@@ -8,7 +8,7 @@ Local Booru — локальная программа для управлени�
 
 ## Скачать
 
-[Скачать Local_Booru_Windows_x64.zip](https://github.com/Ucellar/Local_Booru/releases/download/Local_booru_parser/Local_booru_windows_x64))
+[Скачать Local_Booru_Windows_x64.zip](https://github.com/Ucellar/Local_Booru/releases/download/Local_booru_parser/Local_booru_windows_x64)
 
 ## Что умеет
 
