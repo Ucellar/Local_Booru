@@ -1,0 +1,71 @@
+═══════════════════════════════════════════════════════════
+  Local Booru — Инструкция по сборке EXE
+═══════════════════════════════════════════════════════════
+
+СПОСОБ 1 — Автоматически (рекомендуется)
+─────────────────────────────────────────
+Просто запусти:
+    build_exe.bat
+
+Дважды кликни по нему или из консоли:
+    cd F:\ai-auto\LB NEW UI
+    build_exe.bat
+
+Готовый EXE появится в:
+    dist\Local Booru\Local Booru.exe
+
+
+СПОСОБ 2 — Через .spec файл (если bat не работает)
+────────────────────────────────────────────────────
+В папке проекта:
+
+    python -m pip install pyinstaller
+    python -m PyInstaller Local_Booru.spec
+
+Готовый EXE: dist\Local Booru\Local Booru.exe
+
+
+СПОСОБ 3 — Вручную одной строкой
+──────────────────────────────────
+    python -m PyInstaller --onedir --windowed --name "Local Booru" --icon assets\icons\app_icon.ico --add-data "assets;assets" --add-data "core;core" --add-data "ui;ui" --collect-submodules=core --collect-submodules=ui --collect-data=PySide6 --hidden-import=PySide6.QtWebEngineWidgets --hidden-import=PySide6.QtMultimedia --hidden-import=sqlite3 app.py
+
+
+ЗАПУСК БЕЗ СБОРКИ (всегда работает)
+─────────────────────────────────────
+    python app.py
+
+
+ВОЗМОЖНЫЕ ПРОБЛЕМЫ
+──────────────────
+● "'pyinstaller' не является командой"
+  → Используй: python -m PyInstaller (не просто pyinstaller)
+
+● "No module named 'core.xxx'" при запуске EXE
+  → Убедись что папки core/ и ui/ есть рядом с EXE
+    ИЛИ пересобери через .spec файл (Способ 2)
+
+● EXE запускается но сразу закрывается
+  → Временно измени --windowed на --console в build_exe.bat
+    и посмотри ошибку
+
+● PySide6 WebEngine ошибки
+  → Добавь в переменные среды:
+    QTWEBENGINE_DISABLE_SANDBOX=1
+
+● Большой размер EXE (500MB+) — это нормально
+  PySide6 + WebEngine весят много
+  Для уменьшения: добавь --upx-dir к PyInstaller
+  (нужен UPX: https://upx.github.io/)
+
+
+СТРУКТУРА ПОСЛЕ СБОРКИ
+───────────────────────
+dist\
+  Local Booru\
+    Local Booru.exe    ← главный файл
+    assets\            ← иконки, ресурсы
+    core\              ← модули
+    ui\                ← модули
+    PySide6\           ← Qt библиотеки
+    ...
+═══════════════════════════════════════════════════════════

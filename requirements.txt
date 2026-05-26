@@ -1,0 +1,13 @@
+PySide6
+Pillow
+imagehash
+requests
+beautifulsoup4
+playwright
+opencv-python
+browser-cookie3
+PySide6-Addons
+PyMuPDF
+
+curl_cffi
+python-mpv
