@@ -97,6 +97,12 @@ def replace_image_sources(con, image_id, source_text="", extra_sources=None):
             con.execute("INSERT OR IGNORE INTO image_sources(image_id, source_id) VALUES(?,?)", (image_id, int(row["id"])))
 
 
+def ensure_image(settings, media_path, status="", original_path="", hash_md5=None):
+    """Ensure an image row exists and return its id without replacing tags/source."""
+    with db(settings, write=True) as con:
+        return _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5)
+
+
 def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site=""):
     with db(settings, write=True) as con:
         image_id = _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5)

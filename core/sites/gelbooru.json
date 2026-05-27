@@ -1,0 +1,23 @@
+{
+  "engine": "gelbooru",
+  "description": "Gelbooru DAPI (gelbooru.com, rule34.xxx, xbooru.com, realbooru.com, tbib.org, safebooru.org)",
+  "known_hosts": ["gelbooru.com", "rule34.xxx", "xbooru.com", "realbooru.com", "tbib.org", "safebooru.org"],
+  "requires_auth": false,
+  "cf_protected": ["rule34.xxx"],
+  "md5_search": [
+    {"path": "/index.php", "params": {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/index.php", "params": {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": "{md5}", "limit": 1}, "format": "json"},
+    {"path": "/index.php", "params": {"page": "dapi", "s": "post", "q": "index", "tags": "md5:{md5}", "limit": 1}, "format": "xml"},
+    {"path": "/index.php", "params": {"page": "dapi", "s": "post", "q": "index", "tags": "{md5}", "limit": 1}, "format": "xml"}
+  ],
+  "post_fields": {
+    "id":       ["id"],
+    "md5":      ["md5", "hash"],
+    "tags":     ["tags", "tag_string"],
+    "file_url": ["file_url", "image"],
+    "rating":   ["rating"],
+    "source":   ["source"]
+  },
+  "post_list_path": ["post", "@post"],
+  "post_url": "{root}/index.php?page=post&s=view&id={id}"
+}

@@ -53,10 +53,21 @@ class LogoCropDialog(QDialog):
 class SettingsPage(QWidget):
     def __init__(self, main):
         super().__init__(); self.main=main
-        lay=QVBoxLayout(self); self.form=QFormLayout()
+        lay=QVBoxLayout(self); lay.setSpacing(0); lay.setContentsMargins(0,0,0,0)
+        # Scroll area — all content inside, works on any screen size
+        from PySide6.QtWidgets import QScrollArea
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._inner = QWidget()
+        self._inner.setAutoFillBackground(True)
+        self._inner.setObjectName("SettingsInner")
+
         self.root=QLineEdit(); self.choose=QPushButton(); self.choose.clicked.connect(self.choose_root); row=QHBoxLayout(); row.addWidget(self.root,1); row.addWidget(self.choose)
+        self.flaresolverr_url=QLineEdit(); self.flaresolverr_url.setPlaceholderText("http://localhost:8191  (оставь пустым если не используешь)")
+        self.fs_test_inline=QPushButton("Проверить"); self.fs_test_inline.clicked.connect(self._test_flaresolverr); self.fs_test_inline.setMaximumWidth(100)
+        _fs_row=QHBoxLayout(); _fs_row.addWidget(self.flaresolverr_url,1); _fs_row.addWidget(self.fs_test_inline)
         self.lang=QComboBox(); self.lang.addItem("Русский","ru"); self.lang.addItem("English","en")
-        self.appearance=QComboBox(); self.appearance.addItem("Abyss (тёмный синий)","abyss"); self.appearance.addItem("Ember (тёмный янтарный)","ember"); self.appearance.addItem("Slate (нейтральный серый)","slate"); self.appearance.addItem("Sakura (тёмно-розовый)","sakura"); self.appearance.addItem("PH (чёрный+оранжевый)","ph"); self.appearance.addItem("Light (светлый)","light")
+        self.appearance=QComboBox(); self.appearance.addItem("Abyss (тёмный синий)","abyss"); self.appearance.addItem("Ember (тёмный янтарный)","ember"); self.appearance.addItem("Slate (нейтральный серый)","slate"); self.appearance.addItem("Sakura (тёмно-розовый)","sakura"); self.appearance.addItem("PH (чёрный+оранжевый)","pornhub"); self.appearance.addItem("R34 (тёмный фиолетовый)","r34"); self.appearance.addItem("Light (светлый)","light")
         self.title=QLineEdit(); self.logo=QLineEdit(); self.logo_fit=QComboBox(); self.logo_fit.addItem("Crop","crop"); self.logo_fit.addItem("Contain","contain"); self.logo_choose=QPushButton(); self.logo_choose.clicked.connect(self.choose_logo); self.logo_crop=QPushButton(); self.logo_crop.clicked.connect(self.crop_logo)
         lrow=QHBoxLayout(); lrow.addWidget(self.logo,1); lrow.addWidget(self.logo_choose); lrow.addWidget(self.logo_crop)
         self.output_dir=QLineEdit(); self.choose_output=QPushButton("..."); self.choose_output.clicked.connect(self.choose_output_dir); outrow=QHBoxLayout(); outrow.addWidget(self.output_dir,1); outrow.addWidget(self.choose_output)
@@ -66,8 +77,15 @@ class SettingsPage(QWidget):
 
         self.cols=QSpinBox(); self.cols.setRange(1,12); self.rows=QSpinBox(); self.rows.setRange(1,20); self.card=QSpinBox(); self.card.setRange(100,700); self.ignore_numeric=QCheckBox(); self.show_preview=QCheckBox(); self.error_console=QCheckBox(); self.max_console_lines=QSpinBox(); self.max_console_lines.setRange(200,20000); self.max_console_lines.setSingleStep(100); self.manga_root=QLineEdit(); self.choose_manga=QPushButton("..."); self.choose_manga.clicked.connect(self.choose_manga_root); mrow=QHBoxLayout(); mrow.addWidget(self.manga_root,1); mrow.addWidget(self.choose_manga)
         self.games_root=QLineEdit(); self.choose_games=QPushButton("..."); self.choose_games.clicked.connect(self.choose_games_root); grow=QHBoxLayout(); grow.addWidget(self.games_root,1); grow.addWidget(self.choose_games)
+        self.form = QFormLayout()
+        self.form.setContentsMargins(8, 8, 8, 8)
+        self.form.setSpacing(8)
+        _ilay = QVBoxLayout(self._inner)
+        _ilay.setContentsMargins(8, 8, 8, 8)
+        _ilay.setSpacing(8)
         self.form_rows=[]
         for key, w, tip in [
+            ("FlareSolverr URL", _fs_row, "tip_root"),
             ("Images folder", row, "tip_root"),
             ("Language", self.lang, "tip_language"),
             ("Appearance", self.appearance, "tip_appearance"),
@@ -88,31 +106,37 @@ class SettingsPage(QWidget):
             ("Папка игр", grow, "tip_games_root")
         ]:
             self.add_tip_row(key, w, tip)
-        lay.addLayout(self.form); self.save_btn=QPushButton(); self.save_btn.clicked.connect(self.save); lay.addWidget(self.save_btn)
-        self.instruction_btn=QPushButton("Инструкция"); self.instruction_btn.clicked.connect(self.show_instruction); lay.addWidget(self.instruction_btn)
+        # Wrap form and buttons in scroll area for any screen size
+        from PySide6.QtWidgets import QScrollArea as _SA
+        _scroll = _SA(); _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(_SA.Shape.NoFrame)
+        _inner = __import__("PySide6.QtWidgets",fromlist=["QWidget"]).QWidget()
+        _ilay.addLayout(self.form)
+        self.save_btn=QPushButton(); self.save_btn.clicked.connect(self.save); _ilay.addWidget(self.save_btn)
+        self.instruction_btn=QPushButton("Инструкция"); self.instruction_btn.clicked.connect(self.show_instruction); _ilay.addWidget(self.instruction_btn)
         self.rebuild_sql_btn=QPushButton("Пересобрать SQLite-индекс в фоне")
         self.rebuild_sql_btn.clicked.connect(self.rebuild_sql_index)
-        lay.addWidget(self.rebuild_sql_btn)
+        _ilay.addWidget(self.rebuild_sql_btn)
         self.rebuild_vptree_btn = QPushButton("Пересобрать VP-tree (поиск похожих)")
         self.rebuild_vptree_btn.clicked.connect(self._rebuild_vptree)
-        lay.addWidget(self.rebuild_vptree_btn)
+        _ilay.addWidget(self.rebuild_vptree_btn)
         self.sql_status=QLabel("")
         self.sql_status.setWordWrap(True)
-        lay.addWidget(self.sql_status)
+        _ilay.addWidget(self.sql_status)
         self.sql_optimize_btn=QPushButton("Оптимизировать SQLite")
         self.sql_optimize_btn.clicked.connect(self.optimize_sqlite)
-        lay.addWidget(self.sql_optimize_btn)
+        _ilay.addWidget(self.sql_optimize_btn)
         self.sql_stats_btn=QPushButton("Статистика SQLite")
         self.sql_stats_btn.clicked.connect(self.show_sqlite_stats)
-        lay.addWidget(self.sql_stats_btn)
-        self.danger=QLabel(); self.danger.setStyleSheet("font-size:20px;font-weight:900;color:#ff3838;margin-top:30px"); lay.addWidget(self.danger)
+        _ilay.addWidget(self.sql_stats_btn)
+        self.danger=QLabel(); self.danger.setStyleSheet("font-size:20px;font-weight:900;color:#ff3838;margin-top:30px"); _ilay.addWidget(self.danger)
 
         self.tag_cleanup_info = QLabel(
             "Удаление по выбранному тегу или source. Начни писать — появится список как в галерее. "
             "Сначала выбери конкретный вариант из списка, потом удаляй связанные media/tags/source/searched/cache."
         )
         self.tag_cleanup_info.setWordWrap(True)
-        lay.addWidget(self.tag_cleanup_info)
+        _ilay.addWidget(self.tag_cleanup_info)
 
         self.tag_cleanup_scope = QComboBox()
         self.tag_cleanup_scope.addItem("Все результаты", "all")
@@ -120,14 +144,14 @@ class SettingsPage(QWidget):
         self.tag_cleanup_scope.addItem("Только АСП", "downloader")
         self.tag_cleanup_scope.addItem("Только найденные", "found")
         self.tag_cleanup_scope.addItem("Только не найденные", "no_match")
-        lay.addWidget(self.tag_cleanup_scope)
+        _ilay.addWidget(self.tag_cleanup_scope)
 
         self.tag_cleanup_kind = QComboBox()
         self.tag_cleanup_kind.addItem("Тег", "tag")
         self.tag_cleanup_kind.addItem("Source", "source")
         self.tag_cleanup_kind.currentIndexChanged.connect(self.refresh_cleanup_candidates)
         self.tag_cleanup_scope.currentIndexChanged.connect(self.refresh_cleanup_candidates)
-        lay.addWidget(self.tag_cleanup_kind)
+        _ilay.addWidget(self.tag_cleanup_kind)
 
         self.tag_cleanup_query = QLineEdit()
         self.tag_cleanup_query.setPlaceholderText("начни писать и выбери тег/source из списка")
@@ -143,37 +167,47 @@ class SettingsPage(QWidget):
         self.cleanup_completer.setCompletionMode(QCompleter.PopupCompletion)
         self.tag_cleanup_query.setCompleter(self.cleanup_completer)
         self.tag_cleanup_query.textEdited.connect(self.update_cleanup_completion)
-        lay.addWidget(self.tag_cleanup_query)
+        _ilay.addWidget(self.tag_cleanup_query)
 
         self.tag_cleanup_find_btn = QPushButton("Показать связанные файлы")
         self.tag_cleanup_find_btn.clicked.connect(self.find_tag_cleanup_matches)
-        lay.addWidget(self.tag_cleanup_find_btn)
+        _ilay.addWidget(self.tag_cleanup_find_btn)
 
         self.tag_cleanup_list = QListWidget()
         self.tag_cleanup_list.setMaximumHeight(170)
-        lay.addWidget(self.tag_cleanup_list)
+        _ilay.addWidget(self.tag_cleanup_list)
 
         self.tag_cleanup_delete_btn = QPushButton("Удалить всё связанное с выбранным тегом/source")
         self.tag_cleanup_delete_btn.setEnabled(False)
         self.tag_cleanup_delete_btn.setStyleSheet("QPushButton{background:#7f1d1d;border:1px solid #ff3838;color:white;font-weight:900}QPushButton:disabled{background:#2a2020;color:#777}")
         self.tag_cleanup_delete_btn.clicked.connect(self.delete_tag_cleanup_matches)
-        lay.addWidget(self.tag_cleanup_delete_btn)
+        _ilay.addWidget(self.tag_cleanup_delete_btn)
 
-        self.video_note=QLabel(); lay.addWidget(self.video_note)
+        self.video_note=QLabel(); _ilay.addWidget(self.video_note)
 
         self.controls_title=QLabel()
         self.controls_title.setStyleSheet("font-size:18px;font-weight:900;margin-top:18px")
-        lay.addWidget(self.controls_title)
+        _ilay.addWidget(self.controls_title)
 
         self.controls_info=QLabel()
         self.controls_info.setWordWrap(True)
-        lay.addWidget(self.controls_info)
-
-        lay.addStretch(1); self.load_values(); self.retranslate(); self.apply_tips(); self.refresh_cleanup_candidates()
+        _ilay.addWidget(self.controls_info)
+        _ilay.addStretch(1)
+        self._scroll.setWidget(self._inner)
+        self._scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        lay.addWidget(self._scroll, 1)
+        self.load_values(); self.retranslate(); self.apply_tips(); self.refresh_cleanup_candidates()
     def add_tip_row(self, label_key, widget, tip_key):
         lab=QLabel(self.main.t(label_key)+"  ?")
         lab.setToolTip(self.main.t(tip_key))
-        lab.setStyleSheet("font-weight:700")
+        _tc = self.main.settings.get("appearance","abyss")
+        _label_colors = {"light": ("#1a1c2a","#5060d0"), "dark": ("#c0c8e0","#6c85e0"), "abyss": ("#c0c8e0","#6c85e0"),
+                         "r34": ("#111111","#3a7a35"), "pornhub": ("#f5f5f5","#ff9000"), "pornhub": ("#f5f5f5","#ff9000"),
+                         "ember": ("#c8b090","#c87040"), "slate": ("#b0c8d0","#5a8a9f"),
+                         "sakura": ("#e0b0d0","#d060a0")}
+        _lc, _hc = _label_colors.get(_tc, ("#c0c8e0","#6c85e0"))
+        lab.setStyleSheet(f"QLabel{{font-weight:700;min-width:220px;color:{_lc};}} QLabel:hover{{color:{_hc};}}")
+        lab.setMinimumWidth(220)
         if hasattr(widget, "setToolTip"):
             widget.setToolTip(self.main.t(tip_key))
         self.form.addRow(lab, widget)
@@ -182,6 +216,15 @@ class SettingsPage(QWidget):
     def apply_tips(self):
         self.set_tip(self.root,"tip_root"); self.set_tip(self.ignore_numeric,"tip_numeric"); self.set_tip(self.cols,"tip_root"); self.set_tip(self.rows,"tip_root")
     def retranslate(self):
+        # Re-apply scroll background when theme changes
+        try:
+            pal = self.palette()
+            bg = pal.color(pal.ColorRole.Window)
+            css = f"background:{bg.name()};"
+            self._inner.setStyleSheet(f"#SettingsInner{{{css}}}")
+            self._scroll.setStyleSheet(f"QScrollArea{{{css}border:none;}}")
+        except Exception:
+            pass
         t=self.main.t; self.choose.setText(t("Choose")); self.logo_choose.setText(t("Choose")); self.logo_crop.setText(t("Crop logo")); self.save_btn.setText(t("Save settings")); self.danger.setText(t("Danger zone")); self.video_note.setText(t("Video tagging note"))
 
         if self.main.settings.get("language","ru") == "ru":
@@ -199,7 +242,8 @@ class SettingsPage(QWidget):
             if hasattr(w, "setToolTip"):
                 w.setToolTip(t(tip_key))
     def load_values(self):
-        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.title.setText(s.get("theme_title","Local Booru")); self.logo.setText(s.get("logo_path","")); self.cols.setValue(int(s.get("columns",4))); self.rows.setValue(int(s.get("rows_per_page",4))); self.card.setValue(int(s.get("card_height",220))); self.ignore_numeric.setChecked(bool(s.get("ignore_numeric_tags",False))); self.show_preview.setChecked(bool(s.get("show_search_preview", True))); self.error_console.setChecked(bool(s.get("enable_error_console", True))); self.max_console_lines.setValue(int(s.get("max_console_lines",2500))); self.manga_root.setText(s.get("manga_root","")); self.games_root.setText(s.get("games_root","")); self.output_dir.setText(s.get("output_dir","")); self.copy_results.setChecked(bool(s.get("copy_results_enabled", True)))
+        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.title.setText(s.get("theme_title","Local Booru")); self.logo.setText(s.get("logo_path","")); self.cols.setValue(int(s.get("columns",4))); self.rows.setValue(int(s.get("rows_per_page",4))); self.card.setValue(int(s.get("card_height",220))); self.ignore_numeric.setChecked(bool(s.get("ignore_numeric_tags",False))); self.show_preview.setChecked(bool(s.get("show_search_preview", True))); self.error_console.setChecked(bool(s.get("enable_error_console", True))); self.max_console_lines.setValue(int(s.get("max_console_lines",2500))); self.manga_root.setText(s.get("manga_root",""))
+        self.flaresolverr_url.setText(s.get("flaresolverr_url","")); self.games_root.setText(s.get("games_root","")); self.output_dir.setText(s.get("output_dir","")); self.copy_results.setChecked(bool(s.get("copy_results_enabled", True)))
         self.lang.setCurrentIndex(max(0,self.lang.findData(s.get("language","ru")))); self.appearance.setCurrentIndex(max(0,self.appearance.findData(s.get("appearance","dark")))); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData(s.get("logo_fit","crop"))))
     def choose_root(self):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.root.text())
@@ -230,7 +274,45 @@ class SettingsPage(QWidget):
         if dlg.exec():
             self.logo.setText(dlg.save_crop()); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData("crop")))
     def save(self):
-        s=self.main.settings; s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["copy_results_enabled"]=self.copy_results.isChecked(); save_settings(s); self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate(); QMessageBox.information(self,self.main.t("Saved"),self.main.t("Settings saved"))
+        s=self.main.settings; s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["copy_results_enabled"]=self.copy_results.isChecked(); save_settings(s); self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate(); QMessageBox.information(self,self.main.t("Saved"),self.main.t("Settings saved"))
+
+    def _run_maintenance(self):
+        from core.stability import run_file_maintenance
+        log_lines = []
+        def _log(m): log_lines.append(m)
+        stats = run_file_maintenance(self.main.settings, log=_log, max_check=99999)
+        msg = (f"Проверено: {stats['checked']} файлов\n"
+               f"Отсутствует: {stats['missing']} (помечены удалёнными)\n"
+               f"Ошибок: {stats['errors']}")
+        QMessageBox.information(self, "File Maintenance", msg)
+
+    def _test_flaresolverr(self):
+        from core.flaresolverr import FlareSolverrClient
+        url = self.flaresolverr_url.text().strip() or "http://localhost:8191"
+        client = FlareSolverrClient(url)
+        if client.is_running():
+            QMessageBox.information(self, "FlareSolverr",
+                f"✅ FlareSolverr доступен на {url}\n\n"
+                "Теперь ascii2d и другие CF-сайты будут работать через реальный Chrome.")
+        else:
+            QMessageBox.warning(self, "FlareSolverr",
+                f"❌ FlareSolverr недоступен на {url}\n\n"
+                "Установка:\n"
+                "1. Скачай с github.com/FlareSolverr/FlareSolverr/releases\n"
+                "2. Распакуй и запусти flaresolverr.exe\n"
+                "3. Или: docker run -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest\n"
+                "4. Укажи URL выше и нажми Сохранить настройки")
+
+    def _backup_db(self):
+        from core.stability import maybe_backup_db
+        backup = maybe_backup_db(self.main.settings, max_backups=10)
+        if backup:
+            from pathlib import Path
+            QMessageBox.information(self, "Резервная копия",
+                f"Бэкап создан:\n{Path(backup).name}\n{Path(backup).stat().st_size//1024} KB")
+        else:
+            QMessageBox.information(self, "Резервная копия",
+                "Бэкап уже создавался в последние 24 часа.\nДля принудительного — удали файлы в data/db_backups/")
 
     def _rebuild_vptree(self):
         from core.database.connection import get_connection

@@ -1,0 +1,22 @@
+{
+  "engine": "danbooru",
+  "description": "Danbooru 2.x API (donmai.us, allthefallen.moe, lolibooru.moe, aibooru.online)",
+  "known_hosts": ["danbooru.donmai.us", "booru.allthefallen.moe", "lolibooru.moe", "aibooru.online"],
+  "requires_auth": false,
+  "cf_protected": ["danbooru.donmai.us", "booru.allthefallen.moe"],
+  "md5_search": [
+    {"path": "/posts.json", "params": {"tags": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/posts.json", "params": {"search[md5]": "{md5}", "limit": 1}, "format": "json"},
+    {"path": "/posts.json", "params": {"md5": "{md5}", "limit": 1}, "format": "json"}
+  ],
+  "post_fields": {
+    "id":       ["id"],
+    "md5":      ["md5", "file_md5"],
+    "tags":     ["tag_string", "tags"],
+    "file_url": ["file_url", "large_file_url"],
+    "rating":   ["rating"],
+    "source":   ["source"]
+  },
+  "post_list_path": ["posts", null],
+  "post_url": "{root}/posts/{id}"
+}

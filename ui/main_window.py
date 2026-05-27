@@ -26,6 +26,7 @@ NAV_ICONS = {
     "Manga":      ("📖", "manga"),
     "Games":      ("🎮", "games"),
     "DLER":       ("⬇", "grabber"),
+    "Subs":       ("🔄", "subs"),
     "Duplicates": ("♊", "dupes"),
     "Post":       ("🔎", "gallery"),
     "Settings":   ("⚙", "settings"),
@@ -35,7 +36,7 @@ _ICON_CACHE: dict = {}
 _CURRENT_THEME: str = "dark"
 
 def _is_light_theme(theme_name: str) -> bool:
-    return theme_name in ("light",)
+    return theme_name in ("light", "r34")
 
 def _load_icon(name: str, light_theme: bool = False) -> "QIcon | None":
     """Load QIcon from assets/icons/. White icons for dark themes, dark for light."""
@@ -137,27 +138,13 @@ class MainWindow(QMainWindow):
         self.logo.setAlignment(Qt.AlignCenter)
         self.logo.setFixedHeight(52)
         self.logo.setWordWrap(False)
-        self.logo.setStyleSheet(
-            "font-size: 14px; font-weight: 800; color: #b899ff; padding: 4px 8px;"
-            "border: none; margin: 2px 0 8px 0;"
-        )
         sidebar_lay.addWidget(self.logo)
 
         # Workspace switcher (compact)
         self.mode_btn = QPushButton("  Парсер")
         self.mode_btn.setObjectName("ModeBtn")
         self.mode_btn.setFixedHeight(32)
-        self.mode_btn.setStyleSheet(
-            "QPushButton#ModeBtn { background: #13151d; border: 1px solid #1e2130;"
-            " border-radius: 8px; color: #7c8099; font-size: 11px; font-weight: 600; padding: 0 10px; }"
-            "QPushButton#ModeBtn:hover { color: #c9cdd6; background: #1a1d26; }"
-        )
         self.mode_menu = QMenu(self)
-        self.mode_menu.setStyleSheet(
-            "QMenu { background:#1a1d26; border:1px solid #2e3347; color:#c9cdd6; border-radius:8px; padding:4px; }"
-            "QMenu::item { padding:6px 20px; border-radius:6px; }"
-            "QMenu::item:selected { background:#2d2050; color:#b899ff; }"
-        )
         for workspace, title in WORKSPACE_TITLES.items():
             label = title.get(self.settings.get("language", "ru"), next(iter(title.values()))) if isinstance(title, dict) else str(title)
             action = self.mode_menu.addAction(label)
@@ -216,14 +203,15 @@ class MainWindow(QMainWindow):
 
         # Stack
         self.stack = QStackedWidget()
-        self.stack.setStyleSheet("QStackedWidget { background: #0d0f14; }")
         content_lay.addWidget(self.stack, 1)
 
         root_lay.addWidget(content, 1)
         self.setCentralWidget(root)
 
         self._build_pages()
-        self.apply_theme()
+        # Defer theme application until all widgets are shown (fixes startup theme bug)
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self.apply_theme)
         self.retranslate()
         self.set_workspace(self.settings.get("workspace", "apt"))
 
@@ -247,12 +235,44 @@ class MainWindow(QMainWindow):
     def apply_theme(self):
         theme_name = self.settings.get("appearance", "dark")
         self.setStyleSheet(stylesheet_for(theme_name))
-        # Invalidate icon cache so icons reload with correct color
+        # Sync QPalette so palette(highlight) and palette(text) work in labels
+        try:
+            from PySide6.QtGui import QPalette, QColor
+            from PySide6.QtCore import Qt
+            _accent_map = {
+                "dark": ("#6c85e0", "#c0c8e0", "#0d0f16"),
+                "abyss": ("#6c85e0", "#c0c8e0", "#0d0f16"),
+                "ember": ("#c87040", "#c8b090", "#14141e"),
+                "slate": ("#5a8a9f", "#b0c8d0", "#16181e"),
+                "sakura": ("#d060a0", "#e0b0d0", "#140820"),
+                "ph":    ("#ff9000", "#f5f5f5", "#0f0f0f"),
+                "ph": ("#ff9000", "#f5f5f5", "#1b1b1b"),
+                "r34":   ("#7b2fff", "#e0d4f5", "#1a0a2e"),
+                "light": ("#5060d0", "#1a1c2a", "#f4f5f8"),
+            }
+            accent, text, bg = _accent_map.get(theme_name, ("#6c85e0", "#c0c8e0", "#0d0f16"))
+            pal = self.palette()
+            pal.setColor(QPalette.ColorRole.Highlight, QColor(accent))
+            pal.setColor(QPalette.ColorRole.HighlightedText, QColor(bg))
+            pal.setColor(QPalette.ColorRole.Text, QColor(text))
+            pal.setColor(QPalette.ColorRole.WindowText, QColor(text))
+            pal.setColor(QPalette.ColorRole.Window, QColor(bg))
+            pal.setColor(QPalette.ColorRole.Base, QColor(bg))
+            self.setPalette(pal)
+        except Exception:
+            pass
         import ui.main_window as _mw
         _mw._ICON_CACHE.clear()
         _mw._CURRENT_THEME = theme_name
         self._update_logo()
         self._reload_nav_icons()
+        # Refresh settings page background when theme changes
+        try:
+            sp = self.settings_page
+            if hasattr(sp, "retranslate"):
+                sp.retranslate()
+        except Exception:
+            pass
 
     def _update_logo(self):
         p = Path(self.settings.get("logo_path", ""))

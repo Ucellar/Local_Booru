@@ -87,3 +87,12 @@ def db(settings, write: bool = False, readonly: bool = False):
             con.close()
         except Exception:
             pass
+
+
+def get_connection(settings):
+    """Simple connection helper (caller must close manually).
+    Prefer using the 'db' context manager for writes.
+    """
+    con = connect(settings)
+    ensure_initialized(con)
+    return con

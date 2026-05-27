@@ -9,7 +9,7 @@ SITES_BY_ENGINE = {
         "danbooru.donmai.us":       {"enabled": False, "type": "danbooru",      "login": "", "api_key": "", "user_id": "", "login_url": "https://danbooru.donmai.us",       "notes": "Лучшие теги. Cloudflare — нужен curl_cffi"},
         "booru.allthefallen.moe":   {"enabled": True,  "type": "danbooru",      "login": "", "api_key": "", "user_id": "", "login_url": "https://booru.allthefallen.moe",   "notes": "ATF — Danbooru движок"},
         "lolibooru.moe":            {"enabled": False,  "type": "danbooru",     "login": "", "api_key": "", "user_id": "", "login_url": "https://lolibooru.moe",             "notes": "Danbooru движок"},
-        "hypnohub.net":             {"enabled": False,  "type": "danbooru",     "login": "", "api_key": "", "user_id": "", "login_url": "https://hypnohub.net",              "notes": "Danbooru движок"},
+        "hypnohub.net":             {"enabled": False,  "type": "hypnohub",     "login": "", "api_key": "", "user_id": "", "login_url": "https://hypnohub.net",              "notes": "Danbooru движок"},
         "aibooru.online":           {"enabled": False,  "type": "danbooru",     "login": "", "api_key": "", "user_id": "", "login_url": "https://aibooru.online",            "notes": "AI-арт, Danbooru движок"},
     },
     "Gelbooru": {

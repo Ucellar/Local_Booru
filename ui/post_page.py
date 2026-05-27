@@ -113,6 +113,10 @@ class PostPage(QWidget):
         self.video_active = False
         self.gif_movie = None
         self.context = []
+        self._current_image_id: int | None = None  # for star rating
+        self._mpv_player = None
+        self._mpv_container = None
+        self._mpv_timer = None
         self.setFocusPolicy(Qt.StrongFocus)
 
         from PySide6.QtWidgets import QSlider, QFrame
@@ -419,36 +423,73 @@ class PostPage(QWidget):
                 self.fullscreen_btn.setText("⊡")
             self.fullscreen_btn.setToolTip("Exit fullscreen (F11)")
 
+    def _ensure_rating_image_id(self, item: dict | None = None):
+        """Return/create SQLite image id for the current post.
+
+        Rating used to silently do nothing when the post was opened from a
+        context that had no already-loaded SQLite id.  This helper makes rating
+        independent from gallery enrichment: use item['id'] if present, otherwise
+        find/create the image row by path.
+        """
+        try:
+            item = item or self.item()
+            if not item:
+                return None
+            if item.get("id") is not None:
+                return int(item.get("id"))
+            path = item.get("path", "")
+            if not path:
+                return None
+            from core.database.connection import db
+            with db(self.main.settings, readonly=True) as conn:
+                row = conn.execute("SELECT id FROM images WHERE path=?", (path,)).fetchone()
+                if row:
+                    return int(row["id"])
+            from core.database.storage import ensure_image
+            return int(ensure_image(self.main.settings, path, status="manual_rating"))
+        except Exception as e:
+            import logging
+            logging.getLogger("local_booru").error("Rating image id error: %s", e)
+            return None
+
     def _on_rating_changed(self, rating: int):
         """Save rating to DB when user clicks stars."""
-        if self._current_image_id is None:
+        image_id = self._current_image_id or self._ensure_rating_image_id()
+        if image_id is None:
             return
         try:
-            from core.database.connection import get_connection
-            conn = get_connection(self.main.settings)
-            conn.execute("UPDATE images SET rating=? WHERE id=?",
-                        (rating, self._current_image_id))
-            conn.commit()
-        except Exception:
-            pass
+            from core.database.connection import db
+            with db(self.main.settings, write=True) as conn:
+                conn.execute("UPDATE images SET rating=? WHERE id=?", (int(rating), int(image_id)))
+            self._current_image_id = int(image_id)
+            try:
+                # keep current in-memory item consistent for current session
+                self.item()["rating"] = int(rating)
+            except Exception:
+                pass
+        except Exception as e:
+            import logging
+            logging.getLogger("local_booru").error("Rating save error: %s", e)
 
     def _load_rating(self, item: dict):
         """Load rating from DB for current image."""
         try:
-            from core.database.connection import get_connection
-            conn = get_connection(self.main.settings)
-            # Get image_id by path
-            path = item.get("path", "")
-            row = conn.execute(
-                "SELECT id, rating FROM images WHERE path=?", (path,)
-            ).fetchone()
-            if row:
-                self._current_image_id = row[0]
-                self.star_rating.set_rating(row[1] or 0)
-            else:
+            image_id = self._ensure_rating_image_id(item)
+            if image_id is None:
                 self._current_image_id = None
                 self.star_rating.set_rating(0)
-        except Exception:
+                return
+            from core.database.connection import db
+            with db(self.main.settings, readonly=True) as conn:
+                row = conn.execute(
+                    "SELECT COALESCE(rating, 0) as rating FROM images WHERE id=?",
+                    (int(image_id),)
+                ).fetchone()
+            self._current_image_id = int(image_id)
+            self.star_rating.set_rating(int(row["rating"] if row else 0))
+        except Exception as e:
+            import logging
+            logging.getLogger("local_booru").error("Rating load error: %s", e)
             self._current_image_id = None
             self.star_rating.set_rating(0)
 
@@ -635,6 +676,7 @@ class PostPage(QWidget):
         self.render_media(path, item)
         self.render_tags(item)
         self.render_fav(path)
+        self._load_rating(item)
         ctx = self.context or self.main.gallery_page._batch
         gp = self.main.gallery_page
         per = gp._per_page()

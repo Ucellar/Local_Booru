@@ -16,6 +16,7 @@ from core.library import sort_tag_items
 from core.tag_utils import normalize_tag
 from core.favorites import load_favorites
 from core.search.human_query_parser import parse_query, to_sql_conditions as _num_to_sql
+from core.stability import safe_call as _safe_call
 from core.database.repository import (
     count_search_items, search_items, enrich_items,
     candidate_tags, candidate_sources, counts,
@@ -52,8 +53,10 @@ class ImageCard(QFrame):
         self._destroyed = False
         self.setFixedSize(w, h)
         self.setStyleSheet(
-            "QFrame{background:#111420;border:1px solid #1c2030;border-radius:10px;}"
-            "QFrame:hover{border:1px solid #7c5cbf;background:#141828;}"
+            (lambda _t: (
+            f"QFrame{{background:{"#a8d99f" if _t=="r34" else "#111420"};border:{"1px" if _t=="r34" else "1px"} solid {"#6da36b" if _t=="r34" else "#1c2030"};border-radius:{"2px" if _t=="r34" else "10px"};}}"  
+            f"QFrame:hover{{border:{"1px" if _t=="r34" else "1px"} solid {"#3a7a35" if _t=="r34" else "#7c5cbf"};background:{"#8cc57d" if _t=="r34" else "#141828"};}}"  
+        ))(getattr(__import__("ui.main_window",fromlist=["_CURRENT_THEME"]),"_CURRENT_THEME","abyss"))
         )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
@@ -263,15 +266,27 @@ class GalleryPage(QWidget):
             self.rating_min.addItem(label, val)
         self.refresh_btn = QPushButton()
 
-        row.addWidget(self.search_label)
+        # Sort: compact label
+        self.gallery_sort.setFixedWidth(100)
+        self.sort_label.setFixedWidth(130)
+
+        # Rating: op + stars
+        self.rating_op = QComboBox()
+        self.rating_op.setFixedWidth(105)
+        for label, val in [("рейтинг",""),("равно","="),("не меньше",">="),("не больше","<=")]:
+            self.rating_op.addItem(label, val)
+        self.rating_stars = QComboBox()
+        self.rating_stars.setFixedWidth(110)
+        for label, val in [("—","0"),("★","1"),("★★","2"),("★★★","3"),("★★★★","4"),("★★★★★","5")]:
+            self.rating_stars.addItem(label, val)
+
         row.addWidget(self.search, 4)
         row.addWidget(self.clear_btn)
         row.addWidget(self.file_filter)
-        row.addWidget(self.source_label)
-        row.addWidget(self.source, 1)
         row.addWidget(self.sort_label)
-        row.addWidget(self.gallery_sort, 1)
-        row.addWidget(self.rating_min)
+        row.addWidget(self.gallery_sort)
+        row.addWidget(self.rating_op)
+        row.addWidget(self.rating_stars)
         row.addWidget(self.fav)
         row.addWidget(self.refresh_btn)
         lay.addLayout(row)
@@ -363,6 +378,9 @@ class GalleryPage(QWidget):
         # Signals
         # Search fires on Return; live typing only updates autocomplete
         self.search.returnPressed.connect(self.apply_filter)
+        self.rating_op.currentIndexChanged.connect(self.apply_filter)
+        self.rating_op.currentIndexChanged.connect(self._on_rating_op_changed)
+        self.rating_stars.currentIndexChanged.connect(self.apply_filter)
         # Also apply after 600ms idle
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -515,7 +533,21 @@ class GalleryPage(QWidget):
 
     # ── Filter ────────────────────────────────────────────────────────────────
 
+    def _on_rating_op_changed(self):
+        op = self.rating_op.currentData() if hasattr(self, 'rating_op') else ''
+        if hasattr(self, 'rating_stars'):
+            self.rating_stars.setEnabled(bool(op))
+            if not op:
+                self.rating_stars.setCurrentIndex(0)
+
     def apply_filter(self):
+        try:
+            self._apply_filter_impl()
+        except Exception as e:
+            import logging
+            logging.getLogger("local_booru").error("apply_filter error: %s", e, exc_info=True)
+
+    def _apply_filter_impl(self):
         raw_q = self.search.text().strip()
 
         src = self.source.currentText() or "all"
@@ -539,10 +571,15 @@ class GalleryPage(QWidget):
         else:
             self._filter_preview.setVisible(False)
 
-        rating_min_val = int(self.rating_min.currentData() or "0")
-        if rating_min_val > 0:
-            _extra_where.append("COALESCE(i.rating, 0) >= ?")
-            _extra_params.append(rating_min_val)
+        _rating_op    = getattr(self, "rating_op", None)
+        _rating_stars = getattr(self, "rating_stars", None)
+        if _rating_op and _rating_stars:
+            op = _rating_op.currentData() or ""
+            stars = int(_rating_stars.currentData() or "0")
+            if op and stars > 0:
+                op_safe = op if op in ("=",">=","<=") else ">="
+                _extra_where.append(f"COALESCE(i.rating, 0) {op_safe} ?")
+                _extra_params.append(stars)
 
         total = count_search_items(self.main.settings, q, src, ff,
                                    extra_where=_extra_where, extra_params=_extra_params)

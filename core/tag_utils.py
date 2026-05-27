@@ -21,6 +21,10 @@ def ascii_fold(text: str) -> str:
 def normalize_tag(tag) -> str:
     t = strip_tag_prefix(tag)
     t = html.unescape(t).strip()
+    # Tags starting with '-' are booru search exclusion operators, not real tags.
+    # "-short_hair" means "exclude short_hair" — drop entirely.
+    if t.startswith("-"):
+        return ""
     t = re.sub(r"\s+", "_", t)
     t = ascii_fold(t)
     return t

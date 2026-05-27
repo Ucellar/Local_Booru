@@ -114,19 +114,7 @@ class TaggerWorker(QThread):
                 return "nomatch"
             return output_processed_status(self.settings, path)
 
-        if self.settings.get("retry_nomatch"):
-            # If root itself is output/no_match/media, retry all files in that folder.
-            try:
-                is_nm_folder = root.name == "media" and root.parent.name == "no_match"
-            except Exception:
-                is_nm_folder = False
-            if not is_nm_folder:
-                before_status = len(files)
-                files=[p for p in files if processed_status(p) == "nomatch"]
-                skipped_status = before_status - len(files)
-                if skipped_status:
-                    self.log.emit(f"SKIP NON-NOMATCH SQL STATUS: {skipped_status}")
-        elif self.settings.get("tag_only_untagged") or self.settings.get("skip_existing"):
+        if self.settings.get("tag_only_untagged") or self.settings.get("skip_existing"):
             before_status = len(files)
             self.log.emit(f"STATUS CHECK: {before_status} files")
             status_map = {}
@@ -312,13 +300,18 @@ class TaggerPage(QWidget):
         row=QHBoxLayout(); self.root=QLineEdit(); self.choose_btn=QPushButton(); self.choose_btn.clicked.connect(self.choose); row.addWidget(self.root,1); row.addWidget(self.choose_btn)
         self.api=QLineEdit(); self.api.setEchoMode(QLineEdit.Password)
         self.min_sim=QDoubleSpinBox(); self.min_sim.setRange(50,99); self.min_sim.setSingleStep(0.5)
-        self.skip=QCheckBox(); self.only_untagged=QCheckBox(); self.skip_copy_suffix=QCheckBox(); self.retry_nomatch=QCheckBox(); self.mark_nomatch=QCheckBox(); self.md5=QCheckBox(); self.sauce=QCheckBox(); self.ascii2d=QCheckBox(); self.ascii_api=QLineEdit()
+        self.skip=QCheckBox(); self.only_untagged=QCheckBox(); self.skip_copy_suffix=QCheckBox(); self.mark_nomatch=QCheckBox(); self.md5=QCheckBox(); self.sauce=QCheckBox(); self.ascii2d=QCheckBox()
         self.iqdb=QCheckBox(); self.browser=QCheckBox()
+        # Prevent checkboxes from stretching in QFormLayout
+        for _cb in [self.skip,self.only_untagged,self.skip_copy_suffix,
+                    self.mark_nomatch,self.md5,
+                    self.sauce,self.ascii2d,self.iqdb,self.browser]:
+            _cb.setFixedWidth(20)
         self.iqdb_min=QDoubleSpinBox(); self.iqdb_min.setRange(50,99); self.iqdb_min.setSingleStep(0.5)
         self.delay=QDoubleSpinBox(); self.delay.setRange(0,120); self.limit=QSpinBox(); self.limit.setRange(0,1000000); self.req_timeout=QSpinBox(); self.req_timeout.setRange(5,300); self.sauce_cooldown=QSpinBox(); self.sauce_cooldown.setRange(1,1440)
         self.output_suffix=QLineEdit(); self.sources_suffix=QLineEdit(); self.browser_wait=QSpinBox(); self.browser_wait.setRange(10,600)
         self.form_rows=[]
-        for label,w,tip in [("Folder",row,"tip_root"),("SauceNAO API key",self.api,"tip_saucenao"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("SauceNAO fallback",self.sauce,"tip_sauce"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Ascii2D API key",self.ascii_api,"tip_ascii_api"),("Skip existing",self.skip,"tip_skip"),("Tag only untagged",self.only_untagged,"tip_only_untagged"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix"),("Retry NO MATCH",self.retry_nomatch,"tip_retry_nomatch"),("Mark NO MATCH",self.mark_nomatch,"tip_mark_nomatch"),("Delay",self.delay,"tip_delay"),("Request timeout",self.req_timeout,"tip_delay"),("Sauce cooldown min",self.sauce_cooldown,"tip_sauce"),("Limit",self.limit,"tip_limit"),("Tag suffix",self.output_suffix,"tip_suffix"),("Source suffix",self.sources_suffix,"tip_sources_suffix"),("Use system browser cookies",self.browser,"tip_system_cookies")]: self.add_tip_row(label,w,tip)
+        for label,w,tip in [("Folder",row,"tip_root"),("SauceNAO API key",self.api,"tip_saucenao"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("SauceNAO fallback",self.sauce,"tip_sauce"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Skip existing",self.skip,"tip_skip"),("Tag only untagged",self.only_untagged,"tip_only_untagged"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix"),("Mark NO MATCH",self.mark_nomatch,"tip_mark_nomatch"),("Delay",self.delay,"tip_delay"),("Request timeout",self.req_timeout,"tip_delay"),("Sauce cooldown min",self.sauce_cooldown,"tip_sauce"),("Limit",self.limit,"tip_limit"),("Use system browser cookies",self.browser,"tip_system_cookies")]: self.add_tip_row(label,w,tip)
         split.addWidget(left)
         right=QWidget(); rlay=QVBoxLayout(right)
         self.sites_widget = SitesWidget()
@@ -332,7 +325,7 @@ class TaggerPage(QWidget):
         self.console_preview_split = QSplitter(Qt.Horizontal)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); set_bounded_log(self.log, int(self.main.settings.get("max_console_lines", 2500)))
         self.preview_box=QLabel("Preview"); self.preview_box.setAlignment(Qt.AlignCenter); self.preview_box.setMinimumWidth(280)
-        self.preview_box.setStyleSheet("border:1px solid #2f3541;border-radius:8px;background:#07080c")
+        self.preview_box.setStyleSheet("border:1px solid #2f3541;border-radius:8px;")
         self.console_preview_split.addWidget(self.log); self.console_preview_split.addWidget(self.preview_box)
         self.console_preview_split.setSizes([900,320])
         lay.addWidget(self.console_preview_split,2)
@@ -343,7 +336,13 @@ class TaggerPage(QWidget):
     def add_tip_row(self, label_key, widget, tip_key):
         lab = QLabel(self.main.t(label_key) + "  ?")
         lab.setToolTip(self.main.t(tip_key))
-        lab.setStyleSheet("QLabel{font-weight:700;} QLabel:hover{color:#ff54a7;}")
+        _tc2 = self.main.settings.get("appearance","abyss") if hasattr(self,"main") else "abyss"
+        _lmap = {"light": ("#1a1c2a","#5060d0"), "r34": ("#111111","#3a7a35"),
+                 "pornhub": ("#f5f5f5","#ff9000"), "pornhub": ("#f5f5f5","#ff9000"),
+                 "ember": ("#c8b090","#c87040"), "slate": ("#b0c8d0","#5a8a9f"),
+                 "sakura": ("#e0b0d0","#d060a0")}
+        _lc2, _hc2 = _lmap.get(_tc2, ("#c0c8e0","#6c85e0"))
+        lab.setStyleSheet(f"QLabel{{font-weight:700;color:{_lc2};}} QLabel:hover{{color:{_hc2};}}")
 
         if hasattr(widget, "setToolTip"):
             widget.setToolTip(self.main.t(tip_key))
@@ -367,7 +366,7 @@ class TaggerPage(QWidget):
     def bool_item(self, checked):
         it=QTableWidgetItem(); it.setFlags(it.flags()|Qt.ItemIsUserCheckable); it.setCheckState(Qt.Checked if checked else Qt.Unchecked); return it
     def load_values(self):
-        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.api.setText(s.get("saucenao_api_key","")); self.min_sim.setValue(float(s.get("min_similarity",85))); self.skip.setChecked(bool(s.get("skip_existing",True))); self.only_untagged.setChecked(bool(s.get("tag_only_untagged",True))); self.skip_copy_suffix.setChecked(bool(s.get("skip_copy_suffix_files",True))); self.retry_nomatch.setChecked(bool(s.get("retry_nomatch",False))); self.mark_nomatch.setChecked(bool(s.get("mark_no_match",True))); self.md5.setChecked(bool(s.get("enable_md5_lookup",True))); self.sauce.setChecked(bool(s.get("enable_saucenao",True))); self.ascii2d.setChecked(s.get("enable_ascii2d",False)); self.ascii_api.setText(s.get("ascii2d_api_key",""))
+        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.api.setText(s.get("saucenao_api_key","")); self.min_sim.setValue(float(s.get("min_similarity",85))); self.skip.setChecked(bool(s.get("skip_existing",True))); self.only_untagged.setChecked(bool(s.get("tag_only_untagged",True))); self.skip_copy_suffix.setChecked(bool(s.get("skip_copy_suffix_files",True)));  self.mark_nomatch.setChecked(bool(s.get("mark_no_match",True))); self.md5.setChecked(bool(s.get("enable_md5_lookup",True))); self.sauce.setChecked(bool(s.get("enable_saucenao",True))); self.ascii2d.setChecked(s.get("enable_ascii2d",False))
         self.iqdb.setChecked(bool(s.get("enable_iqdb",True))); self.iqdb_min.setValue(float(s.get("iqdb_min_similarity",75))); self.delay.setValue(float(s.get("delay_seconds",8))); self.req_timeout.setValue(int(float(s.get("request_timeout_seconds",20)))); self.sauce_cooldown.setValue(int(float(s.get("saucenao_cooldown_seconds",3600))/60)); self.limit.setValue(int(s.get("limit_files",0))); self.output_suffix.setText(s.get("output_suffix",".tags.txt")); self.sources_suffix.setText(s.get("sources_suffix",".sources.txt")); self.browser.setChecked(bool(s.get("use_system_browser_cookies", s.get("use_browser_auth",False)))); self.browser_wait.setValue(int(s.get("browser_auth_wait_seconds",60)))
         self.sites_widget.load(s)
     def retranslate(self):
@@ -380,7 +379,7 @@ class TaggerPage(QWidget):
                 w.setToolTip(t(tip_key))
     def apply_tips(self):
         t=self.main.t
-        pairs=[(self.root,"tip_root"),(self.api,"tip_saucenao"),(self.min_sim,"tip_min_similarity"),(self.md5,"tip_md5"),(self.sauce,"tip_sauce"),(self.iqdb,"tip_iqdb"),(self.delay,"tip_delay"),(self.req_timeout,"tip_delay"),(self.sauce_cooldown,"tip_sauce"),(self.limit,"tip_limit"),(self.skip,"tip_skip"),(self.only_untagged,"tip_only_untagged"),(self.skip_copy_suffix,"tip_skip_copy_suffix"),(self.retry_nomatch,"tip_retry_nomatch"),(self.mark_nomatch,"tip_mark_nomatch"),(self.browser,"tip_browser")]
+        pairs=[(self.root,"tip_root"),(self.api,"tip_saucenao"),(self.min_sim,"tip_min_similarity"),(self.md5,"tip_md5"),(self.sauce,"tip_sauce"),(self.iqdb,"tip_iqdb"),(self.delay,"tip_delay"),(self.req_timeout,"tip_delay"),(self.sauce_cooldown,"tip_sauce"),(self.limit,"tip_limit"),(self.skip,"tip_skip"),(self.only_untagged,"tip_only_untagged"),(self.skip_copy_suffix,"tip_skip_copy_suffix"),(self.mark_nomatch,"tip_mark_nomatch"),(self.browser,"tip_browser")]
         for w,k in pairs: w.setToolTip(t(k))
 
     def _table_clicked(self, *args, **kwargs):
@@ -459,13 +458,13 @@ class TaggerPage(QWidget):
         s["skip_existing"] = self.skip.isChecked()
         s["tag_only_untagged"] = self.only_untagged.isChecked()
         s["skip_copy_suffix_files"] = self.skip_copy_suffix.isChecked()
-        s["retry_nomatch"] = self.retry_nomatch.isChecked()
+        
         s["mark_no_match"] = self.mark_nomatch.isChecked()
         s["enable_md5_lookup"] = self.md5.isChecked()
         s["enable_saucenao"] = self.sauce.isChecked()
         s["enable_iqdb"] = self.iqdb.isChecked()
         s["enable_ascii2d"] = self.ascii2d.isChecked()
-        s["ascii2d_api_key"] = self.ascii_api.text()
+        # ascii2d has no public API
         s["iqdb_min_similarity"] = self.iqdb_min.value()
         s["delay_seconds"] = self.delay.value()
         s["request_timeout_seconds"] = self.req_timeout.value()

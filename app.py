@@ -58,12 +58,29 @@ def _log_exception(exc_type, exc, tb):
 
 
 def main() -> int:
-    sys.excepthook = _log_exception
+    # ── Stability: logging + exception handler ──────────────────────────
+    from core.stability import setup_logging, install_global_exception_handler
+    setup_logging()
+    import logging
+    _applog = logging.getLogger("local_booru")
+    _applog.info("=== Local Booru starting ===")
 
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LocalBooru.App")
     except Exception:
         pass
+
+    # ── HiDPI / multi-resolution support ──────────────────────────────
+    try:
+        from PySide6.QtCore import Qt
+        # Enable automatic HiDPI scaling (handles 4K, 1080p, 1440p etc.)
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+    except Exception:
+        pass
+    os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
     app = QApplication(sys.argv)
     try:
@@ -73,6 +90,9 @@ def main() -> int:
     app.setStyle("Fusion")
     app.setApplicationName("Local Booru")
     app.setOrganizationName("Local Booru")
+
+    # Install global Qt + Python exception handler
+    install_global_exception_handler(app)
 
     # Start thumbnail service (background QThreadPool, 3 workers)
     from core.thumb_service import ThumbnailService
@@ -108,10 +128,35 @@ def main() -> int:
     except Exception:
         pass
 
+    # ── Stability: startup checks (DB integrity + backup) ──────────────
+    try:
+        from core.settings import load_settings as _ls
+        from core.stability import run_startup_checks
+        import threading
+        _settings = _ls()
+        threading.Thread(
+            target=run_startup_checks,
+            args=(_settings,),
+            kwargs={"log": lambda m: _applog.info(m)},
+            daemon=True
+        ).start()
+    except Exception as _se:
+        _applog.warning("Startup checks failed: %s", _se)
+
     w = MainWindow()
     if icon:
         w.setWindowIcon(icon)
     w.show()
+
+    # Register clean exit handler (Hydrus pattern: marks shutdown as OK)
+    def _on_clean_exit():
+        try:
+            from core.settings import load_settings as _ls
+            from core.stability import on_clean_exit
+            on_clean_exit(_ls())
+        except Exception:
+            pass
+    app.aboutToQuit.connect(_on_clean_exit)
 
     ret = app.exec()
 

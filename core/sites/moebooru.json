@@ -1,0 +1,23 @@
+{
+  "engine": "moebooru",
+  "description": "Moebooru API (konachan.com, yande.re, rule34.us)",
+  "known_hosts": ["konachan.com", "konachan.net", "yande.re", "rule34.us"],
+  "requires_auth": false,
+  "cf_protected": ["rule34.us"],
+  "md5_search": [
+    {"path": "/post/index.json", "params": {"tags": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/post/index.json", "params": {"tags": "{md5}", "limit": 1}, "format": "json"},
+    {"path": "/posts.json",      "params": {"tags": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/posts.json",      "params": {"md5": "{md5}", "limit": 1}, "format": "json"}
+  ],
+  "post_fields": {
+    "id":       ["id"],
+    "md5":      ["md5"],
+    "tags":     ["tags"],
+    "file_url": ["file_url"],
+    "rating":   ["rating"],
+    "source":   ["source"]
+  },
+  "post_list_path": [null],
+  "post_url": "{root}/post/show/{id}"
+}

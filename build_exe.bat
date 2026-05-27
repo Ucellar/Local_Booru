@@ -11,6 +11,8 @@ echo [1/3] Installing dependencies...
 python -m pip install -r requirements.txt --quiet
 python -m pip install pyinstaller --quiet
 python -m pip install curl_cffi --quiet
+python -m pip install playwright --quiet
+python -m playwright install chromium --with-deps
 echo Done.
 echo.
 

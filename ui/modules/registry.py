@@ -13,6 +13,7 @@ from ui.manga_page import MangaPage
 from ui.downloader_page import DownloaderPage
 from ui.games_page import GamesPage
 from ui.duplicates_page import DuplicatesPage
+from ui.subscription_page import SubscriptionPage
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ PAGE_SPECS: tuple[PageSpec, ...] = (
     PageSpec("Games",      "games_page",      "Games",       "btn_games",      "Игры",     GamesPage,      "gallery", True),
     # Граббер workspace (был АСП)
     PageSpec("DLER",       "downloader_page", "DLER",        "btn_dler",       "Граббер",  DownloaderPage, "adp"),
+    PageSpec("Subs",       "subs_page",       "Subs",        "btn_subs",       "Подписки", SubscriptionPage, "adp"),
     PageSpec("Duplicates", "duplicates_page", "Duplicates",  "btn_duplicates", "Дубли",    DuplicatesPage, "duplicates", True),
     # System (always available via code)
     PageSpec("Post",       "post_page",       "Post",        None,             "Post",     PostPage,       "system", False, True),

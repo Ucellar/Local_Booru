@@ -29,6 +29,21 @@ try:
 except Exception:
     sync_playwright = None
 
+try:
+    from core.site_driver import SiteDriver as _SiteDriver
+except Exception:
+    _SiteDriver = None
+
+try:
+    from core.cf_bypass import get_cf_clearance as _get_cf, make_cf_session as _make_cf_session
+except Exception:
+    _get_cf = None; _make_cf_session = None
+
+try:
+    from core.bandwidth import wait_for_domain as _bw_wait
+except Exception:
+    _bw_wait = lambda url: None
+
 from core.paths import SETTINGS_FILE, BROWSER_PROFILE_DIR, BROWSER_COOKIES_DIR, CACHE_DIR, ERROR_LOG_FILE, ensure_output_base
 from core.nomatch_db import upsert_nomatch, remove_nomatch
 from core.tag_utils import normalize_tag as _shared_normalize_tag, canonical_tag_key
@@ -611,6 +626,7 @@ _CF_HOSTS = {
     "danbooru.donmai.us", "donmai.us",
     "booru.allthefallen.moe", "allthefallen.moe",
     "rule34.xxx", "rule34.us",
+    "ascii2d.net",
 }
 
 # Import standard requests separately for file uploads
@@ -781,33 +797,40 @@ def get_session(settings=None, log_func=None, target_host=None):
 
 
 def _post_with_file(session, url, file_path, file_field="file", extra_data=None, extra_params=None, timeout=60):
-    """POST a file upload — always uses standard requests (curl_cffi has incompatible API)."""
+    """POST a file upload using the safest available requests-compatible session.
+
+    curl_cffi is not fully compatible with the file upload path, so it is
+    converted to a plain requests.Session. cloudscraper, however, must keep
+    its own session object; otherwise the Cloudflare bypass is lost and ASCII2D
+    falls back to 403 even when cloudscraper is installed in the same Python.
+    """
     import io, importlib
     std_req = importlib.import_module("requests")
-    
-    # Always use a plain requests session for file uploads
-    plain = std_req.Session()
-    # Copy cookies and headers from original session
-    try:
-        plain.cookies.update(session.cookies)
-    except Exception:
-        pass
-    try:
-        plain.headers.update(dict(session.headers))
-    except Exception:
-        pass
-    
+
     file_path_str = str(file_path) if not hasattr(file_path, 'read') else None
     filename = (
         getattr(file_path, 'name', '').split('/')[-1].split('\\')[-1]
         or (file_path_str or '').split('/')[-1].split('\\')[-1]
         or "image.jpg"
     )
-    
+
     with (open(file_path_str, 'rb') if file_path_str else file_path) as f:
         file_bytes = f.read()
-    
-    return plain.post(
+
+    target = session
+    mod = type(session).__module__.lower()
+    if "cloudscraper" not in mod and "curl_cffi" in mod:
+        target = std_req.Session()
+        try:
+            target.cookies.update(session.cookies)
+        except Exception:
+            pass
+        try:
+            target.headers.update(dict(session.headers))
+        except Exception:
+            pass
+
+    return target.post(
         url,
         files={file_field: (filename, io.BytesIO(file_bytes))},
         data=extra_data or {},
@@ -2131,6 +2154,8 @@ class Tagger:
             return "moebooru"
         if raw in ("e621", "e926"):
             return "e621"
+        if raw in ("hypnohub",):
+            return "hypnohub"
         if raw in ("szurubooru", "philomena"):
             return raw
 
@@ -2141,8 +2166,10 @@ class Tagger:
             return "moebooru"
         if "gelbooru" in domain or "rule34.xxx" in domain or "xbooru" in domain or "safebooru" in domain or "tbib" in domain or "realbooru" in domain:
             return "gelbooru"
-        if "danbooru" in domain or "donmai" in domain or "allthefallen" in domain or "lolibooru" in domain or "hypnohub" in domain or "aibooru" in domain:
+        if "danbooru" in domain or "donmai" in domain or "allthefallen" in domain or "lolibooru" in domain or "aibooru" in domain:
             return "danbooru"
+        if "hypnohub" in domain:
+            return "hypnohub"
 
         return "custom"
 
@@ -2234,64 +2261,35 @@ class Tagger:
         return self.auth_params(site if isinstance(site, dict) else {})
 
     def _engine_api_attempts(self, site, md5):
-        """Build MD5 lookup attempts by engine family.
+        """Build MD5 lookup attempts from JSON site configs (imgbrd-grabber pattern).
 
-        Every booru-style site goes through this instead of one-off per-domain
-        code. Each attempt is (url, params, expected_format_label).
+        Falls back to hardcoded logic for unknown engines.
         """
         site = site if isinstance(site, dict) else {}
         root = self._site_root_from_cfg(site).rstrip("/")
         engine = self._normalize_engine_type(site)
         auth = self._auth_params_for_site(site)
-        attempts = []
+        host = urlparse(root).netloc.lower().replace("www.", "")
 
-        if engine == "danbooru":
-            # Danbooru forks disagree: real Danbooru usually supports tags=md5:,
-            # ATF historically answered search[md5]. Try both, strict MD5 guard
-            # still decides whether tags are allowed.
-            attempts += [
-                (f"{root}/posts.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"search[md5]": md5, "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"md5": md5, "limit": 1, **auth}, "json"),
-            ]
-        elif engine == "gelbooru":
-            attempts += [
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": md5, "limit": 1, **auth}, "json"),
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index", "tags": f"md5:{md5}", "limit": 1, **auth}, "xml"),
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index", "tags": md5, "limit": 1, **auth}, "xml"),
-            ]
-        elif engine == "moebooru":
-            attempts += [
-                (f"{root}/post/index.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/post/index.json", {"tags": md5, "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"md5": md5, "limit": 1, **auth}, "json"),
-            ]
-        elif engine == "e621":
-            attempts += [
-                (f"{root}/posts.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"tags": f"md5:{md5} status:any", "limit": 1, **auth}, "json"),
-            ]
-        elif engine == "szurubooru":
-            attempts += [
-                (f"{root}/api/posts", {"query": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/api/posts", {"query": md5, "limit": 1, **auth}, "json"),
-            ]
-        else:
-            # Unknown/custom: try all common engines. This is deliberately broad
-            # but still safe because tags are only applied after exact MD5.
-            attempts += [
-                (f"{root}/posts.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"search[md5]": md5, "limit": 1, **auth}, "json"),
-                (f"{root}/posts.json", {"md5": md5, "limit": 1, **auth}, "json"),
-                (f"{root}/post/index.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index", "tags": f"md5:{md5}", "limit": 1, **auth}, "xml"),
-                (f"{root}/api/posts", {"query": f"md5:{md5}", "limit": 1, **auth}, "json"),
-            ]
+        # Try JSON driver first
+        driver = (_SiteDriver.for_engine(engine) or _SiteDriver.for_host(host)) if _SiteDriver else None
+        if driver:
+            # rule34.us has its own config override
+            if "rule34.us" in host:
+                from core.site_driver import _load_config
+                from pathlib import Path as _P
+                _r34_cfg = _load_config(str(_P(__file__).parent.parent / "sites" / "rule34us.json"))
+                driver = _SiteDriver(_r34_cfg)
+            return driver.md5_attempts(root, md5, auth or None)
 
-        return attempts
+        # Fallback for truly unknown engines
+        return [
+            (f"{root}/posts.json",     {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
+            (f"{root}/posts.json",     {"md5": md5, "limit": 1, **auth}, "json"),
+            (f"{root}/post/index.json",{"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
+            (f"{root}/index.php",      {"page": "dapi", "s": "post", "q": "index",
+                                        "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
+        ]
 
     def _post_url_for_engine(self, site, post):
         site = site if isinstance(site, dict) else {}
@@ -2329,6 +2327,18 @@ class Tagger:
                     groups = html_groups
             except Exception:
                 pass
+        elif source_url and engine == "danbooru" and groups_to_tags(groups):
+            # ATF (danbooru-engine) returns only a flat "tags" string in its JSON.
+            # If all tags ended up in general (no tag_string_artist/character etc.),
+            # try the post HTML for proper artist/character/copyright grouping.
+            _categorized = any(groups.get(k) for k in ("artist", "character", "copyright", "meta"))
+            if not _categorized:
+                try:
+                    html_groups = self.grouped_tags_from_url(source_url)
+                    if groups_to_tags(html_groups) and any(html_groups.get(k) for k in ("artist", "character", "copyright")):
+                        groups = html_groups
+                except Exception:
+                    pass
         return groups
 
     def _html_search_params_for_engine(self, site, md5):
@@ -2383,7 +2393,57 @@ class Tagger:
                 self.log(f"    {label} HTML fallback error: {e}")
         return [], "", empty_tag_groups()
 
+    def _ensure_cf_clearance(self, host: str, root: str) -> None:
+        """Auto-obtain cf_clearance for CF-protected sites if missing.
+        
+        Checks existing cookies - if no cf_clearance found, tries to get one
+        via DrissionPage/patchright/playwright and saves to cookie file.
+        """
+        if not _get_cf:
+            return
+        cf_hosts = ["donmai.us", "allthefallen.moe"]
+        if not any(cf in (host or "") for cf in cf_hosts):
+            return
+        
+        # Check if we already have cf_clearance
+        try:
+            existing, _ = load_cookie_bundle_for_host(host)
+            has_cf = any(
+                (c.name if hasattr(c, "name") else c.get("name", "")) == "cf_clearance"
+                for c in (existing or [])
+            )
+            if has_cf:
+                return  # Already have it
+        except Exception:
+            pass
+        
+        self.log(f"  CF AUTO: no cf_clearance for {host}, attempting auto-solve...")
+        result = _get_cf(root or f"https://{host}", log_fn=self.log)
+        if result:
+            cookies, ua = result
+            # Save to cookie file so it persists
+            from core.cf_bypass import save_cookies_to_file
+            saved = save_cookies_to_file(cookies, host)
+            if saved:
+                self.log(f"  CF AUTO: saved cookies to {saved.name}")
+            # Also update session cache
+            try:
+                s = _make_cf_session(cookies, root or f"https://{host}", ua)
+                self._session_cache[host] = s
+                self.log(f"  CF AUTO: session updated with new cf_clearance ✓")
+            except Exception as e:
+                self.log(f"  CF AUTO: session update error: {e}")
+        else:
+            self.log(f"  CF AUTO: failed to get cf_clearance for {host}")
+
     def engine_by_md5(self, site, md5):
+        _html_rejected = False  # track if HTML MD5 already rejected for this site
+
+        # BLOCK: danbooru/ATF - only proceed if HTML md5 verification passes
+        # These sites return false positives without proper CF session
+        _root = self._site_root_from_cfg(site) if isinstance(site, dict) else ""
+        _ehost = urlparse(_root).netloc.lower().replace("www.", "")
+        _is_cf_strict = any(cf in _ehost for cf in ["donmai.us", "allthefallen.moe"])
         """Single MD5 lookup path for every configured booru/custom site."""
         site = site if isinstance(site, dict) else {}
         label = self._site_label(site)
@@ -2399,6 +2459,8 @@ class Tagger:
             headers["User-Agent"] = "LocalBooru/3.0 (local archive manager; contact: local-user)"
             headers["Accept-Encoding"] = "gzip, deflate"
 
+        _rejected_post_ids_this_md5 = set()  # skip post IDs already rejected in this engine_by_md5 call
+
         for api, params, fmt in self._engine_api_attempts(site, md5):
             try:
                 r = self._atf_get_cached(session, api, host, params=params, timeout=self.timeout, headers=headers)
@@ -2411,28 +2473,79 @@ class Tagger:
                         continue
 
                     # First try API-level explicit MD5.
-                    if self._post_md5_value(post) != (md5 or "").lower():
-                        # Some APIs omit md5 even in search result. Verify via
-                        # post HTML before rejecting. This is generic for every
-                        # engine, not ATF-only.
-                        src_for_verify = self._post_url_for_engine(site, post)
-                        if not src_for_verify:
+                    post_md5 = self._post_md5_value(post)
+                    wanted_md5 = (md5 or "").lower()
+                    is_atf = "allthefallen" in (label or "").lower() or "allthefallen" in (host or "").lower()
+
+                    # Skip post IDs already rejected by a previous attempt in this call.
+                    _pid_str = str(post.get("id", ""))
+                    if _pid_str and _pid_str in _rejected_post_ids_this_md5:
+                        continue
+
+                    # --- MD5 verification ---
+                    # _md5_ok becomes True only when we can confirm this is the right post.
+                    _md5_ok = (post_md5 == wanted_md5)
+
+                    if not _md5_ok:
+                        # ATF with DIFFERENT md5 echoed back → definitely wrong post, hard reject.
+                        # (ATF/Danbooru are the same codebase; for ATF we blacklist the post id
+                        #  so it won't be reused for other files in the same session.)
+                        if is_atf and self.settings.get("strict_atf_md5", True) and post_md5:
+                            self.log(f"    {label} MD5 REJECT: local={md5} remote={post_md5}")
+                            if not hasattr(self, "_atf_rejected_posts"):
+                                self._atf_rejected_posts = set()
+                            self._atf_rejected_posts.add(str(post.get("id", "")))
+                            if _pid_str:
+                                _rejected_post_ids_this_md5.add(_pid_str)
+                            continue
+
+                        # For all sites (ATF/Danbooru/etc.) when md5 is absent or different:
+                        # fetch the concrete post page HTML and verify the md5 there.
+                        # ATF uses _atf_get to handle PoW challenges automatically.
+                        # Deleted posts have no file_url in HTML → no md5 → safe reject.
+                        _src_for_verify = self._post_url_for_engine(site, post)
+                        if not _src_for_verify:
                             self.log(f"    {label} MD5 REJECT: post has no post URL for HTML verification")
                             continue
                         try:
-                            html = self._http_get_cached(session, src_for_verify, timeout=self.timeout, headers={"Accept": "text/html,application/xhtml+xml,*/*"}).text
-                            if not self._verify_html_md5(label, html, md5):
-                                got = self._post_md5_value(post)
-                                if got:
-                                    self.log(f"    {label} MD5 REJECT: local={md5} remote={got}")
+                            if is_atf:
+                                _html_v = self._atf_get_cached(
+                                    session, _src_for_verify, host,
+                                    timeout=self.timeout,
+                                    headers={"Accept": "text/html,application/xhtml+xml,*/*"}).text
+                            else:
+                                _html_v = self._http_get_cached(
+                                    session, _src_for_verify, timeout=self.timeout,
+                                    headers={"Accept": "text/html,application/xhtml+xml,*/*"}).text
+                            if self._verify_html_md5(label, _html_v, md5):
+                                _md5_ok = True
+                            else:
+                                if post_md5:
+                                    self.log(f"    {label} MD5 REJECT: local={md5} remote={post_md5}")
                                 else:
-                                    self.log(f"    {label} MD5 REJECT: post={post.get('id')} has no verifiable md5")
+                                    self.log("    " + label + " MD5 REJECT: post=" + str(post.get("id","?")) + " no verifiable md5")
+                                if _pid_str:
+                                    _rejected_post_ids_this_md5.add(_pid_str)
+                                if _is_cf_strict:
+                                    break
                                 continue
                         except Exception as e:
                             self.log(f"    {label} MD5 HTML VERIFY ERROR: {e}")
                             continue
 
+                    if not _md5_ok:
+                        continue
+
                     source_url = self._post_url_for_engine(site, post)
+
+                    # ATF blacklist: skip if this post was already wrong for another file
+                    if "allthefallen" in label:
+                        _atf_bl = getattr(self, "_atf_rejected_posts", set())
+                        _atf_pid = str(post.get("id", ""))
+                        if _atf_pid in _atf_bl:
+                            self.log("    " + label + " BLACKLIST: post=" + _atf_pid + " was wrong for another file, skipping")
+                            continue
+
                     groups = self._groups_from_engine_post(site, post, source_url)
                     tags = groups_to_tags(groups) or self._tags_from_post_dict(post)
                     if not tags and source_url:
@@ -2472,10 +2585,33 @@ class Tagger:
         self._lookup_cache_enabled = True
         self._request_cache = {}
         try:
-            for site in self._all_enabled_site_configs():
+            sites = self._all_enabled_site_configs()
+
+            # ATF / allthefallen is useful as a last-resort source, but in real
+            # use it sometimes returns very noisy site-specific tags.  Do not let
+            # it pollute results that were already verified by cleaner sources
+            # such as Danbooru/Gelbooru/e621/rule34.xxx.  It remains available
+            # only as fallback when nothing else found tags.
+            def _is_atf_site(_site):
+                try:
+                    text = " ".join([
+                        str(_site.get("domain") or ""),
+                        str(_site.get("name") or ""),
+                        str(_site.get("base_url") or ""),
+                        str(_site.get("login_url") or ""),
+                        str(_site.get("url") or ""),
+                    ]).lower()
+                    return "allthefallen" in text or text.strip() == "atf" or " atf" in (" " + text)
+                except Exception:
+                    return False
+
+            sites = sorted(sites, key=lambda _site: 1 if _is_atf_site(_site) else 0)
+
+            for site in sites:
                 label = self._site_label(site)
                 try:
                     self.log(f"  MD5 CHECK: {label}")
+
                     tags, source, groups = self.engine_by_md5(site, md5)
                     if tags:
                         self.log(f"  MD5 MATCH: {label} {redact_sensitive_url(source)}")
@@ -3105,7 +3241,21 @@ class Tagger:
             # crash MD5 search, just let caller try the next endpoint.
             try:
                 if self.log:
-                    self.log(f"    {site_name}: JSON/DAPI parse skipped: {e}")
+                    err_str = str(e)
+                    r_text = getattr(r, "text", "") or ""
+                    r_status = getattr(r, "status_code", 0)
+                    r_ct = str(getattr(r, "headers", {}).get("content-type", "")).lower()
+                    # Silent: these are all "not found" or known broken APIs
+                    is_empty_json = "json" in r_ct and not r_text.strip()
+                    is_zero_xml = "xml" in r_ct and 'count="0"' in r_text[:200]
+                    is_404 = r_status == 404
+                    is_html_not_found = "html" in r_ct and r_status == 200
+                    if is_empty_json or is_zero_xml or is_404:
+                        pass  # silent: not found on this site
+                    elif is_html_not_found and site_name in ("hypnohub.net", "rule34.us"):
+                        pass  # silent: these sites return HTML index when no results
+                    else:
+                        self.log(f"    {site_name}: JSON/DAPI parse skipped: {e}")
             except Exception:
                 pass
 
@@ -3794,15 +3944,18 @@ class Tagger:
     def _ascii2d_parse_results(self, html: str, domains: set) -> list:
         """Parse ascii2d result page and return (url, similarity) pairs.
 
-        ascii2d result structure:
+        ascii2d.net HTML structure (handles both old and new layouts):
           .item-box
+            .item-content  — thumbnail
             .detail-box
-              h6  — artist/source info
-                a  — link to post on source site
-              .hash — perceptual hash
-
-        We pick links from .detail-box h6 a that belong to known domains.
-        Each result box is one match; first box is best match.
+              small         — source site name + link  ← PRIMARY
+              h6 > a        — artist link (pixiv/twitter)
+              .hash         — perceptual hash value
+        
+        Strategy:
+        1. Check all <a href> in .detail-box for known booru domains
+        2. Also try external links (pixiv, twitter) as source hints
+        3. Skip internal ascii2d links
         """
         soup = BeautifulSoup(html, "html.parser")
         out = []
@@ -3812,42 +3965,372 @@ class Tagger:
             detail = box.select_one(".detail-box")
             if not detail:
                 continue
-            # First h6 contains the primary source link
-            for a in detail.select("h6 a[href]"):
+
+            # Collect all candidate links from this result box
+            candidates = []
+            for a in detail.select("a[href]"):
                 href = a.get("href", "").strip()
                 if not href:
                     continue
                 if href.startswith("//"):
                     href = "https:" + href
-                if href.startswith("/"):
+                elif href.startswith("/"):
                     href = "https://ascii2d.net" + href
+
                 host = urlparse(href).netloc.lower().replace("www.", "")
+
+                # Skip ascii2d internal links
+                if "ascii2d.net" in host:
+                    continue
+
+                candidates.append((href, host))
+
+            # Score: first box = best, each subsequent = -5
+            score = max(60.0, 100.0 - i * 5)
+
+            # Priority 1: exact domain match (gelbooru, rule34, etc.)
+            for href, host in candidates:
                 if host in domains and href not in seen:
                     seen.add(href)
-                    # Score: first result = best match, decrease by position
-                    score = max(60.0, 100.0 - i * 5)
                     out.append((href, score))
                     self.log(f"  ASCII2D hit[{i}] {score:.0f}% {href}")
+                    break  # one per box
+
+            # Priority 2: if no exact match, try partial domain match
+            if not any(href for href, _ in candidates if href in seen):
+                for href, host in candidates:
+                    if href not in seen:
+                        # Check if any enabled domain is a substring
+                        for dom in domains:
+                            if dom in host or host in dom:
+                                seen.add(href)
+                                out.append((href, score * 0.8))
+                                self.log(f"  ASCII2D partial[{i}] {score*0.8:.0f}% {href}")
+                                break
+
         return out
+
+    def _get_ascii2d_session(self):
+        """Build a session that can bypass ascii2d Cloudflare protection.
+
+        cloudscraper is tried before curl_cffi because ASCII2D needs file upload.
+        curl_cffi can warm the homepage, but the upload path is not reliable
+        when converted to plain requests.
+        """
+        # Priority 0: FlareSolverr — real Chrome, 100% CF bypass
+        fs_url = ""
+        try:
+            fs_url = (self.settings or {}).get("flaresolverr_url", "").strip() if self.settings else ""
+        except Exception:
+            pass
+        if fs_url:
+            try:
+                from core.flaresolverr import FlareSolverrClient
+                import requests as _std_req, time as _time
+                # Cache session for 25 minutes (cf_clearance expires after 30min)
+                _cache_key = f"ascii2d_session_{fs_url}"
+                _cached = getattr(self, "_ascii2d_session_cache", {})
+                _cached_entry = _cached.get(_cache_key)
+                if _cached_entry and _time.time() - _cached_entry[1] < 1500:
+                    self.log("  ASCII2D: reusing cached FlareSolverr session")
+                    return _cached_entry[0]
+
+                client = FlareSolverrClient(fs_url)
+                # Solve homepage to get cf_clearance
+                self.log("  ASCII2D: FlareSolverr solving homepage for cf_clearance...")
+                cookies, ua = client.get_cookies_for("https://ascii2d.net/")
+                cf = next((c for c in cookies if c.get("name") == "cf_clearance"), None)
+                if cf:
+                    self.log(f"  ASCII2D: FlareSolverr got cf_clearance ✓")
+                else:
+                    self.log("  ASCII2D: FlareSolverr no cf_clearance yet, trying upload page...")
+                    cookies2, ua2 = client.get_cookies_for("https://ascii2d.net/search/file")
+                    cookies = cookies + cookies2
+                    ua = ua2 or ua
+                    cf = next((c for c in cookies if c.get("name") == "cf_clearance"), None)
+
+                # Build plain requests session with CF cookies + matching UA
+                s = _std_req.Session()
+                s.headers.update({
+                    "User-Agent": ua or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+                    "Referer": "https://ascii2d.net/",
+                })
+                from urllib.parse import urlparse
+                for c in cookies:
+                    try:
+                        s.cookies.set(
+                            c.get("name",""), c.get("value",""),
+                            domain=c.get("domain","ascii2d.net").lstrip(".")
+                        )
+                    except Exception:
+                        pass
+
+                status = "✓ (cf_clearance)" if cf else "(no cf_clearance)"
+                self.log(f"  ASCII2D: FlareSolverr session ready {status}")
+                # Cache session
+                if not hasattr(self, "_ascii2d_session_cache"):
+                    self._ascii2d_session_cache = {}
+                self._ascii2d_session_cache[_cache_key] = (s, _time.time())
+                return s
+            except Exception as fe:
+                self.log(f"  ASCII2D: FlareSolverr error: {fe}")
+        else:
+            self.log("  ASCII2D: FlareSolverr not set (Settings → FlareSolverr URL)")
+
+        # Priority 1: cloudscraper for Cloudflare + file upload
+        try:
+            import cloudscraper
+            cs = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            )
+            cs.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/136.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+                "Referer": "https://ascii2d.net/",
+            })
+            try:
+                r_warm = cs.get("https://ascii2d.net/", timeout=20, allow_redirects=True)
+                self.log(f"  ASCII2D: cloudscraper warm-up status={getattr(r_warm, 'status_code', '?')}")
+            except Exception as we:
+                self.log(f"  ASCII2D: cloudscraper warm-up failed: {we}")
+            self.log("  ASCII2D: using cloudscraper")
+            return cs
+        except ImportError:
+            self.log("  ASCII2D: cloudscraper not installed in this Python. Try: python -m pip install cloudscraper")
+        except Exception as e:
+            self.log(f"  ASCII2D: cloudscraper error: {e}")
+
+        # Priority 2: curl_cffi with Chrome impersonation
+        if _CURL_CFFI:
+            try:
+                s = requests.Session(impersonate="chrome120")
+                s.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/136.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+                    "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "Referer": "https://ascii2d.net/",
+                })
+                try:
+                    r_warm = s.get("https://ascii2d.net/", timeout=15, allow_redirects=True)
+                    self.log(f"  ASCII2D: curl_cffi warm-up status={getattr(r_warm, 'status_code', '?')}")
+                except Exception as we:
+                    self.log(f"  ASCII2D: curl_cffi warm-up failed: {we}")
+                return s
+            except Exception as e:
+                self.log(f"  ASCII2D: curl_cffi session error: {e}")
+
+        # Priority 3: requests
+        import importlib as _imp
+        std = _imp.import_module("requests").Session()
+        std.headers["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36"
+        )
+        self.log("  ASCII2D: falling back to standard requests (may get 403)")
+        return std
+
+    def _ascii2d_try_playwright(self, img_path, domains):
+        """Try ascii2d via browser automation. Returns list or None on failure."""
+
+        def _launch_and_search(get_browser_fn):
+            """Inner: try to get browser from factory fn, upload, return html."""
+            try:
+                _browser, _ctx = get_browser_fn()
+                _page = _ctx.new_page()
+                _page.goto("https://ascii2d.net/", timeout=60000, wait_until="load")
+                _page.wait_for_timeout(4000)
+                _page.goto("https://ascii2d.net/search/file",
+                           timeout=60000, wait_until="load")
+                _page.wait_for_timeout(3000)
+                # Wait for CF to finish (either file input appears or we timeout)
+                _deadline = 35  # seconds — CF challenge timeout (patchright needs more time)
+                _found = False
+                import time as _t
+                _t0 = _t.time()
+                while _t.time() - _t0 < _deadline:
+                    try:
+                        _page.wait_for_selector("input[type='file']", timeout=2000)
+                        _found = True
+                        break
+                    except Exception:
+                        _page.wait_for_timeout(1500)
+                if not _found:
+                    _browser.close()
+                    return None  # CF still blocking
+                _page.set_input_files("input[type='file']", str(img_path))
+                _page.wait_for_timeout(800)
+                _page.click("input[type='submit'], button[type='submit']")
+                _page.wait_for_load_state("networkidle", timeout=30000)
+                _html = _page.content()
+                _browser.close()
+                return _html
+            except Exception as _e:
+                try: _browser.close()
+                except Exception: pass
+                raise _e
+
+        # Method A: patchright (undetected chromium, best CF bypass)
+        try:
+            from patchright.sync_api import sync_playwright as _patchright
+            self.log("  ASCII2D: patchright (undetected Chrome)...")
+            with _patchright() as _pw:
+                def _get():
+                    _b = _pw.chromium.launch(
+                        headless=True,
+                        args=["--no-sandbox","--disable-blink-features=AutomationControlled"])
+                    _c = _b.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                   "Chrome/142.0.0.0 Safari/537.36",
+                        viewport={"width":1280,"height":800})
+                    return _b, _c
+                _html = _launch_and_search(_get)
+            if _html and "item-box" in _html:
+                _out = self._ascii2d_parse_results(_html, domains)
+                self.log(f"  ASCII2D: patchright ✓ {len(_out)} result(s)")
+                return _out or []
+            elif _html:
+                self.log("  ASCII2D: patchright - page loaded but CF still blocking")
+            else:
+                self.log("  ASCII2D: patchright - CF challenge not solved in time")
+        except ImportError:
+            self.log("  ASCII2D: patchright not installed → pip install patchright && python -m patchright install chromium")
+        except Exception as _pe:
+            self.log(f"  ASCII2D: patchright error: {type(_pe).__name__}: {str(_pe)[:160]}")
+
+        # Method B: regular Playwright
+        try:
+            from playwright.sync_api import sync_playwright as _pwright
+            self.log("  ASCII2D: Playwright headless...")
+            with _pwright() as _pw:
+                def _get():
+                    _b = _pw.chromium.launch(
+                        headless=True,
+                        args=["--no-sandbox","--disable-blink-features=AutomationControlled"],
+                    )
+                    _c = _b.new_context(
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                   "AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36",
+                        viewport={"width":1280,"height":800},
+                    )
+                    _c.add_init_script(
+                        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+                    )
+                    return _b, _c
+                _html = _launch_and_search(_get)
+            if _html and "item-box" in _html:
+                _out = self._ascii2d_parse_results(_html, domains)
+                self.log(f"  ASCII2D: Playwright ✓ {len(_out)} result(s)")
+                return _out or []
+            elif _html:
+                self.log("  ASCII2D: Playwright CF still blocking (install patchright for better bypass)")
+            else:
+                self.log("  ASCII2D: Playwright timed out (CF challenge not solved)")
+        except ImportError:
+            self.log("  ASCII2D: Playwright not installed → pip install playwright && playwright install chromium")
+        except Exception as _pe:
+            self.log(f"  ASCII2D: Playwright error: {type(_pe).__name__}: {str(_pe)[:80]}")
+
+        return None  # All browser methods failed
+
+    def ascii2d_by_url(self, image_url: str, session=None) -> list:
+        """Search ascii2d by image URL instead of file upload.
+        Works via FlareSolverr GET request (no POST = no CF block).
+        """
+        if not image_url or not image_url.startswith("http"):
+            return []
+        domains = self.enabled_domains()
+        try:
+            import urllib.parse
+            enc = urllib.parse.quote(image_url, safe="")
+            search_url = f"https://ascii2d.net/search/url/{enc}"
+            if session is None:
+                session = self._get_ascii2d_session()
+            self.log(f"  ASCII2D URL search: {image_url[:60]}...")
+            r = session.get(search_url, timeout=30, allow_redirects=True)
+            if r.status_code == 200:
+                results = self._ascii2d_parse_results(r.text, domains)
+                if results:
+                    self.log(f"  ASCII2D URL search: {len(results)} result(s)")
+                return results
+        except Exception as e:
+            self.log(f"  ASCII2D URL search error: {e}")
+        return []
 
     def ascii2d_urls(self, img_path):
         domains = self.enabled_domains()
-        api_key = (self.settings.get("ascii2d_api_key") or "").strip()
-        headers = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+
+        # Priority 1: Playwright — real Chromium, 100% CF bypass for file upload
+        # Try patchright first (undetected fork of Playwright)
+        # then regular Playwright, then FlareSolverr CSRF trick
+        _pw_result = self._ascii2d_try_playwright(img_path, domains)
+        if _pw_result is not None:
+            return _pw_result
+
+        # Priority 2: FlareSolverr + cloudscraper + curl_cffi fallbacks
+        s = self._get_ascii2d_session()
 
         # Try file upload (hash search)
         hash_html = ""
         bovw_url = ""
         try:
-            with img_path.open("rb") as f:
-                r = _post_with_file(self.session, "https://ascii2d.net/search/file",
-                                   img_path, file_field="file",
-                                   timeout=max(self.timeout, 60))
+            # Get CSRF token from homepage before uploading
+            extra_data = {}
+            try:
+                warm = s.get("https://ascii2d.net/search/file", timeout=15)
+                if warm.status_code == 200:
+                    from bs4 import BeautifulSoup as _BS
+                    _soup = _BS(warm.text, "html.parser")
+                    csrf = _soup.select_one("input[name='authenticity_token']")
+                    if csrf:
+                        extra_data["authenticity_token"] = csrf.get("value","")
+                    utf8 = _soup.select_one("input[name='utf8']")
+                    if utf8:
+                        extra_data["utf8"] = utf8.get("value", "✓")
+                    if "cf_clearance" in str(warm.cookies):
+                        self.log("  ASCII2D: got cf_clearance from upload page")
+            except Exception as _we:
+                self.log(f"  ASCII2D: pre-upload fetch: {_we}")
+
+            r = _post_with_file(s, "https://ascii2d.net/search/file",
+                               img_path, file_field="file",
+                               extra_data=extra_data,
+                               timeout=max(self.timeout, 60))
+            if r.status_code == 403:
+                self.log("  ASCII2D: 403 upload blocked by Cloudflare Bot Fight Mode")
+                # Try URL-based search as fallback
+                # Look for source URLs in known locations
+                source_urls = []
+                try:
+                    # Check if img_path has an associated source URL in DB
+                    from core.database.connection import db
+                    with db(self.settings, readonly=True) as _conn:
+                        _row = _conn.execute(
+                            "SELECT rm.file_url FROM raw_metadata rm "
+                            "JOIN images i ON i.id=rm.image_id WHERE i.path=?",
+                            (str(img_path),)
+                        ).fetchone()
+                        if _row and _row[0]:
+                            source_urls.append(_row[0])
+                except Exception:
+                    pass
+                if source_urls:
+                    self.log(f"  ASCII2D: trying URL search for {source_urls[0][:50]}...")
+                    url_results = self.ascii2d_by_url(source_urls[0], s)
+                    if url_results:
+                        return url_results
+                self.log("  ASCII2D: no source URL for URL search. Use FlareSolverr + Playwright for full bypass.")
+                return []
             r.raise_for_status()
             hash_html = r.text
-            # ascii2d returns hash search first; bovw link is in the page
             soup_tmp = BeautifulSoup(hash_html, "html.parser")
             bovw_link = soup_tmp.select_one("a[href*='/search/bovw/']")
             if bovw_link:
@@ -3863,15 +4346,10 @@ class Tagger:
 
         out = self._ascii2d_parse_results(hash_html, domains)
 
-        # If hash search gave no results, try bovw (color/feature search)
+        # If hash gave no results, try bovw (color/feature search)
         if not out and bovw_url:
             try:
-                r2 = self.session.get(
-                    bovw_url,
-                    headers=headers,
-                    timeout=max(self.timeout, 45),
-                    allow_redirects=True,
-                )
+                r2 = s.get(bovw_url, timeout=max(self.timeout, 45), allow_redirects=True)
                 r2.raise_for_status()
                 out = self._ascii2d_parse_results(r2.text, domains)
                 if out:

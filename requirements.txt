@@ -11,3 +11,6 @@ PyMuPDF
 
 curl_cffi
 python-mpv
+cloudscraper
+patchright
+DrissionPage

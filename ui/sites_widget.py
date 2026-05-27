@@ -65,6 +65,7 @@ class _SectionHeader(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 3, 6, 3)
         lay.setSpacing(8)
+        self.setStyleSheet('background:transparent;')
 
         self._arrow = QLabel("▼")
         self._arrow.setFixedWidth(16)
@@ -124,12 +125,13 @@ class SitesWidget(QWidget):
         hh.setSectionResizeMode(C_LOGIN,    QHeaderView.Interactive)
         hh.setSectionResizeMode(C_APIKEY,   QHeaderView.Interactive)
         hh.setSectionResizeMode(C_USERID,   QHeaderView.ResizeToContents)
-        hh.setSectionResizeMode(C_LOGINURL, QHeaderView.Stretch)
-        hh.setSectionResizeMode(C_NOTES,    QHeaderView.Interactive)
-        self.table.setColumnWidth(C_DOMAIN,   180)
-        self.table.setColumnWidth(C_LOGIN,    110)
-        self.table.setColumnWidth(C_APIKEY,   110)
-        self.table.setColumnWidth(C_NOTES,    160)
+        hh.setSectionResizeMode(C_LOGINURL, QHeaderView.Interactive)   # narrower
+        hh.setSectionResizeMode(C_NOTES,    QHeaderView.Stretch)       # wider
+        self.table.setColumnWidth(C_DOMAIN,   160)
+        self.table.setColumnWidth(C_LOGIN,    90)
+        self.table.setColumnWidth(C_APIKEY,   90)
+        self.table.setColumnWidth(C_LOGINURL, 220)
+        self.table.setColumnWidth(C_NOTES,    260)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.verticalHeader().setVisible(False)
@@ -210,7 +212,7 @@ class SitesWidget(QWidget):
 
         self.table.setItem(row, C_ENABLED,  _bool_item(cfg.get("enabled", True)))
         dom_it = _text_item(domain, editable=custom)
-        dom_it.setForeground(QBrush(QColor("#c0c8e0")))
+        # domain color inherited from theme
         self.table.setItem(row, C_DOMAIN,   dom_it)
         eng_it = _text_item(engine, editable=False)
         eng_it.setForeground(QBrush(QColor(color)))
@@ -220,7 +222,7 @@ class SitesWidget(QWidget):
         self.table.setItem(row, C_USERID,   _text_item(cfg.get("user_id", "")))
         self.table.setItem(row, C_LOGINURL, _text_item(cfg.get("login_url", "")))
         notes_it = _text_item(ALL_KNOWN_SITES.get(domain, {}).get("notes", ""), editable=False)
-        notes_it.setForeground(QBrush(QColor("#606080")))
+        # notes color inherited from theme
         self.table.setItem(row, C_NOTES,    notes_it)
 
     def _add_custom_row(self, site: dict):

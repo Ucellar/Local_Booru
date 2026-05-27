@@ -1,0 +1,23 @@
+{
+  "engine": "moebooru",
+  "description": "rule34.us - uses custom API endpoints (v2 frontend)",
+  "known_hosts": ["rule34.us"],
+  "requires_auth": false,
+  "cf_protected": ["rule34.us"],
+  "md5_search": [
+    {"path": "/api/posts",   "params": {"q": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/api/posts",   "params": {"tags": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/v1/posts",    "params": {"q": "md5:{md5}", "limit": 1}, "format": "json"},
+    {"path": "/index.php",   "params": {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": "md5:{md5}", "limit": 1}, "format": "json"}
+  ],
+  "post_fields": {
+    "id":       ["id"],
+    "md5":      ["md5"],
+    "tags":     ["tags"],
+    "file_url": ["file_url"],
+    "rating":   ["rating"],
+    "source":   ["source"]
+  },
+  "post_list_path": [null],
+  "post_url": "{root}/index.php?page=post&s=view&id={id}"
+}
