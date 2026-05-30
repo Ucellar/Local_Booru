@@ -2,22 +2,46 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from pathlib import Path
+import re
 import time
 from core.tag_utils import normalize_tag
 from .connection import db
 
 
+_TOKEN_RE = re.compile(r'"([^"]+)"|(\S+)')
+
 def _parse_query(query):
+    """Booru-style query parser.
+
+    Plain words are required tags, minus-prefixed words are excluded tags.
+    This intentionally keeps search human/simple: ``abc -bad_tag`` instead of
+    forcing ``artist:abc -tag:bad_tag``.  Quoted tags are supported for odd
+    legacy tag names, while normal booru tags still use underscores.
+    """
     plus, minus = [], []
-    for raw in (query or "").replace(",", " ").split():
-        raw = raw.strip()
+    text = (query or "").replace(",", " ")
+    for m in _TOKEN_RE.finditer(text):
+        raw = (m.group(1) or m.group(2) or "").strip()
         if not raw:
             continue
-        if raw.startswith("-") and len(raw) > 1:
-            minus.append(normalize_tag(raw[1:]))
-        else:
-            plus.append(normalize_tag(raw))
-    return [x for x in plus if x], [x for x in minus if x]
+        neg = raw.startswith("-") and len(raw) > 1
+        if neg:
+            raw = raw[1:].strip()
+        # User-facing shorthand: tag:abc is accepted, but not required.
+        if raw.lower().startswith("tag:"):
+            raw = raw[4:]
+        norm = normalize_tag(raw)
+        if not norm:
+            continue
+        (minus if neg else plus).append(norm)
+    # Preserve order, remove duplicates.
+    def _uniq(seq):
+        seen=set(); out=[]
+        for x in seq:
+            if x not in seen:
+                seen.add(x); out.append(x)
+        return out
+    return _uniq(plus), _uniq(minus)
 
 
 def _bucket_clause(bucket):
@@ -204,7 +228,10 @@ def tag_group_counts(settings):
             ORDER BY category, c DESC, name COLLATE NOCASE
         """).fetchall()
     for r in rows:
-        out[r["category"] or "general"][r["name"]] = int(r["c"])
+        name = normalize_tag(r["name"])
+        if not name:
+            continue
+        out[r["category"] or "general"][name] = int(r["c"])
     return out
 
 
@@ -220,7 +247,12 @@ def candidate_tags(settings, scope="all"):
         if where:
             sql += " AND " + where
         sql += " GROUP BY t.id ORDER BY t.name COLLATE NOCASE"
-        return [r["name"] for r in con.execute(sql, args).fetchall()]
+        out = []
+        for r in con.execute(sql, args).fetchall():
+            tag = normalize_tag(r["name"])
+            if tag:
+                out.append(tag)
+        return out
 
 
 def candidate_sources(settings, scope="all"):
@@ -273,13 +305,15 @@ def find_images_by_tag(settings, tag, scope="all", limit=None):
 
 
 def find_images_by_source(settings, source_text, scope="all", limit=None):
-    q = "%" + str(source_text or "").lower() + "%"
+    # Deletion UI works on a selected candidate. Use exact matching so typing a
+    # common domain cannot accidentally remove every URL containing it.
+    q = str(source_text or "").strip().lower()
     where, args = _scope_where(scope)
     sql = """
         SELECT DISTINCT i.id, i.path, i.file_name, i.bucket FROM images i
         JOIN image_sources isrc ON isrc.image_id=i.id
         JOIN sources s ON s.id=isrc.source_id
-        WHERE i.deleted=0 AND (LOWER(s.url) LIKE ? OR LOWER(s.host) LIKE ?)
+        WHERE i.deleted=0 AND (LOWER(s.url) = ? OR LOWER(s.host) = ?)
     """
     params = [q, q]
     if where:
@@ -288,6 +322,21 @@ def find_images_by_source(settings, source_text, scope="all", limit=None):
     sql += " ORDER BY i.path COLLATE NOCASE"
     if limit:
         sql += " LIMIT ?"; params.append(int(limit))
+    with db(settings, readonly=True) as con:
+        return [dict(r) for r in con.execute(sql, params).fetchall()]
+
+
+def find_images_by_buckets(settings, buckets, limit=None):
+    """Return live indexed files in exact output buckets for reliable cleanup."""
+    values = [str(b) for b in (buckets or []) if str(b)]
+    if not values:
+        return []
+    ph = ",".join(["?"] * len(values))
+    sql = f"SELECT DISTINCT id, path, file_name, bucket FROM images WHERE deleted=0 AND bucket IN ({ph}) ORDER BY path COLLATE NOCASE"
+    params = list(values)
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
     with db(settings, readonly=True) as con:
         return [dict(r) for r in con.execute(sql, params).fetchall()]
 

@@ -3,10 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 from contextlib import contextmanager
-from threading import Lock
+from threading import Lock, local
 
 _INIT_LOCK = Lock()
 _INIT_DONE = set()
+_TLS = local()
+_POOL_LOCK = Lock()
+_ALL_CONNECTIONS = []
 
 
 def db_path(settings):
@@ -26,9 +29,9 @@ def db_path(settings):
 def connect(settings, *, readonly: bool = False):
     path = db_path(settings)
     if readonly and path.exists():
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30, check_same_thread=False)
     else:
-        con = sqlite3.connect(str(path), timeout=60)
+        con = sqlite3.connect(str(path), timeout=60, check_same_thread=False)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
@@ -62,6 +65,55 @@ def ensure_initialized(con, *, force=False):
         _INIT_DONE.add(path)
 
 
+
+def _pooled_key(settings, readonly: bool) -> str:
+    return f"{db_path(settings)}|ro={int(bool(readonly))}"
+
+def get_pooled_connection(settings, *, readonly: bool = False):
+    """Return one SQLite connection per thread and db path.
+
+    This keeps WAL connections warm during gallery + tagger + subscription work
+    and avoids opening/closing SQLite for every tiny query.  Connections are
+    thread-local, so callers do not share a sqlite3.Connection across threads.
+    """
+    key = _pooled_key(settings, readonly)
+    cache = getattr(_TLS, "connections", None)
+    if cache is None:
+        cache = {}
+        _TLS.connections = cache
+    con = cache.get(key)
+    if con is not None:
+        try:
+            con.execute("SELECT 1")
+            return con
+        except Exception:
+            try: con.close()
+            except Exception: pass
+            cache.pop(key, None)
+    con = connect(settings, readonly=readonly)
+    ensure_initialized(con)
+    cache[key] = con
+    with _POOL_LOCK:
+        _ALL_CONNECTIONS.append(con)
+    return con
+
+def close_pooled_connections() -> int:
+    """Close known pooled connections during graceful shutdown."""
+    n = 0
+    with _POOL_LOCK:
+        cons = list(_ALL_CONNECTIONS)
+        _ALL_CONNECTIONS.clear()
+    for con in cons:
+        try:
+            con.close(); n += 1
+        except Exception:
+            pass
+    try:
+        _TLS.connections = {}
+    except Exception:
+        pass
+    return n
+
 @contextmanager
 def db(settings, write: bool = False, readonly: bool = False):
     """Context-managed SQLite connection.
@@ -69,9 +121,11 @@ def db(settings, write: bool = False, readonly: bool = False):
     Every function that touches SQLite should go through this helper. It fixes
     the old WAL lock leaks by closing connections deterministically.
     """
-    con = connect(settings, readonly=readonly and not write)
+    use_pool = bool((settings or {}).get("sqlite_connection_pool", True))
+    con = get_pooled_connection(settings, readonly=readonly and not write) if use_pool else connect(settings, readonly=readonly and not write)
     try:
-        ensure_initialized(con)
+        if not use_pool:
+            ensure_initialized(con)
         yield con
         if write:
             con.commit()
@@ -83,16 +137,19 @@ def db(settings, write: bool = False, readonly: bool = False):
                 pass
         raise
     finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+        if not use_pool:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 def get_connection(settings):
-    """Simple connection helper (caller must close manually).
-    Prefer using the 'db' context manager for writes.
+    """Compatibility helper. Returns a pooled connection by default.
+    Prefer using the db() context manager for writes.
     """
+    if bool((settings or {}).get("sqlite_connection_pool", True)):
+        return get_pooled_connection(settings)
     con = connect(settings)
     ensure_initialized(con)
     return con

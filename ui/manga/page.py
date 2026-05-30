@@ -62,37 +62,19 @@ class MangaPage(QWidget):
         top = QHBoxLayout()
         self.search = QLineEdit(); self.search.setClearButtonEnabled(True); self.search.setPlaceholderText("Поиск по названию или тегам")
         self.sort = QComboBox(); self.sort.addItem("Название", "title"); self.sort.addItem("Новые", "new"); self.sort.addItem("Старые", "old"); self.sort.addItem("Страниц больше", "pages_desc")
-        self.refresh_btn = QPushButton("Обновить"); self.url_tags_btn = QPushButton("Теги по URL")
-        top.addWidget(QLabel("Манга")); top.addWidget(self.search,1); top.addWidget(self.sort); top.addWidget(self.refresh_btn); top.addWidget(self.url_tags_btn); lay.addLayout(top)
+        self.refresh_btn = QPushButton("Обновить")
+        top.addWidget(QLabel("Манга")); top.addWidget(self.search,1); top.addWidget(self.sort); top.addWidget(self.refresh_btn); lay.addLayout(top)
         split = QSplitter(Qt.Horizontal); lay.addWidget(split,1)
         tag_side = QWidget(); tl = QVBoxLayout(tag_side); tl.addWidget(QLabel("Теги")); self.tags_list = QListWidget(); tl.addWidget(self.tags_list,1); split.addWidget(tag_side)
         self.area = QScrollArea(); self.area.setWidgetResizable(True); self.gridw = QWidget(); self.grid = QGridLayout(self.gridw); self.area.setWidget(self.gridw); split.addWidget(self.area)
 
-        self.url_panel = QWidget()
-        up = QVBoxLayout(self.url_panel)
-        up.addWidget(QLabel("Манга / URL-теги"))
-        self.manga_list = QListWidget()
-        up.addWidget(self.manga_list, 1)
-        self.manga_url = QLineEdit()
-        self.manga_url.setClearButtonEnabled(True)
-        self.manga_url.setPlaceholderText("Вставь ссылку на страницу манги")
-        self.apply_manga_url_btn = QPushButton("Взять теги по URL")
-        self.delete_manga_tags_btn = QPushButton("Удалить теги выбранной манги")
-        up.addWidget(self.manga_url)
-        up.addWidget(self.apply_manga_url_btn)
-        up.addWidget(self.delete_manga_tags_btn)
-        self.url_status = QLabel("")
-        self.url_status.setWordWrap(True)
-        up.addWidget(self.url_status)
-        split.addWidget(self.url_panel)
-        split.setSizes([260,1000,320])
+        split.setSizes([260, 1000])
         self.current_manga_item = None
 
-        self.search.textChanged.connect(self.apply_filter); self.sort.currentIndexChanged.connect(self.apply_filter); self.refresh_btn.clicked.connect(self.refresh); self.url_tags_btn.clicked.connect(self.focus_url_panel); self.tags_list.itemClicked.connect(self.tag_clicked)
-        self.manga_list.currentRowChanged.connect(self.select_manga_row)
-        self.manga_list.itemClicked.connect(self.copy_selected_manga_name)
-        self.apply_manga_url_btn.clicked.connect(self.apply_url_to_selected_manga)
-        self.delete_manga_tags_btn.clicked.connect(self.delete_selected_manga_tags)
+        self.search.textChanged.connect(self.apply_filter)
+        self.sort.currentIndexChanged.connect(self.apply_filter)
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.tags_list.itemClicked.connect(self.tag_clicked)
     def retranslate(self):
         pass
     def refresh(self):
@@ -159,128 +141,6 @@ class MangaPage(QWidget):
         for i,it in enumerate(self.filtered):
             self.grid.addWidget(MangaCard(it, self.open_manga), i//cols, i%cols)
         self.grid.setRowStretch((len(self.filtered)//max(1,cols))+1,1)
-
-        self.manga_list.blockSignals(True)
-        self.manga_list.clear()
-        for it in self.filtered:
-            li = QListWidgetItem(it.get("title", "") or Path(it.get("path", "")).name)
-            li.setToolTip(it.get("path", ""))
-            self.manga_list.addItem(li)
-        self.manga_list.blockSignals(False)
-        if self.filtered and self.current_manga_item not in self.filtered:
-            self.current_manga_item = self.filtered[0]
-            self.manga_list.setCurrentRow(0)
-    def parse_tags_from_url(self, url):
-        import requests
-        from bs4 import BeautifulSoup
-        headers = {"User-Agent": "LocalBooru/2.0"}
-        r = requests.get(url, headers=headers, timeout=int(self.main.settings.get("request_timeout_seconds", 20)))
-        soup = BeautifulSoup(r.text or "", "html.parser")
-        tags=[]; groups={g: [] for g in GROUP_ORDER}; title=""
-        if soup.title and soup.title.text: title=soup.title.text.strip()
-        for a in soup.select("a[href*='/tag/'], a[href*='/artist/'], a[href*='/character/'], a[href*='/parody/'], a[href*='/group/'], a[href*='/language/'], a[href*='/category/']"):
-            txt=a.get_text(" ", strip=True); href=a.get("href", "")
-            if not txt: continue
-            clean=txt.split(" ")[0].strip().replace(" ", "_")
-            if not clean: continue
-            if "/artist/" in href: groups["artist"].append(clean)
-            elif "/character/" in href: groups["character"].append(clean)
-            elif "/parody/" in href: groups["parody"].append(clean)
-            elif "/language/" in href: groups["language"].append(clean)
-            elif "/category/" in href: groups["category"].append(clean)
-            else: groups["general"].append(clean)
-            tags.append(clean)
-        for m in soup.select("meta[name='keywords'], meta[property='og:title']"):
-            content=m.get("content", "")
-            for x in re.split(r"[,;]", content):
-                x=x.strip().replace(" ", "_")
-                if x and len(x)<80: tags.append(x); groups["general"].append(x)
-        seen=set(); out=[]
-        for t in tags:
-            nt=norm_tag(t)
-            if nt and nt not in seen: seen.add(nt); out.append(nt)
-        for g in groups:
-            seen=set(); arr=[]
-            for t in groups[g]:
-                nt=norm_tag(t)
-                if nt and nt not in seen: seen.add(nt); arr.append(nt)
-            groups[g]=arr
-        return title,out,groups
-    def focus_url_panel(self):
-        self.url_status.setText("Выбери папку манги справа, вставь URL и нажми «Взять теги по URL».")
-        try:
-            self.manga_url.setFocus()
-        except Exception:
-            pass
-
-    def select_manga_row(self, row):
-        if row < 0 or row >= len(self.filtered):
-            return
-        self.current_manga_item = self.filtered[row]
-        self.url_status.setText(self.current_manga_item.get("title", ""))
-
-    def copy_selected_manga_name(self, item):
-        try:
-            from PySide6.QtWidgets import QApplication
-            QApplication.clipboard().setText(item.text())
-            self.url_status.setText(f"Скопировано название: {item.text()}")
-        except Exception:
-            pass
-
-    def apply_url_to_selected_manga(self):
-        if not self.current_manga_item:
-            self.url_status.setText("Сначала выбери папку манги в списке.")
-            return
-        url = self.manga_url.text().strip()
-        if not url:
-            self.url_status.setText("Вставь ссылку на страницу манги.")
-            return
-        try:
-            folder = Path(self.current_manga_item.get("path", ""))
-            title,tags,groups = self.parse_tags_from_url(url)
-            if not tags:
-                self.url_status.setText("Теги не найдены. Проверь ссылку или cookies сайта.")
-                return
-            fp = (folder / "metadata.json") if folder.is_dir() else folder.with_suffix(folder.suffix + ".metadata.json")
-            old={}
-            if fp.exists():
-                try: old=json.loads(fp.read_text(encoding="utf-8"))
-                except Exception: old={}
-            old["title"] = old.get("title") or title or folder.name
-            old["source_url"] = url
-            old["tags"] = sorted(set(list(old.get("tags", [])) + tags))
-            for g,arr in groups.items():
-                if arr:
-                    old[g] = sorted(set(list(old.get(g, [])) + arr))
-            fp.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.url_status.setText(f"Готово. Теги сохранены: {len(tags)}")
-            self.refresh()
-        except Exception as e:
-            self.url_status.setText(f"Ошибка URL: {type(e).__name__}: {e}")
-
-    def delete_selected_manga_tags(self):
-        if not self.current_manga_item:
-            self.url_status.setText("Сначала выбери мангу.")
-            return
-        p = Path(self.current_manga_item.get("path", ""))
-        targets = []
-        if p.is_dir():
-            for name in MANGA_META_NAMES | {"tags.txt", ".tags.txt"}:
-                targets.append(p / name)
-        else:
-            targets += [p.with_suffix(p.suffix + ".metadata.json"), p.with_suffix(".metadata.json"), p.parent / (p.stem + ".metadata.json")]
-        deleted = 0
-        for fp in targets:
-            try:
-                if fp.exists() and fp.is_file():
-                    fp.unlink(); deleted += 1
-            except Exception:
-                pass
-        self.url_status.setText(f"Удалено файлов тегов манги: {deleted}. Страницы не удалялись.")
-        self.refresh()
-
-    def add_tags_from_url(self):
-        self.focus_url_panel()
 
     def open_manga(self, item):
         if self.reader is not None:

@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def init_db(con, force=False):
@@ -98,6 +98,48 @@ def init_db(con, force=False):
         value TEXT NOT NULL
     );
 
+
+    -- Operation journal: crash/recovery trace for multi-step library operations.
+    CREATE TABLE IF NOT EXISTS operation_journal (
+        op_id TEXT PRIMARY KEY,
+        op_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'running',
+        target_type TEXT NOT NULL DEFAULT '',
+        target_id TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL DEFAULT '{}',
+        error TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        finished_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Integrity checker output. Kept in DB so the UI can show what was found/repaired.
+    CREATE TABLE IF NOT EXISTS integrity_issues (
+        id INTEGER PRIMARY KEY,
+        issue_type TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'warning',
+        image_id INTEGER DEFAULT 0,
+        path TEXT NOT NULL DEFAULT '',
+        details TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        repaired_at INTEGER NOT NULL DEFAULT 0
+    );
+
+    -- Duplicate relation graph. dup_groups is the fast component table; this stores why files are related.
+    CREATE TABLE IF NOT EXISTS duplicate_relations (
+        id INTEGER PRIMARY KEY,
+        image_a INTEGER NOT NULL,
+        image_b INTEGER NOT NULL,
+        relation TEXT NOT NULL DEFAULT 'potential_duplicate',
+        distance INTEGER DEFAULT 0,
+        confidence REAL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'unreviewed',
+        created_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        UNIQUE(image_a, image_b, relation)
+    );
+
     CREATE TABLE IF NOT EXISTS meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -163,6 +205,12 @@ def init_db(con, force=False):
     CREATE INDEX IF NOT EXISTS idx_processed_status ON processed_files(status);
     CREATE INDEX IF NOT EXISTS idx_delete_log_path ON delete_log(path);
     CREATE INDEX IF NOT EXISTS idx_task_log_status ON task_log(status, task_type);
+    CREATE INDEX IF NOT EXISTS idx_operation_journal_status ON operation_journal(status, op_type);
+    CREATE INDEX IF NOT EXISTS idx_operation_journal_target ON operation_journal(target_type, target_id);
+    CREATE INDEX IF NOT EXISTS idx_integrity_issues_status ON integrity_issues(status, issue_type);
+    CREATE INDEX IF NOT EXISTS idx_duplicate_relations_status ON duplicate_relations(status, relation);
+    CREATE INDEX IF NOT EXISTS idx_duplicate_relations_a ON duplicate_relations(image_a);
+    CREATE INDEX IF NOT EXISTS idx_duplicate_relations_b ON duplicate_relations(image_b);
     """)
     con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
     con.commit()

@@ -793,6 +793,28 @@ def get_session(settings=None, log_func=None, target_host=None):
                 if target_host == "danbooru.donmai.us":
                     log_func("  DANBOORU WARNING: no cookies loaded; Cloudflare/login pages will probably fail.")
 
+    # Wrap the real session once so parser, tagger and subscriptions all share
+    # the same process-wide host throttle, including raw session.get() calls.
+    try:
+        if not bool(getattr(s, "_local_booru_global_limiter", False)):
+            from core.http_rate_limiter import wait_for as _global_wait_for, apply_retry_after as _global_retry_after
+            _orig_get = s.get
+            _orig_post = s.post
+            def _limited_get(url, *args, **kwargs):
+                _global_wait_for(url, settings or {})
+                response = _orig_get(url, *args, **kwargs)
+                _global_retry_after(response, settings or {})
+                return response
+            def _limited_post(url, *args, **kwargs):
+                _global_wait_for(url, settings or {})
+                response = _orig_post(url, *args, **kwargs)
+                _global_retry_after(response, settings or {})
+                return response
+            s.get = _limited_get
+            s.post = _limited_post
+            s._local_booru_global_limiter = True
+    except Exception:
+        pass
     return s
 
 
@@ -830,13 +852,27 @@ def _post_with_file(session, url, file_path, file_field="file", extra_data=None,
         except Exception:
             pass
 
-    return target.post(
+    wrapped = bool(getattr(target, "_local_booru_global_limiter", False))
+    if not wrapped:
+        try:
+            from core.http_rate_limiter import wait_for as _global_wait_for
+            _global_wait_for(url, {})
+        except Exception:
+            pass
+    response = target.post(
         url,
         files={file_field: (filename, io.BytesIO(file_bytes))},
         data=extra_data or {},
         params=extra_params or {},
         timeout=timeout,
     )
+    if not wrapped:
+        try:
+            from core.http_rate_limiter import apply_retry_after as _global_retry_after
+            _global_retry_after(response, {})
+        except Exception:
+            pass
+    return response
 
 
 def safe_json_response(r, source="HTTP"):
@@ -922,15 +958,18 @@ def result_paths_for(settings, img, status):
     base_out = result_output_base(settings)
     bucket = result_bucket_name(status)
     bucket_dir = base_out / bucket
+    # Use session_folder subfolder so each tagger run is isolated
+    session_sub = settings.get("session_folder", "")
+    media_dir = bucket_dir / "media" / session_sub if session_sub else bucket_dir / "media"
     return {
         "base": base_out,
         "bucket": bucket_dir,
-        "media": bucket_dir / "media",
+        "media": media_dir,
         "tags": bucket_dir / "tags",
         "source": bucket_dir / "source",
         "searched": bucket_dir / "searched",
         "cache": bucket_dir / "cache",
-        "media_file": bucket_dir / "media" / img.name,
+        "media_file": media_dir / img.name,
         "searched_file": bucket_dir / "searched" / (img.stem + ".searched.json"),
     }
 
@@ -1066,11 +1105,12 @@ def do_browser_login(auth_url, wait_seconds=60):
 def cleanup_preview_cache(settings=None):
     """Keep generated preview/frame files bounded by age and count."""
     settings = settings or {}
-    max_files = int(settings.get("max_preview_cache_files", 1000) or 1000)
-    max_age_days = int(settings.get("preview_cache_max_age_days", 14) or 14)
+    max_files = int(settings.get("max_preview_cache_files", settings.get("max_thumb_cache_files", 20000)) or 20000)
+    max_age_days = int(settings.get("preview_cache_max_age_days", settings.get("thumb_cache_max_age_days", 90)) or 90)
     roots = [
         Path.cwd() / "Local_Booru_Output" / "preview_cache",
         CACHE_DIR / "preview_cache",
+        CACHE_DIR / "thumbs",
     ]
     now = time.time()
     max_age = max_age_days * 86400

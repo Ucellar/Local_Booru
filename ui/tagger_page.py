@@ -3,7 +3,7 @@ from urllib.parse import urlparse
 import json
 import time
 import webbrowser
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QPlainTextEdit,QProgressBar,QCheckBox,QDoubleSpinBox,QSpinBox,QLineEdit,QFileDialog,QGroupBox,QFormLayout,QSplitter,QTableWidget,QTableWidgetItem,QComboBox,QHeaderView,QMessageBox,QAbstractItemView
+from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QPlainTextEdit,QProgressBar,QCheckBox,QDoubleSpinBox,QSpinBox,QLineEdit,QFileDialog,QGroupBox,QFormLayout,QSplitter,QTableWidget,QTableWidgetItem,QComboBox,QHeaderView,QMessageBox,QAbstractItemView,QSizePolicy
 from PySide6.QtCore import QThread, Signal, Qt, QTimer
 from core.settings import save_settings, DEFAULT_SITES
 from core.tagger_engine import Tagger, MEDIA_EXTS, video_frame_image, output_processed_status, result_output_base, has_copy_suffix
@@ -146,7 +146,10 @@ class TaggerWorker(QThread):
         if not files:
             self.log.emit("NO FILES TO SEARCH. Check root folder, copy-suffix filter, skip-existing, and retry-no-match settings.")
 
-        tagger=Tagger(self.settings, lambda m:self.log.emit(str(m)))
+        from datetime import datetime as _dt
+        _session_ts = _dt.now().strftime("%Y-%m-%d_%H-%M")
+        _settings_with_session = dict(self.settings, session_folder=_session_ts)
+        tagger=Tagger(_settings_with_session, lambda m:self.log.emit(str(m)))
         total=len(files)
         tagged=0
         nomatch=0
@@ -154,34 +157,97 @@ class TaggerWorker(QThread):
         errors=0
         stopped=False
 
-        for i,p in enumerate(files,1):
-            self._wait_if_paused_or_delay(0)
-            if self.isInterruptionRequested():
-                self.log.emit("STOPPED")
-                stopped=True
-                break
+        parallel_workers = int(self.settings.get("tagger_parallel_workers", 1) or 1)
+        parallel_workers = max(1, min(parallel_workers, 4))
 
-            try:
-                self.current_file.emit(str(p))
+        def _process_one(path, worker_index=0):
+            # One Tagger instance per worker.  The Tagger has session/cache state,
+            # so sharing one instance across threads is not safe.
+            local_settings = dict(_settings_with_session)
+            local_tagger = Tagger(local_settings, lambda m: self.log.emit(str(m)))
+            local_tagger.cancel_callback = self.isInterruptionRequested
+            self.current_file.emit(str(path))
+            return local_tagger.process_image(path)
+
+        if parallel_workers <= 1 or total <= 1:
+            for i,p in enumerate(files,1):
+                self._wait_if_paused_or_delay(0)
                 if self.isInterruptionRequested():
                     self.log.emit("STOPPED")
                     stopped=True
                     break
-                tagger.cancel_callback = self.isInterruptionRequested
-                result = tagger.process_image(p)
-                if result == "tagged":
-                    tagged += 1
-                elif result == "nomatch":
-                    nomatch += 1
-                elif result == "skip":
-                    skipped += 1
-            except Exception as e:
-                errors += 1
-                nomatch += 1
-                self.log.emit(f"ERROR {p.name}: {e}")
 
-            self.progress.emit(i,total)
-            self._wait_if_paused_or_delay(float(self.settings.get("delay_seconds", 0) or 0))
+                try:
+                    self.current_file.emit(str(p))
+                    if self.isInterruptionRequested():
+                        self.log.emit("STOPPED")
+                        stopped=True
+                        break
+                    tagger.cancel_callback = self.isInterruptionRequested
+                    result = tagger.process_image(p)
+                    if result == "tagged":
+                        tagged += 1
+                    elif result == "nomatch":
+                        nomatch += 1
+                    elif result == "skip":
+                        skipped += 1
+                except Exception as e:
+                    errors += 1
+                    nomatch += 1
+                    self.log.emit(f"ERROR {p.name}: {e}")
+
+                self.progress.emit(i,total)
+                self._wait_if_paused_or_delay(float(self.settings.get("delay_seconds", 0) or 0))
+        else:
+            self.log.emit(f"PARALLEL TAGGER: {parallel_workers} workers enabled")
+            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+            pending = {}
+            done_count = 0
+            file_iter = iter(files)
+            with ThreadPoolExecutor(max_workers=parallel_workers, thread_name_prefix="tagger") as ex:
+                def submit_next():
+                    if self.isInterruptionRequested():
+                        return False
+                    try:
+                        pth = next(file_iter)
+                    except StopIteration:
+                        return False
+                    fut = ex.submit(_process_one, pth, len(pending) + 1)
+                    pending[fut] = pth
+                    return True
+
+                for _ in range(parallel_workers):
+                    submit_next()
+
+                while pending:
+                    self._wait_if_paused_or_delay(0)
+                    if self.isInterruptionRequested():
+                        stopped = True
+                        self.log.emit("STOPPED")
+                        for fut in pending:
+                            fut.cancel()
+                        break
+                    ready, _ = wait(list(pending.keys()), timeout=0.25, return_when=FIRST_COMPLETED)
+                    if not ready:
+                        continue
+                    for fut in ready:
+                        pth = pending.pop(fut)
+                        try:
+                            result = fut.result()
+                            if result == "tagged":
+                                tagged += 1
+                            elif result == "nomatch":
+                                nomatch += 1
+                            elif result == "skip":
+                                skipped += 1
+                        except Exception as e:
+                            errors += 1
+                            nomatch += 1
+                            self.log.emit(f"ERROR {Path(pth).name}: {e}")
+                        done_count += 1
+                        self.progress.emit(done_count,total)
+                        self._wait_if_paused_or_delay(float(self.settings.get("delay_seconds", 0) or 0))
+                        submit_next()
 
         self.log.emit(
             f"SUMMARY: TAGGED={tagged} NO_MATCH={nomatch} SKIPPED={skipped} ERRORS={errors} TOTAL={total}"
@@ -295,32 +361,38 @@ class BrowserLoginWorker(QThread):
 class TaggerPage(QWidget):
     def __init__(self, main):
         super().__init__(); self.main=main; self.worker=None; self.browser_worker=None
-        lay=QVBoxLayout(self); split=QSplitter(); lay.addWidget(split,3)
-        left=QWidget(); left_lay=QHBoxLayout(left); self.form_left=QFormLayout(); self.form_right=QFormLayout(); left_lay.addLayout(self.form_left,1); left_lay.addLayout(self.form_right,1); self._form_col=0
+        lay=QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(6); split=QSplitter(); lay.addWidget(split,3)
+        left=QWidget(); left_lay=QHBoxLayout(left); left_lay.setContentsMargins(0, 0, 6, 0); left_lay.setSpacing(8); self.form_left=QFormLayout(); self.form_right=QFormLayout(); left_lay.addLayout(self.form_left,1); left_lay.addLayout(self.form_right,1); self._form_col=0
         row=QHBoxLayout(); self.root=QLineEdit(); self.choose_btn=QPushButton(); self.choose_btn.clicked.connect(self.choose); row.addWidget(self.root,1); row.addWidget(self.choose_btn)
         self.api=QLineEdit(); self.api.setEchoMode(QLineEdit.Password)
         self.min_sim=QDoubleSpinBox(); self.min_sim.setRange(50,99); self.min_sim.setSingleStep(0.5)
         self.skip=QCheckBox(); self.only_untagged=QCheckBox(); self.skip_copy_suffix=QCheckBox(); self.mark_nomatch=QCheckBox(); self.md5=QCheckBox(); self.sauce=QCheckBox(); self.ascii2d=QCheckBox()
         self.iqdb=QCheckBox(); self.browser=QCheckBox()
-        # Prevent checkboxes from stretching in QFormLayout
+        # Keep bare indicators compact, but leave enough room for QSS borders.
+        # Old fixedWidth(20) clipped 17px indicators with 2px borders in dark themes.
         for _cb in [self.skip,self.only_untagged,self.skip_copy_suffix,
                     self.mark_nomatch,self.md5,
                     self.sauce,self.ascii2d,self.iqdb,self.browser]:
-            _cb.setFixedWidth(20)
+            _cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            _cb.setFixedSize(23, 23)
         self.iqdb_min=QDoubleSpinBox(); self.iqdb_min.setRange(50,99); self.iqdb_min.setSingleStep(0.5)
         self.delay=QDoubleSpinBox(); self.delay.setRange(0,120); self.limit=QSpinBox(); self.limit.setRange(0,1000000); self.req_timeout=QSpinBox(); self.req_timeout.setRange(5,300); self.sauce_cooldown=QSpinBox(); self.sauce_cooldown.setRange(1,1440)
         self.output_suffix=QLineEdit(); self.sources_suffix=QLineEdit(); self.browser_wait=QSpinBox(); self.browser_wait.setRange(10,600)
         self.form_rows=[]
         for label,w,tip in [("Folder",row,"tip_root"),("SauceNAO API key",self.api,"tip_saucenao"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("SauceNAO fallback",self.sauce,"tip_sauce"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Skip existing",self.skip,"tip_skip"),("Tag only untagged",self.only_untagged,"tip_only_untagged"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix"),("Mark NO MATCH",self.mark_nomatch,"tip_mark_nomatch"),("Delay",self.delay,"tip_delay"),("Request timeout",self.req_timeout,"tip_delay"),("Sauce cooldown min",self.sauce_cooldown,"tip_sauce"),("Limit",self.limit,"tip_limit"),("Use system browser cookies",self.browser,"tip_system_cookies")]: self.add_tip_row(label,w,tip)
         split.addWidget(left)
-        right=QWidget(); rlay=QVBoxLayout(right)
+        right=QWidget(); rlay=QVBoxLayout(right); rlay.setContentsMargins(6, 0, 0, 0); rlay.setSpacing(4)
         self.sites_widget = SitesWidget()
         self.sites_widget.save_btn.clicked.connect(self.sync)
         self.sites_widget.login_btn.clicked.connect(self.open_selected_login)
         self.sites_widget.all_login_btn.clicked.connect(self.open_all_logins)
         rlay.addWidget(self.sites_widget)
         split.addWidget(right); split.setSizes([520,820])
-        row2=QHBoxLayout(); self.save_btn=QPushButton(); self.save_btn.clicked.connect(self.sync); self.start=QPushButton(); self.start.clicked.connect(self.run); self.pause_btn=QPushButton("PAUSE"); self.pause_btn.setCheckable(True); self.pause_btn.clicked.connect(self.pause_resume); self.pause_btn.setEnabled(False); self.stop_btn = QPushButton(); self.stop_btn.clicked.connect(self.stop); self.stop_btn.setEnabled(False); row2.addWidget(self.save_btn); row2.addWidget(self.start); row2.addWidget(self.pause_btn); row2.addWidget(self.stop_btn); lay.addLayout(row2)
+        row2=QHBoxLayout(); row2.setContentsMargins(0, 0, 0, 0); row2.setSpacing(6); self.save_btn=QPushButton(); self.save_btn.clicked.connect(self.sync); self.start=QPushButton(); self.start.clicked.connect(self.run); self.pause_btn=QPushButton("PAUSE"); self.pause_btn.setCheckable(True); self.pause_btn.clicked.connect(self.pause_resume); self.pause_btn.setEnabled(False); self.stop_btn = QPushButton(); self.stop_btn.clicked.connect(self.stop); self.stop_btn.setEnabled(False);
+        for _btn in (self.save_btn, self.start, self.pause_btn, self.stop_btn):
+            _btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            row2.addWidget(_btn, 1)
+        lay.addLayout(row2)
         self.progress=QProgressBar(); lay.addWidget(self.progress)
         self.console_preview_split = QSplitter(Qt.Horizontal)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); set_bounded_log(self.log, int(self.main.settings.get("max_console_lines", 2500)))
@@ -337,8 +409,10 @@ class TaggerPage(QWidget):
         lab = QLabel(self.main.t(label_key) + "  ?")
         lab.setToolTip(self.main.t(tip_key))
         _tc2 = self.main.settings.get("appearance","abyss") if hasattr(self,"main") else "abyss"
-        _lmap = {"light": ("#1a1c2a","#5060d0"), "r34": ("#111111","#3a7a35"),
-                 "pornhub": ("#f5f5f5","#ff9000"), "pornhub": ("#f5f5f5","#ff9000"),
+        _lmap = {"light": ("#1a1c2a","#5060d0"), "r34": ("#111111","#3a7a35"), "r34dark": ("#d6e4d3","#6aa5ff"),
+                 "win95": ("#000000","#000080"), "windows95": ("#000000","#000080"),
+                 "ph": ("#f5f5f5","#ff9000"), "pornhub": ("#f5f5f5","#ff9000"),
+                 "dark": ("#c0c8e0","#6c85e0"), "abyss": ("#c0c8e0","#6c85e0"),
                  "ember": ("#c8b090","#c87040"), "slate": ("#b0c8d0","#5a8a9f"),
                  "sakura": ("#e0b0d0","#d060a0")}
         _lc2, _hc2 = _lmap.get(_tc2, ("#c0c8e0","#6c85e0"))
@@ -351,6 +425,42 @@ class TaggerPage(QWidget):
         target_form.addRow(lab, widget)
         self._form_col = getattr(self, "_form_col", 0) + 1
         self.form_rows.append((lab, label_key, widget, tip_key))
+
+
+    def apply_theme_style(self, theme_name: str | None = None):
+        """Refresh parser page inline label styles after runtime theme switch."""
+        theme_name = theme_name or self.main.settings.get("appearance", "abyss")
+        colors = {
+            "light": ("#1a1c2a", "#5060d0"),
+            "r34": ("#111111", "#3a7a35"),
+            "r34dark": ("#d6e4d3", "#6aa5ff"),
+            "win95": ("#000000", "#000080"),
+            "windows95": ("#000000", "#000080"),
+            "ph": ("#f5f5f5", "#ff9000"),
+            "pornhub": ("#f5f5f5", "#ff9000"),
+            "dark": ("#c0c8e0", "#6c85e0"),
+            "abyss": ("#c0c8e0", "#6c85e0"),
+            "ember": ("#c8b090", "#c87040"),
+            "slate": ("#b0c8d0", "#5a8a9f"),
+            "sakura": ("#e0b0d0", "#d060a0"),
+        }
+        fg, hover = colors.get(theme_name, colors["abyss"])
+        try:
+            for lab, label_key, widget, tip_key in getattr(self, "form_rows", []):
+                lab.setStyleSheet(f"QLabel{{font-weight:700;color:{fg};background:transparent;}} QLabel:hover{{color:{hover};}}")
+        except Exception:
+            pass
+        try:
+            if theme_name in ("win95", "windows95"):
+                self.preview_box.setStyleSheet("border-top:2px solid #808080;border-left:2px solid #808080;border-bottom:2px solid #ffffff;border-right:2px solid #ffffff;border-radius:0px;background:#c0c0c0;color:#000000;")
+            elif theme_name == "r34":
+                self.preview_box.setStyleSheet("border:1px solid #6da36b;border-radius:0px;background:#b7e2af;color:#111111;")
+            elif theme_name == "r34dark":
+                self.preview_box.setStyleSheet("border:1px solid #345032;border-radius:0px;background:#171e15;color:#d6e4d3;")
+            else:
+                self.preview_box.setStyleSheet("border:1px solid #2f3541;border-radius:8px;")
+        except Exception:
+            pass
 
     def append_log(self, msg):
         bounded_append(self.log, msg, int(self.main.settings.get("max_console_lines", 2500)))

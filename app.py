@@ -97,6 +97,11 @@ def main() -> int:
     # Start thumbnail service (background QThreadPool, 3 workers)
     from core.thumb_service import ThumbnailService
     thumb_svc = ThumbnailService.instance(max_threads=3)
+    try:
+        from core.shutdown import register as _shutdown_register
+        _shutdown_register("thumbnail service", thumb_svc.stop)
+    except Exception:
+        pass
 
     try:
         cleanup_preview_cache(load_settings())
@@ -127,6 +132,19 @@ def main() -> int:
                     _ctx.save_settings()
     except Exception:
         pass
+
+    # ── Optional filesystem watcher / incremental indexing ─────────────
+    watcher = None
+    try:
+        from core.settings import load_settings as _ls
+        from core.filesystem_watcher import LibraryWatcher
+        from core.shutdown import register as _shutdown_register
+        _settings_for_watch = _ls()
+        watcher = LibraryWatcher(_settings_for_watch, log=lambda m: _applog.info(m))
+        if watcher.start():
+            _shutdown_register("library watcher", watcher.stop)
+    except Exception as _we:
+        _applog.warning("Watcher startup failed: %s", _we)
 
     # ── Stability: startup checks (DB integrity + backup) ──────────────
     try:
@@ -160,11 +178,15 @@ def main() -> int:
 
     ret = app.exec()
 
-    # Graceful shutdown
+    # Graceful shutdown: stop background pools, watcher and pooled DB handles.
     try:
-        thumb_svc.stop()
+        from core.shutdown import request_shutdown
+        request_shutdown()
     except Exception:
-        pass
+        try:
+            thumb_svc.stop()
+        except Exception:
+            pass
 
     return ret
 

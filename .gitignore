@@ -28,8 +28,10 @@ dist/
 # Project runtime folders, keep placeholders only
 data/cache/*
 !data/cache/.keep
+
 data/runtime/*
 !data/runtime/.keep
+
 data/settings/*
 !data/settings/.keep
 
@@ -38,8 +40,17 @@ data/settings/*
 Thumbs.db
 .idea/
 .vscode/
+Local_Booru_Output/
+Local_Booru_Archive/
+output/
+dist/
+build/
+*.spec.bak
 
 # Archives
 *.zip
 *.7z
 *.rar
+*.cookies
+cookies.txt
+browser_cookies/

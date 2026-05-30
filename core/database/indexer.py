@@ -135,14 +135,30 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                 mtime_ns, size = int(st.st_mtime_ns), int(st.st_size)
             except Exception:
                 continue
-            old = con.execute("SELECT id, mtime_ns, size_bytes FROM images WHERE path=?", (sp,)).fetchone()
+            old = con.execute("SELECT id, mtime_ns, size_bytes, hash_phash FROM images WHERE path=?", (sp,)).fetchone()
             if old and not force and int(old["mtime_ns"]) == mtime_ns and int(old["size_bytes"]) == size:
+                # Fast path: file unchanged. If phash was missing from an older
+                # index, fill it opportunistically without rebuilding metadata.
+                if bool(settings.get("sqlite_compute_phash_on_index", True)) and not old["hash_phash"] and path.suffix.lower() not in VIDEO_EXTS:
+                    try:
+                        from core.tagger.engine import file_phash
+                        ph = file_phash(path)
+                        if ph:
+                            con.execute("UPDATE images SET hash_phash=? WHERE id=?", (ph, old["id"]))
+                            from core.vptree import VPTree
+                            VPTree(con).insert(int(old["id"]), ph)
+                    except Exception:
+                        pass
                 skipped += 1
                 continue
+            # SQLite is the source of truth for metadata. Sidecars are import
+            # inputs, not a reason to erase DB-only tags/sources created by
+            # subscriptions/parser. Only replace links when sidecar metadata
+            # actually exists.
             groups = read_tag_json(path, settings)
             if not groups:
                 tags = read_tags_txt(path, settings)
-                groups = {"general": tags}
+                groups = {"general": tags} if tags else None
             sources = read_sources(path, settings)
             width, height = image_size(path)
             md5 = None
@@ -151,9 +167,16 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                     md5 = file_md5(path)
                 except Exception:
                     pass
+            phash = None
+            if bool(settings.get("sqlite_compute_phash_on_index", True)) and path.suffix.lower() not in VIDEO_EXTS:
+                try:
+                    from core.tagger.engine import file_phash
+                    phash = file_phash(path)
+                except Exception:
+                    phash = None
             con.execute("""
-                INSERT INTO images(path, file_name, bucket, size_bytes, width, height, hash_md5, mtime_ns, is_video, indexed_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO images(path, file_name, bucket, size_bytes, width, height, hash_md5, hash_phash, mtime_ns, is_video, indexed_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(path) DO UPDATE SET
                     file_name=excluded.file_name,
                     bucket=excluded.bucket,
@@ -161,15 +184,35 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                     width=excluded.width,
                     height=excluded.height,
                     hash_md5=COALESCE(excluded.hash_md5, images.hash_md5),
+                    hash_phash=COALESCE(excluded.hash_phash, images.hash_phash),
                     mtime_ns=excluded.mtime_ns,
                     is_video=excluded.is_video,
                     indexed_at=excluded.indexed_at
-            """, (sp, path.name, bucket_for_path(path), size, width, height, md5, mtime_ns, int(path.suffix.lower() in VIDEO_EXTS), now))
+            """, (sp, path.name, bucket_for_path(path), size, width, height, md5, phash, mtime_ns, int(path.suffix.lower() in VIDEO_EXTS), now))
             image_id = con.execute("SELECT id FROM images WHERE path=?", (sp,)).fetchone()["id"]
-            upsert_tags(con, image_id, groups)
-            upsert_sources(con, image_id, sources)
+            if phash:
+                try:
+                    from core.vptree import VPTree
+                    VPTree(con).insert(int(image_id), phash)
+                except Exception:
+                    pass
+            if groups is not None:
+                upsert_tags(con, image_id, groups)
+            if sources:
+                upsert_sources(con, image_id, sources)
+            # Persistent thumbnail pre-generation.  This writes data/cache/thumbs/*.jpg
+            # once during indexing, so gallery opening only loads cached JPEGs.
+            if bool(settings.get("thumbs_pregen_on_index", True)):
+                try:
+                    from core.image_safe import safe_thumbnail_path
+                    safe_thumbnail_path(path, int(settings.get("thumb_cache_w", 256)), int(settings.get("thumb_cache_h", 256)))
+                    # Also prewarm the common gallery card size used by defaults.
+                    safe_thumbnail_path(path, int(settings.get("thumb_cache_card_w", 240)), int(settings.get("thumb_cache_card_h", 220)))
+                except Exception:
+                    pass
             indexed += 1
-            if indexed % 200 == 0:
+            _batch_commit = max(1, int(settings.get("db_batch_commit_size", 100) or 100))
+            if indexed % _batch_commit == 0:
                 con.commit()
                 if progress:
                     progress(indexed, skipped)

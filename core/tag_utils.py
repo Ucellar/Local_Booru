@@ -21,6 +21,9 @@ def ascii_fold(text: str) -> str:
 def normalize_tag(tag) -> str:
     t = strip_tag_prefix(tag)
     t = html.unescape(t).strip()
+    # Bare separators sometimes leak in from scraped sidebars and are not tags.
+    if re.fullmatch(r"[-–—_]+", t):
+        return ""
     # Tags starting with '-' are booru search exclusion operators, not real tags.
     # "-short_hair" means "exclude short_hair" — drop entirely.
     if t.startswith("-"):

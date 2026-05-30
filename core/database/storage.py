@@ -52,8 +52,8 @@ def _ensure_image(con, media_path, status="", original_path="", hash_md5=None):
     return image_id
 
 
-def replace_image_tags(con, image_id, groups):
-    con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+def add_image_tags(con, image_id, groups):
+    """Add tag links without dropping tags discovered by another source."""
     groups = groups or {}
     if isinstance(groups, list):
         groups = {"general": groups}
@@ -74,8 +74,13 @@ def replace_image_tags(con, image_id, groups):
             con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, int(row["id"])))
 
 
-def replace_image_sources(con, image_id, source_text="", extra_sources=None):
-    con.execute("DELETE FROM image_sources WHERE image_id=?", (image_id,))
+def replace_image_tags(con, image_id, groups):
+    con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+    add_image_tags(con, image_id, groups)
+
+
+def add_image_sources(con, image_id, source_text="", extra_sources=None):
+    """Add source links without dropping existing source history."""
     urls = []
     for line in str(source_text or "").splitlines():
         for part in line.split():
@@ -97,19 +102,57 @@ def replace_image_sources(con, image_id, source_text="", extra_sources=None):
             con.execute("INSERT OR IGNORE INTO image_sources(image_id, source_id) VALUES(?,?)", (image_id, int(row["id"])))
 
 
+def replace_image_sources(con, image_id, source_text="", extra_sources=None):
+    con.execute("DELETE FROM image_sources WHERE image_id=?", (image_id,))
+    add_image_sources(con, image_id, source_text, extra_sources)
+
+
+def media_path_by_md5(settings, md5: str) -> str:
+    """Return an existing on-disk library path for MD5, or an empty string."""
+    if not md5:
+        return ""
+    with db(settings, readonly=True) as con:
+        rows = con.execute(
+            "SELECT path FROM images WHERE deleted=0 AND hash_md5=? ORDER BY indexed_at DESC",
+            (str(md5).lower(),),
+        ).fetchall()
+    for row in rows:
+        try:
+            if Path(row["path"]).exists():
+                return str(row["path"])
+        except Exception:
+            continue
+    return ""
+
+
+def md5_exists(settings, md5: str) -> bool:
+    """Return True if a file with this MD5 is already in the library."""
+    if not md5:
+        return False
+    with db(settings, readonly=True) as con:
+        row = con.execute(
+            "SELECT 1 FROM images WHERE hash_md5 = ? LIMIT 1", (md5.lower(),)
+        ).fetchone()
+    return row is not None
+
+
 def ensure_image(settings, media_path, status="", original_path="", hash_md5=None):
     """Ensure an image row exists and return its id without replacing tags/source."""
     with db(settings, write=True) as con:
         return _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5)
 
 
-def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site=""):
+def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site="", merge_existing=False):
     with db(settings, write=True) as con:
         image_id = _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5)
         if groups is None:
             groups = {"general": list(tags or [])}
-        replace_image_tags(con, image_id, groups)
-        replace_image_sources(con, image_id, source_text, [post_url, file_url])
+        if merge_existing:
+            add_image_tags(con, image_id, groups)
+            add_image_sources(con, image_id, source_text, [post_url, file_url])
+        else:
+            replace_image_tags(con, image_id, groups)
+            replace_image_sources(con, image_id, source_text, [post_url, file_url])
         if raw is not None or post_url or file_url or site:
             try:
                 raw_json = json.dumps(raw if raw is not None else {}, ensure_ascii=False)

@@ -56,7 +56,7 @@ class MangaCard(QFrame):
         super().__init__()
         self.item = item; self.cb = cb
         self.setFixedSize(w, h)
-        self.setStyleSheet("QFrame{background:#1f1f1f;border:1px solid #333;border-radius:8px;}QFrame:hover{border:2px solid #ff54a7;}")
+        self.setStyleSheet("QFrame{background:#1f1f1f;border:1px solid #3a3a3a;border-radius:0px;}QFrame:hover{border:2px solid #ff54a7;border-radius:0px;}")
         lay = QVBoxLayout(self); lay.setContentsMargins(6,6,6,6)
         img = QLabel(); img.setAlignment(Qt.AlignCenter); img.setFixedSize(w-14, h-70)
         cover = item.get("cover", "")

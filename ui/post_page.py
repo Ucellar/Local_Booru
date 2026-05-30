@@ -113,6 +113,7 @@ class PostPage(QWidget):
         self.video_active = False
         self.gif_movie = None
         self.context = []
+        self._page_history: list[tuple[int, list[dict]]] = []
         self._current_image_id: int | None = None  # for star rating
         self._mpv_player = None
         self._mpv_container = None
@@ -254,7 +255,7 @@ class PostPage(QWidget):
                 from pathlib import Path as _P
                 _base = _P(__file__).parent.parent / "assets" / "icons"
                 _theme = getattr(self.main, "settings", {}).get("appearance", "dark")
-                _light = _theme == "light"
+                _light = _theme in ("light", "r34", "win95", "windows95")
                 _suffix = "_dark" if _light else ""
                 for _n in [f"{icon_name}{_suffix}", icon_name]:
                     _p = _base / f"{_n}.ico"
@@ -540,6 +541,25 @@ class PostPage(QWidget):
         super().keyPressEvent(event)
 
     def stop_video(self):
+        """Stop every playback backend before another post is rendered.
+
+        MPV is the preferred backend, while ``self.player`` only exists for the
+        Qt multimedia fallback.  Stopping only the Qt player left MPV audio
+        playing after navigating from a video to an image.
+        """
+        if self._mpv_timer:
+            try:
+                self._mpv_timer.stop()
+            except Exception:
+                pass
+        if self._mpv_player is not None:
+            try:
+                self._mpv_player.stop()
+            except Exception:
+                try:
+                    self._mpv_player.command("stop")
+                except Exception:
+                    pass
         if self.player:
             try:
                 self.player.stop()
@@ -553,6 +573,13 @@ class PostPage(QWidget):
                 pass
         self.gif_movie = None
         self.video_active = False
+        try:
+            self._seek_bar.setVisible(False)
+            self._seek_bar.setRange(0, 0)
+            self._time_label.setVisible(False)
+            self._time_label.setText("0:00 / 0:00")
+        except Exception:
+            pass
 
 
     def back_to_gallery(self):
@@ -574,7 +601,7 @@ class PostPage(QWidget):
             from PySide6.QtGui import QIcon
             from PySide6.QtCore import QSize
             _base = _P(__file__).parent.parent / "assets" / "icons"
-            _light = self.main.settings.get("appearance", "dark") == "light"
+            _light = self.main.settings.get("appearance", "dark") in ("light", "r34", "win95", "windows95")
             _sfx = "_dark" if _light else ""
             _sz = QSize(18, 18)
             for btn, name in [
@@ -601,7 +628,7 @@ class PostPage(QWidget):
             from PySide6.QtCore import QSize
             _base = _P(__file__).parent.parent / "assets" / "icons"
             _theme = self.main.settings.get("appearance", "dark")
-            _sfx = "_dark" if _theme == "light" else ""
+            _sfx = "_dark" if _theme in ("light", "r34", "win95", "windows95") else ""
             _fit_ico = f"fit_w{_sfx}" if self.fit == "width" else f"fit_h{_sfx}"
             for _n in [_fit_ico, _fit_ico.replace(_sfx, "")]:
                 _p = _base / f"{_n}.ico"
@@ -630,6 +657,8 @@ class PostPage(QWidget):
     def set_post(self, idx, context=None):
         self.stop_video()
         self.setFocus(Qt.OtherFocusReason)
+        self._page_history = []
+        self._zoom_factor = 1.0
         if context:
             # keep post navigation in the current gallery order/filter/sort
             self.context = list(context)
@@ -802,6 +831,9 @@ class PostPage(QWidget):
         return True
 
     def render_media(self, path, item=None):
+        # One unconditional teardown point: prevents audio/video from a previous
+        # post surviving navigation, including video -> video transitions.
+        self.stop_video()
         if item and item.get("is_video"):
             self.render_video(path)
         elif path.suffix.lower() == ".gif":
@@ -889,7 +921,15 @@ class PostPage(QWidget):
         movie.start()
 
     def toggle_video(self):
-        if not self.item().get("is_video") or not self.player:
+        if not self.item().get("is_video"):
+            return
+        if self._mpv_player is not None and self.video_active:
+            try:
+                self._mpv_player.pause = not bool(self._mpv_player.pause)
+                return
+            except Exception:
+                pass
+        if not self.player:
             return
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
@@ -943,7 +983,7 @@ class PostPage(QWidget):
             from PySide6.QtGui import QIcon
             from PySide6.QtCore import QSize
             _base = _P(__file__).parent.parent / "assets" / "icons"
-            _light = self.main.settings.get("appearance", "dark") == "light"
+            _light = self.main.settings.get("appearance", "dark") in ("light", "r34", "win95", "windows95")
             _sfx = "_dark" if _light else ""
             _ico_name = "volume_off" if muted else "volume"
             for _n in [f"{_ico_name}{_sfx}", _ico_name]:
@@ -1260,7 +1300,7 @@ class PostPage(QWidget):
             from PySide6.QtCore import QSize
             _base = _P(__file__).parent.parent / "assets" / "icons"
             _theme = self.main.settings.get("appearance", "dark")
-            _sfx = "_dark" if _theme == "light" else ""
+            _sfx = "_dark" if _theme in ("light", "r34", "win95", "windows95") else ""
             _ico_name = f"favorite_on{_sfx}" if _is_fav else f"favorite{_sfx}"
             _p = _base / f"{_ico_name}.ico"
             if not _p.exists():
@@ -1292,7 +1332,7 @@ class PostPage(QWidget):
             from PySide6.QtCore import QSize
             _base = _P(__file__).parent.parent / "assets" / "icons"
             _theme = self.main.settings.get("appearance", "dark")
-            _sfx = "_dark" if _theme == "light" else ""
+            _sfx = "_dark" if _theme in ("light", "r34", "win95", "windows95") else ""
             _fit_ico = f"fit_w{_sfx}" if self.fit == "width" else f"fit_h{_sfx}"
             for _n in [_fit_ico, _fit_ico.replace(_sfx, "")]:
                 _p = _base / f"{_n}.ico"
@@ -1318,6 +1358,22 @@ class PostPage(QWidget):
         if self.index > 0:
             self.index -= 1
             self.fit = "height"
+            self._zoom_factor = 1.0
+            self._enrich_current()
+            self.render()
+        elif self._page_history:
+            # Return through any number of gallery pages, keeping viewer and grid in sync.
+            page_number, previous_context = self._page_history.pop()
+            self.context = list(previous_context)
+            self.index = len(self.context) - 1
+            gp = self.main.gallery_page
+            gp._page = page_number
+            gp._batch = list(previous_context)
+            gp._clear_grid()
+            QTimer.singleShot(0, gp._render_page)
+            self.fit = "height"
+            self._zoom_factor = 1.0
+            self._enrich_current()
             self.render()
 
     def next_post(self):
@@ -1325,9 +1381,21 @@ class PostPage(QWidget):
         if self.index < len(ctx) - 1:
             self.index += 1
             self.fit = "height"
+            self._zoom_factor = 1.0
+            self._enrich_current()
             self.render()
         else:
             self._load_next_gallery_page()
+
+    def _enrich_current(self):
+        """Load full metadata for current item (tags, sources etc.)."""
+        try:
+            ctx = self.context or self.main.gallery_page._batch
+            if 0 <= self.index < len(ctx):
+                from core.database.repository import enrich_items
+                enrich_items(self.main.settings, [ctx[self.index]])
+        except Exception:
+            pass
 
     def _load_next_gallery_page(self):
         gp = self.main.gallery_page
@@ -1346,9 +1414,14 @@ class PostPage(QWidget):
             limit=per,
             offset=offset,
             order=gp._last_filter.get("order", "path"),
+            extra_where=getattr(gp, "_last_extra_where", None),
+            extra_params=getattr(gp, "_last_extra_params", None),
         ) or []
         if not batch:
             return
+        # Save a real page history so repeated previous-navigation can return
+        # through page 3 -> page 2 -> page 1 rather than only one hop.
+        self._page_history.append((gp._page, list(self.context or gp._batch)))
         # Update gallery page state
         gp._page = next_page
         gp._batch = batch
@@ -1363,4 +1436,5 @@ class PostPage(QWidget):
         self.context = list(batch)
         self.index = 0
         self.fit = "height"
+        self._zoom_factor = 1.0
         self.render()

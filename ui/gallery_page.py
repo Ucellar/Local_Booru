@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from collections import Counter
+from collections import Counter, OrderedDict
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QScrollArea, QGridLayout, QFrame, QComboBox, QCheckBox, QSplitter,
-    QListWidget, QSizePolicy, QListWidgetItem, QSpinBox,
+    QListWidget, QSizePolicy, QListWidgetItem, QSpinBox, QListView,
+    QAbstractItemView, QStyledItemDelegate, QStyle,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel
-from PySide6.QtGui import QPixmap, QColor, QBrush
+from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect
+from PySide6.QtGui import QPixmap, QColor, QBrush, QIcon, QPainter, QPen
 
 from core.library import sort_tag_items
 from core.tag_utils import normalize_tag
@@ -33,11 +34,40 @@ GROUP_COLORS = {
 
 _PH_CACHE: dict[tuple, QPixmap] = {}
 
+def _current_theme_name() -> str:
+    try:
+        from ui.main_window import _CURRENT_THEME
+        return _CURRENT_THEME
+    except Exception:
+        return "abyss"
+
+def _gallery_item_colors(theme: str | None = None) -> tuple[str, str]:
+    theme = theme or _current_theme_name()
+    colors = {
+        "abyss": ("#111420", "#e8e8e8"),
+        "dark": ("#111420", "#e8e8e8"),
+        "ember": ("#181408", "#d8c8a0"),
+        "slate": ("#1e2028", "#c8ccd8"),
+        "sakura": ("#140820", "#e0c8d8"),
+        "pornhub": ("#0f0f0f", "#f0f0f0"),
+        "ph": ("#0f0f0f", "#f0f0f0"),
+        "r34": ("#a8d99f", "#111111"),
+        "r34dark": ("#10150f", "#d8e6d5"),
+        "win95": ("#c0c0c0", "#000000"),
+        "windows95": ("#c0c0c0", "#000000"),
+        "light": ("#ffffff", "#1a1c2a"),
+    }
+    return colors.get(theme, colors["abyss"])
+
+
 def _placeholder(w: int, h: int) -> QPixmap:
-    key = (w, h)
+    theme = _current_theme_name()
+    key = (w, h, theme)
     if key not in _PH_CACHE:
         p = QPixmap(w, h)
-        p.fill(QColor("#0f1118"))
+        # Keep the allocated square invisible while a thumbnail is loading.
+        # The real border is painted around the actual image, not around the cell.
+        p.fill(Qt.transparent)
         _PH_CACHE[key] = p
     return _PH_CACHE[key]
 
@@ -52,12 +82,26 @@ class ImageCard(QFrame):
         self._path = str(item.get("path", ""))
         self._destroyed = False
         self.setFixedSize(w, h)
-        self.setStyleSheet(
-            (lambda _t: (
-            f"QFrame{{background:{"#a8d99f" if _t=="r34" else "#111420"};border:{"1px" if _t=="r34" else "1px"} solid {"#6da36b" if _t=="r34" else "#1c2030"};border-radius:{"2px" if _t=="r34" else "10px"};}}"  
-            f"QFrame:hover{{border:{"1px" if _t=="r34" else "1px"} solid {"#3a7a35" if _t=="r34" else "#7c5cbf"};background:{"#8cc57d" if _t=="r34" else "#141828"};}}"  
-        ))(getattr(__import__("ui.main_window",fromlist=["_CURRENT_THEME"]),"_CURRENT_THEME","abyss"))
-        )
+        _CURRENT_THEME = _current_theme_name()
+        if _CURRENT_THEME in ("win95", "windows95"):
+            self.setStyleSheet(
+                "QFrame{background:#c0c0c0;border-top:2px solid #808080;"
+                "border-left:2px solid #808080;border-bottom:2px solid #ffffff;"
+                "border-right:2px solid #ffffff;border-radius:0px;}"
+                "QFrame:hover{background:#c0c0c0;border-top:2px solid #000080;"
+                "border-left:2px solid #000080;border-bottom:2px solid #ffffff;"
+                "border-right:2px solid #ffffff;}"
+            )
+        elif _CURRENT_THEME == "r34":
+            self.setStyleSheet(
+                "QFrame{background:#a8d99f;border:1px solid #6da36b;border-radius:2px;}"
+                "QFrame:hover{background:#8cc57d;border:1px solid #3a7a35;}"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame{background:#111420;border:1px solid #1c2030;border-radius:10px;}"
+                "QFrame:hover{background:#141828;border:1px solid #7c5cbf;}"
+            )
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
 
@@ -68,17 +112,24 @@ class ImageCard(QFrame):
         th = max(30, h - 14)
         self.lab.setFixedSize(tw, th)
         self._tw, self._th = tw, th
+        if _CURRENT_THEME in ("win95", "windows95"):
+            self.lab.setStyleSheet("background:#ffffff;color:#000000;border:0px;border-radius:0px;font-weight:400;")
         lay.addWidget(self.lab)
 
-        if item.get("is_video"):
+        self._is_video = bool(item.get("is_video"))
+        self.lab.setPixmap(_placeholder(tw, th))
+        if self._is_video:
+            if _CURRENT_THEME in ("win95", "windows95"):
+                self.lab.setStyleSheet("background:#ffffff;color:#000000;border:0px;border-radius:0px;font-weight:700;")
+            else:
+                self.lab.setStyleSheet("font-weight:900;color:#e8e8e8;")
+
+        svc = ThumbnailService.instance()
+        pix = svc.request(self._path, tw, th, self._on_thumb)
+        if pix is not None and not pix.isNull():
+            self._set_pix(pix)
+        elif self._is_video:
             self.lab.setText("▶ VIDEO\n" + Path(self._path).name[:24])
-            self.lab.setStyleSheet("font-weight:900;color:#8f96a3;")
-        else:
-            self.lab.setPixmap(_placeholder(tw, th))
-            svc = ThumbnailService.instance()
-            pix = svc.request(self._path, tw, th, self._on_thumb)
-            if pix is not None and not pix.isNull():
-                self._set_pix(pix)
 
     def _on_thumb(self, path: str, pix: QPixmap) -> None:
         if self._destroyed or path != self._path:
@@ -92,6 +143,8 @@ class ImageCard(QFrame):
         scaled = pix.scaled(QSize(self._tw, self._th),
                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.lab.setPixmap(scaled)
+        if getattr(self, "_is_video", False):
+            self.lab.setText("")
 
     def mousePressEvent(self, _):
         self.cb(self.index)
@@ -104,6 +157,202 @@ class ImageCard(QFrame):
         super().closeEvent(e)
         self._destroyed = True
 
+
+
+# ── Virtual gallery model ─────────────────────────────────────────────────────
+
+class GalleryListModel(QAbstractListModel):
+    """Virtualized icon model for the gallery.
+
+    QListView asks `data()` mostly for visible indexes, so thousands of items no
+    longer mean thousands of QWidget cards. Thumbnails are requested lazily and
+    pushed back via dataChanged when ready.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.items: list[dict] = []
+        self.thumb_w = 220
+        self.thumb_h = 200
+        # ThumbnailService already owns its own LRU, but the model used to keep
+        # a second unbounded QPixmap dictionary for the current result set.
+        self._pix_by_path: OrderedDict[str, QPixmap] = OrderedDict()
+        self._pix_cache_max = 500
+        self._requested: set[str] = set()
+        self._path_to_rows: dict[str, list[int]] = {}
+
+    def set_items(self, items: list[dict], thumb_w: int, thumb_h: int) -> None:
+        self.beginResetModel()
+        # Defensive UI de-duplication: even if an upstream query accidentally
+        # returns the same file twice, do not render duplicate cards.  Preserve
+        # the first item because it carries the current metadata/order.
+        deduped: list[dict] = []
+        seen_paths: set[str] = set()
+        for item in (items or []):
+            raw_path = str((item or {}).get("path", "")).strip()
+            if raw_path:
+                key = str(Path(raw_path)).replace("\\", "/").casefold()
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+            deduped.append(item)
+        self.items = deduped
+        self.thumb_w = max(32, int(thumb_w or 220))
+        self.thumb_h = max(32, int(thumb_h or 200))
+        self._pix_by_path.clear()
+        self._requested.clear()
+        self._path_to_rows = {}
+        for i, it in enumerate(self.items):
+            self._path_to_rows.setdefault(str(it.get("path", "")), []).append(i)
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.items)
+
+    def _cached_pix(self, path: str):
+        pix = self._pix_by_path.get(path)
+        if pix is not None:
+            self._pix_by_path.move_to_end(path)
+        return pix
+
+    def _store_pix(self, path: str, pix: QPixmap) -> None:
+        if not path or pix is None or pix.isNull():
+            return
+        self._pix_by_path[path] = pix
+        self._pix_by_path.move_to_end(path)
+        while len(self._pix_by_path) > self._pix_cache_max:
+            self._pix_by_path.popitem(last=False)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row = index.row()
+        if row < 0 or row >= len(self.items):
+            return None
+        item = self.items[row]
+        path = str(item.get("path", ""))
+        if role == Qt.UserRole:
+            return row
+        if role == Qt.UserRole + 1:
+            return item
+        if role == Qt.ToolTipRole:
+            return path
+        if role == Qt.DisplayRole:
+            # Keep labels extremely short; full path is in tooltip/opened post.
+            return "▶" if item.get("is_video") else ""
+        if role == Qt.DecorationRole:
+            pix = self._cached_pix(path)
+            if pix is not None and not pix.isNull():
+                return pix
+            if path not in self._requested:
+                self._requested.add(path)
+                svc = ThumbnailService.instance()
+                # Generate a larger cached thumbnail and draw it down to the tile.
+                # This prevents the blurred look on high-DPI / wide displays.
+                req_w = min(768, max(self.thumb_w, self.thumb_w * 2))
+                req_h = min(768, max(self.thumb_h, self.thumb_h * 2))
+                got = svc.request(path, req_w, req_h, self._on_thumb)
+                if got is not None and not got.isNull():
+                    self._store_pix(path, got)
+                    return self._cached_pix(path)
+            return _placeholder(self.thumb_w, self.thumb_h)
+        if role == Qt.BackgroundRole:
+            return None
+        if role == Qt.ForegroundRole:
+            _bg, fg = _gallery_item_colors()
+            return QColor(fg)
+        return None
+
+    def _on_thumb(self, path: str, pix: QPixmap) -> None:
+        if not path:
+            return
+        if pix is not None and not pix.isNull():
+            self._store_pix(path, pix)
+        rows = self._path_to_rows.get(path, [])
+        for r in rows:
+            if 0 <= r < len(self.items):
+                idx = self.index(r, 0)
+                self.dataChanged.emit(idx, idx, [Qt.DecorationRole])
+
+
+
+class GalleryCardDelegate(QStyledItemDelegate):
+    """Paint square layout cells, but outline only the actual aspect-fit preview.
+
+    The cell is always square to keep the grid stable.  The image is never
+    cropped: portrait images are limited by height, landscape images by width.
+    """
+    def sizeHint(self, option, index):
+        # Explicit square allocation keeps every page laid out the same way,
+        # independent of the aspect ratios of the files on that page.
+        model = index.model()
+        side = max(32, int(getattr(model, "thumb_w", 200) or 200))
+        gap = 14
+        try:
+            parent = self.parent()
+            gap = max(0, int(parent.gridSize().width()) - side) if parent is not None else 14
+        except Exception:
+            pass
+        return QSize(side + gap, side + gap)
+
+    def paint(self, painter: QPainter, option, index):
+        painter.save()
+        item = index.data(Qt.UserRole + 1) or {}
+        theme = _current_theme_name()
+        video = bool(item.get("is_video"))
+        selected = bool(option.state & QStyle.State_Selected)
+
+        # Draw from QPixmap directly. QIcon may preserve the intrinsic preview
+        # size instead of enlarging it, which made some pages look compressed to
+        # their smallest thumbnails even though the grid slot was square.
+        model = index.model()
+        requested_side = int(getattr(model, "thumb_w", 0) or 0)
+        side = max(32, min(
+            requested_side or max(32, min(option.rect.width(), option.rect.height()) - 8),
+            max(32, option.rect.width() - 8),
+            max(32, option.rect.height() - 8),
+        ))
+        cell = QRect(
+            option.rect.x() + (option.rect.width() - side) // 2,
+            option.rect.y() + (option.rect.height() - side) // 2,
+            side,
+            side,
+        )
+
+        pix = index.data(Qt.DecorationRole)
+        if not isinstance(pix, QPixmap) or pix.isNull():
+            painter.restore()
+            return
+
+        draw = pix.scaled(cell.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        x = cell.x() + (cell.width() - draw.width()) // 2
+        y = cell.y() + (cell.height() - draw.height()) // 2
+        image_rect = QRect(x, y, draw.width(), draw.height())
+
+        painter.drawPixmap(image_rect, draw)
+
+        if theme == "r34":
+            border = "#6da36b"
+        elif theme == "r34dark":
+            border = "#355b35"
+        elif theme in ("win95", "windows95"):
+            border = "#808080"
+        elif theme == "light":
+            border = "#c8cce0"
+        else:
+            border = "#303645"
+
+        width = 1
+        if video:
+            border = "#004cff" if theme in ("r34", "r34dark") else "#388cff"
+            width = 2
+        if selected:
+            border = "#004cff" if theme in ("r34", "r34dark") else "#5c8dff"
+            width = 2
+
+        painter.setPen(QPen(QColor(border), width))
+        painter.drawRect(image_rect.adjusted(0, 0, -1, -1))
+        painter.restore()
 
 # ── Tag autocomplete ──────────────────────────────────────────────────────────
 
@@ -118,12 +367,20 @@ class _TagCompleteEdit(QLineEdit):
         self._popup.setFocusPolicy(Qt.NoFocus)
         self._popup.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._popup.setMouseTracking(True)
-        self._popup.setStyleSheet(
-            "QListWidget{background:#0f1118;border:1px solid #2e3347;color:#c9cdd6;font-size:12px;border-radius:8px;}"
-            "QListWidget::item{padding:4px 10px;border-radius:4px;}"
-            "QListWidget::item:hover{background:#1e2236;color:#e0e4f0;}"
-            "QListWidget::item:selected{background:#2d2050;color:#c9a8ff;}"
-        )
+        _CURRENT_THEME = _current_theme_name()
+        if _CURRENT_THEME in ("win95", "windows95"):
+            self._popup.setStyleSheet(
+                "QListWidget{background:#ffffff;border:1px solid #000000;color:#000000;font-size:12px;border-radius:0px;}"
+                "QListWidget::item{padding:2px 6px;border-radius:0px;}"
+                "QListWidget::item:selected{background:#000080;color:#ffffff;}"
+            )
+        else:
+            self._popup.setStyleSheet(
+                "QListWidget{background:#0f1118;border:1px solid #2e3347;color:#c9cdd6;font-size:12px;border-radius:8px;}"
+                "QListWidget::item{padding:4px 10px;border-radius:4px;}"
+                "QListWidget::item:hover{background:#1e2236;color:#e0e4f0;}"
+                "QListWidget::item:selected{background:#2d2050;color:#c9a8ff;}"
+            )
         self._popup.itemClicked.connect(self._pick)
         self._popup_active = False
         self._timer = QTimer(self)
@@ -344,15 +601,22 @@ class GalleryPage(QWidget):
         self.info = QLabel("")
         rl.addWidget(self.info)
 
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.holder = QWidget()
-        self.grid = QGridLayout(self.holder)
-        self.grid.setSpacing(14)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.scroll.setWidget(self.holder)
-        rl.addWidget(self.scroll, 1)
+        self.view = QListView()
+        self.view.setViewMode(QListView.IconMode)
+        self.view.setResizeMode(QListView.Adjust)
+        self.view.setMovement(QListView.Static)
+        self.view.setUniformItemSizes(True)
+        self.view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.view.setWrapping(True)
+        self.view.setSpacing(14)
+        self.view.setWordWrap(False)
+        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.model = GalleryListModel(self)
+        self.view.setModel(self.model)
+        self.view.setItemDelegate(GalleryCardDelegate(self.view))
+        self.view.setStyleSheet("QListView{background:transparent;border:none;} QListView::item{background:transparent;border:none;}")
+        self.view.clicked.connect(lambda idx: self._open_post(idx.row()))
+        rl.addWidget(self.view, 1)
 
         # Pager
         pager = QHBoxLayout()
@@ -414,7 +678,7 @@ class GalleryPage(QWidget):
             from PySide6.QtGui import QIcon
             from PySide6.QtCore import QSize
             _theme = getattr(self.main, "settings", {}).get("appearance", "dark")
-            _sfx = "_dark" if _theme == "light" else ""
+            _sfx = "_dark" if _theme in ("light", "r34", "win95", "windows95") else ""
             _base = _P(__file__).parent.parent / "assets" / "icons"
             for _n in [f"refresh{_sfx}", "refresh"]:
                 _p = _base / f"{_n}.ico"
@@ -427,10 +691,36 @@ class GalleryPage(QWidget):
         except Exception:
             pass
         self.sources_title.setText(t("Sources"))
-        self.page_tags_title.setText(t("Current page tags"))
+        self.page_tags_title.setText("Теги на странице (всего)" if getattr(self.main, "settings", {}).get("language", "ru") == "ru" else "Page tags (total)")
+        self.page_tags_title.setToolTip("Показаны теги текущей страницы; число — количество во всей галерее.")
         self.prev_btn.setText("← " + t("Prev"))
         self.next_btn.setText(t("Next") + " →")
         self.sources_toggle.setText(t("Show all"))
+
+
+    def apply_theme_style(self, theme_name: str | None = None):
+        """Refresh inline-styled gallery pieces after a runtime theme switch."""
+        try:
+            global _PH_CACHE
+            _PH_CACHE.clear()
+        except Exception:
+            pass
+        try:
+            self._filter_preview.setStyleSheet("color:#003c8f;font-size:11px;padding:1px 4px;" if theme_name in ("r34", "win95", "windows95", "light") else "color:#6080c0;font-size:11px;padding:1px 4px;")
+        except Exception:
+            pass
+        # Existing ImageCard instances have inline QSS; rebuild them so card borders,
+        # label backgrounds and placeholder colors match the new theme immediately.
+        try:
+            if getattr(self, "_batch", None):
+                QTimer.singleShot(0, self._render_page)
+        except Exception:
+            pass
+        try:
+            self.view.viewport().update()
+            self.retranslate()
+        except Exception:
+            pass
 
     # ── Refresh ───────────────────────────────────────────────────────────────
 
@@ -637,37 +927,35 @@ class GalleryPage(QWidget):
         self.prev_btn.setVisible(self._page > 1)
         self.next_btn.setVisible(self._page < maxp)
 
-        self._clear_grid()
         QTimer.singleShot(0, lambda b=batch, tk=token: self._render_cards(b, tk))
 
     def _clear_grid(self):
-        while self.grid.count():
-            item = self.grid.takeAt(0)
-            w = item.widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
+        try:
+            self.model.set_items([], 220, 200)
+        except Exception:
+            pass
 
     def _render_cards(self, batch: list, token: int):
         if token != self._render_token:
             return
-        cols = int(self.main.settings.get("columns", 4))
-        h = int(self.main.settings.get("card_height", 220))
-        vieww = max(480, self.scroll.viewport().width() - 42)
-        w = max(150, int((vieww - (cols - 1) * 14) / cols))
-        self._render_card_batch(batch, h, cols, w, token, 0, chunk=8)
+        cols = max(1, int(self.main.settings.get("columns", 4)))
+        max_tile = max(64, int(self.main.settings.get("card_height", 220) or 220))
+        theme = _current_theme_name()
+        spacing = 7 if theme in ("r34", "r34dark") else 10
+        vieww = max(240, self.view.viewport().width() - 8)
+        available_tile = max(48, int((vieww - (cols * spacing * 2)) / cols))
+        # One fixed square slot per item; the image is aspect-fit inside it.
+        # card_height now really caps preview size on wide windows.
+        tile = max(48, min(max_tile, available_tile))
+        self.view.setSpacing(0)  # padding is accounted for in gridSize
+        self.view.setGridSize(QSize(tile + spacing * 2, tile + spacing * 2))
+        self.view.setIconSize(QSize(tile, tile))
+        self.model.set_items(batch, tile, tile)
+        QTimer.singleShot(30, self._render_page_tags)
 
     def _render_card_batch(self, batch, h, cols, w, token, start, chunk):
-        if token != self._render_token:
-            return
-        end = min(len(batch), start + chunk)
-        for i in range(start, end):
-            card = ImageCard(batch[i], i, self._open_post, w, h)
-            self.grid.addWidget(card, i // cols, i % cols)
-        if end < len(batch):
-            QTimer.singleShot(5, lambda: self._render_card_batch(batch, h, cols, w, token, end, chunk))
-        else:
-            QTimer.singleShot(30, self._render_page_tags)
+        # Compatibility for old calls; QListView/GalleryListModel handles virtual rows now.
+        self._render_cards(batch, token)
 
     # ── Page tags ─────────────────────────────────────────────────────────────
 
@@ -745,7 +1033,8 @@ class GalleryPage(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if self.isVisible() and self._batch:
+        batch = getattr(self, "_batch", None) or (self.model.items if hasattr(self, "model") else None)
+        if self.isVisible() and batch:
             QTimer.singleShot(150, self._render_page)
 
     # ── Open post ─────────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QPixmap, QColor, QPainter, QFont
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
-    QStackedWidget, QVBoxLayout, QWidget, QFrame, QSizePolicy, QSpacerItem,
+    QStackedWidget, QVBoxLayout, QWidget, QFrame, QSizePolicy, QSpacerItem, QComboBox,
 )
 
 from core.app_context import AppContext
@@ -36,7 +36,8 @@ _ICON_CACHE: dict = {}
 _CURRENT_THEME: str = "dark"
 
 def _is_light_theme(theme_name: str) -> bool:
-    return theme_name in ("light", "r34")
+    """Themes that need dark icon variants on light backgrounds."""
+    return theme_name in ("light", "r34", "win95", "windows95")
 
 def _load_icon(name: str, light_theme: bool = False) -> "QIcon | None":
     """Load QIcon from assets/icons/. White icons for dark themes, dark for light."""
@@ -234,7 +235,25 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         theme_name = self.settings.get("appearance", "dark")
-        self.setStyleSheet(stylesheet_for(theme_name))
+        qss = stylesheet_for(theme_name)
+        # Styled backgrounds only need to be enabled once. Doing it on every theme
+        # switch is expensive on galleries with many visible widgets.
+        if not getattr(self, "_theme_widgets_prepared", False):
+            try:
+                for _w in [self] + self.findChildren(QWidget):
+                    _w.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+                self._theme_widgets_prepared = True
+            except Exception:
+                pass
+        # A single global QSS apply is enough; clearing + applying both globally and
+        # on MainWindow caused a visible stall when changing themes.
+        try:
+            from PySide6.QtWidgets import QApplication
+            qapp = QApplication.instance()
+            if qapp is not None:
+                qapp.setStyleSheet(qss)
+        except Exception:
+            self.setStyleSheet(qss)
         # Sync QPalette so palette(highlight) and palette(text) work in labels
         try:
             from PySide6.QtGui import QPalette, QColor
@@ -245,9 +264,12 @@ class MainWindow(QMainWindow):
                 "ember": ("#c87040", "#c8b090", "#14141e"),
                 "slate": ("#5a8a9f", "#b0c8d0", "#16181e"),
                 "sakura": ("#d060a0", "#e0b0d0", "#140820"),
-                "ph":    ("#ff9000", "#f5f5f5", "#0f0f0f"),
                 "ph": ("#ff9000", "#f5f5f5", "#1b1b1b"),
-                "r34":   ("#7b2fff", "#e0d4f5", "#1a0a2e"),
+                "pornhub": ("#ff9000", "#f5f5f5", "#1b1b1b"),
+                "r34":   ("#3a7a35", "#111111", "#a8d99f"),
+                "r34dark": ("#6aa5ff", "#d6e4d3", "#10150f"),
+                "win95": ("#000080", "#000000", "#c0c0c0"),
+                "windows95": ("#000080", "#000000", "#c0c0c0"),
                 "light": ("#5060d0", "#1a1c2a", "#f4f5f8"),
             }
             accent, text, bg = _accent_map.get(theme_name, ("#6c85e0", "#c0c8e0", "#0d0f16"))
@@ -256,9 +278,23 @@ class MainWindow(QMainWindow):
             pal.setColor(QPalette.ColorRole.HighlightedText, QColor(bg))
             pal.setColor(QPalette.ColorRole.Text, QColor(text))
             pal.setColor(QPalette.ColorRole.WindowText, QColor(text))
+            pal.setColor(QPalette.ColorRole.ButtonText, QColor(text))
+            pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(text))
             pal.setColor(QPalette.ColorRole.Window, QColor(bg))
             pal.setColor(QPalette.ColorRole.Base, QColor(bg))
+            pal.setColor(QPalette.ColorRole.Button, QColor(bg))
             self.setPalette(pal)
+            from PySide6.QtWidgets import QApplication
+            qapp = QApplication.instance()
+            if qapp is not None:
+                qapp.setPalette(pal)
+            # Push the new palette into already-created widgets; otherwise labels/buttons
+            # may keep old black/white text until the next full restart.
+            for _w in [self] + self.findChildren(QWidget):
+                try:
+                    _w.setPalette(pal)
+                except Exception:
+                    pass
         except Exception:
             pass
         import ui.main_window as _mw
@@ -266,11 +302,42 @@ class MainWindow(QMainWindow):
         _mw._CURRENT_THEME = theme_name
         self._update_logo()
         self._reload_nav_icons()
+        try:
+            sep_color = ("#6da36b" if theme_name == "r34" else ("#345032" if theme_name == "r34dark" else ("#808080" if theme_name in ("win95", "windows95") else "#1e2130")))
+            for frame in self.findChildren(QFrame):
+                if frame.frameShape() == QFrame.HLine:
+                    frame.setStyleSheet(f"border: none; background: {sep_color}; max-height: 1px; margin: 4px 12px;")
+        except Exception:
+            pass
         # Refresh settings page background when theme changes
         try:
             sp = self.settings_page
             if hasattr(sp, "retranslate"):
                 sp.retranslate()
+        except Exception:
+            pass
+        # Keep old Win95/R34 controls from using enormous native drop-downs.
+        try:
+            for cb in self.findChildren(QComboBox):
+                cb.setMaxVisibleItems(12)
+        except Exception:
+            pass
+        # Let custom widgets with inline styles refresh after theme switching.
+        try:
+            for w in self.findChildren(QWidget):
+                fn = getattr(w, "apply_theme_style", None)
+                if callable(fn):
+                    fn(theme_name)
+        except Exception:
+            pass
+        # Global QSS and palette application above already trigger repaint; avoid
+        # an additional full unpolish/polish pass over the whole gallery.
+        self.update()
+        try:
+            from PySide6.QtWidgets import QApplication
+            qapp = QApplication.instance()
+            if qapp is not None:
+                qapp.processEvents()
         except Exception:
             pass
 
@@ -336,7 +403,7 @@ class MainWindow(QMainWindow):
             if btn:
                 em, ico = NAV_ICONS.get(spec.key, ("•",""))
                 label = self.t(spec.key) if spec.key in ("Tagger","Gallery","Manga","Games","Duplicates","DLER","Tags") else spec.button_text
-                icon = _load_icon(ico)
+                icon = _load_icon(ico, _is_light_theme(self.settings.get("appearance", "dark")))
                 if icon:
                     btn.setIcon(icon); btn.setIconSize(QSize(18,18)); btn.setText(f"  {label}")
                 else:

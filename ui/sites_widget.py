@@ -7,9 +7,10 @@ Custom sites appear under "Свои сайты" group at the bottom.
 """
 from __future__ import annotations
 from typing import Callable
+from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QBrush, QFont
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QColor, QBrush, QFont, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
@@ -82,12 +83,61 @@ class _SectionHeader(QWidget):
         lay.addWidget(self._count_lbl)
         lay.addStretch(1)
 
-        self.setStyleSheet(
-            "QWidget{background:#0f1220;border-radius:4px;margin:2px 0;}"
-            "QWidget:hover{background:#141828;}"
-        )
+        self.apply_theme_style()
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(28)
+
+    def apply_theme_style(self, theme_name: str | None = None):
+        if theme_name is None:
+            try:
+                from ui.main_window import _CURRENT_THEME
+                theme_name = _CURRENT_THEME
+            except Exception:
+                theme_name = "abyss"
+        color = ENGINE_COLORS.get(self.engine, "#808080")
+        if theme_name == "r34":
+            bg, hover, border = "#8cc57d", "#9fd191", "#6da36b"
+            text = "#111111"
+            self._arrow.setStyleSheet(f"color:{text};font-weight:bold;font-size:11px;")
+            for lbl in self.findChildren(QLabel):
+                lbl.setStyleSheet(f"color:{text};font-weight:700;font-size:13px;")
+            self._count_lbl.setStyleSheet("color:#111111;font-size:11px;")
+            self.setStyleSheet(
+                f"QWidget{{background:{bg};border:1px solid {border};border-radius:0px;margin:2px 0;}}"
+                f"QWidget:hover{{background:{hover};}}"
+            )
+        elif theme_name == "r34dark":
+            bg, hover, border = "#253722", "#1d2c1b", "#345032"
+            text = "#d6e4d3"
+            self._arrow.setStyleSheet(f"color:{text};font-weight:bold;font-size:11px;")
+            for lbl in self.findChildren(QLabel):
+                lbl.setStyleSheet(f"color:{text};font-weight:700;font-size:13px;")
+            self._count_lbl.setStyleSheet("color:#a6c7a1;font-size:11px;")
+            self.setStyleSheet(
+                f"QWidget{{background:{bg};border:1px solid {border};border-radius:0px;margin:2px 0;}}"
+                f"QWidget:hover{{background:{hover};}}"
+            )
+        elif theme_name in ("win95", "windows95"):
+            self._arrow.setStyleSheet("color:#000000;font-weight:bold;font-size:11px;")
+            for lbl in self.findChildren(QLabel):
+                lbl.setStyleSheet("color:#000000;font-weight:700;font-size:13px;")
+            self._count_lbl.setStyleSheet("color:#000000;font-size:11px;")
+            self.setStyleSheet(
+                "QWidget{background:#c0c0c0;border-top:1px solid #ffffff;border-left:1px solid #ffffff;"
+                "border-bottom:1px solid #808080;border-right:1px solid #808080;border-radius:0px;margin:2px 0;}"
+                "QWidget:hover{background:#c0c0c0;}"
+            )
+        else:
+            self._arrow.setStyleSheet(f"color:{color};font-weight:bold;font-size:11px;")
+            # first QLabel is engine title; count label is handled separately
+            labels = self.findChildren(QLabel)
+            if len(labels) >= 2:
+                labels[1].setStyleSheet(f"color:{color};font-weight:700;font-size:13px;")
+            self._count_lbl.setStyleSheet("color:#606080;font-size:11px;")
+            self.setStyleSheet(
+                "QWidget{background:#0f1220;border-radius:4px;margin:2px 0;}"
+                "QWidget:hover{background:#141828;}"
+            )
 
     def mousePressEvent(self, e):
         self._expanded = not self._expanded
@@ -141,12 +191,13 @@ class SitesWidget(QWidget):
 
         # Buttons
         btn_row = QHBoxLayout()
-        self.add_btn    = QPushButton("＋ Свой сайт")
-        self.del_btn    = QPushButton("✕ Удалить")
-        self.login_btn  = QPushButton("🔓 Войти (выбранный)")
-        self.all_login_btn = QPushButton("🔓 Войти (все)")
-        self.import_btn = QPushButton("📥 Импорт cookies.txt")
-        self.save_btn   = QPushButton("💾 Сохранить")
+        self.add_btn    = QPushButton("Свой сайт")
+        self.del_btn    = QPushButton("Удалить")
+        self.login_btn  = QPushButton("Войти (выбранный)")
+        self.all_login_btn = QPushButton("Войти (все)")
+        self.import_btn = QPushButton("Импорт cookies.txt")
+        self.save_btn   = QPushButton("Сохранить")
+        self.apply_theme_style()
         for b in [self.add_btn, self.del_btn, self.login_btn, self.all_login_btn, self.import_btn, self.save_btn]:
             btn_row.addWidget(b)
         outer.addLayout(btn_row)
@@ -154,6 +205,41 @@ class SitesWidget(QWidget):
         self.add_btn.clicked.connect(self._add_custom)
         self.del_btn.clicked.connect(self._del_selected)
         self.import_btn.clicked.connect(self._import_cookies_txt)
+
+    def apply_theme_style(self, theme_name: str | None = None):
+        """Reload action icons with enough contrast for the active theme."""
+        if theme_name is None:
+            try:
+                from ui.main_window import _CURRENT_THEME
+                theme_name = _CURRENT_THEME
+            except Exception:
+                theme_name = "abyss"
+        light = theme_name in ("light", "r34", "win95", "windows95")
+        suffix = "_dark" if light else ""
+        base = Path(__file__).parent.parent / "assets" / "icons"
+        actions = [
+            (getattr(self, "add_btn", None), "action_add"),
+            (getattr(self, "del_btn", None), "action_delete"),
+            (getattr(self, "login_btn", None), "action_login"),
+            (getattr(self, "all_login_btn", None), "action_login_all"),
+            (getattr(self, "import_btn", None), "action_cookie"),
+            (getattr(self, "save_btn", None), "action_save"),
+        ]
+        for button, name in actions:
+            if button is None:
+                continue
+            path = base / f"{name}{suffix}.png"
+            if not path.exists():
+                path = base / f"{name}.png"
+            icon = QIcon(str(path)) if path.exists() else QIcon()
+            button.setIcon(icon)
+            if not icon.isNull():
+                button.setIconSize(QSize(16, 16))
+        for header in self._section_headers.values():
+            try:
+                header.apply_theme_style(theme_name)
+            except Exception:
+                pass
 
     # ── Population ────────────────────────────────────────────────────────────
 
@@ -180,6 +266,7 @@ class SitesWidget(QWidget):
         self._custom_start_row = self.table.rowCount()
         for site in saved_custom:
             self._add_custom_row(site)
+        self.apply_theme_style()
 
     def _add_section_header(self, engine: str, count: int):
         row = self.table.rowCount()
@@ -323,6 +410,8 @@ class SitesWidget(QWidget):
             QMessageBox.warning(self, "Ошибка", "Не удалось скопировать:\n" + str(e))
 
         # ── Read back ─────────────────────────────────────────────────────────────
+
+        self.apply_theme_style()
 
     def collect(self) -> tuple[dict, list]:
         """Return (sites_dict, custom_sites_list) for saving to settings.

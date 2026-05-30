@@ -40,6 +40,11 @@ class TaskManager(QObject):
 
     def __init__(self, parent=None, max_workers=2):
         super().__init__(parent)
+        try:
+            from core.shutdown import register
+            register("task manager", self.shutdown)
+        except Exception:
+            pass
         self.pool = ThreadPoolExecutor(max_workers=max(1, int(max_workers or 2)), thread_name_prefix="local-booru")
         self.tasks = []
 
@@ -88,5 +93,7 @@ class TaskManager(QObject):
         for t in list(self.tasks):
             try: t.cancel()
             except Exception: pass
-        try: self.pool.shutdown(wait=False, cancel_futures=True)
-        except TypeError: self.pool.shutdown(wait=False)
+        try: self.pool.shutdown(wait=True, timeout=3, cancel_futures=True)
+        except TypeError:
+            try: self.pool.shutdown(wait=False)
+            except Exception: pass

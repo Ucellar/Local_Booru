@@ -121,6 +121,14 @@ def scan_roots(settings: dict) -> list[Path]:
         root = Path(settings.get("root", ""))
         return [root] if str(root) else []
     out = result_output_base(settings)
+    # Include the subscription download root itself.  Do NOT rglob every
+    # timestamp/query folder on every gallery/index open; iter_media_files is
+    # already recursive and one stable root is enough.  The old leaf-directory
+    # expansion made startup/indexing O(number_of_subscription_folders) before
+    # a single media file was even inspected.
+    subs_root = Path(settings.get("output_dir", str(out))) / "subscriptions"
+    subs_roots = [subs_root] if subs_root.exists() else []
+
     roots = [
         out / "found" / "media",
         out / "partial_match" / "media",
@@ -128,7 +136,7 @@ def scan_roots(settings: dict) -> list[Path]:
         out / "downloads" / "found" / "media",
         out / "downloads" / "partial_match" / "media",
         out / "downloads" / "no_match" / "media",
-    ]
+    ] + subs_roots
     if not any(r.exists() for r in roots):
         root = Path(settings.get("root", ""))
         roots = [root] if str(root) else []

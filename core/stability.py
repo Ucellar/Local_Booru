@@ -38,15 +38,15 @@ def setup_logging(log_dir: Path | None = None) -> logging.Logger:
     )
 
     # App log: INFO+
-    fh = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    fh = logging.handlers.TimedRotatingFileHandler(
+        log_file, when="midnight", interval=1, backupCount=7, encoding="utf-8"
     )
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
 
     # Error log: ERROR+
-    eh = logging.handlers.RotatingFileHandler(
-        error_file, maxBytes=2 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    eh = logging.handlers.TimedRotatingFileHandler(
+        error_file, when="midnight", interval=1, backupCount=7, encoding="utf-8"
     )
     eh.setLevel(logging.ERROR)
     eh.setFormatter(fmt)
