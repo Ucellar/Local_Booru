@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import time
 import mimetypes
 import shutil
@@ -8,6 +9,7 @@ import html
 import imagehash
 from PIL import Image
 from pathlib import Path
+from contextlib import nullcontext
 from urllib.parse import urlparse, parse_qs, urljoin, unquote
 
 try:
@@ -47,6 +49,10 @@ except Exception:
 from core.paths import SETTINGS_FILE, BROWSER_PROFILE_DIR, BROWSER_COOKIES_DIR, CACHE_DIR, ERROR_LOG_FILE, ensure_output_base
 from core.nomatch_db import upsert_nomatch, remove_nomatch
 from core.tag_utils import normalize_tag as _shared_normalize_tag, canonical_tag_key
+from core.file_safety import atomic_copy2
+from core.services.media_storage_service import copy_into_managed, unlink_managed, delete_bucket_artifacts
+from core.source_protection import require_managed_media_mutation, is_source_archive_path
+from core.redaction import sanitize_text
 GALLERY_SETTINGS_FILE = SETTINGS_FILE
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
@@ -64,12 +70,16 @@ def has_copy_suffix(path):
 
 DEFAULT_SETTINGS = {
     "root": "C:/Local_Booru_Input",
-    "output_suffix": ".tags.txt",
-    "sources_suffix": ".sources.txt",
     "saucenao_api_key": "",
     "min_similarity": 85.0,
     "delay_seconds": 8.0,
+    "tagger_low_power_mode": False,
+    "tagger_site_interval_seconds": 1.10,
+    "tagger_conveyor_window": 32,
+    "tagger_background_tag_groups": True,
     "request_timeout_seconds": 20,
+    "network_retry_attempts": 2,
+    "network_retry_delay_seconds": 10,
     "saucenao_cooldown_seconds": 3600,
     "enable_md5_lookup": True,
     "enable_saucenao": True,
@@ -84,16 +94,11 @@ DEFAULT_SETTINGS = {
     "tag_only_untagged": True,
     "skip_copy_suffix_files": True,
     "retry_nomatch": False,
-    "mark_no_match": True,
     "limit_files": 0,
-    "use_browser_auth": False,
-    "use_system_browser_cookies": False,
     "enable_curl_cffi": False,
-    "browser_auth_url": "https://example.com",
-    "browser_auth_wait_seconds": 60,
     "sites": {
         "rule34.xxx": {"enabled": True, "type": "rule34xxx", "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.xxx/index.php?page=account&s=login"},
-        "rule34.us": {"enabled": True, "type": "rule34us", "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.us/index.php?page=account&s=login"},
+        "rule34.us": {"enabled": True, "type": "rule34us", "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.us/index.php?page=account&s=login", "notes": "HTML-поиск с проверкой MD5; подтверждённого API нет"},
         "danbooru.donmai.us": {"enabled": True, "type": "danbooru", "login": "", "api_key": "", "user_id": "", "login_url": "https://danbooru.donmai.us/session/new"},
         "gelbooru.com": {"enabled": True, "type": "gelbooru_html", "login": "", "api_key": "", "user_id": "", "login_url": "https://gelbooru.com/index.php?page=account&s=login"},
         "e621.net": {"enabled": True, "type": "e621", "login": "", "api_key": "", "user_id": "", "login_url": "https://e621.net/session/new"},
@@ -107,7 +112,8 @@ def load_settings():
         try:
             data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             merged = DEFAULT_SETTINGS.copy()
-            merged.update(data)
+            retired = {"copy_results_enabled", "copy_mode", "tags_suffix", "sources_suffix", "output_suffix", "mark_no_match", "tagger_site_conveyor_enabled", "use_browser_auth", "use_system_browser_cookies", "browser_auth_url", "browser_auth_wait_seconds"}
+            merged.update({k: v for k, v in data.items() if k not in retired})
             merged["sites"] = {**DEFAULT_SETTINGS["sites"], **data.get("sites", {})}
             merged["custom_sites"] = data.get("custom_sites", [])
             return merged
@@ -117,20 +123,16 @@ def load_settings():
 
 
 def save_settings(settings):
+    for retired in {"copy_results_enabled", "copy_mode", "tags_suffix", "sources_suffix", "output_suffix", "mark_no_match", "tagger_site_conveyor_enabled", "use_browser_auth", "use_system_browser_cookies", "browser_auth_url", "browser_auth_wait_seconds"}:
+        settings.pop(retired, None)
     SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 
 
 def redact_sensitive_url(text):
-    """Hide API credentials in log lines and saved debug messages."""
-    try:
-        value = str(text)
-    except Exception:
-        return text
-    value = re.sub(r'((?:api_key|apikey|key|token|login|user_id|password|pass)=)([^&\s]+)', r'\1***', value, flags=re.I)
-    value = re.sub(r'((?:api_key|apikey|key|token|login|user_id|password|pass)%5D=)([^&\s]+)', r'\1***', value, flags=re.I)
-    return value
+    """Backward-compatible wrapper for central privacy redaction."""
+    return sanitize_text(text)
 
 
 def is_md5(text):
@@ -267,21 +269,38 @@ def atf_find_post_view_url_from_html(html_text, base_url="https://booru.allthefa
 
 
 def atf_parse_post_view_html(html_text):
-    """
-    Parse grouped ATF/Danbooru-style tag sidebar from a single post page.
+    """Parse an ATF post sidebar without ever trusting visible link text.
+
+    ATF is Danbooru-based. Visible sidebar labels can contain counts/UI text;
+    only the ``tags=`` query value in a tag-search href is accepted as a tag.
     Returns (tags, groups).
     """
     groups = {
         "artist": [],
         "character": [],
         "copyright": [],
+        "species": [],
         "general": [],
         "meta": [],
     }
 
+    def tag_from_href(anchor):
+        try:
+            href = html.unescape(str(anchor.get("href", "")))
+            vals = parse_qs(urlparse(href).query).get("tags", [])
+            if not vals:
+                return ""
+            tag = html.unescape(str(vals[0])).strip().replace(" ", "_")
+            if not tag or tag.startswith(("rating:", "sort:", "md5:", "user:", "score:")):
+                return ""
+            if tag.lower() in {"?", "posts", "post", "all"}:
+                return ""
+            return tag
+        except Exception:
+            return ""
+
     try:
         soup = BeautifulSoup(html_text or "", "html.parser")
-
         category_map = {
             "0": "general",
             "1": "artist",
@@ -290,78 +309,30 @@ def atf_parse_post_view_html(html_text):
             "5": "meta",
         }
 
-        # Danbooru-style classes: category-0, category-1...
+        # Numeric Danbooru/ATF categories.
         for cls_num, group_name in category_map.items():
-            for el in soup.select(f".category-{cls_num} a.search-tag, .category-{cls_num} a[href*='tags='], .category-{cls_num} a[href*='/posts?tags=']"):
-                tag = el.get_text(" ", strip=True)
-                tag = re.sub(r"\s+", " ", tag).strip()
-                tag = tag.replace(" ", "_")
-                tag = html.unescape(tag)
+            for el in soup.select(f".category-{cls_num} a.search-tag[href*='tags='], .category-{cls_num} a[href*='tags=']"):
+                tag = tag_from_href(el)
                 if tag and tag not in groups[group_name]:
                     groups[group_name].append(tag)
 
-        # ATF/Danbooru often has tag-list li with category classes.
-        for li in soup.find_all(["li", "div"], class_=True):
-            cls = " ".join(li.get("class", []))
-            m = re.search(r"category-(\d+)", cls)
-            if not m:
-                continue
-            group_name = category_map.get(m.group(1), "general")
-            a = li.find("a", class_=re.compile(r"search-tag|tag"))
-            if not a:
-                # choose last useful link in the row
-                links = li.find_all("a")
-                a = links[-1] if links else None
-            if not a:
-                continue
-            tag = a.get_text(" ", strip=True)
-            tag = re.sub(r"\s+", " ", tag).strip().replace(" ", "_")
-            tag = html.unescape(tag)
-            if tag and tag not in groups[group_name]:
-                groups[group_name].append(tag)
-
-        # Header-based fallback: Artist / Copyrights / Characters / General / Meta
-        current = None
-        header_map = {
-            "artist": "artist",
-            "artists": "artist",
-            "copyright": "copyright",
-            "copyrights": "copyright",
-            "character": "character",
-            "characters": "character",
-            "general": "general",
-            "tag": "general",
-            "tags": "general",
-            "meta": "meta",
-            "metadata": "meta",
+        # Named sidebar classes used by newer page variants.
+        named_classes = {
+            "artist": "artist", "character": "character", "copyright": "copyright",
+            "general": "general", "metadata": "meta", "meta": "meta", "species": "species",
         }
-
-        for node in soup.find_all(["h3", "h4", "h5", "li", "div", "a"]):
-            text = node.get_text(" ", strip=True).lower()
-            key = re.sub(r"[^a-z]", "", text)
-            if key in header_map:
-                current = header_map[key]
-                continue
-
-            if current and node.name == "a":
-                href = str(node.get("href", ""))
-                if "tags=" not in href and "/posts?tags=" not in href:
-                    continue
-                tag = node.get_text(" ", strip=True)
-                tag = re.sub(r"\s+", " ", tag).strip().replace(" ", "_")
-                tag = html.unescape(tag)
-                if tag and tag not in groups[current] and tag.lower() not in {"?", "posts", "all"}:
-                    groups[current].append(tag)
+        for cls_part, group_name in named_classes.items():
+            for el in soup.select(f".tag-type-{cls_part} a.search-tag[href*='tags='], .tag-type-{cls_part} a[href*='tags=']"):
+                tag = tag_from_href(el)
+                if tag and tag not in groups[group_name]:
+                    groups[group_name].append(tag)
 
         all_tags = []
-        for g in ["artist", "copyright", "character", "general", "meta"]:
-            for t in groups[g]:
-                if t not in all_tags:
-                    all_tags.append(t)
-
-        groups = {k: v for k, v in groups.items() if v}
-        return all_tags, groups
-
+        for group_name in ("artist", "copyright", "character", "species", "general", "meta"):
+            for tag in groups[group_name]:
+                if tag not in all_tags:
+                    all_tags.append(tag)
+        return all_tags, {k: v for k, v in groups.items() if v}
     except Exception:
         return [], {}
 
@@ -435,10 +406,14 @@ def unique_keep_order(items):
 def empty_tag_groups():
     return {
         "artist": [],
+        "contributor": [],
         "character": [],
         "copyright": [],
+        "species": [],
         "general": [],
         "meta": [],
+        "lore": [],
+        "invalid": [],
         "parody": [],
         "language": [],
         "category": [],
@@ -452,6 +427,9 @@ TAG_CATEGORY_MAP = {
     "3": "copyright", 3: "copyright", "copyright": "copyright", "series": "copyright",
     "4": "character", 4: "character", "character": "character",
     "5": "meta", 5: "meta", "metadata": "meta", "meta": "meta",
+    "species": "species", "specie": "species",
+    "contributor": "contributor", "contributors": "contributor",
+    "lore": "lore", "invalid": "invalid",
 }
 
 def normalize_tag(tag):
@@ -491,7 +469,7 @@ def merge_tag_groups(groups_list):
 def groups_to_tags(groups):
     tags = []
 
-    for key in ["artist", "character", "copyright", "general", "meta", "parody", "language", "category", "pages"]:
+    for key in ["artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid", "parody", "language", "category", "pages"]:
         tags += groups.get(key, [])
 
     return unique_keep_order(tags)
@@ -730,7 +708,7 @@ def get_session(settings=None, log_func=None, target_host=None):
                 pass
         return added
 
-    if settings and target_host and (settings.get("use_browser_auth") or settings.get("use_system_browser_cookies")):
+    if settings and target_host:
         total_added = 0
         sources = []
 
@@ -757,7 +735,7 @@ def get_session(settings=None, log_func=None, target_host=None):
             sources.append(f"{txt_info}:{added}")
 
         # 3) Optional fallback: real Chrome/Edge/Firefox cookies.
-        if settings.get("use_system_browser_cookies"):
+        if False:  # retired: never read system browser cookies automatically
             jar, info = load_system_cookiejar_for_host(target_host)
             if jar:
                 added = _add_jar(jar)
@@ -857,6 +835,8 @@ def _post_with_file(session, url, file_path, file_field="file", extra_data=None,
         try:
             from core.http_rate_limiter import wait_for as _global_wait_for
             _global_wait_for(url, {})
+        except InterruptedError:
+            raise
         except Exception:
             pass
     response = target.post(
@@ -979,8 +959,6 @@ def output_processed_status(settings, img):
 
     Old .searched.json files are ignored in this branch: the DB is the source of truth.
     """
-    if not settings.get("copy_results_enabled", True):
-        return None
     try:
         from core.database.storage import processed_status
         return processed_status(settings, img)
@@ -989,33 +967,61 @@ def output_processed_status(settings, img):
 
 
 def copy_result_files(settings, img, status):
-    """Archive processed media into output and register it in SQLite.
+    """Archive media while enforcing one live physical file per exact MD5.
 
-    This SQLite branch does not create .tags.txt/.sources.txt/.tags.json/.searched.json.
-    Metadata belongs to the database; files on disk are only media/cache.
+    A second site or second input file may resolve to identical bytes.  For a
+    FOUND result we reuse the already-live canonical media path instead of
+    creating another gallery card/session copy. Metadata is merged later into
+    that returned path.
     """
-    if not settings.get("copy_results_enabled", True):
-        return
-
     img = Path(img)
+    # Source media is immutable; every result is represented in managed output.
     paths = result_paths_for(settings, img, status)
+    bucket = result_bucket_name(status)
+    md5 = ""
+    try:
+        md5 = file_md5(img).lower() if img.exists() else ""
+    except Exception:
+        md5 = ""
+
+    # Exact tagged media already present in FOUND is the canonical physical copy.
+    # Do not copy the same bytes into another session folder.
+    if bucket == "found" and md5:
+        try:
+            from core.database.storage import found_media_path_by_md5
+            existing = found_media_path_by_md5(settings, md5)
+            if existing and Path(existing).exists():
+                return Path(existing)
+        except Exception:
+            pass
+
     for d in (paths["media"], paths["cache"]):
         d.mkdir(parents=True, exist_ok=True)
 
     try:
-        shutil.copy2(img, paths["media_file"])
+        from core.preflight import ensure_space_for_write
+        _incoming = img.stat().st_size if img.exists() else 0
+        _ok_space, _space_msg = ensure_space_for_write(settings, paths["media_file"], _incoming)
+        if not _ok_space:
+            append_error_log("COPY STOP NO DISK SPACE: " + _space_msg)
+            return None
+        paths["media_file"] = copy_into_managed(settings, img, paths["media_file"], operation="tagger.copy_result")
     except Exception:
-        pass
+        return None
 
-    try:
-        from core.database.storage import mark_processed
-        mark_processed(settings, paths["media_file"], status=result_bucket_name(status), original_path=str(img))
-    except Exception:
-        pass
-
+    # Found/partial metadata is inserted by save_found_metadata after this copy,
+    # so its normal import lifecycle (Inbox/Archive) remains intact. NO_MATCH
+    # has no metadata writer and must be registered here.
+    if bucket == "no_match":
+        try:
+            from core.database.storage import ensure_image
+            ensure_image(settings, paths["media_file"], status=bucket, original_path=str(img), hash_md5=md5 or None)
+        except Exception:
+            pass
+    return paths["media_file"]
 
 def cleanup_archived_result(settings, img, statuses=("nomatch",)):
-    """Remove a file and sidecars from output buckets after it was promoted.
+    """Remove a promoted file and inherited generated artifacts from an output bucket.
 
     Used when a no_match item receives manual tags and must not reappear in
     no_match on the next run.
@@ -1029,70 +1035,70 @@ def cleanup_archived_result(settings, img, statuses=("nomatch",)):
             try:
                 f = paths[key] / img.name
                 if f.exists():
-                    f.unlink()
+                    unlink_managed(settings, f, operation="tagger.cleanup_archived_result")
             except Exception:
                 pass
-        for dkey in ("tags", "source", "cache", "searched"):
-            d = paths[dkey]
-            try:
-                for f in d.glob(stem + "*"):
-                    try:
-                        f.unlink()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        # Live mode no longer writes tag/source sidecars. Generated cache/search
+        # artifacts, if inherited from an old build, are cleaned only inside the
+        # disposable output tree through the storage gateway.
+        try:
+            delete_bucket_artifacts(settings, paths["media"] / img.name, operation="tagger.cleanup_legacy_output_artifacts")
+        except Exception:
+            pass
 
 
-def write_sidecar_tags(settings, img, tags, source_url="", groups=None, status="tagged"):
-    """Store tags/source in SQLite only.
+def save_found_metadata(settings, img, tags, source_url="", groups=None, status="tagged", *, archived_media_path=None, hash_md5=None):
+    """Store tags/source in SQLite only for the canonical archived media path.
 
-    Historical name is kept for compatibility with old call sites.
-    No .txt/.json sidecar files are written in the SQLite-main branch.
+    ``archived_media_path`` may already point at an existing exact-MD5 canonical
+    file, so additional sites enrich one row instead of producing duplicates.
     """
     img = Path(img)
     paths = result_paths_for(settings, img, status)
     paths["media"].mkdir(parents=True, exist_ok=True)
     paths["cache"].mkdir(parents=True, exist_ok=True)
+    media_path = Path(archived_media_path) if archived_media_path else paths["media_file"]
     if not groups or not groups_to_tags(groups):
         groups = {"artist": [], "character": [], "copyright": [], "general": list(tags or []), "meta": []}
     try:
-        from core.database.storage import upsert_media_metadata
-        upsert_media_metadata(
+        from core.import_pipeline import register_media_import
+        return register_media_import(
             settings,
-            paths["media_file"],
+            media_path,
             tags=tags or [],
             groups=groups,
-            source_text=source_url or "",
+            sources=[source_url] if source_url else [],
             status=result_bucket_name(status),
             original_path=str(img),
+            hash_md5=hash_md5,
+            origin="tagger",
+            merge_existing=True,
         )
     except Exception:
-        pass
-    return None, None, None
+        return None
+
+# Temporary public compatibility alias for old extensions/imports; internal code uses SQLite terminology.
+write_sidecar_tags = save_found_metadata
 
 def promote_manual_match(settings, img, tags, source_url="", groups=None):
     """Promote a NO_MATCH file to found after manual URL tag extraction."""
     img = Path(img)
     tags = unique_keep_order(tags)
-    write_sidecar_tags(settings, img, tags, source_url, groups, status="tagged")
-    try:
-        nm = img.with_suffix(".nomatch")
-        if nm.exists():
-            nm.unlink()
-    except Exception:
-        pass
-    remove_nomatch(img)
+    # Archive/reuse the one canonical exact-MD5 media copy first; metadata then
+    # attaches to that physical row rather than creating another live image.
+    archived_media = copy_result_files(settings, img, "tagged")
+    save_found_metadata(settings, img, tags, source_url, groups, status="tagged", archived_media_path=archived_media)
+    remove_nomatch(img, settings=settings)
     # Archive as found first, then remove old no_match/partial copies.
-    copy_result_files(settings, img, "tagged")
     cleanup_archived_result(settings, img, ("nomatch", "partial"))
     return True
 
 def append_error_log(msg):
     try:
         ERROR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        safe = sanitize_text(msg)
         with ERROR_LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {safe}\n")
     except Exception:
         pass
 
@@ -1154,25 +1160,88 @@ def cleanup_preview_cache(settings=None):
                 pass
 
 
+_TRANSIENT_NETWORK_MARKERS = (
+    "read timed out", "connect timed out", "connection timed out", "timeout error",
+    "timeout('", "timeouterror", "connection aborted", "connection reset",
+    "failed to resolve", "getaddrinfo failed", "nameresolutionerror",
+    "temporary failure in name resolution", "network is unreachable",
+    "connection refused", "max retries exceeded", "ssleoferror",
+    "unexpected_eof_while_reading", "remote end closed connection",
+)
+
+def _is_transient_network_error_text(message):
+    text = str(message or "").lower()
+    return any(marker in text for marker in _TRANSIENT_NETWORK_MARKERS)
+
+def _network_error_host(message):
+    text = str(message or "")
+    m = re.search(r'host=["\']([^"\']+)', text, re.I)
+    if m:
+        return m.group(1).lower()
+    m = re.search(r"\[([^\]]+)\]", text)
+    return m.group(1).lower() if m else "network"
+
 class Tagger:
     def __init__(self, settings, log_func):
         self.settings = settings
-        self.session = get_session(settings, log_func)
-        self.log = log_func
+        self._external_log = log_func
+        self._transient_network_events = []
+        self._transient_network_hosts = set()
+        self._background_group_urls = []
+        self.log = self._log_and_track
+        self.session = get_session(settings, self.log)
         self.timeout = max(5, int(float(settings.get("request_timeout_seconds", 20))))
         self.saucenao_state_file = CACHE_DIR / "saucenao_state.json"
+        self._saucenao_deferred = False
+        self._saucenao_defer_reason = ""
+        self._saucenao_retry_after = 0
+        self._background_group_urls = []
         self._partial_match_found = False
         self._partial_match_reason = ""
         self.cancel_callback = None
+        # Optional UI callback used by the per-site conveyor. Signature:
+        # callback(site_label, media_path, state). It is deliberately passive:
+        # the engine remains usable without any Qt/UI dependency.
+        self.activity_callback = None
         # Per-Tagger session/request caches.  Network code must not reload
         # cookies or re-run anti-bot verification for every fallback branch.
         self._session_cache = {}
         self._request_cache = {}
         self._lookup_cache_enabled = False
+        # One-shot diagnostics for sites that are correctly configured but may
+        # simply have no overlap with the local archive. This separates an
+        # empty MD5 result from a dead/malformed public DAPI endpoint.
+        self._dapi_health_reported = set()
         try:
             cleanup_preview_cache(self.settings)
         except Exception:
             pass
+
+    def _log_and_track(self, message):
+        text = sanitize_text(message)
+        if _is_transient_network_error_text(text):
+            self._transient_network_events.append(text[:400])
+            self._transient_network_hosts.add(_network_error_host(text))
+        self._external_log(text)
+
+    def _reset_network_state(self):
+        self._transient_network_events = []
+        self._transient_network_hosts = set()
+
+    def transient_network_failed(self):
+        return bool(self._transient_network_events)
+
+    def network_failure_summary(self):
+        hosts = sorted(h for h in self._transient_network_hosts if h)
+        return ", ".join(hosts) if hosts else "network"
+
+    def report_activity(self, site_label, media_path, state="Ищет"):
+        callback = getattr(self, "activity_callback", None)
+        if callable(callback):
+            try:
+                callback(str(site_label), str(media_path), str(state))
+            except Exception:
+                pass
 
     def session_for_host(self, host):
         host = (host or "").lower().replace("www.", "")
@@ -1355,6 +1424,32 @@ class Tagger:
                     domains.add(str(site["domain"]).lower().replace("www.", ""))
         return domains
 
+    def _needs_background_tag_groups(self, url):
+        """Whether category recovery for a matched URL must be deferred.
+
+        These hosts expose usable clean post tags quickly, but category recovery
+        may add HTML/tag-index requests. In conveyor/fallback operation that
+        extra work belongs to the durable enrichment queue.
+        """
+        if not self.settings.get("tagger_background_tag_groups", self.settings.get("tagger_background_rule34_categories", True)):
+            return False
+        host = urlparse(str(url or "")).netloc.lower().replace("www.", "")
+        return host in {"gelbooru.com", "rule34.xxx", "api.rule34.xxx", "xbooru.com", "hypnohub.net"}
+
+    def groups_or_defer_background(self, url, tags):
+        if self._needs_background_tag_groups(url):
+            if url and url not in self._background_group_urls:
+                self._background_group_urls.append(str(url))
+            groups = empty_tag_groups()
+            groups["general"] = unique_keep_order([normalize_tag(t) for t in (tags or []) if normalize_tag(t)])
+            return groups
+        return self.grouped_tags_from_url(url)
+
+    def take_background_group_urls(self):
+        urls = unique_keep_order(list(self._background_group_urls or []))
+        self._background_group_urls = []
+        return urls
+
     def tags_from_url(self, url):
         host = urlparse(url).netloc.lower().replace("www.", "")
         try:
@@ -1368,8 +1463,10 @@ class Tagger:
                 return self.danbooru_tags(url)
             if host == "gelbooru.com":
                 return self.gelbooru_tags(url)
-            if host == "e621.net":
-                return self.e621_tags(url)
+            if host in ("xbooru.com", "hypnohub.net"):
+                return groups_to_tags(self.documented_dapi_groups_from_url(url, host))
+            if host in ("e621.net", "e926.net"):
+                return self.e621_tags(url, host=host)
             custom_sites = self.settings.get("custom_sites", [])
             if isinstance(custom_sites, list):
                 for site in custom_sites:
@@ -1388,18 +1485,32 @@ class Tagger:
         host = urlparse(url).netloc.lower().replace("www.", "")
 
         try:
-            if host in ("rule34.xxx", "api.rule34.xxx", "rule34.us"):
+            if host in ("rule34.xxx", "api.rule34.xxx"):
                 try:
-                    html = self.session_for_host("rule34.xxx" if "rule34.xxx" in host else "rule34.us").get(url, timeout=self.timeout).text
+                    html = self.session_for_host("rule34.xxx").get(url, timeout=self.timeout).text
                     groups = self.booru_groups_from_html(html)
                     if groups_to_tags(groups):
                         return groups
                 except Exception:
                     pass
                 tags = self.tags_from_url(url)
-                return self._categorize_flat_tags("rule34.xxx" if "rule34.xxx" in host else "rule34.us", tags)
+                return self._categorize_flat_tags("rule34.xxx", tags)
 
-            if host == "danbooru.donmai.us":
+            if host == "rule34.us":
+                # No verified JSON API exists here. On a concrete post page,
+                # read tag values from href only; never use rendered link text.
+                if not self._is_strict_post_url(url):
+                    return empty_tag_groups()
+                r = self.session_for_host("rule34.us").get(
+                    url, timeout=self.timeout,
+                    headers={"Accept": "text/html,application/xhtml+xml,*/*"},
+                )
+                return self.gelbooru_groups_from_html(r.text or "")
+
+            if host in ("danbooru.donmai.us", "donmai.us"):
+                # Official Danbooru exposes post tags in JSON. Never parse the
+                # visible HTML page as a metadata fallback: on a Cloudflare or
+                # login page it is not authoritative data.
                 parts = urlparse(url).path.strip("/").split("/")
 
                 if len(parts) >= 3 and parts[0] == "post" and parts[1] == "show":
@@ -1413,53 +1524,31 @@ class Tagger:
                 r = s.get(
                     f"https://danbooru.donmai.us/posts/{post_id}.json",
                     params=self.auth_params(self.site_cfg("danbooru.donmai.us")),
-                    timeout=self.timeout
+                    timeout=self.timeout,
+                    headers=self._danbooru_api_headers(),
                 )
+                data = safe_json_response(r, "danbooru.donmai.us")
+                return self._groups_from_post_dict_general(data if isinstance(data, dict) else {})
 
-                try:
-                    data = r.json()
-                except Exception:
-                    return empty_tag_groups()
+            if host in ("gelbooru.com", "xbooru.com", "hypnohub.net"):
+                # Documented DAPI sources: read grouped metadata from their
+                # API, never from display text in the rendered page.
+                return self.documented_dapi_groups_from_url(url, host)
 
-                return {
-                    "artist": data.get("tag_string_artist", "").split(),
-                    "character": data.get("tag_string_character", "").split(),
-                    "copyright": data.get("tag_string_copyright", "").split(),
-                    "general": data.get("tag_string_general", "").split(),
-                    "meta": data.get("tag_string_meta", "").split(),
-                }
-
-            if host == "gelbooru.com":
-                q = parse_qs(urlparse(url).query)
-                post_id = q.get("id", [None])[0]
-                if q.get("s", [""])[0] == "list" and q.get("md5"):
-                    posts = self.gelbooru_dapi_posts({"tags": f"md5:{q['md5'][0]}", "limit": 1})
-                    if posts:
-                        return self.gelbooru_groups_from_post(posts[0])
-                if post_id:
-                    posts = self.gelbooru_dapi_posts({"id": post_id})
-                    if posts:
-                        return self.gelbooru_groups_from_post(posts[0])
-                    html = self.session.get(url, timeout=self.timeout).text
-                    return self.gelbooru_groups_from_html(html)
-
-            if host == "e621.net":
+            if host in ("e621.net", "e926.net"):
+                # e621 post JSON already exposes clean grouped tags. Never parse the
+                # visible HTML sidebar: it contains UI labels/counts such as
+                # ``Uploaded by the artist`` and ``4.2m`` that polluted SQLite.
                 post_id = urlparse(url).path.strip("/").split("/")[-1]
-                data = safe_json_response(self.session.get(
-                    f"https://e621.net/posts/{post_id}.json",
-                    params=self.auth_params(self.site_cfg("e621.net")),
-                    timeout=self.timeout
-                ), "e621")
-                post = data.get("post", {}) if isinstance(data, dict) else {}
-                groups = empty_tag_groups()
-                tag_map = post.get("tags", {}) if isinstance(post, dict) else {}
-                if isinstance(tag_map, dict):
-                    groups["artist"] = tag_map.get("artist", [])
-                    groups["character"] = tag_map.get("character", [])
-                    groups["copyright"] = tag_map.get("copyright", [])
-                    groups["general"] = tag_map.get("general", [])
-                    groups["meta"] = tag_map.get("meta", []) + tag_map.get("species", []) + tag_map.get("invalid", []) + tag_map.get("lore", [])
-                return groups
+                session = self.session_for_host(host)
+                data = safe_json_response(session.get(
+                    f"https://{host}/posts/{post_id}.json",
+                    params=self.auth_params(self.site_cfg(host)),
+                    timeout=self.timeout,
+                    headers=self._e621_api_headers(host),
+                ), host)
+                post = data.get("post", data) if isinstance(data, dict) else {}
+                return self._groups_from_post_dict_general(post)
 
         except Exception:
             pass
@@ -1486,27 +1575,25 @@ class Tagger:
         return []
 
     def rule34us_tags(self, url):
-        post_id = parse_qs(urlparse(url).query).get("id", [None])[0]
-        if not post_id:
-            return []
-        api = "https://rule34.us/index.php"
-        params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "id": post_id}
-        params.update(self.auth_params(self.site_cfg("rule34.us")))
-        session = self.session_for_host("rule34.us")
-        r = session.get(api, params=params, timeout=self.timeout)
+        """Read rule34.us post tags from a concrete page using href values only.
+
+        rule34.us has Gelbooru-like browser search syntax but no confirmed JSON
+        API. Visible tag link text is not metadata because it may include post
+        counters; only ``tags=`` query values are accepted here.
+        """
         try:
-            data = safe_json_response(r, "rule34.us")
+            if not self._is_strict_post_url(url):
+                return []
+            session = self.session_for_host("rule34.us")
+            r = session.get(url, timeout=self.timeout, headers={"Accept": "text/html,application/xhtml+xml,*/*"})
+            if int(getattr(r, "status_code", 0) or 0) >= 400:
+                return []
+            return self.gelbooru_tags_from_html(r.text or "")
         except Exception:
             return []
-        post = None
-        if isinstance(data, list) and data:
-            post = data[0]
-        elif isinstance(data, dict):
-            p = data.get("post")
-            post = p[0] if isinstance(p, list) and p else p if isinstance(p, dict) else None
-        return post.get("tags", "").split() if post else []
 
     def danbooru_tags(self, url):
+        """Read official Danbooru post tags only from its JSON API."""
         parts = urlparse(url).path.strip("/").split("/")
 
         if len(parts) >= 3 and parts[0] == "post" and parts[1] == "show":
@@ -1516,33 +1603,134 @@ class Tagger:
         else:
             post_id = parts[-1]
 
-        r = self.session.get(
+        session = self.session_for_host("danbooru.donmai.us")
+        r = session.get(
             f"https://danbooru.donmai.us/posts/{post_id}.json",
             params=self.auth_params(self.site_cfg("danbooru.donmai.us")),
-            timeout=self.timeout
+            timeout=self.timeout,
+            headers=self._danbooru_api_headers(),
         )
-
-        if r.status_code != 200:
-            raise Exception(f"Danbooru status {r.status_code}: {r.text[:120]}")
-
-        try:
-            data = r.json()
-        except Exception:
-            raise Exception(f"Danbooru non-json: {r.text[:120]}")
-
-        tags = []
-        for field in [
-            "tag_string_general",
-            "tag_string_character",
-            "tag_string_copyright",
-            "tag_string_artist",
-            "tag_string_meta",
-        ]:
-            tags += data.get(field, "").split()
-
-        return unique_keep_order(tags)
+        data = safe_json_response(r, "danbooru.donmai.us")
+        return groups_to_tags(self._groups_from_post_dict_general(data if isinstance(data, dict) else {}))
 
     
+
+    def _danbooru_tag_from_href(self, href):
+        """Return one real Danbooru tag encoded in a tag-search link.
+
+        Restricted post pages may expose visible sidebar tags when the JSON
+        object omits them.  Never read ``a.text`` here: it can include counts,
+        action labels or other UI text.  Only a single ``tags=...`` value from
+        a sidebar link is accepted.
+        """
+        try:
+            query = parse_qs(urlparse(html.unescape(str(href or ""))).query)
+            values = query.get("tags") or []
+        except Exception:
+            return ""
+        if len(values) != 1:
+            return ""
+        raw = html.unescape(str(values[0] or "")).strip()
+        # A tag link names exactly one tag.  Search/filter links such as
+        # ``tags=foo bar`` or ``tags=rating:s`` are not metadata tags.
+        if not raw or len(raw.split()) != 1:
+            return ""
+        tag = normalize_tag(raw)
+        low = tag.lower()
+        if not tag or low.startswith((
+            "rating:", "order:", "sort:", "md5:", "id:", "user:",
+            "status:", "filetype:", "parent:", "source:",
+        )):
+            return ""
+        if any(ch in tag for ch in ("/", "?", "=", "&", "#")):
+            return ""
+        return tag
+
+    def _danbooru_groups_from_confirmed_html(self, html_text):
+        """Extract restricted Danbooru sidebar tags from href values only.
+
+        The caller must already have a concrete post returned by Danbooru's
+        exact MD5 JSON query.  This routine is deliberately unusable as a
+        general HTML-search fallback and therefore cannot apply Cloudflare or
+        login-page text as metadata.
+        """
+        text = str(html_text or "")
+        head = text[:30000].lower()
+        if any(marker in head for marker in (
+            "just a moment", "cf-chl-", "cloudflare",
+            "attention required", "captcha",
+        )):
+            return empty_tag_groups()
+
+        soup = BeautifulSoup(text, "html.parser")
+        groups = empty_tag_groups()
+        group_classes = {
+            "artist": ("tag-type-artist", "category-1", "tag-type-1"),
+            "copyright": ("tag-type-copyright", "category-3", "tag-type-3"),
+            "character": ("tag-type-character", "category-4", "tag-type-4"),
+            "general": ("tag-type-general", "category-0", "tag-type-0"),
+            "meta": ("tag-type-meta", "tag-type-metadata", "category-5", "tag-type-5"),
+        }
+        selectors = [
+            "#tag-list li", "ul#tag-list li", ".tag-list li",
+            "li[class*='tag-type-']", "li[class*='category-']",
+        ]
+        nodes = []
+        seen_nodes = set()
+        for selector in selectors:
+            for node in soup.select(selector):
+                marker = id(node)
+                if marker not in seen_nodes:
+                    seen_nodes.add(marker)
+                    nodes.append(node)
+
+        for node in nodes:
+            cls = " ".join(node.get("class", [])).lower()
+            group = "general"
+            for candidate, needles in group_classes.items():
+                if any(needle in cls for needle in needles):
+                    group = candidate
+                    break
+            # Current Danbooru renders the real tag as ``a.search-tag`` and
+            # the visible post count as a separate sibling.  Prefer that exact
+            # contract; retain href-only compatibility for older page variants.
+            links = node.select("a.search-tag[href*='tags=']")
+            if not links:
+                links = node.select("a[href*='tags=']")
+            for link in links:
+                tag = self._danbooru_tag_from_href(link.get("href", ""))
+                if tag:
+                    groups[group].append(tag)
+
+        for group in groups:
+            groups[group] = unique_keep_order(groups[group])
+        return groups
+
+    def _danbooru_confirmed_html_fallback(self, session, post_id):
+        """Fetch HTML only for an already confirmed restricted Danbooru post."""
+        post_id = str(post_id or "").strip()
+        if not post_id or not post_id.isdigit():
+            return empty_tag_groups()
+        post_url = f"https://danbooru.donmai.us/posts/{post_id}"
+        try:
+            response = self._http_get_cached(
+                session, post_url, timeout=self.timeout,
+                headers={"Accept": "text/html,application/xhtml+xml,*/*"},
+            )
+            if int(getattr(response, "status_code", 0) or 0) >= 400:
+                self.log(f"    danbooru.donmai.us RESTRICTED HTML SKIP: post={post_id} status={response.status_code}")
+                return empty_tag_groups()
+            groups = self._danbooru_groups_from_confirmed_html(response.text or "")
+            tags = groups_to_tags(groups)
+            if tags:
+                self.log(f"    danbooru.donmai.us TAG SOURCE: html_sidebar_href post={post_id} tags={len(tags)}")
+            else:
+                self.log(f"    danbooru.donmai.us RESTRICTED HTML SKIP: post={post_id} no href tags")
+            return groups
+        except Exception as e:
+            self.log(f"    danbooru.donmai.us RESTRICTED HTML ERROR: post={post_id} {type(e).__name__}: {e}")
+            return empty_tag_groups()
+
 
     def _clean_booru_tag_candidate(self, txt="", href=""):
         """Extract a clean tag name from booru sidebar links.
@@ -1563,7 +1751,9 @@ class Tagger:
         out = []
         for t in vals:
             t = html.unescape(str(t)).strip()
-            t = re.sub(r"\s+\d[\d,]*\s*$", "", t).strip()
+            # Sidebar links may include a visible global count: "horse 231k" / "meesh 2.0k".
+            # Strip it before spaces become underscores; the API tag itself is never touched here.
+            t = re.sub(r"(?:\s+|_)\d+(?:[.,]\d+)?[kmb]?\s*$", "", t, flags=re.IGNORECASE).strip()
             t = t.replace(" ", "_")
             if not t or t in {"?", "+", "-", "edit", "wiki", "posts", "post", "login", "remove"}:
                 continue
@@ -1584,6 +1774,7 @@ class Tagger:
             "copyright": "copyright", "copyrights": "copyright", "series": "copyright", "серия": "copyright", "копирайт": "copyright",
             "general": "general", "tag": "general", "tags": "general", "теги": "general", "общие": "general",
             "meta": "meta", "metadata": "meta", "мета": "meta",
+            "species": "species", "вид": "species", "виды": "species",
         }
         return aliases.get(t)
 
@@ -1610,7 +1801,7 @@ class Tagger:
                     continue
 
                 cls = " ".join(node.get("class", [])).lower() if hasattr(node, "get") else ""
-                for key in ("artist", "character", "copyright", "general", "meta"):
+                for key in ("artist", "character", "copyright", "species", "general", "meta"):
                     if key in cls or (key == "meta" and "metadata" in cls):
                         current = key
                         break
@@ -1642,6 +1833,7 @@ class Tagger:
             "general": ["li.tag-type-general a", ".tag-type-general a", "li[class*='general'] a", "a.tag-type-general",
                         # Danbooru: 0 = general
                         "li.category-0 a", ".category-0 a", "li[class*='category-0'] a"],
+            "species": ["li.tag-type-species a", ".tag-type-species a", "li[class*='species'] a", "a.tag-type-species"],
             "meta": ["li.tag-type-metadata a", "li.tag-type-meta a", ".tag-type-metadata a", ".tag-type-meta a", "li[class*='metadata'] a", "li[class*='meta'] a", "a.tag-type-metadata", "a.tag-type-meta",
                      # Danbooru: 5 = meta
                      "li.category-5 a", ".category-5 a", "li[class*='category-5'] a"],
@@ -1702,103 +1894,75 @@ class Tagger:
         return unique_keep_order(out)
 
     def gelbooru_tags_from_html(self, html):
-        """Best-effort Gelbooru tag recovery from HTML.
+        """Dormant compatibility parser: recover only tag values encoded in href.
 
-        This is useful when IQDB points to a Gelbooru post/list page whose post is
-        deleted or hidden from DAPI, but the rendered HTML still contains the tag
-        sidebar or tag search links.
+        Automatic Gelbooru scanning is JSON-only; rule34.us uses this parser
+        only after exact MD5 verification of a concrete HTML post page. It deliberately ignores rendered link text,
+        counters and meta-keywords to avoid interface-text tags in SQLite.
         """
         soup = BeautifulSoup(html or "", "html.parser")
         tags = []
-
         selectors = [
-            "li.tag-type-general a",
-            "li.tag-type-character a",
-            "li.tag-type-copyright a",
-            "li.tag-type-artist a",
-            "li.tag-type-metadata a",
-            "li.tag-type-meta a",
+            "li.tag-type-general a[href*='tags=']",
+            "li.tag-type-character a[href*='tags=']",
+            "li.tag-type-copyright a[href*='tags=']",
+            "li.tag-type-artist a[href*='tags=']",
+            "li.tag-type-metadata a[href*='tags=']",
+            "li.tag-type-meta a[href*='tags=']",
             "ul#tag-list a[href*='tags=']",
             "#tag-list a[href*='tags=']",
             "aside a[href*='tags=']",
             "a[href*='page=post'][href*='tags=']",
         ]
-
         for sel in selectors:
             for a in soup.select(sel):
                 href = a.get("href", "") or ""
-                text = a.get_text(" ", strip=True)
-                candidates = []
-                if text:
-                    candidates.append(text)
                 try:
-                    q = parse_qs(urlparse(href).query)
-                    for raw in q.get("tags", []):
-                        candidates += str(raw).replace("+", " ").split()
+                    for raw in parse_qs(urlparse(href).query).get("tags", []):
+                        for tag in str(raw).replace("+", " ").split():
+                            tag = normalize_tag(tag)
+                            if tag and not tag.startswith(("rating:", "sort:", "md5:")):
+                                tags.append(tag)
                 except Exception:
                     pass
-
-                for t in candidates:
-                    t = str(t).strip()
-                    if not t:
-                        continue
-                    if t in {"?", "+", "-", "edit", "wiki", "posts", "post", "login"}:
-                        continue
-                    if "?" in t or "=" in t or "/" in t:
-                        continue
-                    if t.startswith(("rating:", "sort:", "md5:")):
-                        continue
-                    # Gelbooru sidebar sometimes has counts/actions mixed in.
-                    if re.fullmatch(r"[0-9,]+", t):
-                        continue
-                    tags.append(t)
-
-        if not tags:
-            soup2 = BeautifulSoup(html or "", "html.parser")
-            for meta in soup2.select("meta[name='keywords']"):
-                content = meta.get("content", "")
-                for t in re.split(r"[,\s]+", content):
-                    t = normalize_tag(t)
-                    if t and t.lower() not in {"posts", "post", "all", "gelbooru", "image", "images"}:
-                        tags.append(t)
         return self._filter_recovered_gelbooru_tags(unique_keep_order(tags))
 
     def gelbooru_groups_from_html(self, html):
-        """Recover Gelbooru tag groups from rendered HTML/sidebar."""
+        """Dormant compatibility parser: group Gelbooru href tag values only."""
         soup = BeautifulSoup(html or "", "html.parser")
         groups = empty_tag_groups()
         selectors = {
-            "artist": ["li.tag-type-artist a"],
-            "character": ["li.tag-type-character a"],
-            "copyright": ["li.tag-type-copyright a", "li.tag-type-copyrights a"],
-            "general": ["li.tag-type-general a"],
-            "meta": ["li.tag-type-metadata a", "li.tag-type-meta a"],
+            "artist": ["li.tag-type-artist a[href*='tags=']"],
+            "character": ["li.tag-type-character a[href*='tags=']"],
+            "copyright": ["li.tag-type-copyright a[href*='tags=']", "li.tag-type-copyrights a[href*='tags=']"],
+            "general": ["li.tag-type-general a[href*='tags=']"],
+            "meta": ["li.tag-type-metadata a[href*='tags=']", "li.tag-type-meta a[href*='tags=']"],
         }
         for group, sels in selectors.items():
             for sel in sels:
                 for a in soup.select(sel):
-                    txt = a.get_text(" ", strip=True)
                     href = a.get("href", "") or ""
-                    candidates = []
-                    if txt:
-                        candidates.append(txt)
                     try:
-                        q = parse_qs(urlparse(href).query)
-                        for raw in q.get("tags", []):
-                            candidates += str(raw).replace("+", " ").split()
+                        for raw in parse_qs(urlparse(href).query).get("tags", []):
+                            for tag in str(raw).replace("+", " ").split():
+                                tag = normalize_tag(tag)
+                                if tag and not tag.startswith(("rating:", "sort:", "md5:")):
+                                    groups[group].append(tag)
                     except Exception:
                         pass
-                    for t in candidates:
-                        t = str(t).strip()
-                        if not t or t.lower() in {"?", "+", "-", "edit", "wiki", "posts", "post", "login", "all", "help", "comments", "favorite", "favorites", "random"}:
-                            continue
-                        if "?" in t or "=" in t or "/" in t or re.fullmatch(r"[0-9,]+", t):
-                            continue
-                        if t.startswith(("rating:", "sort:", "md5:")):
-                            continue
-                        groups[group].append(t)
-        for k in groups:
-            groups[k] = unique_keep_order(groups[k])
+        if not groups_to_tags(groups):
+            for a in soup.select("a[href*='tags=']"):
+                href = a.get("href", "") or ""
+                try:
+                    for raw in parse_qs(urlparse(href).query).get("tags", []):
+                        for tag in str(raw).replace("+", " ").split():
+                            tag = normalize_tag(tag)
+                            if tag and not tag.startswith(("rating:", "sort:", "md5:", "page:", "id:")):
+                                groups["general"].append(tag)
+                except Exception:
+                    pass
+        for key in groups:
+            groups[key] = self._filter_recovered_gelbooru_tags(unique_keep_order(groups[key]))
         return groups
 
     def _categorize_tags_via_dapi(self, host, tags):
@@ -1820,9 +1984,9 @@ class Tagger:
         elif host == "rule34.xxx":
             base = "https://api.rule34.xxx/index.php"
             session_host = "rule34.xxx"
-        elif host == "rule34.us":
-            base = "https://rule34.us/index.php"
-            session_host = "rule34.us"
+        elif host in ("xbooru.com", "hypnohub.net"):
+            base = f"https://{host}/index.php"
+            session_host = host
         else:
             groups["general"] = clean
             return groups
@@ -1935,7 +2099,7 @@ class Tagger:
 
     def _categorize_flat_tags(self, source_host, tags):
         source_host = (source_host or "").lower().replace("www.", "")
-        if source_host in ("gelbooru.com", "rule34.xxx", "rule34.us"):
+        if source_host in ("gelbooru.com", "rule34.xxx", "xbooru.com", "hypnohub.net"):
             groups = self._categorize_tags_via_dapi(source_host, tags)
             if groups_to_tags(groups):
                 return groups
@@ -1943,7 +2107,7 @@ class Tagger:
         groups["general"] = unique_keep_order([normalize_tag(t) for t in tags or [] if normalize_tag(t)])
         return groups
 
-    def gelbooru_groups_from_post(self, post):
+    def gelbooru_groups_from_post(self, post, source_host="gelbooru.com"):
         groups = empty_tag_groups()
         if not isinstance(post, dict):
             return groups
@@ -1975,7 +2139,7 @@ class Tagger:
         # page=dapi&s=tag&q=index&names=...
         flat = self.gelbooru_tags_from_post(post)
         if flat:
-            return self._categorize_flat_tags("gelbooru.com", flat)
+            return self._categorize_flat_tags(source_host, flat)
         return groups
 
     def gelbooru_tags_from_post(self, post):
@@ -1988,6 +2152,31 @@ class Tagger:
         if isinstance(value, list):
             return unique_keep_order(value)
         return []
+
+    def documented_dapi_groups_from_url(self, url, host):
+        """Read Gelbooru-family post metadata only from exact JSON DAPI calls."""
+        host = str(host or "").lower().replace("www.", "")
+        if host not in {"gelbooru.com", "xbooru.com", "hypnohub.net"}:
+            return empty_tag_groups()
+        q = parse_qs(urlparse(url).query)
+        post_id = q.get("id", [None])[0]
+        md5_value = q.get("md5", [None])[0]
+        tag_query = q.get("tags", [None])[0]
+        if post_id:
+            lookup = {"id": post_id}
+        elif md5_value:
+            lookup = {"tags": f"md5:{md5_value}", "limit": 1}
+        elif isinstance(tag_query, str) and tag_query.lower().startswith("md5:"):
+            lookup = {"tags": tag_query, "limit": 1}
+        else:
+            return empty_tag_groups()
+        params = {"page": "dapi", "s": "post", "q": "index", "json": "1", **lookup}
+        params.update(self.auth_params(self.site_cfg(host)))
+        r = self.session_for_host(host).get(f"https://{host}/index.php", params=params, timeout=self.timeout)
+        posts = self._posts_from_dapi_response(r, host)
+        if posts:
+            return self.gelbooru_groups_from_post(posts[0], host)
+        return empty_tag_groups()
 
     def gelbooru_dapi_posts(self, params):
         api_params = {
@@ -2019,105 +2208,77 @@ class Tagger:
         return []
 
     def gelbooru_tags(self, url):
+        """Read Gelbooru tags from DAPI only; never scrape visible page text."""
         q = parse_qs(urlparse(url).query)
-
+        post_id = q.get("id", [None])[0]
         if q.get("s", [""])[0] == "list" and q.get("md5"):
             return self.gelbooru_tags_by_md5(q["md5"][0])
-
-        post_id = q.get("id", [None])[0]
         if not post_id:
             return []
-
         posts = self.gelbooru_dapi_posts({"id": post_id})
         if posts:
-            tags = self.gelbooru_tags_from_post(posts[0])
-            if tags:
-                return tags
-
-        # HTML fallback, если DAPI не отдал json
-        html = self.session.get(
-            f"https://gelbooru.com/index.php?page=post&s=view&id={post_id}",
-            params=self.auth_params(self.site_cfg("gelbooru.com")),
-            timeout=self.timeout
-        ).text
-        tags = self.gelbooru_tags_from_html(html)
-        if tags:
-            self._partial_match_found = True
-            self._partial_match_reason = f"Gelbooru HTML recovered tags for deleted/hidden post id={post_id}"
-            self.log(f"  PARTIAL MATCH: recovered {len(tags)} Gelbooru tags from HTML/deleted post")
-        return tags
+            return self._filter_recovered_gelbooru_tags(self.gelbooru_tags_from_post(posts[0]))
+        self.log(f"    gelbooru.com DAPI JSON only: no post id={post_id}; HTML fallback disabled")
+        return []
 
     def gelbooru_tags_by_md5(self, md5):
-        # IQDB часто даёт ссылку вида:
-        # https://gelbooru.com/index.php?page=post&s=list&md5=<hash>
-        # Сначала пробуем DAPI, потом HTML. ВАЖНО: на list-page нельзя
-        # сразу собирать "теги" из навигации, иначе получаются Posts/all.
+        """Read Gelbooru tags only after the documented exact MD5 DAPI lookup."""
         posts = self.gelbooru_dapi_posts({"tags": f"md5:{md5}", "limit": 1})
-        if posts:
-            tags = self._filter_recovered_gelbooru_tags(self.gelbooru_tags_from_post(posts[0]))
+        for post in posts:
+            if not self._verify_builtin_post_md5("gelbooru.com", post, md5):
+                continue
+            tags = self._filter_recovered_gelbooru_tags(self.gelbooru_tags_from_post(post))
             if tags:
                 return tags
-
-            post_id = posts[0].get("id")
-            if post_id:
-                return self.gelbooru_tags(
-                    f"https://gelbooru.com/index.php?page=post&s=view&id={post_id}"
-                )
-
-        # HTML fallback
-        params = {"page": "post", "s": "list", "tags": f"md5:{md5}"}
-        params.update(self.auth_params(self.site_cfg("gelbooru.com")))
-
-        html = self.session.get("https://gelbooru.com/index.php", params=params, timeout=self.timeout).text
-        soup = BeautifulSoup(html, "html.parser")
-
-        # 1) Если list-page содержит ссылку на post view — идём туда.
-        # Там чаще всего лежит настоящий sidebar с тегами.
-        # Ищем настоящий post view id в HTML list/deleted страницы
-        html_match = re.search(r'[?&]id=(\d+)', html)
-        if html_match:
-            post_id = html_match.group(1)
-            self.log(f"  GELBOORU VIEW RECOVER: id={post_id}")
-            tags = self._filter_recovered_gelbooru_tags(self.gelbooru_tags(
-                f"https://gelbooru.com/index.php?page=post&s=view&id={post_id}"
-            ))
-            if tags:
-                return tags
-
-        # 2) Только если post view не помог, пробуем аварийно вытянуть теги
-        # прямо из list/deleted HTML. Мусор типа Posts/all фильтруется.
-        recovered = self._filter_recovered_gelbooru_tags(self.gelbooru_tags_from_html(html))
-        if recovered:
-            self._partial_match_found = True
-            self._partial_match_reason = f"Gelbooru HTML recovered tags from md5 list {md5}"
-            self.log(f"  PARTIAL MATCH: recovered {len(recovered)} Gelbooru tags from md5/list HTML")
-            return recovered
-
-        self.log("  PARTIAL MATCH SKIP: Gelbooru md5/list contained no real tags")
+        self.log("    gelbooru.com DAPI JSON only: no exact API MD5 match; HTML fallback disabled")
         return []
 
 
-    def e621_tags(self, url):
+    def _danbooru_api_headers(self):
+        """Headers for official Danbooru JSON calls.
+
+        Danbooru requests a unique application User-Agent rather than a browser
+        impersonation. Login is included only as a harmless identifier when it
+        is already configured for the site's API.
+        """
+        cfg = self.site_cfg("danbooru.donmai.us")
+        login = str(cfg.get("login") or "").strip() if isinstance(cfg, dict) else ""
+        identity = f"{login}" if login else "local-user"
+        return {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": f"LocalBooru/3.2 ({identity})",
+        }
+
+    def _e621_api_headers(self, host="e621.net"):
+        """Headers required by the e621/e926 JSON API.
+
+        e621 explicitly asks applications to identify themselves and not
+        impersonate a browser. Include the configured login when available.
+        """
+        cfg = self.site_cfg(host)
+        login = str(cfg.get("login") or "").strip() if isinstance(cfg, dict) else ""
+        identity = f"by {login} on e621" if login else "local archive manager"
+        return {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": f"LocalBooru/3.1 ({identity})",
+        }
+
+    def e621_tags(self, url, host="e621.net"):
         post_id = urlparse(url).path.strip("/").split("/")[-1]
-        session = self.session_for_host("e621.net")
+        host = str(host or "e621.net").lower().replace("www.", "")
+        if host not in ("e621.net", "e926.net"):
+            host = "e621.net"
+        session = self.session_for_host(host)
         data = safe_json_response(session.get(
-            f"https://e621.net/posts/{post_id}.json",
-            params=self.auth_params(self.site_cfg("e621.net")),
+            f"https://{host}/posts/{post_id}.json",
+            params=self.auth_params(self.site_cfg(host)),
             timeout=self.timeout,
-            headers={
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip, deflate",
-                "User-Agent": "LocalBooru/3.0 (local archive manager; contact: local-user)",
-            },
-        ), "e621")
-        tags = []
-        post = data.get("post", {}) if isinstance(data, dict) else {}
-        tag_map = post.get("tags", {}) if isinstance(post, dict) else {}
-        if isinstance(tag_map, dict):
-            for group in tag_map.values():
-                if isinstance(group, list):
-                    tags += group
-        return tags
+            headers=self._e621_api_headers(host),
+        ), host)
+        post = data.get("post", data) if isinstance(data, dict) else {}
+        return groups_to_tags(self._groups_from_post_dict_general(post))
 
     def custom_tags_from_url(self, site, url):
         parts = urlparse(url).path.strip("/").split("/")
@@ -2195,7 +2356,8 @@ class Tagger:
         if raw in ("e621", "e926"):
             return "e621"
         if raw in ("hypnohub",):
-            return "hypnohub"
+            # HypnoHub exposes Gelbooru-compatible DAPI, not /posts.json.
+            return "gelbooru"
         if raw in ("szurubooru", "philomena"):
             return raw
 
@@ -2204,12 +2366,10 @@ class Tagger:
             return "e621"
         if "rule34.us" in domain or "konachan" in domain or "yande.re" in domain:
             return "moebooru"
-        if "gelbooru" in domain or "rule34.xxx" in domain or "xbooru" in domain or "safebooru" in domain or "tbib" in domain or "realbooru" in domain:
+        if "gelbooru" in domain or "rule34.xxx" in domain or "xbooru" in domain or "hypnohub" in domain or "safebooru" in domain or "tbib" in domain or "realbooru" in domain:
             return "gelbooru"
         if "danbooru" in domain or "donmai" in domain or "allthefallen" in domain or "lolibooru" in domain or "aibooru" in domain:
             return "danbooru"
-        if "hypnohub" in domain:
-            return "hypnohub"
 
         return "custom"
 
@@ -2311,6 +2471,46 @@ class Tagger:
         auth = self._auth_params_for_site(site)
         host = urlparse(root).netloc.lower().replace("www.", "")
 
+        # Danbooru-style exact MD5 endpoints documented by the sites use the
+        # ``tags=md5:<hash>`` meta-tag. Do not try guessed params such as
+        # ``search[md5]`` or ``md5`` on official Danbooru or ATF: ATF accepts
+        # those requests but can return an unrelated ordinary post, which used
+        # to create repeated MD5 rejects and unsafe HTML recovery attempts.
+        exact_tags_only_hosts = {
+            "danbooru.donmai.us", "donmai.us", "booru.allthefallen.moe",
+        }
+        if host in exact_tags_only_hosts:
+            return [
+                (f"{root}/posts.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
+            ]
+
+        # rule34.us exposes browser search syntax compatible with Gelbooru,
+        # but no confirmed JSON/DAPI endpoint. Do not manufacture API calls.
+        # It is handled later through strict HTML search + explicit MD5 proof.
+        if host == "rule34.us":
+            return []
+
+        # rule34.xxx has a working DAPI API host. Keep its conveyor lane to a
+        # single exact JSON request: the previous generic Gelbooru driver tried
+        # raw hashes/XML/HTML on misses and then performed expensive tag-category
+        # lookups for every hit, making the lane appear frozen for minutes.
+        if host in {"rule34.xxx", "api.rule34.xxx"}:
+            return [
+                ("https://api.rule34.xxx/index.php", {"page": "dapi", "s": "post", "q": "index",
+                                                       "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
+            ]
+
+        # Gelbooru, Xbooru and HypnoHub publish the Gelbooru-compatible DAPI
+        # listing contract with `tags` meta-tags and JSON output. For these
+        # concrete hosts never try guessed raw-hash/custom endpoints, XML
+        # variants, or browser-page recovery after a miss.
+        exact_dapi_only_hosts = {"gelbooru.com", "xbooru.com", "hypnohub.net"}
+        if host in exact_dapi_only_hosts:
+            return [
+                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index",
+                                        "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
+            ]
+
         # Try JSON driver first
         driver = (_SiteDriver.for_engine(engine) or _SiteDriver.for_host(host)) if _SiteDriver else None
         if driver:
@@ -2355,8 +2555,23 @@ class Tagger:
 
     def _groups_from_engine_post(self, site, post, source_url=""):
         engine = self._normalize_engine_type(site)
+        root = self._site_root_from_cfg(site).rstrip("/")
+        host = urlparse(root).netloc.lower().replace("www.", "")
+        if host in {"rule34.xxx", "api.rule34.xxx", "gelbooru.com", "xbooru.com", "hypnohub.net"}:
+            # Flat-tag DAPI responses are intentionally kept flat in the live
+            # exact-search lane. Category recovery may require HTML or many tag
+            # API requests and therefore belongs to the durable background
+            # enrichment worker, never to a source lane that must keep moving.
+            groups = empty_tag_groups()
+            groups["general"] = self.gelbooru_tags_from_post(post)
+            return groups
+        if engine == "e621" or host in {"danbooru.donmai.us", "donmai.us", "booru.allthefallen.moe"}:
+            # These JSON API responses are the only authoritative automatic
+            # metadata source. In particular, ATF HTML previously produced
+            # unrelated/repeated candidates and interface-text tags.
+            return self._groups_from_post_dict_general(post)
         if engine == "gelbooru":
-            groups = self.gelbooru_groups_from_post(post)
+            groups = self.gelbooru_groups_from_post(post, host)
         else:
             groups = self._groups_from_post_dict_general(post)
 
@@ -2394,6 +2609,10 @@ class Tagger:
             host = urlparse(root).netloc.lower()
             if "rule34.us" in host:
                 base = f"{root}/index.php"
+                # rule34.us documents Gelbooru-like browser search but no
+                # structured API. Try the metatag form first and raw hash form
+                # second; both are safe because a concrete result is accepted
+                # only when its remote media bytes hash to the requested MD5.
                 searches = [
                     {"page": "post", "s": "list", "tags": f"md5:{md5}"},
                     {"page": "post", "s": "list", "tags": md5},
@@ -2405,6 +2624,39 @@ class Tagger:
             base = f"{root}/posts"
             searches = [{"tags": f"md5:{md5}"}, {"tags": md5}]
         return base, searches
+
+    def _report_dapi_health_once(self, site, host, session, headers=None):
+        """Probe a documented DAPI host once after its first local MD5 miss.
+
+        Xbooru/HypnoHub may genuinely contain none of the current files. The
+        parser previously printed identical text for that case and for a dead
+        or HTML-only endpoint. A one-request probe makes the distinction visible
+        without accepting any unverified metadata.
+        """
+        if host not in {"xbooru.com", "hypnohub.net"}:
+            return
+        done = getattr(self, "_dapi_health_reported", set())
+        if host in done:
+            return
+        done.add(host)
+        self._dapi_health_reported = done
+        try:
+            params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "limit": 1}
+            params.update(self._auth_params_for_site(site))
+            r = self._atf_get_cached(
+                session, f"https://{host}/index.php", host, params=params,
+                timeout=self.timeout, headers=headers or {}
+            )
+            posts = self._posts_from_dapi_response(r, host)
+            if posts and isinstance(posts[0], dict):
+                pid = posts[0].get("id", "?")
+                self.log(f"    {host} DAPI ENDPOINT ACTIVE: probe post={pid}; local MD5 absent so far")
+            else:
+                status = int(getattr(r, "status_code", 0) or 0)
+                ctype = str(getattr(r, "headers", {}).get("content-type", "") or "").split(";", 1)[0]
+                self.log(f"    {host} DAPI ENDPOINT WARNING: no parseable probe post status={status} content_type={ctype or 'unknown'}")
+        except Exception as e:
+            self.log(f"    {host} DAPI ENDPOINT ERROR: {type(e).__name__}: {e}")
 
     def _engine_html_fallback_by_md5(self, site, md5):
         label = self._site_label(site)
@@ -2491,13 +2743,22 @@ class Tagger:
         host = urlparse(root).netloc.lower().replace("www.", "")
         session = self.session_for_host(host)
         engine = self._normalize_engine_type(site)
+        official_danbooru = host in {"danbooru.donmai.us", "donmai.us"}
+        is_atf = host == "booru.allthefallen.moe" or "allthefallen" in (label or "").lower()
+        is_documented_dapi_exact = host in {"gelbooru.com", "xbooru.com", "hypnohub.net"}
+        # rule34.xxx also has a reliable JSON DAPI endpoint, but unlike Gelbooru
+        # its tag-category endpoint is too expensive for an inline conveyor lane.
+        # Treat MD5 lookup as strict JSON-only and keep returned tags flat/fast.
+        is_rule34xxx_dapi_exact = host in {"rule34.xxx", "api.rule34.xxx"}
+        is_rule34us_html_only = host == "rule34.us"
         headers = {
             "Accept": "application/json, application/xml, text/xml, */*",
-            "User-Agent": "LocalBooru/3.0 (local archive manager)",
+            "User-Agent": "LocalBooru/3.2 (local archive manager)",
         }
+        if official_danbooru:
+            headers.update(self._danbooru_api_headers())
         if engine == "e621":
-            headers["User-Agent"] = "LocalBooru/3.0 (local archive manager; contact: local-user)"
-            headers["Accept-Encoding"] = "gzip, deflate"
+            headers.update(self._e621_api_headers(host))
 
         _rejected_post_ids_this_md5 = set()  # skip post IDs already rejected in this engine_by_md5 call
 
@@ -2515,7 +2776,6 @@ class Tagger:
                     # First try API-level explicit MD5.
                     post_md5 = self._post_md5_value(post)
                     wanted_md5 = (md5 or "").lower()
-                    is_atf = "allthefallen" in (label or "").lower() or "allthefallen" in (host or "").lower()
 
                     # Skip post IDs already rejected by a previous attempt in this call.
                     _pid_str = str(post.get("id", ""))
@@ -2523,10 +2783,36 @@ class Tagger:
                         continue
 
                     # --- MD5 verification ---
-                    # _md5_ok becomes True only when we can confirm this is the right post.
-                    _md5_ok = (post_md5 == wanted_md5)
+                    # Ordinary API posts must expose the requested MD5.  Official
+                    # Danbooru restricted/Gold posts are a special case: when the
+                    # exact ``tags=md5:<hash>`` JSON request returned a concrete
+                    # post_id but hid md5/file_url, the query itself identifies the
+                    # candidate.  Do not reject it as remote=missing.
+                    restricted_danbooru_candidate = bool(
+                        official_danbooru and _pid_str and not post_md5
+                    )
+                    _md5_ok = (post_md5 == wanted_md5) or restricted_danbooru_candidate
+                    if restricted_danbooru_candidate:
+                        self.log(f"    {label} RESTRICTED CANDIDATE: post={_pid_str} remote=hidden exact_md5_query=1")
 
                     if not _md5_ok:
+                        if official_danbooru:
+                            # A different exposed hash is a real mismatch.  HTML
+                            # is not permitted to rescue it.
+                            self.log(f"    {label} JSON MD5 REJECT: post={post.get('id', '?')} remote={post_md5 or 'missing'}")
+                            if _pid_str:
+                                _rejected_post_ids_this_md5.add(_pid_str)
+                            continue
+
+                        if is_documented_dapi_exact or is_rule34xxx_dapi_exact:
+                            # Their exact JSON DAPI lookup is authoritative for automatic
+                            # matching. A result without the requested explicit MD5 is not
+                            # trusted and must never be rescued from visible HTML.
+                            self.log(f"    {label} JSON MD5 REJECT: local={md5} remote={post_md5 or 'missing'}")
+                            if _pid_str:
+                                _rejected_post_ids_this_md5.add(_pid_str)
+                            continue
+
                         # ATF with DIFFERENT md5 echoed back → definitely wrong post, hard reject.
                         # (ATF/Danbooru are the same codebase; for ATF we blacklist the post id
                         #  so it won't be reused for other files in the same session.)
@@ -2588,7 +2874,24 @@ class Tagger:
 
                     groups = self._groups_from_engine_post(site, post, source_url)
                     tags = groups_to_tags(groups) or self._tags_from_post_dict(post)
-                    if not tags and source_url:
+                    if official_danbooru and tags:
+                        self.log(f"    {label} TAG SOURCE: json_api post={_pid_str or '?'} tags={len(tags)}")
+                    elif is_atf and tags:
+                        self.log(f"    {label} TAG SOURCE: json_api_exact_md5 post={_pid_str or '?'} tags={len(tags)}")
+                    elif is_documented_dapi_exact and tags:
+                        self.log(f"    {label} TAG SOURCE: dapi_json_exact_md5 post={_pid_str or '?'} tags={len(tags)}")
+                    elif is_rule34xxx_dapi_exact and tags:
+                        self.log(f"    {label} TAG SOURCE: dapi_json_exact_md5_flat_fast post={_pid_str or '?'} tags={len(tags)}")
+
+                    # Restricted official Danbooru fallback: only after a concrete
+                    # post came from the exact MD5 JSON result and JSON contained no
+                    # tags.  The parser below reads tag names from href query values
+                    # only; visible sidebar text is intentionally ignored.
+                    if official_danbooru and not tags and restricted_danbooru_candidate:
+                        groups = self._danbooru_confirmed_html_fallback(session, _pid_str)
+                        tags = groups_to_tags(groups)
+
+                    if not tags and source_url and not official_danbooru and not is_atf and not is_documented_dapi_exact and not is_rule34xxx_dapi_exact and engine != "e621":
                         try:
                             tags = self.tags_from_url(source_url)
                             groups = self._categorize_flat_tags(host or label, tags)
@@ -2599,6 +2902,33 @@ class Tagger:
 
             except Exception as e:
                 self.log(f"    {label} {engine} API error: {e}")
+
+        # Official e621/e926 never use HTML metadata.  Official Danbooru may
+        # parse HTML only inside the concrete restricted-candidate branch above;
+        # no blind HTML search is allowed after API errors or empty JSON results.
+        if engine == "e621":
+            self.log(f"    {label} JSON only: no exact API match; HTML tag fallback disabled")
+            return [], "", empty_tag_groups()
+        if official_danbooru:
+            self.log(f"    {label} no exact JSON candidate; restricted HTML fallback not allowed")
+            return [], "", empty_tag_groups()
+        if is_atf:
+            self.log(f"    {label} JSON only: no exact API MD5 match; HTML fallback disabled")
+            return [], "", empty_tag_groups()
+        if is_documented_dapi_exact:
+            self._report_dapi_health_once(site, host, session, headers)
+            self.log(f"    {label} DAPI JSON only: no exact API MD5 match; HTML fallback disabled")
+            return [], "", empty_tag_groups()
+        if is_rule34xxx_dapi_exact:
+            self.log(f"    {label} DAPI JSON fast lane: no exact API MD5 match; HTML/category fallback disabled")
+            return [], "", empty_tag_groups()
+        if is_rule34us_html_only:
+            tags, src, groups = self._engine_html_fallback_by_md5(site, md5)
+            if tags:
+                self.log(f"    {label} TAG SOURCE: html_href_exact_md5 tags={len(tags)}")
+                return tags, src, groups
+            self.log(f"    {label} HTML only: no exact MD5-verified post match")
+            return [], "", empty_tag_groups()
 
         # Last chance: engine-generic strict HTML search, still automatic and
         # still exact-MD5 only.
@@ -3357,6 +3687,7 @@ class Tagger:
             "artist": ["tag_string_artist", "tags_artist", "artist_tags"],
             "character": ["tag_string_character", "tags_character", "character_tags"],
             "copyright": ["tag_string_copyright", "tags_copyright", "copyright_tags"],
+            "species": ["tag_string_species", "tags_species", "species_tags"],
             "general": ["tag_string_general", "tags_general", "general_tags"],
             "meta": ["tag_string_meta", "tags_meta", "tags_metadata", "metadata_tags"],
         }
@@ -3382,9 +3713,11 @@ class Tagger:
                 "tags": "general",
                 "meta": "meta",
                 "metadata": "meta",
-                "species": "meta",
-                "invalid": "meta",
-                "lore": "meta",
+                "species": "species",
+                "contributor": "contributor",
+                "contributors": "contributor",
+                "lore": "lore",
+                "invalid": "invalid",
             }
             for key, val in tag_map.items():
                 group = category_map.get(str(key).lower(), "general")
@@ -3531,6 +3864,79 @@ class Tagger:
         # is not proof that the page is a concrete post or that its file matches.
         return ""
 
+    def _html_original_media_url(self, html_text, post_url):
+        """Return a likely original media URL from a concrete HTML post page."""
+        soup = BeautifulSoup(html_text or "", "html.parser")
+        selectors = [
+            "a#image-download-link",
+            "a[href*='/data/original/']",
+            "a[href*='/images/']",
+            "a[href*='/img/']",
+            "source[src]",
+            "video source[src]",
+            "img#image",
+            "img#post-image",
+            "img.image",
+            "meta[property='og:image']",
+            "meta[name='twitter:image']",
+        ]
+        for sel in selectors:
+            el = soup.select_one(sel)
+            if not el:
+                continue
+            value = el.get("href") or el.get("src") or el.get("content")
+            if value:
+                return urljoin(post_url, html.unescape(str(value)))
+        match = re.search(r'''https?://[^"'<>\s]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm)(?:\?[^"'<>\s]*)?''', html_text or "", re.I)
+        return match.group(0) if match else ""
+
+    def _remote_media_md5_matches(self, site_name, media_url, wanted_md5):
+        """Hash a candidate's media bytes when its HTML hides the MD5."""
+        wanted = (wanted_md5 or "").strip().lower()
+        if not media_url or not re.fullmatch(r"[0-9a-f]{32}", wanted):
+            return False
+        try:
+            host = urlparse(media_url).netloc.lower().replace("www.", "") or site_name
+            session = self.session_for_host(host)
+            r = session.get(media_url, timeout=self.timeout, stream=True,
+                            headers={"Accept": "image/*,video/*,application/octet-stream,*/*"})
+            status = int(getattr(r, "status_code", 0) or 0)
+            ctype = str(getattr(r, "headers", {}).get("content-type", "") or "").lower()
+            if status >= 400 or "text/html" in ctype:
+                self.log(f"    {site_name} REMOTE FILE MD5 REJECT: media response status={status} content_type={ctype or 'unknown'}")
+                return False
+            digest = hashlib.md5()
+            if hasattr(r, "iter_content"):
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        digest.update(chunk)
+            else:
+                digest.update(getattr(r, "content", b"") or b"")
+            got = digest.hexdigest().lower()
+            if got == wanted:
+                self.log(f"    {site_name} REMOTE FILE MD5 VERIFIED: media bytes match local hash")
+                return True
+            self.log(f"    {site_name} REMOTE FILE MD5 REJECT: local={wanted} remote={got}")
+        except Exception as e:
+            self.log(f"    {site_name} REMOTE FILE MD5 ERROR: {type(e).__name__}: {e}")
+        return False
+
+    def _verify_html_or_remote_media_md5(self, site_name, html_text, post_url, wanted_md5):
+        """Verify a concrete HTML candidate without trusting search text."""
+        wanted = (wanted_md5 or "").strip().lower()
+        got = self._html_explicit_md5_value(html_text, wanted)
+        if got and got == wanted:
+            return True
+        if site_name == "rule34.us":
+            media_url = self._html_original_media_url(html_text, post_url)
+            if media_url and self._remote_media_md5_matches(site_name, media_url, wanted):
+                return True
+        if got and got != wanted:
+            self.log(f"    {site_name} HTML MD5 REJECT: local={wanted} remote={got}")
+        else:
+            self.log(f"    {site_name} HTML MD5 REJECT: no explicit md5 or verified original media in HTML")
+        return False
+
     def _verify_html_md5(self, site_name, html, wanted_md5):
         wanted = (wanted_md5 or "").strip().lower()
         got = self._html_explicit_md5_value(html, wanted)
@@ -3556,13 +3962,21 @@ class Tagger:
                 timeout=self.timeout,
                 headers={"Accept": "text/html,application/xhtml+xml,*/*"},
             ).text
-            if not self._verify_html_md5(site_name, html, wanted_md5):
+            if not self._verify_html_or_remote_media_md5(site_name, html, url, wanted_md5):
                 return [], "", empty_tag_groups()
-            groups = self.booru_groups_from_html(html)
-            tags = groups_to_tags(groups)
-            if not tags:
-                tags = self.tags_from_url(url)
-                groups = self._categorize_flat_tags(site_name, tags)
+            if site_name == "rule34.us":
+                groups = self.gelbooru_groups_from_html(html)
+                tags = groups_to_tags(groups)
+                if not tags:
+                    tags = self.gelbooru_tags_from_html(html)
+                    groups = empty_tag_groups()
+                    groups["general"] = tags
+            else:
+                groups = self.booru_groups_from_html(html)
+                tags = groups_to_tags(groups)
+                if not tags:
+                    tags = self.tags_from_url(url)
+                    groups = self._categorize_flat_tags(site_name, tags)
             if tags:
                 return tags, url, groups
         except Exception as e:
@@ -3672,108 +4086,37 @@ class Tagger:
         return [], ""
 
     def rule34us_by_md5(self, md5):
-        cfg = self.site_cfg("rule34.us")
-        session = self.session_for_host("rule34.us")
-
-        attempts = [
-            ("rule34.us json", "https://rule34.us/index.php", True),
-            ("rule34.us xml", "https://rule34.us/index.php", False),
-        ]
-
-        for label, api, use_json in attempts:
-            params = {
-                "page": "dapi",
-                "s": "post",
-                "q": "index",
-                "tags": f"md5:{md5}",
-                "limit": 1,
-            }
-            if use_json:
-                params["json"] = "1"
-            params.update(self.auth_params(cfg))
-
-            try:
-                r = session.get(api, params=params, timeout=self.timeout)
-                if r.status_code != 200:
-                    self.log(f"    rule34.us {label} status {r.status_code}")
-                    continue
-
-                posts = self._posts_from_dapi_response(r, "rule34.us")
-                if posts:
-                    p = posts[0]
-                    if not self._verify_builtin_post_md5("rule34.us", p, md5):
-                        continue
-                    tags = self._tags_from_post_dict(p)
-                    post_id = p.get("id")
-                    if tags:
-                        url = f"https://rule34.us/index.php?page=post&s=view&id={post_id}"
-                        groups = self.grouped_tags_from_url(url)
-                        return tags, url, groups
-            except Exception as e:
-                self.log(f"    rule34.us {label} error: {e}")
-
-        tags, src, groups = self._html_search_strict_by_md5("rule34.us", "https://rule34.us/index.php", md5)
-        if tags:
-            return tags, src, groups
-        self.log("    rule34.us HTML fallback skipped: no exact API MD5 confirmation")
-        return [], ""
+        """Compatibility entry point routed through strict verified HTML search."""
+        site = dict(self.site_cfg("rule34.us") or {})
+        site.setdefault("domain", "rule34.us")
+        site.setdefault("type", "rule34us")
+        site.setdefault("login_url", "https://rule34.us")
+        site["enabled"] = True
+        return self.engine_by_md5(site, md5)
 
     def danbooru_by_md5(self, md5):
-        params = {"tags": f"md5:{md5}", "limit": 1}
-        params.update(self.auth_params(self.site_cfg("danbooru.donmai.us")))
-        s = self.session_for_host("danbooru.donmai.us")
-        r = s.get("https://danbooru.donmai.us/posts.json", params=params, timeout=self.timeout)
-
-        if r.status_code != 200:
-            raise Exception(f"Danbooru status {r.status_code}: {r.text[:120]}")
-
-        posts = self._posts_from_dapi_response(r, "danbooru")
-        for p in posts:
-            if not self._verify_builtin_post_md5("danbooru", p, md5):
-                continue
-            groups = self._groups_from_post_dict_general(p)
-            tags = groups_to_tags(groups)
-            if tags:
-                return tags, f"https://danbooru.donmai.us/posts/{p.get('id')}", groups
-        return [], ""
+        """Compatibility entry point routed through the restricted-safe pipeline."""
+        site = dict(self.site_cfg("danbooru.donmai.us") or {})
+        site.setdefault("domain", "danbooru.donmai.us")
+        site.setdefault("type", "danbooru")
+        site.setdefault("login_url", "https://danbooru.donmai.us/session/new")
+        site["enabled"] = True
+        return self.engine_by_md5(site, md5)
 
     def gelbooru_by_md5(self, md5):
-        params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "tags": f"md5:{md5}", "limit": 1}
-        params.update(self.auth_params(self.site_cfg("gelbooru.com")))
-        r = self.session_for_host("gelbooru.com").get("https://gelbooru.com/index.php", params=params, timeout=self.timeout)
-        posts = self._posts_from_dapi_response(r, "gelbooru")
-        if not posts:
-            self.log("    gelbooru HTML fallback skipped: no exact API MD5 confirmation")
-            return [], ""
-        for p in posts:
-            if not self._verify_builtin_post_md5("gelbooru", p, md5):
-                continue
-            post_id = p.get("id")
-            groups = self.gelbooru_groups_from_post(p)
-            if not groups_to_tags(groups):
-                groups = self._groups_from_post_dict_general(p)
-            tags = groups_to_tags(groups) or self._tags_from_post_dict(p)
-            if tags:
-                url = f"https://gelbooru.com/index.php?page=post&s=view&id={post_id}"
-                try:
-                    html_groups = self.grouped_tags_from_url(url)
-                    if groups_to_tags(html_groups):
-                        groups = html_groups
-                        tags = groups_to_tags(groups)
-                except Exception:
-                    pass
-                return tags, url, groups
-        return [], ""
+        """Compatibility entry point routed through the DAPI JSON-only pipeline."""
+        site = dict(self.site_cfg("gelbooru.com") or {})
+        site.setdefault("domain", "gelbooru.com")
+        site.setdefault("type", "gelbooru_html")
+        site.setdefault("login_url", "https://gelbooru.com")
+        site["enabled"] = True
+        return self.engine_by_md5(site, md5)
 
     def e621_by_md5(self, md5):
         """Exact e621 MD5 lookup through the same normalized post parser as all sites."""
         base_params = self.auth_params(self.site_cfg("e621.net"))
         session = self.session_for_host("e621.net")
-        headers = {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip, deflate",
-            "User-Agent": "LocalBooru/3.0 (local archive manager; contact: local-user)",
-        }
+        headers = self._e621_api_headers("e621.net")
 
         attempts = [
             {"tags": f"md5:{md5}", "limit": 1, **base_params},
@@ -3806,24 +4149,48 @@ class Tagger:
         return [], ""
 
     def _load_saucenao_state(self):
+        """Load quota cooldown from SQLite; import the pre-v128 JSON state once."""
         try:
+            from core.services.service_state import get_cooldown, set_cooldown
+            state = get_cooldown(self.settings, "saucenao")
+            if int(state.get("cooldown_until", 0) or 0) > 0:
+                return state
+            # Compatibility migration only: never write live cooldowns to JSON again.
             if self.saucenao_state_file.exists():
                 data = json.loads(self.saucenao_state_file.read_text(encoding="utf-8"))
-                return data if isinstance(data, dict) else {}
+                until = int(float(data.get("cooldown_until", 0) or 0)) if isinstance(data, dict) else 0
+                if until > 0:
+                    set_cooldown(self.settings, "saucenao", until, reason=str(data.get("reason") or "legacy_json_import"))
+                    try:
+                        self.saucenao_state_file.rename(self.saucenao_state_file.with_suffix(".json.migrated.bak"))
+                    except Exception:
+                        pass
+                    return get_cooldown(self.settings, "saucenao")
+            return state
         except Exception:
-            pass
-        return {}
+            return {"cooldown_until": 0, "reason": "", "updated_at": 0}
 
     def _save_saucenao_state(self, data):
         try:
-            self.saucenao_state_file.parent.mkdir(parents=True, exist_ok=True)
-            self.saucenao_state_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            from core.services.service_state import set_cooldown
+            set_cooldown(self.settings, "saucenao", int(float(data.get("cooldown_until", 0) or 0)), reason=str(data.get("reason") or ""))
         except Exception:
             pass
 
     def _saucenao_cooldown_left(self):
         until = float(self._load_saucenao_state().get("cooldown_until", 0) or 0)
         return max(0, int(until - time.time()))
+
+    def _saucenao_cooldown_until(self):
+        return int(float(self._load_saucenao_state().get("cooldown_until", 0) or 0))
+
+    def _defer_saucenao_retry(self, reason="limit"):
+        self._saucenao_deferred = True
+        self._saucenao_defer_reason = str(reason or "limit")
+        self._saucenao_retry_after = max(int(time.time()) + 1, self._saucenao_cooldown_until())
+
+    def saucenao_retry_after_epoch(self):
+        return int(self._saucenao_retry_after or self._saucenao_cooldown_until() or time.time() + 60)
 
     def _set_saucenao_cooldown(self, reason="limit"):
         seconds = int(float(self.settings.get("saucenao_cooldown_seconds", 3600) or 3600))
@@ -3838,6 +4205,7 @@ class Tagger:
         left = self._saucenao_cooldown_left()
         if left > 0:
             self.log(f"  SAUCENAO COOLDOWN ACTIVE: {left//60}m {left%60}s left")
+            self._defer_saucenao_retry("cooldown_active")
             return []
 
         url = "https://saucenao.com/search.php"
@@ -3854,6 +4222,7 @@ class Tagger:
         if r.status_code == 429:
             self.log("  SAUCENAO 429: API limit reached")
             self._set_saucenao_cooldown("429")
+            self._defer_saucenao_retry("429")
             return []
 
         if r.status_code >= 500:
@@ -3880,6 +4249,9 @@ class Tagger:
             try:
                 if int(short_rem) <= 0 or int(long_rem) <= 0:
                     self._set_saucenao_cooldown("api_limit")
+                    # Results from this final allowed request are still usable.
+                    # If none produce tags, process_image defers this file instead of writing NO_MATCH.
+                    self._defer_saucenao_retry("api_limit")
             except Exception:
                 pass
 
@@ -4406,17 +4778,80 @@ class Tagger:
         except Exception:
             return False
 
-    def process_image(self, img):
-        out_txt = out_sources = out_json = Path("__disabled_sidecar__")
-        out_nomatch = img.with_suffix(".nomatch")
+    def merge_conveyor_match_into_existing(self, archived_media_path, original_img, all_tags, sources, all_groups):
+        """Merge newly found source metadata into an existing FOUND archive row.
+
+        A newly enabled site must enrich an already archived file without copying
+        the same media into a new session folder on every incremental rescan.
+        """
+        archived_media_path = Path(archived_media_path)
+        original_img = Path(original_img)
+        all_tags = unique_keep_order(filter_numeric_tags(list(all_tags or []), self.settings.get("ignore_numeric_tags")))
+        if not all_tags or not archived_media_path.exists():
+            return "nomatch"
+        tag_groups = merge_tag_groups(list(all_groups or []))
+        if not groups_to_tags(tag_groups):
+            tag_groups["general"] = all_tags
+        source_list = [str(x) for x in (sources or []) if str(x).strip()]
+        try:
+            from core.import_pipeline import register_media_import
+            _merge_result = register_media_import(
+                self.settings, archived_media_path, tags=all_tags, groups=tag_groups,
+                sources=source_list, status="found", original_path=str(original_img),
+                origin="tagger", merge_existing=True, generate_thumbnail=False,
+            )
+            _added = int((_merge_result or {}).get("source_added", 0) or 0)
+            if _added:
+                self.log(f"  EXACT MD5 MERGE: existing_media={archived_media_path} source_added={_added} no_physical_copy_created=1")
+        except Exception as e:
+            self.log(f"  EXISTING METADATA MERGE ERROR: {e}")
+            return "error"
+        self.log(f"  TAGS MERGED INTO EXISTING FOUND: {len(all_tags)}")
+        return "tagged"
+
+    def save_conveyor_match(self, img, all_tags, sources, all_groups):
+        """Commit an aggregate exact-MD5 match collected by site workers.
+
+        The asynchronous site conveyor keeps network calls parallel per host,
+        but persistence remains serialized through this method.  This prevents
+        concurrent SQLite writes and preserves the same result format used by
+        the ordinary single-file path.
+        """
+        img = Path(img)
+        all_tags = unique_keep_order(filter_numeric_tags(list(all_tags or []), self.settings.get("ignore_numeric_tags")))
+        if not all_tags:
+            return "nomatch"
+        tag_groups = merge_tag_groups(list(all_groups or []))
+        if not groups_to_tags(tag_groups):
+            tag_groups["general"] = all_tags
+        source_text = "\n".join(str(x) for x in (sources or []) if str(x).strip())
+        archived_media = copy_result_files(self.settings, img, "tagged")
+        _import_result = save_found_metadata(self.settings, img, all_tags, source_text, tag_groups, status="tagged", archived_media_path=archived_media)
+        if isinstance(_import_result, dict) and int(_import_result.get("source_added", 0) or 0):
+            self.log(f"  EXACT MD5 MERGE: existing_media={_import_result.get('canonical_path','')} source_added={int(_import_result.get('source_added',0))} no_physical_copy_created=1")
+        remove_nomatch(img, settings=self.settings)
+        cleanup_archived_result(self.settings, img, ("nomatch", "partial"))
+        self.log(f"  TAGS: {len(all_tags)}")
+        return "tagged"
+
+    def process_image(self, img, persist_lock=None):
+        """Search one file and serialize only final persistence when a lock is supplied.
+
+        Reverse-search network operations can take minutes. In conveyor mode they
+        must not hold the SQLite/file-output lock or exact-MD5 lanes will appear
+        frozen while SauceNAO/IQDB/Ascii2D is waiting.
+        """
+        def _persist_guard():
+            return persist_lock if persist_lock is not None else nullcontext()
+        self._reset_network_state()
+        self._saucenao_deferred = False
+        self._saucenao_defer_reason = ""
+        self._saucenao_retry_after = 0
 
         if self.settings.get("skip_existing") and not self.settings.get("retry_nomatch"):
             already = output_processed_status(self.settings, img)
             if already:
                 self.log(f"SKIP ARCHIVED ({already}): {img.name}")
-                return "skip"
-            if out_txt.exists() and out_txt.stat().st_size > 0:
-                self.log(f"SKIP: {img.name}")
                 return "skip"
 
         self.log(f"SEARCH: {img.name}")
@@ -4463,6 +4898,8 @@ class Tagger:
             return "skip"
 
         if self.settings.get("enable_saucenao") and not all_tags:
+            _fallback_started = time.monotonic()
+            self.report_activity("SauceNAO", img, "Обратный поиск")
             try:
                 sauce_urls = self.saucenao_urls(search_img)
             except Exception as e:
@@ -4473,7 +4910,7 @@ class Tagger:
                 try:
                     self.log(f"  SAUCE MATCH: {sim:.2f}% {url}")
                     tags = self.tags_from_url(url)
-                    groups = self.grouped_tags_from_url(url)
+                    groups = self.groups_or_defer_background(url, tags)
 
                     if tags:
                         all_tags += tags
@@ -4484,18 +4921,23 @@ class Tagger:
 
                 except Exception as e:
                     self.log(f"  SAUCE URL ERROR: {url} {e}")
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: SauceNAO path took {_fallback_elapsed:.1f}s for {img.name}")
 
         if self.cancelled():
             self.log("  CANCELLED")
             return "skip"
 
-        if self.settings.get("enable_iqdb") and not all_tags:
+        if self.settings.get("enable_iqdb") and not all_tags and not self.settings.get("_saucenao_retry_only", False):
+            _fallback_started = time.monotonic()
+            self.report_activity("IQDB", img, "Обратный поиск")
             self.log("  IQDB START")
             for url, sim in self.iqdb_urls(search_img):
                 try:
                     self.log(f"  IQDB MATCH: {sim:.2f}% {url}")
                     tags = self.tags_from_url(url)
-                    groups = self.grouped_tags_from_url(url)
+                    groups = self.groups_or_defer_background(url, tags)
 
                     if tags:
                         all_tags += tags
@@ -4514,12 +4956,17 @@ class Tagger:
 
                 except Exception as e:
                     self.log(f"  IQDB URL ERROR: {url} {e}")
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: IQDB path took {_fallback_elapsed:.1f}s for {img.name}")
 
         if self.cancelled():
             self.log("  CANCELLED")
             return "skip"
 
-        if self.settings.get("enable_ascii2d") and not all_tags:
+        if self.settings.get("enable_ascii2d") and not all_tags and not self.settings.get("_saucenao_retry_only", False):
+            _fallback_started = time.monotonic()
+            self.report_activity("Ascii2D", img, "Обратный поиск")
             self.log("  ASCII2D START")
 
             for url, sim in self.ascii2d_urls(search_img):
@@ -4527,7 +4974,7 @@ class Tagger:
                     self.log(f"  ASCII2D MATCH: {url}")
 
                     tags = self.tags_from_url(url)
-                    groups = self.grouped_tags_from_url(url)
+                    groups = self.groups_or_defer_background(url, tags)
 
                     if tags:
                         all_tags += tags
@@ -4541,8 +4988,17 @@ class Tagger:
 
                 except Exception as e:
                     self.log(f"  ASCII2D URL ERROR: {url} {e}")
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: Ascii2D path took {_fallback_elapsed:.1f}s for {img.name}")
 
         all_tags = unique_keep_order(filter_numeric_tags(all_tags, self.settings.get("ignore_numeric_tags")))
+
+        # STOP is a hard boundary for persistence: an in-flight HTTP response may
+        # return after cancellation, but it must not write TAGGED/NO_MATCH state.
+        if self.cancelled():
+            self.log("  CANCELLED BEFORE SAVE")
+            return "skip"
 
         if all_tags:
             tag_groups = merge_tag_groups(all_groups)
@@ -4554,34 +5010,45 @@ class Tagger:
             if self._partial_match_found:
                 source_text = source_text + ("\n" if source_text else "") + f"PARTIAL: {self._partial_match_reason}"
 
-            # Write tags/source/json directly into Local_Booru_Output. Do not create
-            # .tags.txt/.sources.txt beside originals anymore.
-            write_sidecar_tags(self.settings, img, all_tags, source_text, tag_groups, status=result_status)
+            # Network lookups above intentionally run without the conveyor persist
+            # lock.  Only the SQLite/output mutation below is serialized.
+            with _persist_guard():
+                # Write tags/source/json directly into Local_Booru_Output. Do not create
+                # .tags.txt/.sources.txt beside originals anymore.
+                archived_media = copy_result_files(self.settings, img, result_status)
+                _import_result = save_found_metadata(self.settings, img, all_tags, source_text, tag_groups, status=result_status, archived_media_path=archived_media)
+                if isinstance(_import_result, dict) and int(_import_result.get("source_added", 0) or 0):
+                    self.log(f"  EXACT MD5 MERGE: existing_media={_import_result.get('canonical_path','')} source_added={int(_import_result.get('source_added',0))} no_physical_copy_created=1")
 
-            if out_nomatch.exists():
-                try:
-                    out_nomatch.unlink()
-                except Exception:
-                    pass
-            remove_nomatch(img)
+                remove_nomatch(img, settings=self.settings)
 
-            copy_result_files(self.settings, img, result_status)
-            cleanup_archived_result(self.settings, img, ("nomatch",))
+                cleanup_archived_result(self.settings, img, ("nomatch",))
             if self._partial_match_found:
                 self.log(f"  PARTIAL TAGS: {len(all_tags)}")
                 return "partial"
             self.log(f"  TAGS: {len(all_tags)}")
             return "tagged"
         else:
-            for p in [out_txt, out_sources, out_json]:
-                if p.exists():
-                    p.unlink()
-            # NO_MATCH is now represented by output/no_match + nomatch_cache, not by
-            # marker files next to the original source. Keep old .nomatch disabled.
-            upsert_nomatch(img)
-            cleanup_archived_result(self.settings, img, ("tagged", "partial"))
-            copy_result_files(self.settings, img, "nomatch")
-            self.log("  NO MATCH - no txt created")
+            if self._saucenao_deferred and self.settings.get("enable_saucenao") and self.settings.get("saucenao_api_key"):
+                retry_at = self.saucenao_retry_after_epoch()
+                wait_for = max(0, retry_at - int(time.time()))
+                self.log(
+                    "  SAUCENAO DEFERRED: API cooldown active; file NOT sent to NO_MATCH; "
+                    f"retry in {wait_for//60}m {wait_for%60}s"
+                )
+                return "retry_saucenao"
+            if self.transient_network_failed():
+                self.log(
+                    "  NETWORK TEMPORARY FAILURE: lookup was incomplete "
+                    f"({self.network_failure_summary()}); file deferred, NOT sent to NO_MATCH"
+                )
+                return "retry_network"
+            with _persist_guard():
+                # NO_MATCH is durable SQLite state plus a disposable managed output copy.
+                cleanup_archived_result(self.settings, img, ("tagged", "partial"))
+                archived_nomatch = copy_result_files(self.settings, img, "nomatch")
+                upsert_nomatch(img, settings=self.settings, media_path=archived_nomatch)
+            self.log("  NO MATCH SAVED TO SQLITE")
             return "nomatch"
 
 

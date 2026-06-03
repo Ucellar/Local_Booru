@@ -30,6 +30,20 @@ def _cache_root():
     root.mkdir(parents=True, exist_ok=True)
     return root
 
+def _thumb_source_marker(out: Path) -> Path:
+    return out.with_suffix(out.suffix + ".src")
+
+def _remember_thumb_source(out: Path, source: Path) -> None:
+    """Persist reverse lookup for targeted cache deletion on permanent media purge."""
+    try:
+        marker = _thumb_source_marker(out)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_suffix(marker.suffix + ".tmp")
+        tmp.write_text(str(source.resolve()), encoding="utf-8")
+        tmp.replace(marker)
+    except Exception:
+        pass
+
 def _cache_name(path, width, height):
     p = Path(path)
     try:
@@ -99,12 +113,20 @@ def safe_thumbnail_path(path, width=256, height=256, quality=94):
     out = _cache_name(p, width, height)
     try:
         if out.exists() and out.stat().st_size > 0:
+            try:
+                out.touch()  # last-used marker for shutdown cache trimming
+            except Exception:
+                pass
+            _remember_thumb_source(out, p)
             return str(out)
     except Exception:
         pass
 
     if p.suffix.lower() in {".mp4", ".webm", ".mkv", ".mov", ".avi"}:
-        return _video_thumbnail_path(p, out, width, height, quality)
+        made = _video_thumbnail_path(p, out, width, height, quality)
+        if made:
+            _remember_thumb_source(out, p)
+        return made
 
     try:
         from PIL import Image, ImageOps
@@ -116,6 +138,7 @@ def safe_thumbnail_path(path, width=256, height=256, quality=94):
             im.thumbnail((width, height), Image.Resampling.LANCZOS)
             out.parent.mkdir(parents=True, exist_ok=True)
             im.save(out, "JPEG", quality=quality, optimize=True)
+            _remember_thumb_source(out, p)
             return str(out)
     except Exception:
         return ""

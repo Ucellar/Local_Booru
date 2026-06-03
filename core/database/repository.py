@@ -4,21 +4,35 @@ from collections import Counter, defaultdict
 from pathlib import Path
 import re
 import time
-from core.tag_utils import normalize_tag
+from functools import wraps
+from core.performance import timed as _perf_timed
+from core.tag_utils import normalize_tag, should_hide_tag
 from .connection import db
+
+
+def _measure(operation):
+    """Record only slow repository calls; never changes SQL semantics."""
+    def deco(fn):
+        @wraps(fn)
+        def wrapped(settings, *args, **kwargs):
+            detail = {}
+            if operation.startswith("sql.gallery"):
+                detail = {"source": str(kwargs.get("source", args[1] if len(args) > 1 else "all")), "bucket": str(kwargs.get("bucket", args[2] if len(args) > 2 else "all"))}
+            with _perf_timed(operation, settings, **detail):
+                return fn(settings, *args, **kwargs)
+        return wrapped
+    return deco
 
 
 _TOKEN_RE = re.compile(r'"([^"]+)"|(\S+)')
 
 def _parse_query(query):
-    """Booru-style query parser.
+    """Small booru-style parser.
 
-    Plain words are required tags, minus-prefixed words are excluded tags.
-    This intentionally keeps search human/simple: ``abc -bad_tag`` instead of
-    forcing ``artist:abc -tag:bad_tag``.  Quoted tags are supported for odd
-    legacy tag names, while normal booru tags still use underscores.
+    Space means intersection, while ``a/b`` is a Local Booru extension that
+    returns either tag in one result set. Minus still excludes a tag/group.
     """
-    plus, minus = [], []
+    plus_groups, minus_groups = [], []
     text = (query or "").replace(",", " ")
     for m in _TOKEN_RE.finditer(text):
         raw = (m.group(1) or m.group(2) or "").strip()
@@ -27,21 +41,16 @@ def _parse_query(query):
         neg = raw.startswith("-") and len(raw) > 1
         if neg:
             raw = raw[1:].strip()
-        # User-facing shorthand: tag:abc is accepted, but not required.
         if raw.lower().startswith("tag:"):
             raw = raw[4:]
-        norm = normalize_tag(raw)
-        if not norm:
-            continue
-        (minus if neg else plus).append(norm)
-    # Preserve order, remove duplicates.
-    def _uniq(seq):
-        seen=set(); out=[]
-        for x in seq:
-            if x not in seen:
-                seen.add(x); out.append(x)
-        return out
-    return _uniq(plus), _uniq(minus)
+        options = []
+        for part in raw.split("/"):
+            norm = normalize_tag(part)
+            if norm and norm not in options:
+                options.append(norm)
+        if options:
+            (minus_groups if neg else plus_groups).append(options)
+    return plus_groups, minus_groups
 
 
 def _bucket_clause(bucket):
@@ -53,31 +62,40 @@ def _bucket_clause(bucket):
         return "i.bucket IN ('no_match','downloaded_no_match')", []
     if bucket == "downloaded":
         return "i.bucket LIKE 'downloaded%'", []
+    if bucket == "inbox":
+        return "i.lifecycle='inbox'", []
+    if bucket == "archive":
+        return "COALESCE(i.lifecycle,'archive')='archive'", []
+    if bucket == "trash":
+        return "i.lifecycle='trash'", []
     return "i.bucket=?", [bucket]
 
 
 def _base_search_sql(query="", source="all", bucket="all", count=False):
     plus, minus = _parse_query(query)
     joins = []
-    where = ["i.deleted=0"]
+    # Trash is intentionally viewable; every other gallery section hides deleted rows.
+    where = ["i.deleted=1" if bucket == "trash" else "i.deleted=0"]
     args = []
 
-    # Intersection of positive tags: one EXISTS per tag. SQLite uses idx_image_tags_tag.
-    for tag in plus:
-        where.append("""EXISTS (
+    # Space = intersection. Each slash-group accepts any one option.
+    for options in plus:
+        ph = ",".join(["?"] * len(options))
+        where.append(f"""EXISTS (
             SELECT 1 FROM image_tags it
             JOIN tags t ON t.id=it.tag_id
-            WHERE it.image_id=i.id AND t.normalized_name=?
+            WHERE it.image_id=i.id AND t.normalized_name IN ({ph})
         )""")
-        args.append(tag)
+        args.extend(options)
 
-    for tag in minus:
-        where.append("""NOT EXISTS (
+    for options in minus:
+        ph = ",".join(["?"] * len(options))
+        where.append(f"""NOT EXISTS (
             SELECT 1 FROM image_tags it
             JOIN tags t ON t.id=it.tag_id
-            WHERE it.image_id=i.id AND t.normalized_name=?
+            WHERE it.image_id=i.id AND t.normalized_name IN ({ph})
         )""")
-        args.append(tag)
+        args.extend(options)
 
     if source and source != "all":
         where.append("""EXISTS (
@@ -98,6 +116,7 @@ def _base_search_sql(query="", source="all", bucket="all", count=False):
     return sql, args
 
 
+@_measure("sql.gallery.count")
 def count_search_items(settings, query="", source="all", bucket="all",
                        extra_where=None, extra_params=None):
     sql, args = _base_search_sql(query, source, bucket, count=True)
@@ -109,6 +128,7 @@ def count_search_items(settings, query="", source="all", bucket="all",
         return int(con.execute(sql, args).fetchone()["c"] or 0)
 
 
+@_measure("sql.gallery.page")
 def search_items(settings, query="", source="all", bucket="all", limit=None, offset=0, order="path",
                  extra_where=None, extra_params=None):
     sql, args = _base_search_sql(query, source, bucket, count=False)
@@ -147,9 +167,13 @@ def _item_from_row(row, load_details=False):
         "width": int(row["width"] or 0),
         "height": int(row["height"] or 0),
         "hash_md5": row["hash_md5"],
+        "lifecycle": row["lifecycle"] if "lifecycle" in row.keys() else "archive",
+        "favorite": bool(row["favorite"]) if "favorite" in row.keys() else False,
+        "trashed_at": int(row["trashed_at"] or 0) if "trashed_at" in row.keys() else 0,
     }
 
 
+@_measure("sql.gallery.enrich")
 def enrich_items(settings, items):
     if not items:
         return items
@@ -177,6 +201,8 @@ def enrich_items(settings, items):
                 if item is None:
                     continue
                 cat = r["category"] or "general"
+                if should_hide_tag(r["name"], cat, settings):
+                    continue
                 item.setdefault("tag_groups", {}).setdefault(cat, []).append(r["name"])
                 item.setdefault("tags", []).append(r["name"])
             src_rows = con.execute(f"""
@@ -194,15 +220,19 @@ def enrich_items(settings, items):
     return items
 
 
+@_measure("sql.gallery.source_counts")
 def counts(settings):
     with db(settings, readonly=True) as con:
-        tc = {r["name"]: int(r["c"]) for r in con.execute("""
-            SELECT t.name, COUNT(*) c FROM tags t
+        tc = {}
+        for r in con.execute("""
+            SELECT t.name, t.category, COUNT(*) c FROM tags t
             JOIN image_tags it ON it.tag_id=t.id
             JOIN images i ON i.id=it.image_id
             WHERE i.deleted=0
             GROUP BY t.id ORDER BY c DESC, t.name COLLATE NOCASE
-        """)}
+        """).fetchall():
+            if not should_hide_tag(r["name"], r["category"] or "general", settings):
+                tc[r["name"]] = int(r["c"])
         sc = {r["host"]: int(r["c"]) for r in con.execute("""
             SELECT s.host, COUNT(DISTINCT i.id) c FROM sources s
             JOIN image_sources isrc ON isrc.source_id=s.id
@@ -213,6 +243,20 @@ def counts(settings):
     return tc, sc, {}
 
 
+@_measure("sql.gallery.unique_source_count")
+def source_unique_image_count(settings):
+    """Number of unique non-deleted gallery files with at least one source."""
+    with db(settings, readonly=True) as con:
+        row = con.execute("""
+            SELECT COUNT(DISTINCT i.id) AS c
+            FROM images i
+            JOIN image_sources isrc ON isrc.image_id=i.id
+            WHERE i.deleted=0
+        """).fetchone()
+    return int((row["c"] if row else 0) or 0)
+
+
+@_measure("sql.tags.group_counts")
 def tag_group_counts(settings):
     with db(settings, readonly=True) as con:
         out = defaultdict(Counter)
@@ -229,12 +273,14 @@ def tag_group_counts(settings):
         """).fetchall()
     for r in rows:
         name = normalize_tag(r["name"])
-        if not name:
+        category = r["category"] or "general"
+        if not name or should_hide_tag(r["name"], category, settings):
             continue
-        out[r["category"] or "general"][name] = int(r["c"])
+        out[category][name] = int(r["c"])
     return out
 
 
+@_measure("sql.tags.candidates")
 def candidate_tags(settings, scope="all"):
     with db(settings, readonly=True) as con:
         where, args = _scope_where(scope)
@@ -250,11 +296,12 @@ def candidate_tags(settings, scope="all"):
         out = []
         for r in con.execute(sql, args).fetchall():
             tag = normalize_tag(r["name"])
-            if tag:
+            if tag and not should_hide_tag(r["name"], "general", settings):
                 out.append(tag)
         return out
 
 
+@_measure("sql.sources.candidates")
 def candidate_sources(settings, scope="all"):
     with db(settings, readonly=True) as con:
         where, args = _scope_where(scope)
@@ -288,7 +335,7 @@ def find_images_by_tag(settings, tag, scope="all", limit=None):
     norm = normalize_tag(tag)
     where, args = _scope_where(scope)
     sql = """
-        SELECT DISTINCT i.id, i.path, i.file_name, i.bucket FROM images i
+        SELECT DISTINCT i.id, i.path, i.file_name, i.bucket, i.size_bytes FROM images i
         JOIN image_tags it ON it.image_id=i.id
         JOIN tags t ON t.id=it.tag_id
         WHERE i.deleted=0 AND t.normalized_name=?
@@ -310,7 +357,7 @@ def find_images_by_source(settings, source_text, scope="all", limit=None):
     q = str(source_text or "").strip().lower()
     where, args = _scope_where(scope)
     sql = """
-        SELECT DISTINCT i.id, i.path, i.file_name, i.bucket FROM images i
+        SELECT DISTINCT i.id, i.path, i.file_name, i.bucket, i.size_bytes FROM images i
         JOIN image_sources isrc ON isrc.image_id=i.id
         JOIN sources s ON s.id=isrc.source_id
         WHERE i.deleted=0 AND (LOWER(s.url) = ? OR LOWER(s.host) = ?)
@@ -332,7 +379,7 @@ def find_images_by_buckets(settings, buckets, limit=None):
     if not values:
         return []
     ph = ",".join(["?"] * len(values))
-    sql = f"SELECT DISTINCT id, path, file_name, bucket FROM images WHERE deleted=0 AND bucket IN ({ph}) ORDER BY path COLLATE NOCASE"
+    sql = f"SELECT DISTINCT id, path, file_name, bucket, size_bytes FROM images WHERE deleted=0 AND bucket IN ({ph}) ORDER BY path COLLATE NOCASE"
     params = list(values)
     if limit:
         sql += " LIMIT ?"
@@ -343,8 +390,20 @@ def find_images_by_buckets(settings, buckets, limit=None):
 
 def delete_images(settings, image_rows, delete_files=True, reason="delete", tag_or_source=""):
     from core.deleted_registry import mark_deleted
+    from core.source_protection import require_managed_media_mutation
+    from core.services.media_storage_service import unlink_managed, delete_bucket_artifacts
     deleted_files = errors = 0
     rows = list(image_rows or [])
+    protected_source_skipped = 0
+    if delete_files:
+        allowed_rows = []
+        for row in rows:
+            p = Path(str(row.get("path") or ""))
+            if require_managed_media_mutation(settings, p, "repository.delete_images"):
+                allowed_rows.append(row)
+            else:
+                protected_source_skipped += 1
+        rows = allowed_rows
     ids = [int(r["id"]) for r in rows if r.get("id") is not None]
     paths = [Path(r["path"]) for r in rows if r.get("path")]
 
@@ -353,14 +412,14 @@ def delete_images(settings, image_rows, delete_files=True, reason="delete", tag_
             try:
                 if p.exists() and p.is_file():
                     try:
-                        mark_deleted(p, reason=reason)
+                        mark_deleted(p, reason=reason, settings=settings, manual_delete=True)
                     except Exception:
                         pass
-                    p.unlink()
-                    deleted_files += 1
+                    if unlink_managed(settings, p, operation="repository.delete_images"):
+                        deleted_files += 1
             except Exception:
                 errors += 1
-            _delete_side_artifacts(p)
+            delete_bucket_artifacts(settings, p, operation="repository.delete_side_artifacts")
 
     with db(settings, write=True) as con:
         now = int(time.time())
@@ -376,7 +435,7 @@ def delete_images(settings, image_rows, delete_files=True, reason="delete", tag_
         for p in paths:
             con.execute("DELETE FROM processed_files WHERE media_path=?", (str(p),))
         cleanup_orphans(con)
-    return {"deleted_files": deleted_files, "errors": errors, "deleted_records": len(ids)}
+    return {"deleted_files": deleted_files, "errors": errors, "deleted_records": len(ids), "protected_source_skipped": protected_source_skipped}
 
 
 def cleanup_orphans(con):
@@ -384,14 +443,3 @@ def cleanup_orphans(con):
     con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
 
 
-def _delete_side_artifacts(p: Path):
-    try:
-        bucket = p.parent.parent if p.parent.name == "media" else p.parent
-        for sub in ("cache", "searched", "tags", "source"):
-            d = bucket / sub
-            if d.exists():
-                for f in d.glob(p.stem + "*"):
-                    if f.is_file():
-                        f.unlink(missing_ok=True)
-    except Exception:
-        pass

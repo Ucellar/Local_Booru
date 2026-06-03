@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
@@ -30,6 +31,7 @@ class SubWorker(QThread):
     progress   = Signal(int)
     finished   = Signal(int)
     file_ready = Signal(str)   # emitted after each file is downloaded + tagged
+    plan_required = Signal(dict)  # asks UI before a very large download
 
     def __init__(self, sub: dict, settings: dict, run_mode: str = "all"):
         super().__init__()
@@ -37,9 +39,24 @@ class SubWorker(QThread):
         self.settings = settings
         self.run_mode = run_mode
         self._stop_requested = False
+        self._plan_event = threading.Event()
+        self._plan_allowed = False
 
     def request_stop(self):
         self._stop_requested = True
+        self._plan_allowed = False
+        self._plan_event.set()
+
+    def set_plan_decision(self, allowed: bool):
+        self._plan_allowed = bool(allowed)
+        self._plan_event.set()
+
+    def _confirm_plan(self, plan: dict) -> bool:
+        self._plan_event.clear()
+        self.plan_required.emit(plan)
+        while not self._stop_requested and not self._plan_event.wait(0.2):
+            pass
+        return bool(self._plan_allowed) and not self._stop_requested
 
     def run(self):
         total = run_subscription(
@@ -49,6 +66,7 @@ class SubWorker(QThread):
             stop_flag=self,
             on_file_ready=self.file_ready.emit,
             run_mode=self.run_mode,
+            confirm_plan=self._confirm_plan,
         )
         self.finished.emit(total)
 
@@ -68,7 +86,7 @@ class SubEditDialog(QDialog):
         self._main = getattr(parent, "main", None)
         def _known_tags():
             try:
-                from core.database.repository import candidate_tags
+                from core.services.library_service import candidate_tags
                 return candidate_tags(self._main.settings) if self._main else []
             except Exception:
                 return []
@@ -400,7 +418,8 @@ class SubscriptionPage(QWidget):
             self._load()
 
     def _log(self, msg: str):
-        self.log_box.appendPlainText(msg)
+        from core.redaction import sanitize_text
+        self.log_box.appendPlainText(sanitize_text(msg))
         sb = self.log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -420,6 +439,7 @@ class SubscriptionPage(QWidget):
         self._worker = SubWorker(sub, self.main.settings,
                                   run_mode=sub.get("run_mode", "all"))
         self._worker.log_line.connect(self._log)
+        self._worker.plan_required.connect(self._confirm_large_plan)
         self._worker.finished.connect(self._on_done)
         self._worker.file_ready.connect(self._on_file_ready)
         self._worker.start()
@@ -457,6 +477,7 @@ class SubscriptionPage(QWidget):
         self._worker = SubWorker(sub, self.main.settings,
                                   run_mode=sub.get("run_mode", "all"))
         self._worker.log_line.connect(self._log)
+        self._worker.plan_required.connect(self._confirm_large_plan)
         self._worker.finished.connect(self._on_queue_step)
         self._worker.file_ready.connect(self._on_file_ready)
         self._worker.start()
@@ -464,6 +485,26 @@ class SubscriptionPage(QWidget):
     def _on_queue_step(self, count: int):
         self._log(f"  → {count} новых файлов")
         self._run_next()
+
+    def _confirm_large_plan(self, plan: dict):
+        from core.preflight import format_bytes
+        worker = self._worker
+        if not worker:
+            return
+        disk = plan.get("disk", {})
+        known = int(plan.get("known_files", 0) or 0)
+        text = (
+            f"Найдено файлов для загрузки: {int(plan.get('groups', 0) or 0)}\n"
+            f"Известный размер: {format_bytes(plan.get('known_bytes', 0))} "
+            f"для {known} файл(ов)\n"
+            f"Свободно на диске: {format_bytes(disk.get('free', 0))}\n\n"
+            "Загрузка может занять много времени из-за ограничений сайтов. "
+            "При временных ошибках программа будет ждать и продолжать позже."
+        )
+        if plan.get("not_enough_space"):
+            text += "\n\nВНИМАНИЕ: известный размер уже превышает свободное место с резервом."
+        answer = QMessageBox.question(self, "Большая загрузка", text + "\n\nПродолжить?", QMessageBox.Yes | QMessageBox.No)
+        worker.set_plan_decision(answer == QMessageBox.Yes)
 
     def _on_file_ready(self, path: str):
         """Refresh gallery when a new file is ready."""
@@ -578,37 +619,44 @@ class SubscriptionPage(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        # Collect all file paths for DB cleanup before deleting
+        # Never destroy downloaded session media directly: move every media file
+        # to the recoverable Trash lifecycle, including files not indexed yet.
+        from core.media_utils import is_media
         all_media = []
         for folder in to_delete:
             try:
-                all_media.extend(p for p in folder.rglob("*") if p.is_file())
+                all_media.extend(p for p in folder.rglob("*") if p.is_file() and is_media(p))
             except Exception:
                 pass
         try:
-            from core.database.storage import delete_image_records
-            delete_image_records(self.main.settings, all_media)
-            self._log(f"  БД очищена ({len(all_media)} записей)")
+            from core.library_lifecycle import trash_media_paths
+            result = trash_media_paths(self.main.settings, all_media, reason="subscription_session_cleanup", make_backup=True)
+            moved = int(result.get("trashed_files", 0) or 0)
+            self._log(f"  В «Удалено» перемещено: {moved} файлов")
+            if result.get("error"):
+                self._log(f"  ОШИБКА: {result.get('error')}")
+                return
         except Exception as e:
-            self._log(f"  БД: {e}")
+            self._log(f"  Корзина: {e}")
+            return
 
+        # Remove only empty directory shells; any unknown non-media artifact is
+        # intentionally kept rather than permanently deleted without recovery.
         for folder in to_delete:
             try:
-                shutil.rmtree(folder)
-                self._log(f"🗑 Удалено: {folder}")
+                for child in sorted(folder.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+                    if child.is_dir():
+                        try: child.rmdir()
+                        except OSError: pass
+                try: folder.rmdir()
+                except OSError: pass
             except Exception as e:
-                self._log(f"  ОШИБКА: {folder}: {e}")
+                self._log(f"  Папка сессии оставлена: {folder}: {e}")
 
         if mode == "all":
             update_subscription(sub_id, downloaded_count=0, last_post_ids={})
-        # Also clear seed cache so deleted files can be re-downloaded
-        try:
-            from core.subscription_engine.seed_cache import clear_seeds_for_subscription
-            cleared = clear_seeds_for_subscription(sub_id)
-            self._log(f"  Seed cache очищен ({cleared} записей)")
-        except Exception as e:
-            self._log(f"  Seed cache: {e}")
-        self._log(f"✓ Удалено {total_files} файлов.")
+        self._log("  Seed cache сохранён: удалённые файлы не будут скачаны обратно автоматически.")
+        self._log(f"✓ Перемещено в «Удалено» {len(all_media)} файлов.")
         self._load()
 
     def _auto_check(self):

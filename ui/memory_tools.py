@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+from core.redaction import sanitize_text
 
 
 def set_bounded_log(widget, max_blocks: int = 2500):
@@ -19,11 +20,12 @@ def bounded_append(widget, text: str, max_blocks: int = 2500):
             doc.setMaximumBlockCount(int(max_blocks))
     except Exception:
         pass
+    safe_text = sanitize_text(text)
     try:
-        widget.appendPlainText(str(text))
+        widget.appendPlainText(safe_text)
     except Exception:
         try:
-            widget.append(str(text))
+            widget.append(safe_text)
         except Exception:
             pass
 

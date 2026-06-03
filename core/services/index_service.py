@@ -41,3 +41,18 @@ def rebuild_index(settings: dict, force: bool = False, with_md5: bool = False,
         except Exception:
             pass
     return result
+
+
+def import_legacy_sidecar_metadata(settings: dict, progress=None, stop_check=None):
+    """One-time migration: import old .tags/.sources files into SQLite.
+
+    Live parser/gallery code never reads sidecars after this explicit action.
+    """
+    from core.library_diagnostics import create_forced_backup
+    from core.database.indexer import index_library
+    backup = create_forced_backup(settings, reason="legacy_sidecar_import")
+    if progress:
+        progress("backup создан; импорт старых sidecar...")
+    result = index_library(settings, force=True, progress=lambda i, s: progress(f"indexed={i} skipped={s}") if progress else None, stop_check=stop_check, compute_md5=False, import_legacy_sidecars=True)
+    result["backup"] = str(backup or "")
+    return result

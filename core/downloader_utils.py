@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from core.file_safety import atomic_write_bytes
 from urllib.parse import urlparse
 
 try:
@@ -147,6 +148,25 @@ def _get_or_create_session(host: str, settings: dict, log=None):
     if host in _session_cache:
         return _session_cache[host]
     s = _session(host, settings=settings, log=log)
+    clean_host = str(host or "").lower().replace("www.", "")
+    if clean_host in {"e621.net", "e926.net"}:
+        cfg = ((settings or {}).get("sites") or {}).get(clean_host, {})
+        login = str((cfg or {}).get("login") or "").strip()
+        identity = f"by {login} on e621" if login else "local archive manager"
+        s.headers.update({
+            "User-Agent": f"LocalBooru/3.2 ({identity})",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        })
+    elif clean_host in {"danbooru.donmai.us", "donmai.us"}:
+        cfg = ((settings or {}).get("sites") or {}).get("danbooru.donmai.us", {})
+        login = str((cfg or {}).get("login") or "").strip()
+        identity = login if login else "local-user"
+        s.headers.update({
+            "User-Agent": f"LocalBooru/3.2 ({identity})",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        })
     _session_cache[host] = s
     return s
 
@@ -375,21 +395,20 @@ def _posts_api_url(site: str, query: str, page: int, limit: int = 100) -> tuple[
         }
 
     # Gelbooru/DAPI style. pid is zero-based.
-    if any(h in host for h in ["gelbooru", "xbooru", "realbooru", "tbib", "safebooru"]):
+    if any(h in host for h in ["gelbooru", "xbooru", "hypnohub", "realbooru", "tbib", "safebooru"]):
         return f"https://{host}/index.php", {
             "page": "dapi", "s": "post", "q": "index",
             "json": "1", "tags": query, "limit": limit, "pid": page,
         }
 
-    # rule34.us usually works with DAPI compatibility. Keep this before generic moebooru.
+    # rule34.us exposes website search, but no confirmed JSON/API endpoint.
+    # Subscriptions require structured pagination, so fail closed instead of
+    # sending invented DAPI calls and silently missing/mixing posts.
     if host == "rule34.us":
-        return f"https://{host}/index.php", {
-            "page": "dapi", "s": "post", "q": "index",
-            "json": "1", "tags": query, "limit": limit, "pid": page,
-        }
+        return "", {}
 
     # Danbooru 2.x style. page is one-based.
-    if any(h in host for h in ["danbooru", "donmai", "allthefallen", "lolibooru", "hypnohub", "aibooru"]):
+    if any(h in host for h in ["danbooru", "donmai", "allthefallen", "lolibooru", "aibooru"]):
         return f"https://{host}/posts.json", {
             "tags": query, "limit": limit, "page": page + 1,
         }
@@ -432,12 +451,12 @@ def _posts_api_url_bound(site: str, query: str, page: int, limit: int = 100, cur
     # Gelbooru/Rule34 DAPI pagination is page-number based.  Do not mix
     # `id:<...` tag bounds with `pid`, because rule34.xxx can silently return
     # incomplete pages.  Cursor-style pages stay enabled for Danbooru/e621 only.
-    if host in {"rule34.xxx", "api.rule34.xxx", "rule34.us"} or any(h in host for h in ["gelbooru", "xbooru", "realbooru", "tbib", "safebooru"]):
+    if host in {"rule34.xxx", "api.rule34.xxx"} or any(h in host for h in ["gelbooru", "xbooru", "hypnohub", "realbooru", "tbib", "safebooru"]):
         return _posts_api_url(site, query, page, limit=limit)
 
     bounded_query = _query_with_id_bound(query, "new" if run_mode == "new" else "old", cursor_id)
     # Danbooru/e621 support stable cursor pages b<ID>/a<ID>.
-    if cursor_id > 0 and any(h in host for h in ["danbooru", "donmai", "allthefallen", "lolibooru", "hypnohub", "aibooru", "e621", "e926"]):
+    if cursor_id > 0 and any(h in host for h in ["danbooru", "donmai", "allthefallen", "lolibooru", "aibooru", "e621", "e926"]):
         api_url, params = _posts_api_url(site, query, 0, limit=limit)
         params["page"] = ("a" if run_mode == "new" else "b") + str(int(cursor_id))
         return api_url, params
@@ -528,7 +547,7 @@ def _post_referrer(site: str, post: dict) -> str:
         return ""
     if not pid:
         return f"https://{host}/"
-    if host in {"rule34.xxx", "rule34.us", "xbooru.com"} or any(h in host for h in ["gelbooru", "realbooru", "tbib", "safebooru"]):
+    if host in {"rule34.xxx", "rule34.us", "xbooru.com", "hypnohub.net"} or any(h in host for h in ["gelbooru", "realbooru", "tbib", "safebooru"]):
         return f"https://{host}/index.php?page=post&s=view&id={pid}"
     return f"https://{host}/posts/{pid}"
 
@@ -611,7 +630,7 @@ def fetch_posts_for_query(
     auth = _auth_params(host, settings)
     api_host_for_auth = "api.rule34.xxx" if host == "rule34.xxx" else host
     auth.update(_auth_params(api_host_for_auth, settings))
-    if host in {"rule34.xxx", "api.rule34.xxx", "gelbooru.com", "e621.net", "danbooru.donmai.us", "booru.allthefallen.moe"}:
+    if host in {"rule34.xxx", "api.rule34.xxx", "gelbooru.com", "e621.net", "e926.net", "danbooru.donmai.us", "booru.allthefallen.moe"}:
         log(f"  AUTH [{site}]: {_auth_status(auth)}")
     if host in {"rule34.xxx", "api.rule34.xxx"} and not (auth.get("api_key") and auth.get("user_id")):
         log("  RULE34 WARNING: api_key/user_id не найдены в таблице сайтов; выдача API может быть урезана")
@@ -636,6 +655,9 @@ def fetch_posts_for_query(
         # Prefer id-bound pagination after the first page/checkpoint; page numbers
         # shift and often stop around shallow limits on DAPI sites.
         api_url, base_params = _posts_api_url_bound(site, query, page, limit=page_limit, cursor_id=cursor_id if (page > 0 or run_mode in {"new", "old"}) else 0, run_mode=run_mode)
+        if not api_url:
+            log(f"  FETCH [{site}]: no verified API endpoint; automatic subscription/tag scan disabled")
+            break
         params = {**base_params, **auth}
         try:
             r = _smart_get(s, api_url, host, log, params=params, timeout=45, settings=settings)
@@ -725,11 +747,18 @@ def download_post_file(
     file_urls = _file_url_variants(post, site)
     if not file_urls:
         return False, None
+    def _history(url: str, status: str, error: str = ""):
+        try:
+            from core.library_lifecycle import update_url_history
+            update_url_history(settings, url, status=status, error=error)
+        except Exception:
+            pass
 
     from datetime import datetime as _dt
     _ts = session_folder or _dt.now().strftime("%Y-%m-%d_%H-%M")
+    from core.paths import result_output_base
     out_dir = (
-        Path(settings.get("output_dir", ""))
+        result_output_base(settings)
         / "subscriptions"
         / _safe(site)
         / _safe(query or "misc")
@@ -742,8 +771,19 @@ def download_post_file(
     post_hash = _post_md5(post)
     if post_hash:
         try:
+            from core.deleted_registry import has_deleted_md5
+            if has_deleted_md5(post_hash, settings=settings):
+                policy = str((settings or {}).get("deleted_reimport_policy", "skip") or "skip").lower()
+                if policy != "return_inbox":
+                    log(f"  SKIP DELETED [{site}]: exact MD5 was permanently removed earlier")
+                    for _u in file_urls: _history(_u, "skipped_deleted", "exact MD5 previously deleted")
+                    return False, None
+        except Exception:
+            pass
+        try:
             from core.database.storage import md5_exists as _md5_exists
             if _md5_exists(settings, post_hash):
+                for _u in file_urls: _history(_u, "duplicate", "exact MD5 already in library")
                 return False, None
         except Exception:
             pass
@@ -761,6 +801,7 @@ def download_post_file(
             dest = out_dir / fname
 
             if dest.exists():
+                _history(file_url, "duplicate", "already on disk this session")
                 return False, dest  # already on disk this session
             parent = dest.parent.parent
             if parent.exists():
@@ -768,6 +809,7 @@ def download_post_file(
                     if ts_dir.is_dir():
                         existing = ts_dir / fname
                         if existing.exists():
+                            _history(file_url, "duplicate", "already on disk in another session")
                             return False, existing  # exists in another session
 
             fr = _rate_limited_get(s, file_url, settings=settings, timeout=90, headers=headers, allow_redirects=True)
@@ -782,10 +824,12 @@ def download_post_file(
                     fr = _rate_limited_get(s, file_url, settings=settings, timeout=90, headers=headers, allow_redirects=True)
             if fr.status_code in (401, 403):
                 last_error = f"{fr.status_code} auth/cookie wall"
+                _history(file_url, "auth_required", last_error)
                 log(f"  DL FALLBACK [{site}]: {last_error} {fname}")
                 continue
             if fr.status_code in (404, 410):
                 last_error = f"{fr.status_code} missing file"
+                _history(file_url, "missing", last_error)
                 log(f"  DL FALLBACK [{site}]: {last_error} {fname}")
                 continue
             fr.raise_for_status()
@@ -793,6 +837,7 @@ def download_post_file(
             ok, correct_ext = _valid_media_bytes(raw, fr.headers.get("Content-Type") or "")
             if not ok:
                 last_error = f"non-media response ({len(raw)} bytes, {fr.headers.get('Content-Type','?')})"
+                _history(file_url, "invalid_media", last_error)
                 log(f"  DL FALLBACK [{site}]: {last_error} {fname}")
                 continue
             break
@@ -807,7 +852,17 @@ def download_post_file(
             if dest.exists():
                 return False, None
 
-        dest.write_bytes(raw)
+        from core.preflight import ensure_space_for_write
+        _space_ok, _space_msg = ensure_space_for_write(settings, dest, len(raw))
+        if not _space_ok:
+            log(f"  DL STOP [{site}]: {_space_msg}")
+            try:
+                from core.library_lifecycle import update_url_history
+                update_url_history(settings, file_url, status="failed_disk_space", error=_space_msg)
+            except Exception:
+                pass
+            return False, None
+        atomic_write_bytes(dest, raw)
         log(f"  DL [{site}]: {fname}")
 
         try:
@@ -827,14 +882,30 @@ def download_post_file(
                 old_px = old_w * old_h
                 new_wins = (new_px > old_px) if (new_px and old_px) else (new_size > old_size)
                 if not new_wins:
-                    dest.unlink(missing_ok=True)
-                    log(f"  SKIP DUPE (similar exists): {fname}")
-                    return False, None
+                    try:
+                        from core.library_lifecycle import trash_media_paths, update_url_history
+                        trash_media_paths(settings, [dest], reason="subscription_visual_duplicate", make_backup=False)
+                        update_url_history(settings, file_url, status="duplicate", error="similar existing file kept")
+                    except Exception:
+                        pass
+                    log(f"  SKIP DUPE → Удалено (similar exists): {fname}")
+                    return False, Path(str(similar.get("path") or "")) if similar.get("path") else None
         except Exception:
             pass
 
+        try:
+            from core.library_lifecycle import update_url_history
+            update_url_history(settings, file_url, status="downloaded")
+        except Exception:
+            pass
         time.sleep(0.2)
         return True, dest
     except Exception as e:
         log(f"  DL ERROR [{site}] {fname}: {e}")
+        try:
+            from core.library_lifecycle import update_url_history
+            if 'file_url' in locals() and file_url:
+                update_url_history(settings, file_url, status="failed_temp", error=str(e))
+        except Exception:
+            pass
         return False, None

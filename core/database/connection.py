@@ -10,6 +10,24 @@ _INIT_DONE = set()
 _TLS = local()
 _POOL_LOCK = Lock()
 _ALL_CONNECTIONS = []
+_WRITE_BLOCK_REASON = ""
+
+
+class DatabaseWriteBlockedError(RuntimeError):
+    """Raised when startup integrity checks put the working DB in read-only safety mode."""
+
+
+def set_writes_blocked(reason: str = "") -> None:
+    global _WRITE_BLOCK_REASON
+    _WRITE_BLOCK_REASON = str(reason or "").strip()
+
+
+def writes_blocked_reason() -> str:
+    return _WRITE_BLOCK_REASON
+
+
+def writes_blocked() -> bool:
+    return bool(_WRITE_BLOCK_REASON)
 
 
 def db_path(settings):
@@ -48,6 +66,10 @@ def ensure_initialized(con, *, force=False):
         path = con.execute("PRAGMA database_list").fetchone()[2]
     except Exception:
         path = "memory"
+    if writes_blocked():
+        # The DB failed startup validation.  Do not attempt schema changes while
+        # pages are opening; read-only inspection and manual recovery remain possible.
+        return
     if not force and path in _INIT_DONE:
         return
     with _INIT_LOCK:
@@ -115,12 +137,14 @@ def close_pooled_connections() -> int:
     return n
 
 @contextmanager
-def db(settings, write: bool = False, readonly: bool = False):
+def db(settings, write: bool = False, readonly: bool = False, allow_blocked_write: bool = False):
     """Context-managed SQLite connection.
 
     Every function that touches SQLite should go through this helper. It fixes
     the old WAL lock leaks by closing connections deterministically.
     """
+    if write and writes_blocked() and not allow_blocked_write:
+        raise DatabaseWriteBlockedError("SQLite работает в безопасном режиме только чтения: " + writes_blocked_reason())
     use_pool = bool((settings or {}).get("sqlite_connection_pool", True))
     con = get_pooled_connection(settings, readonly=readonly and not write) if use_pool else connect(settings, readonly=readonly and not write)
     try:

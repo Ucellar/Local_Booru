@@ -118,13 +118,20 @@ def _session_for_url(url, log):
     s = requests.Session()
     cookies, ua = _load_browser_cookie_json(host)
 
-    s.headers.update({
-        "User-Agent": ua or (
+    api_host = host in {"danbooru.donmai.us", "donmai.us", "e621.net", "e926.net"}
+    if host in {"danbooru.donmai.us", "donmai.us"}:
+        user_agent = "LocalBooru/3.2 (local-user)"
+    elif host in {"e621.net", "e926.net"}:
+        user_agent = "LocalBooru/3.2 (local archive manager)"
+    else:
+        user_agent = ua or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/136.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+    s.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "application/json" if api_host else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Referer": url,
     })
 
@@ -255,10 +262,14 @@ def _tag_list_from_post(post):
 def _groups_from_post(post):
     groups = {
         "artist": [],
+        "contributor": [],
         "character": [],
         "copyright": [],
+        "species": [],
         "general": [],
         "meta": [],
+        "lore": [],
+        "invalid": [],
     }
     if not isinstance(post, dict):
         return groups
@@ -266,15 +277,20 @@ def _groups_from_post(post):
     if isinstance(post.get("tags"), dict):
         tags = post.get("tags") or {}
         groups["artist"] = [str(x) for x in tags.get("artist", [])]
+        groups["contributor"] = [str(x) for x in tags.get("contributor", [])]
         groups["character"] = [str(x) for x in tags.get("character", [])]
         groups["copyright"] = [str(x) for x in tags.get("copyright", [])]
+        groups["species"] = [str(x) for x in tags.get("species", [])]
         groups["general"] = [str(x) for x in tags.get("general", [])]
         groups["meta"] = [str(x) for x in tags.get("meta", [])]
+        groups["lore"] = [str(x) for x in tags.get("lore", [])]
+        groups["invalid"] = [str(x) for x in tags.get("invalid", [])]
         return _dedupe_group_dict(groups)
 
     groups["artist"] = str(post.get("tag_string_artist", "") or "").split()
     groups["character"] = str(post.get("tag_string_character", "") or "").split()
     groups["copyright"] = str(post.get("tag_string_copyright", "") or "").split()
+    groups["species"] = str(post.get("tag_string_species", "") or "").split()
     groups["general"] = str(post.get("tag_string_general", "") or post.get("tags", "") or "").split()
     groups["meta"] = str(post.get("tag_string_meta", "") or "").split()
 
@@ -298,6 +314,9 @@ BAD_UI_TAGS = {
 
 def _clean_download_tag(tag):
     tag = unquote(str(tag or "")).strip()
+    # Visible tag sidebars sometimes append site-wide counts (e.g. horse 231k).
+    # Remove those UI counts before normalising spaces; API tag data stays intact.
+    tag = re.sub(r"(?:\s+|_)\d+(?:[.,]\d+)?[kmb]?\s*$", "", tag, flags=re.IGNORECASE)
     tag = tag.replace(" ", "_")
     tag = re.sub(r"_+", "_", tag)
     tag = tag.strip("_")
@@ -316,9 +335,9 @@ def _clean_download_tag(tag):
 
 
 def _dedupe_group_dict(groups):
-    out = {"artist": [], "character": [], "copyright": [], "general": [], "meta": []}
+    out = {"artist": [], "contributor": [], "character": [], "copyright": [], "species": [], "general": [], "meta": [], "lore": [], "invalid": []}
     seen = set()
-    for group in ("artist", "character", "copyright", "general", "meta"):
+    for group in ("artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid"):
         for raw in (groups or {}).get(group, []) or []:
             tag = _clean_download_tag(raw)
             if not tag:
@@ -423,8 +442,7 @@ def _candidate_api_urls(post_url):
             f"https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&id={post_id}",
             f"https://rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&id={post_id}",
         ]
-    if host == "rule34.us" and post_id:
-        out += [f"https://rule34.us/index.php?page=dapi&s=post&q=index&json=1&id={post_id}"]
+    # rule34.us has no confirmed JSON API; direct post URLs are read as HTML.
     if host == "gelbooru.com" and post_id:
         out += [f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&id={post_id}"]
 
@@ -435,8 +453,8 @@ def _candidate_api_urls(post_url):
             out += [f"https://{host}/posts/{pid}.json"]
         elif "danbooru" in host or "donmai" in host:
             out += [f"https://danbooru.donmai.us/posts/{pid}.json"]
-        elif host == "e621.net":
-            out += [f"https://e621.net/posts/{pid}.json"]
+        elif host in ("e621.net", "e926.net"):
+            out += [f"https://{host}/posts/{pid}.json"]
 
     return out
 
@@ -484,7 +502,9 @@ def _tag_search_api(base_url, tags, page=0, limit=20, settings=None):
         return f"https://api.rule34.xxx/index.php?page=dapi&s=post&q=index&json=1&tags={tags_q}&pid={page}&limit={limit}{auth}"
 
     if host == "rule34.us":
-        return f"https://rule34.us/index.php?page=dapi&s=post&q=index&json=1&tags={tags_q}&pid={page}&limit={limit}{auth}"
+        # Search syntax exists in the website, but no verified JSON endpoint.
+        # Do not pretend tag-download can paginate an API that is not available.
+        return ""
 
     if host == "gelbooru.com":
         return f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&tags={tags_q}&pid={page}&limit={limit}{auth}"
@@ -495,7 +515,7 @@ def _tag_search_api(base_url, tags, page=0, limit=20, settings=None):
     if "danbooru" in host or "donmai" in host:
         return f"https://danbooru.donmai.us/posts.json?tags={tags_q}&page={page + 1}&limit={limit}{auth}"
 
-    if host == "e621.net":
-        return f"https://e621.net/posts.json?tags={tags_q}&page={page + 1}&limit={limit}{auth}"
+    if host in ("e621.net", "e926.net"):
+        return f"https://{host}/posts.json?tags={tags_q}&page={page + 1}&limit={limit}{auth}"
 
     return ""

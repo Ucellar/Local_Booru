@@ -53,7 +53,7 @@ QGroupBox{{border:1px solid #1e2235;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#a0accc;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #2a2f4a;border-radius:5px;background:#12151f;}}
-QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;}}
+QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;image:none;}}
 QProgressBar{{background:#12151f;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #5040a0,stop:1 #8060e0);border-radius:3px;}}
 QToolTip{{background:#1c2035;color:#c0c8e0;border:1px solid #2a2f4a;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -119,7 +119,7 @@ QGroupBox{{border:1px solid #2a2410;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#b09870;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #3a3018;border-radius:5px;background:#181408;}}
-QCheckBox::indicator:checked{{background:#c07820;border-color:#c07820;}}
+QCheckBox::indicator:checked{{background:#c07820;border-color:#c07820;image:none;}}
 QProgressBar{{background:#181408;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #8a5808,stop:1 #e09030);border-radius:3px;}}
 QToolTip{{background:#1c1810;color:#d8c8a0;border:1px solid #3a3018;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -184,7 +184,7 @@ QGroupBox{{border:1px solid #2a2e3a;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#9098b0;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #3a3e50;border-radius:5px;background:#262a36;}}
-QCheckBox::indicator:checked{{background:#4a80b8;border-color:#4a80b8;}}
+QCheckBox::indicator:checked{{background:#4a80b8;border-color:#4a80b8;image:none;}}
 QProgressBar{{background:#262a36;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3a6090,stop:1 #60a0d8);border-radius:3px;}}
 QToolTip{{background:#262a36;color:#c8ccd8;border:1px solid #3a3e50;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -249,7 +249,7 @@ QGroupBox{{border:1px solid #241428;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#c090a8;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #38202e;border-radius:5px;background:#180f1a;}}
-QCheckBox::indicator:checked{{background:#c04080;border-color:#c04080;}}
+QCheckBox::indicator:checked{{background:#c04080;border-color:#c04080;image:none;}}
 QProgressBar{{background:#180f1a;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #902040,stop:1 #e060a0);border-radius:3px;}}
 QToolTip{{background:#1c1020;color:#e0c8d8;border:1px solid #38202e;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -313,7 +313,7 @@ QCheckBox,QLabel{{color:#111111;background:transparent;}}
 QCheckBox{{spacing:4px;}}
 QCheckBox::indicator{{width:13px;height:13px;background:#b7e2af;border:1px solid #4f7f49;border-radius:0px;margin:1px;}}
 QCheckBox::indicator:unchecked{{image:none;}}
-QCheckBox::indicator:checked{{image:url(assets/check_r34.png);background:#b7e2af;border:1px solid #4f7f49;}}
+QCheckBox::indicator:checked{{image:none;background:#b7e2af;border:1px solid #4f7f49;}}
 QMenu{{background:#b7e2af;color:#111111;border:1px solid #6da36b;padding:2px;}}
 QMenu::item:selected{{background:#8cc57d;color:#111111;}}
 QToolTip{{background:#ffffe1;color:#000000;border:1px solid #000000;}}
@@ -332,6 +332,7 @@ R34_DARK = (
     .replace("#4f7f49", "#638c5e")
     .replace("#111111", "#d6e4d3")
     .replace("#0033cc", "#6aa5ff")
+    .replace("assets/check_r34.png", "assets/check_dark.png")
 )
 
 PH = f"""
@@ -384,7 +385,7 @@ QGroupBox{{border:1px solid #222222;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#c0c0c0;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #303030;border-radius:5px;background:#1a1a1a;}}
-QCheckBox::indicator:checked{{background:#ff9000;border-color:#ff9000;}}
+QCheckBox::indicator:checked{{background:#ff9000;border-color:#ff9000;image:none;}}
 QProgressBar{{background:#1a1a1a;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #c07000,stop:1 #ff9000);border-radius:3px;}}
 QToolTip{{background:#1a1a1a;color:#f0f0f0;border:1px solid #303030;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -449,7 +450,7 @@ QGroupBox{{border:1px solid #c8cce0;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#3a3c60;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #b8bcd4;border-radius:5px;background:#ffffff;}}
-QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;}}
+QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;image:none;}}
 QProgressBar{{background:#e0e2f0;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #6050c0,stop:1 #9080e0);border-radius:3px;}}
 QToolTip{{background:#ffffff;color:#1a1c2a;border:1px solid #c8cce0;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -504,7 +505,7 @@ QScrollBar::handle:horizontal{{background:#c0c0c0;min-width:20px;border-top:1px 
 QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{{width:16px;background:#c0c0c0;border-top:1px solid #ffffff;border-left:1px solid #ffffff;border-bottom:1px solid #808080;border-right:1px solid #808080;}}
 QCheckBox,QLabel{{color:#000000;background:transparent;}}
 QCheckBox::indicator{{width:13px;height:13px;background:#ffffff;border-top:2px solid #808080;border-left:2px solid #808080;border-bottom:2px solid #ffffff;border-right:2px solid #ffffff;border-radius:0px;margin:1px;}}
-QCheckBox::indicator:checked{{background:#ffffff;}}
+QCheckBox::indicator:checked{{background:#ffffff;image:none;}}
 QGroupBox{{background:#c0c0c0;color:#000000;border:2px groove #808080;border-radius:0px;margin-top:12px;padding:8px 6px 6px 6px;font-weight:700;}}
 QGroupBox::title{{subcontrol-origin:margin;left:8px;padding:0 3px;background:#c0c0c0;}}
 QProgressBar{{background:#ffffff;border:1px solid #808080;border-radius:0px;color:#000000;text-align:center;}}
@@ -537,6 +538,8 @@ _WIDGET_CLEANUP = """
 QLabel { background: transparent; }
 QCheckBox { background: transparent; padding: 0px; margin: 0px; }
 QCheckBox::indicator { margin: 0px; }
+#StatusStrip { border-top: 1px solid rgba(120,120,140,0.25); min-height: 26px; }
+#StatusStrip QLabel { font-size: 11px; opacity: 0.85; }
 """
 
 def stylesheet_for(name: str) -> str:

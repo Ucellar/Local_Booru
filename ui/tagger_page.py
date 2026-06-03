@@ -6,11 +6,44 @@ import webbrowser
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLabel,QPlainTextEdit,QProgressBar,QCheckBox,QDoubleSpinBox,QSpinBox,QLineEdit,QFileDialog,QGroupBox,QFormLayout,QSplitter,QTableWidget,QTableWidgetItem,QComboBox,QHeaderView,QMessageBox,QAbstractItemView,QSizePolicy
 from PySide6.QtCore import QThread, Signal, Qt, QTimer
 from core.settings import save_settings, DEFAULT_SITES
-from core.tagger_engine import Tagger, MEDIA_EXTS, video_frame_image, output_processed_status, result_output_base, has_copy_suffix
+from core.tagger import Tagger, MEDIA_EXTS, video_frame_image, output_processed_status, result_output_base, result_paths_for, has_copy_suffix, is_md5, file_md5, file_phash
 from ui.login_browser import LoginBrowserDialog, open_br34, open_br34_multi
 from ui.sites_widget import SitesWidget
 from ui.memory_tools import bounded_append, set_bounded_log, soft_gc
 from core.deleted_registry import should_skip_deleted_file, has_deleted_record_for_name
+
+
+_NETWORK_EXCEPTION_MARKERS = (
+    "read timed out", "connect timed out", "connection timed out", "timeouterror",
+    "connection aborted", "connection reset", "failed to resolve", "getaddrinfo failed",
+    "nameresolutionerror", "network is unreachable", "connection refused",
+    "max retries exceeded", "ssleoferror", "unexpected_eof_while_reading",
+)
+
+def _looks_like_network_exception(error):
+    text = str(error or "").lower()
+    return any(marker in text for marker in _NETWORK_EXCEPTION_MARKERS)
+
+SITE_SCAN_REVISION = 1
+# Parser changes that must rescan only one source without replaying every lane.
+# The suffix is part of the internal journal identity, not a visible domain.
+SITE_SCAN_KEY_REVISIONS = {
+    "rule34.us": "remote-media-md5-v2",
+}
+
+
+def _site_scan_key(tagger, site):
+    """Stable per-source identity used by the SQLite site scan journal."""
+    site = site if isinstance(site, dict) else {}
+    host = str(site.get("domain") or "").strip().lower().replace("www.", "")
+    if not host:
+        try:
+            host = urlparse(tagger._site_root_from_cfg(site)).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+    key = host or str(tagger._site_label(site)).strip().lower()
+    suffix = SITE_SCAN_KEY_REVISIONS.get(key)
+    return f"{key}::{suffix}" if suffix else key
 
 
 def _ui_normalize_url(url: str):
@@ -26,7 +59,7 @@ def _ui_normalize_url(url: str):
     return None
 
 class TaggerWorker(QThread):
-    log=Signal(str); progress=Signal(int,int); current_file=Signal(str); done=Signal()
+    log=Signal(str); progress=Signal(int,int); current_file=Signal(str); site_current=Signal(str,str,str); done=Signal()
     def __init__(self, settings): super().__init__(); self.settings=settings.copy(); self.paused=False
     def set_paused(self, paused):
         self.paused = bool(paused)
@@ -41,8 +74,692 @@ class TaggerWorker(QThread):
                 break
             time.sleep(min(0.25, end - time.time()))
 
+    def _run_site_conveyor(self, files, session_settings, writer, *, prior_global_status=None, existing_media_map=None, site_done_map=None, restored_saucenao=None):
+        """Process missing file×site checks through one lane per enabled source.
+
+        A global tagged/no_match record no longer means every future source was
+        checked.  Each completed MD5 lane is journaled independently in SQLite;
+        newly enabled sites therefore scan the existing archive once and merge
+        any new metadata without forcing old sites or reverse search to rerun.
+        """
+        import queue
+        import threading
+        from core.services.scan_state_service import (mark_site_scanned, enqueue_reverse_retry, remove_reverse_retry, enqueue_tag_enrichment, seed_background_tag_enrichment, pending_tag_enrichments, complete_tag_enrichment, retry_tag_enrichment, record_task_event)
+
+        sites = writer._all_enabled_site_configs()
+        if not sites:
+            self.log.emit("SITE CONVEYOR: no enabled MD5 sites; using ordinary fallback path")
+            return None
+
+        prior_global_status = dict(prior_global_status or {})
+        existing_media_map = dict(existing_media_map or {})
+        site_done_map = dict(site_done_map or {})
+        interval = max(1.10, float(self.settings.get("tagger_site_interval_seconds", 1.10) or 1.10))
+        low_power = bool(self.settings.get("tagger_low_power_mode", False))
+        window = 1 if low_power else max(2, min(128, int(self.settings.get("tagger_conveyor_window", 32) or 32)))
+        total = len(files)
+        stats = {"tagged": 0, "nomatch": 0, "skipped": 0, "deferred_network": 0,
+                 "deferred_saucenao": 0, "errors": 0, "site_checks": 0, "site_merged": 0}
+        event_q = queue.Queue()
+        fallback_q = queue.Queue()
+        category_q = queue.Queue()
+        persist_lock = threading.Lock()
+        sentinel = object()
+        states = {}
+        category_enabled = bool(self.settings.get("tagger_background_tag_groups", self.settings.get("tagger_background_rule34_categories", True)))
+        category_job_key = "flat-sites::tag-groups-v2"
+        category_hosts = {"gelbooru.com", "rule34.xxx", "xbooru.com", "hypnohub.net"}
+        category_scheduled = set()
+        deferred_sauce = {
+            str(Path(path)): (Path(path), int(retry_at))
+            for path, retry_at, _reason in (restored_saucenao or [])
+        }
+        sauce_wait_notice_for = 0
+        next_token = 0
+        file_iter = iter(files)
+
+        site_lanes = []
+        used_labels = {}
+        for index, site in enumerate(sites):
+            label = writer._site_label(site)
+            used_labels[label] = used_labels.get(label, 0) + 1
+            shown = label if used_labels[label] == 1 else f"{label} ({used_labels[label]})"
+            site_key = _site_scan_key(writer, site)
+            engine = str(site.get("engine") or site.get("type") or "")
+            site_lanes.append((f"site-{index}", shown, site_key, engine, site, queue.Queue()))
+
+        enabled_names = ", ".join(shown for _key, shown, _site_key, _engine, _site, _q in site_lanes)
+        self.log.emit(
+            f"SITE CONVEYOR ACTIVE: lanes={len(site_lanes)} minimum_interval={interval:.2f}s "
+            f"window={window}; sites={enabled_names}"
+        )
+        self.log.emit("SITE CONVEYOR: per-site SQLite journal active; newly enabled sites scan old files without rerunning completed sources")
+        if low_power:
+            self.log.emit("LOW POWER MODE: per-site journal kept; window=1 and per-site previews hidden")
+        self.log.emit("SITE CONVEYOR: existing per-site safety budgets are preserved; restricted sites may wait longer than the minimum interval")
+        self.log.emit("SITE CONVEYOR: reverse search runs only for previously unprocessed files after all MD5 sites miss")
+        if deferred_sauce:
+            next_retry = min(value[1] for value in deferred_sauce.values())
+            left = max(0, next_retry - int(time.time()))
+            self.log.emit(
+                f"SAUCENAO RETRY RESTORED: pending={len(deferred_sauce)}; "
+                f"next retry in {left//60}m {left%60}s; IQDB/Ascii2D will not replay"
+            )
+        # Make fallback services visible in the activity panel even while they
+        # wait for an all-MD5 miss. Previously the table listed only MD5 lanes,
+        # so a later SauceNAO/IQDB stall looked invisible to the user.
+        if self.settings.get("enable_saucenao") and self.settings.get("saucenao_api_key"):
+            self.site_current.emit("SauceNAO", "Ожидает промаха MD5", "")
+        if self.settings.get("enable_iqdb"):
+            self.site_current.emit("IQDB", "Ожидает промаха MD5", "")
+        if self.settings.get("enable_ascii2d"):
+            self.site_current.emit("Ascii2D", "Ожидает промаха MD5", "")
+        if category_enabled:
+            try:
+                seeded = seed_background_tag_enrichment(session_settings, job_key=category_job_key, hosts=tuple(sorted(category_hosts)))
+                jobs = pending_tag_enrichments(session_settings, job_key=category_job_key)
+                for job in jobs:
+                    job_id = (str(job.get("original_path", "")), str(job.get("source_url", "")))
+                    if job_id not in category_scheduled:
+                        category_scheduled.add(job_id)
+                        category_q.put(job)
+                self.site_current.emit("Категории тегов", f"Фон: в очереди {len(jobs)}", "")
+                if seeded or jobs:
+                    self.log.emit(f"TAG CATEGORY BACKGROUND: queued={len(jobs)} backfilled={seeded}; source lanes collect tags only and are not blocked")
+            except Exception as e:
+                self.log.emit(f"TAG CATEGORY BACKGROUND WARNING: cannot load queue: {e}")
+
+        def lane_settings(site):
+            cfg = dict(session_settings)
+            host = str(site.get("domain") or urlparse(writer._site_root_from_cfg(site)).netloc).lower().replace("www.", "")
+            by_host = dict(cfg.get("http_min_interval_by_host") or {})
+            by_host[host] = interval
+            cfg["http_min_interval_by_host"] = by_host
+            # Abort throttling immediately on STOP; otherwise a lane waiting for
+            # its next permitted request looks as if the button did nothing.
+            cfg["_cancel_callback"] = self.isInterruptionRequested
+            return cfg
+
+        def live_log(message):
+            if not self.isInterruptionRequested():
+                self.log.emit(str(message))
+
+        def site_loop(lane_key, shown, site_key, engine, site, work_q):
+            local = Tagger(lane_settings(site), live_log)
+            local.cancel_callback = self.isInterruptionRequested
+            while not self.isInterruptionRequested():
+                try:
+                    item = work_q.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                if item is sentinel:
+                    break
+                token, phase, md5, path = item
+                self._wait_if_paused_or_delay(0)
+                if self.isInterruptionRequested():
+                    break
+                self.site_current.emit(shown, "MD5", str(path))
+                self.log.emit(f"  MD5 CHECK [{shown}]: {Path(path).name}")
+                local._reset_network_state()
+                tags = []
+                source = ""
+                groups = {}
+                error_text = ""
+                try:
+                    tags, source, groups = local.engine_by_md5(site, md5)
+                    if self.isInterruptionRequested():
+                        break
+                    if tags:
+                        self.log.emit(f"  MD5 MATCH [{shown}]: {Path(path).name} {source}")
+                except InterruptedError:
+                    if self.isInterruptionRequested():
+                        break
+                    error_text = "request cancelled"
+                except Exception as e:
+                    if self.isInterruptionRequested():
+                        break
+                    error_text = str(e)
+                    self.log.emit(f"  MD5 ERROR [{shown}]: {Path(path).name}: {e}")
+                if self.isInterruptionRequested():
+                    break
+                network_failed = local.transient_network_failed() or _looks_like_network_exception(error_text)
+                event_q.put(("primary", token, lane_key, site_key, engine, phase, md5, tags, source, groups, network_failed, local.network_failure_summary()))
+
+        fallback_settings = dict(session_settings)
+        fallback_settings["enable_md5_lookup"] = False
+        fallback_settings["_cancel_callback"] = self.isInterruptionRequested
+
+        def fallback_loop():
+            local = Tagger(fallback_settings, live_log)
+            local.cancel_callback = self.isInterruptionRequested
+            local.activity_callback = lambda name, path, status: self.site_current.emit(name, status, path) if not self.isInterruptionRequested() else None
+            while not self.isInterruptionRequested():
+                try:
+                    item = fallback_q.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                if item is sentinel:
+                    break
+                token, path, sauce_retry_only = item
+                self._wait_if_paused_or_delay(0)
+                if self.isInterruptionRequested():
+                    break
+                self.site_current.emit("SauceNAO повтор" if sauce_retry_only else "Запасной поиск", "Ожидает результат", str(path))
+                previous_retry_only = local.settings.get("_saucenao_retry_only", False)
+                local.settings["_saucenao_retry_only"] = bool(sauce_retry_only)
+                try:
+                    # Keep reverse-search network waits outside the serialized
+                    # persistence section. The Tagger acquires this lock only when
+                    # it is ready to write a final result.
+                    result = local.process_image(path, persist_lock=persist_lock)
+                    if self.isInterruptionRequested():
+                        break
+                    # Reverse-search result pages can also come from flat-tag
+                    # sources. Store the found tags immediately, then classify
+                    # those source tags in the same durable background queue.
+                    if result == "tagged" and category_enabled:
+                        for source_url in local.take_background_group_urls():
+                            source_host = urlparse(source_url).netloc.lower().replace("www.", "")
+                            if source_host not in category_hosts and not (source_host == "api.rule34.xxx" and "rule34.xxx" in category_hosts):
+                                continue
+                            media_path = str(result_paths_for(session_settings, path, "tagged")["media_file"])
+                            job_id = (str(path), source_url)
+                            with persist_lock:
+                                enqueue_tag_enrichment(session_settings, path, media_path, source_url, job_key=category_job_key)
+                            if job_id not in category_scheduled:
+                                category_scheduled.add(job_id)
+                                category_q.put({"original_path": str(path), "media_path": media_path, "source_url": source_url, "job_key": category_job_key})
+                                self.log.emit(f"  TAG CATEGORY BACKGROUND QUEUED [{source_host} fallback]: {path.name}")
+                    retry_after = str(local.saucenao_retry_after_epoch()) if result == "retry_saucenao" else ""
+                    event_q.put(("fallback", token, result, retry_after))
+                except InterruptedError:
+                    if self.isInterruptionRequested():
+                        break
+                    event_q.put(("fallback", token, "error", "request cancelled"))
+                except Exception as e:
+                    if self.isInterruptionRequested():
+                        break
+                    event_q.put(("fallback", token, "error", str(e)))
+                finally:
+                    local.settings["_saucenao_retry_only"] = previous_retry_only
+
+        def category_loop():
+            if not category_enabled:
+                return
+            category_settings = dict(session_settings)
+            by_host = dict(category_settings.get("http_min_interval_by_host") or {})
+            # Category lookup is deliberately low-priority and independent from
+            # exact-MD5 lanes. Flat-tag sources collect first and are classified later.
+            for background_host in category_hosts:
+                by_host[background_host] = max(2.50, interval)
+            category_settings["http_min_interval_by_host"] = by_host
+            category_settings["_cancel_callback"] = self.isInterruptionRequested
+            local = Tagger(category_settings, live_log)
+            local.cancel_callback = self.isInterruptionRequested
+            while not self.isInterruptionRequested():
+                try:
+                    job = category_q.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                if job is sentinel:
+                    break
+                original = Path(str(job.get("original_path") or ""))
+                media_text = str(job.get("media_path") or "")
+                media = Path(media_text) if media_text else Path("__missing_media__")
+                source_url = str(job.get("source_url") or "")
+                source_host = urlparse(source_url).netloc.lower().replace("www.", "")
+                job_id = (str(original), source_url)
+                if not source_url:
+                    continue
+                if not media.exists() or not media.is_file():
+                    try:
+                        from core.services.scan_state_service import processed_records_many
+                        row = processed_records_many(session_settings, [original]).get(str(original), {})
+                        media_text = str(row.get("media_path") or "")
+                        media = Path(media_text) if media_text else Path("__missing_media__")
+                    except Exception:
+                        pass
+                if not media.exists() or not media.is_file():
+                    with persist_lock:
+                        complete_tag_enrichment(session_settings, original, source_url, job_key=category_job_key, status="stale", error="archived media missing")
+                    category_scheduled.discard(job_id)
+                    continue
+                shown_host = source_host or "источник"
+                self.site_current.emit(f"{shown_host} категории", "Фоновая раскладка", str(original))
+                try:
+                    groups = local.grouped_tags_from_url(source_url)
+                    if self.isInterruptionRequested():
+                        break
+                    classified = sum(len(groups.get(k, []) or []) for k in ("artist", "character", "copyright", "species", "meta"))
+                    if classified:
+                        parsed_tags = []
+                        for vals in groups.values():
+                            parsed_tags.extend(vals or [])
+                        with persist_lock:
+                            writer.merge_conveyor_match_into_existing(media, original, parsed_tags, [], [groups])
+                            complete_tag_enrichment(session_settings, original, source_url, job_key=category_job_key, status="done")
+                        self.log.emit(f"  TAG CATEGORY BACKGROUND DONE [{shown_host}]: {original.name} classified={classified}")
+                        self.site_current.emit(f"{shown_host} категории", f"Разложено: {classified}", str(original))
+                    else:
+                        with persist_lock:
+                            complete_tag_enrichment(session_settings, original, source_url, job_key=category_job_key, status="done", error="source provides no classified tags")
+                        self.log.emit(f"  TAG CATEGORY BACKGROUND SKIP [{shown_host}]: {original.name} no classified tags")
+                except InterruptedError:
+                    break
+                except Exception as e:
+                    if not self.isInterruptionRequested():
+                        with persist_lock:
+                            retry_tag_enrichment(session_settings, original, source_url, job_key=category_job_key, delay_seconds=300, error=str(e))
+                        self.log.emit(f"  TAG CATEGORY BACKGROUND RETRY [{shown_host}]: {original.name}: {e}")
+                finally:
+                    category_scheduled.discard(job_id)
+
+        threads = []
+        for lane_key, shown, site_key, engine, site, work_q in site_lanes:
+            th = threading.Thread(target=site_loop, args=(lane_key, shown, site_key, engine, site, work_q), daemon=True, name=f"site-conveyor-{lane_key}")
+            th.start()
+            threads.append(th)
+        reverse_thread = threading.Thread(target=fallback_loop, daemon=True, name="site-conveyor-fallback")
+        reverse_thread.start()
+        threads.append(reverse_thread)
+        if category_enabled:
+            category_thread = threading.Thread(target=category_loop, daemon=True, name="site-conveyor-tag-categories")
+            category_thread.start()
+            threads.append(category_thread)
+
+        lane_queue = {lane_key: work_q for lane_key, _shown, _key, _engine, _site, work_q in site_lanes}
+        lane_name = {lane_key: shown for lane_key, shown, _key, _engine, _site, _q in site_lanes}
+        lane_site_key = {lane_key: key for lane_key, _shown, key, _engine, _site, _q in site_lanes}
+        lane_engine = {lane_key: engine for lane_key, _shown, _key, engine, _site, _q in site_lanes}
+
+        def queue_fallback_or_finish(token, state):
+            if self.isInterruptionRequested():
+                return False
+            path_key = str(state["path"])
+            old_status = str(state.get("prior_status") or "")
+            if old_status and not bool(self.settings.get("retry_nomatch", False)):
+                stats["skipped"] += 1
+                self.log.emit(f"  SITE UPDATE COMPLETE: {state['path'].name} existing={old_status}; reverse fallback not repeated")
+                return False
+            if path_key in deferred_sauce:
+                retry_at = int(deferred_sauce[path_key][1])
+                left = max(0, retry_at - int(time.time()))
+                self.log.emit(
+                    f"  SAUCENAO RETRY ALREADY QUEUED: {state['path'].name}; "
+                    f"IQDB/Ascii2D not repeated; retry in {left//60}m {left%60}s"
+                )
+                return False
+            fallback_q.put((token, state["path"], False))
+            state["phase"] = "fallback"
+            return True
+
+        def _archive_path_after_match(state):
+            current = str(state.get("existing_media_path") or "")
+            if current and Path(current).exists():
+                return current
+            try:
+                return str(result_paths_for(session_settings, state["path"], "tagged")["media_file"])
+            except Exception:
+                return current
+
+        def _enqueue_background_tag_job(state, lane_key, result):
+            if not category_enabled:
+                return
+            base_site_key = str(lane_site_key.get(lane_key, "")).split("::", 1)[0]
+            source_url = str(result.get("source") or "")
+            if base_site_key not in category_hosts or not source_url:
+                return
+            media_path = _archive_path_after_match(state)
+            job_id = (str(state["path"]), source_url)
+            try:
+                with persist_lock:
+                    enqueue_tag_enrichment(session_settings, state["path"], media_path, source_url, job_key=category_job_key)
+                if job_id not in category_scheduled:
+                    category_scheduled.add(job_id)
+                    category_q.put({"original_path": str(state["path"]), "media_path": media_path, "source_url": source_url, "job_key": category_job_key})
+                    self.log.emit(f"  TAG CATEGORY BACKGROUND QUEUED [{base_site_key}]: {state['path'].name}")
+            except Exception as e:
+                self.log.emit(f"  TAG CATEGORY QUEUE ERROR [{base_site_key}]: {state['path'].name}: {e}")
+
+        def _persist_one_lane_match(state, lane_key, result):
+            if lane_key in state.get("saved_match_keys", set()):
+                return True
+            tags = list(result.get("tags") or [])
+            if not tags:
+                return True
+            source = str(result.get("source") or "")
+            groups = result.get("groups") or {}
+            try:
+                with persist_lock:
+                    if state.get("persisted_found") or (state.get("prior_status") in ("found", "tagged") and state.get("existing_media_path")):
+                        outcome = writer.merge_conveyor_match_into_existing(
+                            state.get("existing_media_path") or _archive_path_after_match(state),
+                            state["path"], tags,
+                            [f"md5 {lane_name.get(lane_key, lane_key)} {source}"] if source else [],
+                            [groups] if groups else [],
+                        )
+                    else:
+                        outcome = writer.save_conveyor_match(
+                            state["path"], tags,
+                            [f"md5 {lane_name.get(lane_key, lane_key)} {source}"] if source else [],
+                            [groups] if groups else [],
+                        )
+                    if outcome != "tagged":
+                        return False
+                    remove_reverse_retry(session_settings, state["path"], service="saucenao")
+                if not state.get("persisted_found"):
+                    stats["tagged"] += 1
+                    if state.get("was_existing_found"):
+                        stats["site_merged"] += 1
+                state["persisted_found"] = True
+                state["prior_status"] = "found"
+                state["existing_media_path"] = _archive_path_after_match(state)
+                state.setdefault("saved_match_keys", set()).add(lane_key)
+                deferred_sauce.pop(str(state["path"]), None)
+                _enqueue_background_tag_job(state, lane_key, result)
+                return True
+            except Exception as e:
+                state["persistence_error"] = True
+                self.log.emit(f"ERROR {state['path'].name}: {e}")
+                return False
+
+        def checkpoint_lane_results(state, *, finalize_misses=False):
+            """Persist each completed source as soon as its result is final.
+
+            Filename-derived misses are not final until either another site matched
+            that filename or the real-file MD5 pass is known not to be needed.
+            Matches and real-MD5 checks are durable immediately, so STOP/restart
+            resumes each site lane from its own checkpoint instead of replaying the
+            whole conveyor window.
+            """
+            checkpointed = state.setdefault("checkpointed_keys", set())
+            for lane_key, result in list(state.get("lane_results", {}).items()):
+                if lane_key in checkpointed or result.get("network_failed"):
+                    continue
+                final_for_lane = bool(result.get("tags")) or state.get("phase") == "real" or bool(finalize_misses)
+                if not final_for_lane:
+                    continue
+                if result.get("tags") and not _persist_one_lane_match(state, lane_key, result):
+                    continue
+                with persist_lock:
+                    mark_site_scanned(
+                        session_settings, state["path"], lane_site_key[lane_key],
+                        engine=lane_engine[lane_key], scan_revision=SITE_SCAN_REVISION,
+                        outcome="match" if result.get("tags") else "miss",
+                        checked_md5=result.get("md5", ""), source_url=result.get("source", ""),
+                    )
+                checkpointed.add(lane_key)
+                stats["site_checks"] += 1
+
+        def submit_path(path):
+            nonlocal next_token
+            if self.isInterruptionRequested():
+                return False
+            next_token += 1
+            token = next_token
+            path = Path(path)
+            self.log.emit(f"SEARCH: {path.name}")
+            search_img = video_frame_image(path)
+            if search_img != path:
+                self.log.emit(f"  VIDEO FRAME: {search_img.name}")
+            img_phash = file_phash(search_img)
+            if img_phash:
+                self.log.emit(f"  PHASH: {img_phash}")
+            from_filename = is_md5(path.stem)
+            if from_filename:
+                lookup_md5 = path.stem.lower()
+                self.log.emit(f"  TRY MD5 FROM FILENAME: {lookup_md5}")
+                phase = "filename"
+            else:
+                lookup_md5 = file_md5(search_img)
+                self.log.emit(f"  TRY REAL FILE MD5: {lookup_md5}")
+                phase = "real"
+            already = set((site_done_map.get(str(path)) or {}).keys())
+            active_keys = [lane_key for lane_key in lane_queue if lane_site_key[lane_key] not in already]
+            if active_keys and len(active_keys) < len(lane_queue):
+                pending_names = ", ".join(lane_name.get(key, key) for key in active_keys)
+                self.log.emit(f"  RESUME ONLY PENDING SITES: {pending_names}")
+            states[token] = {
+                "path": path, "search_img": search_img, "phase": phase,
+                "first_was_filename": from_filename, "md5": lookup_md5,
+                "active_keys": active_keys, "waiting": set(active_keys),
+                "tags": [], "sources": [], "groups": [], "network_failed": False,
+                "lane_results": {}, "prior_status": prior_global_status.get(str(path)),
+                "was_existing_found": prior_global_status.get(str(path)) in ("found", "tagged"),
+                "existing_media_path": existing_media_map.get(str(path), ""), "is_sauce_retry": False,
+                "checkpointed_keys": set(), "saved_match_keys": set(), "persisted_found": False,
+            }
+            if not active_keys:
+                self.log.emit(f"  MD5 SITES UP TO DATE: {path.name}")
+                if not queue_fallback_or_finish(token, states[token]):
+                    event_q.put(("complete", token))
+                return True
+            for lane_key in active_keys:
+                lane_queue[lane_key].put((token, phase, lookup_md5, path))
+            return True
+
+        def submit_saucenao_retry(path):
+            nonlocal next_token
+            if self.isInterruptionRequested():
+                return False
+            next_token += 1
+            token = next_token
+            path = Path(path)
+            self.log.emit(f"SAUCENAO RETRY AFTER COOLDOWN: {path.name}")
+            try:
+                record_task_event(session_settings, "saucenao_retry", "started_after_cooldown", path.name)
+            except Exception:
+                pass
+            states[token] = {
+                "path": path, "phase": "fallback_saucenao", "waiting": set(),
+                "prior_status": prior_global_status.get(str(path)),
+                "existing_media_path": existing_media_map.get(str(path), ""),
+                "is_sauce_retry": True,
+            }
+            fallback_q.put((token, path, True))
+            return True
+
+        for _ in range(min(window, total)):
+            try:
+                submit_path(next(file_iter))
+            except StopIteration:
+                break
+
+        completed = 0
+        stopped = False
+        while states or deferred_sauce:
+            now = int(time.time())
+            retry_slots = max(0, window - len(states))
+            if retry_slots:
+                due_paths = [key for key, value in list(deferred_sauce.items()) if int(value[1]) <= now]
+                for key in due_paths[:retry_slots]:
+                    path, _retry_at = deferred_sauce.pop(key)
+                    submit_saucenao_retry(path)
+            if not states and deferred_sauce:
+                next_due = min(int(value[1]) for value in deferred_sauce.values())
+                if sauce_wait_notice_for != next_due:
+                    left = max(0, next_due - int(time.time()))
+                    self.log.emit(f"SAUCENAO QUEUE WAITING: {len(deferred_sauce)} file(s); automatic retry in {left//60}m {left%60}s")
+                    sauce_wait_notice_for = next_due
+                self._wait_if_paused_or_delay(min(1.0, max(0.05, next_due - time.time())))
+                continue
+            self._wait_if_paused_or_delay(0)
+            if self.isInterruptionRequested():
+                stopped = True
+                self.log.emit("STOPPED")
+                break
+            try:
+                event = event_q.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if self.isInterruptionRequested():
+                stopped = True
+                self.log.emit("STOPPED")
+                break
+            if event[0] == "primary":
+                _, token, lane_key, site_key, engine, phase, checked_md5, tags, source, groups, network_failed, network_summary = event
+                state = states.get(token)
+                if state is None or phase != state["phase"]:
+                    continue
+                state["waiting"].discard(lane_key)
+                state["lane_results"][lane_key] = {"tags": list(tags or []), "source": source, "groups": groups or {}, "md5": checked_md5, "network_failed": bool(network_failed)}
+                if network_failed:
+                    state["network_failed"] = True
+                if tags:
+                    state["tags"].extend(tags)
+                    if source:
+                        state["sources"].append(f"md5 {lane_name.get(lane_key, lane_key)} {source}")
+                    if groups:
+                        state["groups"].append(groups)
+                    self.site_current.emit(lane_name.get(lane_key, lane_key), "Найдено", str(state["path"]))
+                else:
+                    self.site_current.emit(lane_name.get(lane_key, lane_key), "Нет совпадения", str(state["path"]))
+                # A match is final immediately; a real-MD5 result is also final.
+                # Checkpoint now, before slower lanes finish, so restart does not
+                # replay fast-site work from the beginning of the conveyor window.
+                checkpoint_lane_results(state, finalize_misses=False)
+                if state["waiting"]:
+                    continue
+                if state["tags"]:
+                    # The matching lanes have already saved metadata. At this point
+                    # filename-phase misses are also final because at least one source
+                    # verified the filename hash.
+                    checkpoint_lane_results(state, finalize_misses=True)
+                    if not state.get("persisted_found"):
+                        stats["errors"] += 1
+                elif state["phase"] == "filename":
+                    real_md5 = file_md5(state["search_img"])
+                    if real_md5.lower() != state["md5"].lower():
+                        state["phase"] = "real"
+                        state["md5"] = real_md5
+                        state["waiting"] = set(state["active_keys"])
+                        state["lane_results"] = {}
+                        state["checkpointed_keys"] = set()
+                        state["network_failed"] = False
+                        self.log.emit(f"  TRY REAL FILE MD5: {real_md5}")
+                        for key in state["active_keys"]:
+                            lane_queue[key].put((token, "real", real_md5, state["path"]))
+                        continue
+                    checkpoint_lane_results(state, finalize_misses=True)
+                    if state["network_failed"]:
+                        stats["deferred_network"] += 1
+                        self.log.emit(f"  NETWORK TEMPORARY FAILURE: {state['path'].name} has unfinished site lanes; deferred")
+                    elif queue_fallback_or_finish(token, state):
+                        continue
+                else:
+                    checkpoint_lane_results(state, finalize_misses=True)
+                    if state["network_failed"]:
+                        stats["deferred_network"] += 1
+                        self.log.emit(f"  NETWORK TEMPORARY FAILURE: {state['path'].name} has unfinished site lanes; deferred")
+                    elif queue_fallback_or_finish(token, state):
+                        continue
+                states.pop(token, None)
+                completed += 1
+                self.current_file.emit(str(state["path"]))
+                self.progress.emit(completed, total)
+                try:
+                    submit_path(next(file_iter))
+                except StopIteration:
+                    pass
+            elif event[0] == "complete":
+                _, token = event
+                state = states.pop(token, None)
+                if state is None:
+                    continue
+                completed += 1
+                self.current_file.emit(str(state["path"]))
+                self.progress.emit(completed, total)
+                try:
+                    submit_path(next(file_iter))
+                except StopIteration:
+                    pass
+            elif event[0] == "fallback":
+                _, token, result, error_text = event
+                state = states.pop(token, None)
+                if state is None:
+                    continue
+                is_retry = bool(state.get("is_sauce_retry", False))
+                path_key = str(state["path"])
+                if result == "retry_saucenao":
+                    try:
+                        retry_at = int(error_text or (time.time() + float(self.settings.get("saucenao_cooldown_seconds", 3600) or 3600)))
+                    except Exception:
+                        retry_at = int(time.time() + 3600)
+                    with persist_lock:
+                        enqueue_reverse_retry(session_settings, state["path"], service="saucenao", retry_after=retry_at, reason="api_cooldown")
+                    deferred_sauce[path_key] = (state["path"], retry_at)
+                    stats["deferred_saucenao"] += 1
+                    left = max(0, retry_at - int(time.time()))
+                    self.log.emit(f"  SAUCENAO RETRY QUEUED: {state['path'].name}; automatic retry in {left//60}m {left%60}s")
+                    if is_retry:
+                        try:
+                            record_task_event(session_settings, "saucenao_retry", "cooldown_again", state["path"].name)
+                        except Exception:
+                            pass
+                else:
+                    with persist_lock:
+                        remove_reverse_retry(session_settings, state["path"], service="saucenao")
+                    deferred_sauce.pop(path_key, None)
+                    if is_retry:
+                        try:
+                            record_task_event(session_settings, "saucenao_retry", f"completed_{result}", state["path"].name)
+                        except Exception:
+                            pass
+                    if result == "tagged" or result == "partial":
+                        stats["tagged"] += 1
+                    elif result == "nomatch":
+                        stats["nomatch"] += 1
+                    elif result == "retry_network":
+                        stats["deferred_network"] += 1
+                    elif result == "skip":
+                        stats["skipped"] += 1
+                    else:
+                        stats["errors"] += 1
+                        if error_text:
+                            self.log.emit(f"ERROR {state['path'].name}: {error_text}")
+                if not is_retry:
+                    completed += 1
+                    self.current_file.emit(str(state["path"]))
+                    self.progress.emit(completed, total)
+                    try:
+                        submit_path(next(file_iter))
+                    except StopIteration:
+                        pass
+
+        discarded = 0
+        if stopped or self.isInterruptionRequested():
+            # Hard stop: discard requests already prepared inside the conveyor
+            # window. Already-sent HTTP calls may return, but their logging and
+            # persistence are suppressed after interruption.
+            for _lane_key, _shown, _key, _engine, _site, work_q in site_lanes:
+                while True:
+                    try:
+                        item = work_q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not sentinel:
+                        discarded += 1
+            while True:
+                try:
+                    item = fallback_q.get_nowait()
+                except queue.Empty:
+                    break
+                if item is not sentinel:
+                    discarded += 1
+            # Background category jobs remain durable in SQLite and resume later.
+            self.log.emit(f"STOP: discarded queued checks={discarded}; only already-sent HTTP calls may finish silently")
+        for _lane_key, _shown, _key, _engine, _site, work_q in site_lanes:
+            work_q.put(sentinel)
+        fallback_q.put(sentinel)
+        if category_enabled:
+            category_q.put(sentinel)
+        for th in threads:
+            th.join(timeout=0.25 if stopped else 1.0)
+        return stats, stopped
+
+
     def run(self):
-        root=Path(self.settings.get("root","")); suffix=self.settings.get("output_suffix",".tags.txt")
+        root=Path(self.settings.get("root",""))
         files=[p for p in root.rglob("*") if p.suffix.lower() in MEDIA_EXTS] if root.exists() else []
         self.log.emit(f"SCAN FOUND MEDIA: {len(files)} files")
         # Не сканируем Local_Booru_Output как обычный источник. Иначе один и тот же
@@ -87,9 +804,9 @@ class TaggerWorker(QThread):
         deleted_candidates = 0
         for x in files:
             try:
-                if has_deleted_record_for_name(x):
+                if has_deleted_record_for_name(x, settings=self.settings):
                     deleted_candidates += 1
-                    if should_skip_deleted_file(x):
+                    if should_skip_deleted_file(x, settings=self.settings):
                         deleted_skips += 1
                         continue
             except Exception:
@@ -101,42 +818,103 @@ class TaggerWorker(QThread):
             self.log.emit(f"DELETED-DUPLICATE CACHE CHECKED: {deleted_candidates}")
         if deleted_skips:
             self.log.emit(f"SKIP DELETED-DUPLICATE CACHE: {deleted_skips}")
-        def has_tags(path):
-            tag_file = path.with_suffix(suffix)
-            return tag_file.exists() and tag_file.stat().st_size > 0
-        def has_nomatch(path):
-            return path.with_suffix(".nomatch").exists()
         def processed_status(path):
-            # Skip by original sidecars AND by output/archive cache.
-            if has_tags(path):
-                return "tagged"
-            if has_nomatch(path):
-                return "nomatch"
+            # SQLite is the only live source of processing state. Legacy sidecars
+            # are handled only by the explicit importer/migration tools.
             return output_processed_status(self.settings, path)
+
+        # The per-site conveyor is the supported MD5 architecture, not an end-user toggle.
+        use_conveyor = bool(self.settings.get("enable_md5_lookup", True))
+        active_site_keys = []
+        site_done_map = {}
+        prior_global_status = {}
+        existing_media_map = {}
+        restored_saucenao = []
+        restored_saucenao_paths = set()
+        if use_conveyor:
+            try:
+                _site_probe = Tagger(dict(self.settings), lambda _m: None)
+                active_site_keys = list(dict.fromkeys(_site_scan_key(_site_probe, site) for site in _site_probe._all_enabled_site_configs()))
+                active_site_keys = [x for x in active_site_keys if x]
+                if not active_site_keys:
+                    use_conveyor = False
+            except Exception as e:
+                self.log.emit(f"SITE STATUS WARNING: cannot read enabled sites: {e}")
+                use_conveyor = False
+            if use_conveyor:
+                try:
+                    from core.services.scan_state_service import pending_reverse_retry_paths
+                    current_root_paths = {str(path) for path in files}
+                    restored_saucenao = [
+                        row for row in pending_reverse_retry_paths(self.settings, service="saucenao", limit=1000000)
+                        if str(row[0]) in current_root_paths
+                    ]
+                    restored_saucenao_paths = {str(path) for path, _retry_at, _reason in restored_saucenao}
+                except Exception as e:
+                    self.log.emit(f"SAUCENAO RETRY RESTORE WARNING: {e}")
+                    restored_saucenao = []
+                    restored_saucenao_paths = set()
 
         if self.settings.get("tag_only_untagged") or self.settings.get("skip_existing"):
             before_status = len(files)
             self.log.emit(f"STATUS CHECK: {before_status} files")
             status_map = {}
             try:
-                from core.database.storage import processed_status_many
-                status_map = processed_status_many(self.settings, files)
+                from core.services.scan_state_service import processed_records_many
+                processed_records = processed_records_many(self.settings, files)
+                status_map = {path: row.get("status", "") for path, row in processed_records.items()}
+                existing_media_map = {path: row.get("media_path", "") for path, row in processed_records.items()}
                 self.log.emit(f"STATUS CHECK DB MATCHES: {len(status_map)}")
             except Exception as e:
                 self.log.emit(f"STATUS CHECK DB WARNING: {e}")
-            filtered = []
-            for p in files:
-                if status_map.get(str(p)) is None:
-                    # Keep cheap sidecar compatibility check only. Do not call
-                    # output_processed_status() here, because in SQLite mode that
-                    # would query per file and freeze queue preparation.
-                    if has_tags(p) or has_nomatch(p):
-                        continue
-                    filtered.append(p)
-            files = filtered
-            skipped_status = before_status - len(files)
-            if skipped_status:
-                self.log.emit(f"SKIP ALREADY PROCESSED SQL STATUS: {skipped_status}")
+            if use_conveyor:
+                try:
+                    from core.services.scan_state_service import site_scan_status_many
+                    site_done_map = site_scan_status_many(self.settings, files, active_site_keys, scan_revision=SITE_SCAN_REVISION)
+                except Exception as e:
+                    self.log.emit(f"SITE STATUS DB WARNING: {e}")
+                    site_done_map = {}
+                active_set = set(active_site_keys)
+                filtered = []
+                completed_for_all_sites = 0
+                new_site_pending = 0
+                waiting_saucenao_only = 0
+                for p in files:
+                    path_key = str(p)
+                    existing_status = status_map.get(path_key)
+                    prior_global_status[path_key] = existing_status
+                    done_sites = set((site_done_map.get(path_key) or {}).keys())
+                    has_pending_site = not active_set.issubset(done_sites)
+                    retry_nomatch = bool(self.settings.get("retry_nomatch", False)) and existing_status in ("nomatch", "no_match")
+                    has_saved_sauce_retry = path_key in restored_saucenao_paths and not existing_status
+                    # A durable SauceNAO retry has already passed IQDB/Ascii2D in a
+                    # previous run. Do not feed it through ordinary fallback again.
+                    # It stays in deferred_sauce and is retried through SauceNAO only.
+                    needs_new_result = not existing_status and not has_saved_sauce_retry
+                    if has_pending_site or needs_new_result or retry_nomatch:
+                        filtered.append(p)
+                        if existing_status and has_pending_site:
+                            new_site_pending += 1
+                    elif has_saved_sauce_retry:
+                        waiting_saucenao_only += 1
+                    else:
+                        completed_for_all_sites += 1
+                files = filtered
+                self.log.emit(f"SITE STATUS CHECK: enabled_sites={len(active_site_keys)} fully_checked_existing={completed_for_all_sites} pending_on_processed={new_site_pending}")
+                if waiting_saucenao_only:
+                    self.log.emit(f"SAUCENAO RETRY WAITING: {waiting_saucenao_only} file(s) excluded from normal MD5/IQDB/Ascii2D replay")
+                skipped_status = before_status - len(files)
+                if skipped_status:
+                    self.log.emit(f"SKIP FILES ALREADY CHECKED BY ALL ENABLED SITES: {skipped_status}")
+            else:
+                filtered = []
+                for p in files:
+                    if status_map.get(str(p)) is None:
+                        filtered.append(p)
+                files = filtered
+                skipped_status = before_status - len(files)
+                if skipped_status:
+                    self.log.emit(f"SKIP ALREADY PROCESSED SQL STATUS: {skipped_status}")
 
         self.log.emit("QUEUE PREP: status filters done")
         limit=int(self.settings.get("limit_files",0))
@@ -155,10 +933,51 @@ class TaggerWorker(QThread):
         nomatch=0
         skipped=0
         errors=0
+        deferred_network=0
         stopped=False
+        stopped_network=False
+
+        if use_conveyor and (total > 0 or restored_saucenao):
+            result = self._run_site_conveyor(files, _settings_with_session, tagger, prior_global_status=prior_global_status, existing_media_map=existing_media_map, site_done_map=site_done_map, restored_saucenao=restored_saucenao)
+            if result is not None:
+                stats, stopped = result
+                self.log.emit(
+                    f"SUMMARY: TAGGED={stats['tagged']} NO_MATCH={stats['nomatch']} "
+                    f"SKIPPED={stats['skipped']} DEFERRED_NETWORK={stats['deferred_network']} "
+                    f"DEFERRED_SAUCENAO={stats.get('deferred_saucenao', 0)} "
+                    f"SITE_CHECKS={stats.get('site_checks', 0)} MERGED_EXISTING={stats.get('site_merged', 0)} "
+                    f"ERRORS={stats['errors']} TOTAL={total}"
+                )
+                if stopped:
+                    self.log.emit("SUMMARY: stopped by user")
+                self.done.emit()
+                return
+        elif bool(self.settings.get("tagger_low_power_mode", False)):
+            self.log.emit("LOW POWER MODE: conveyor manually disabled; legacy one-file processing is active")
+
+        network_retry_attempts = max(0, min(5, int(self.settings.get("network_retry_attempts", 2) or 2)))
+        network_retry_delay = max(1.0, min(120.0, float(self.settings.get("network_retry_delay_seconds", 10) or 10)))
 
         parallel_workers = int(self.settings.get("tagger_parallel_workers", 1) or 1)
         parallel_workers = max(1, min(parallel_workers, 4))
+        if bool(self.settings.get("tagger_low_power_mode", False)):
+            parallel_workers = 1
+
+        def _process_with_network_retry(local_tagger, path):
+            for attempt in range(network_retry_attempts + 1):
+                if self.isInterruptionRequested():
+                    return "skip"
+                result = local_tagger.process_image(path)
+                if result != "retry_network":
+                    return result
+                if attempt < network_retry_attempts:
+                    pause = min(120.0, network_retry_delay * (2 ** attempt))
+                    self.log.emit(
+                        f"  NETWORK RETRY {attempt + 1}/{network_retry_attempts}: "
+                        f"{Path(path).name} через {int(pause)} сек."
+                    )
+                    self._wait_if_paused_or_delay(pause)
+            return "retry_network"
 
         def _process_one(path, worker_index=0):
             # One Tagger instance per worker.  The Tagger has session/cache state,
@@ -167,7 +986,7 @@ class TaggerWorker(QThread):
             local_tagger = Tagger(local_settings, lambda m: self.log.emit(str(m)))
             local_tagger.cancel_callback = self.isInterruptionRequested
             self.current_file.emit(str(path))
-            return local_tagger.process_image(path)
+            return _process_with_network_retry(local_tagger, path)
 
         if parallel_workers <= 1 or total <= 1:
             for i,p in enumerate(files,1):
@@ -184,29 +1003,46 @@ class TaggerWorker(QThread):
                         stopped=True
                         break
                     tagger.cancel_callback = self.isInterruptionRequested
-                    result = tagger.process_image(p)
+                    result = _process_with_network_retry(tagger, p)
                     if result == "tagged":
                         tagged += 1
                     elif result == "nomatch":
                         nomatch += 1
                     elif result == "skip":
                         skipped += 1
+                    elif result == "retry_network":
+                        deferred_network += 1
+                        stopped_network = True
+                        self.log.emit(
+                            "NETWORK UNAVAILABLE: текущий файл отложен и НЕ отправлен в Брак. "
+                            "Сканирование остановлено; запусти его снова после восстановления интернета/VPN."
+                        )
                 except Exception as e:
-                    errors += 1
-                    nomatch += 1
-                    self.log.emit(f"ERROR {p.name}: {e}")
+                    if _looks_like_network_exception(e):
+                        deferred_network += 1
+                        stopped_network = True
+                        self.log.emit(
+                            f"NETWORK ERROR {p.name}: {e}. "
+                            "Файл отложен и НЕ отправлен в Брак."
+                        )
+                    else:
+                        errors += 1
+                        self.log.emit(f"ERROR {p.name}: {e}")
 
                 self.progress.emit(i,total)
+                if stopped_network:
+                    break
                 self._wait_if_paused_or_delay(float(self.settings.get("delay_seconds", 0) or 0))
         else:
             self.log.emit(f"PARALLEL TAGGER: {parallel_workers} workers enabled")
             from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
             pending = {}
             done_count = 0
+            network_abort = False
             file_iter = iter(files)
             with ThreadPoolExecutor(max_workers=parallel_workers, thread_name_prefix="tagger") as ex:
                 def submit_next():
-                    if self.isInterruptionRequested():
+                    if self.isInterruptionRequested() or network_abort:
                         return False
                     try:
                         pth = next(file_iter)
@@ -240,20 +1076,44 @@ class TaggerWorker(QThread):
                                 nomatch += 1
                             elif result == "skip":
                                 skipped += 1
+                            elif result == "retry_network":
+                                deferred_network += 1
+                                network_abort = True
+                                stopped_network = True
+                                self.log.emit(
+                                    "NETWORK UNAVAILABLE: файл отложен и НЕ отправлен в Брак. "
+                                    "Новые задачи не запускаются; перезапусти сканирование после восстановления интернета/VPN."
+                                )
                         except Exception as e:
-                            errors += 1
-                            nomatch += 1
-                            self.log.emit(f"ERROR {Path(pth).name}: {e}")
+                            if network_abort and fut.cancelled():
+                                pass
+                            elif _looks_like_network_exception(e):
+                                deferred_network += 1
+                                network_abort = True
+                                stopped_network = True
+                                self.log.emit(
+                                    f"NETWORK ERROR {Path(pth).name}: {e}. "
+                                    "Файл отложен и НЕ отправлен в Брак."
+                                )
+                            else:
+                                errors += 1
+                                self.log.emit(f"ERROR {Path(pth).name}: {e}")
                         done_count += 1
                         self.progress.emit(done_count,total)
                         self._wait_if_paused_or_delay(float(self.settings.get("delay_seconds", 0) or 0))
+                        if network_abort:
+                            for queued in list(pending.keys()):
+                                queued.cancel()
                         submit_next()
 
         self.log.emit(
-            f"SUMMARY: TAGGED={tagged} NO_MATCH={nomatch} SKIPPED={skipped} ERRORS={errors} TOTAL={total}"
+            f"SUMMARY: TAGGED={tagged} NO_MATCH={nomatch} SKIPPED={skipped} "
+            f"DEFERRED_NETWORK={deferred_network} ERRORS={errors} TOTAL={total}"
         )
         if stopped:
             self.log.emit("SUMMARY: stopped by user")
+        if stopped_network:
+            self.log.emit("SUMMARY: stopped because network/VPN was unavailable; deferred files remain eligible for retry")
         self.done.emit()
 
 class BrowserLoginWorker(QThread):
@@ -366,20 +1226,20 @@ class TaggerPage(QWidget):
         row=QHBoxLayout(); self.root=QLineEdit(); self.choose_btn=QPushButton(); self.choose_btn.clicked.connect(self.choose); row.addWidget(self.root,1); row.addWidget(self.choose_btn)
         self.api=QLineEdit(); self.api.setEchoMode(QLineEdit.Password)
         self.min_sim=QDoubleSpinBox(); self.min_sim.setRange(50,99); self.min_sim.setSingleStep(0.5)
-        self.skip=QCheckBox(); self.only_untagged=QCheckBox(); self.skip_copy_suffix=QCheckBox(); self.mark_nomatch=QCheckBox(); self.md5=QCheckBox(); self.sauce=QCheckBox(); self.ascii2d=QCheckBox()
-        self.iqdb=QCheckBox(); self.browser=QCheckBox()
+        self.skip=QCheckBox(); self.only_untagged=QCheckBox(); self.skip_copy_suffix=QCheckBox(); self.md5=QCheckBox(); self.sauce=QCheckBox(); self.ascii2d=QCheckBox()
+        self.iqdb=QCheckBox(); self.low_power=QCheckBox(); self.bg_rule34_categories=QCheckBox()
+        self.site_interval=QDoubleSpinBox(); self.site_interval.setRange(1.10, 30.0); self.site_interval.setDecimals(2); self.site_interval.setSingleStep(0.10); self.site_interval.setSuffix(" с")
+        self.conveyor_window=QSpinBox(); self.conveyor_window.setRange(2,128)
         # Keep bare indicators compact, but leave enough room for QSS borders.
         # Old fixedWidth(20) clipped 17px indicators with 2px borders in dark themes.
-        for _cb in [self.skip,self.only_untagged,self.skip_copy_suffix,
-                    self.mark_nomatch,self.md5,
-                    self.sauce,self.ascii2d,self.iqdb,self.browser]:
+        for _cb in [self.skip,self.only_untagged,self.skip_copy_suffix,self.md5,
+                    self.sauce,self.ascii2d,self.iqdb,self.low_power,self.bg_rule34_categories]:
             _cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             _cb.setFixedSize(23, 23)
         self.iqdb_min=QDoubleSpinBox(); self.iqdb_min.setRange(50,99); self.iqdb_min.setSingleStep(0.5)
         self.delay=QDoubleSpinBox(); self.delay.setRange(0,120); self.limit=QSpinBox(); self.limit.setRange(0,1000000); self.req_timeout=QSpinBox(); self.req_timeout.setRange(5,300); self.sauce_cooldown=QSpinBox(); self.sauce_cooldown.setRange(1,1440)
-        self.output_suffix=QLineEdit(); self.sources_suffix=QLineEdit(); self.browser_wait=QSpinBox(); self.browser_wait.setRange(10,600)
         self.form_rows=[]
-        for label,w,tip in [("Folder",row,"tip_root"),("SauceNAO API key",self.api,"tip_saucenao"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("SauceNAO fallback",self.sauce,"tip_sauce"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Skip existing",self.skip,"tip_skip"),("Tag only untagged",self.only_untagged,"tip_only_untagged"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix"),("Mark NO MATCH",self.mark_nomatch,"tip_mark_nomatch"),("Delay",self.delay,"tip_delay"),("Request timeout",self.req_timeout,"tip_delay"),("Sauce cooldown min",self.sauce_cooldown,"tip_sauce"),("Limit",self.limit,"tip_limit"),("Use system browser cookies",self.browser,"tip_system_cookies")]: self.add_tip_row(label,w,tip)
+        for label,w,tip in [("Folder",row,"tip_root"),("SauceNAO API key",self.api,"tip_saucenao"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("SauceNAO fallback",self.sauce,"tip_sauce"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Skip existing",self.skip,"tip_skip"),("Tag only untagged",self.only_untagged,"tip_only_untagged"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix"),("Background tag groups",self.bg_rule34_categories,"tip_background_groups"),("Low power mode",self.low_power,"tip_low_power"),("Site interval",self.site_interval,"tip_site_interval"),("Conveyor window",self.conveyor_window,"tip_conveyor_window"),("Delay",self.delay,"tip_delay"),("Request timeout",self.req_timeout,"tip_delay"),("Sauce cooldown min",self.sauce_cooldown,"tip_sauce"),("Limit",self.limit,"tip_limit"),]: self.add_tip_row(label,w,tip)
         split.addWidget(left)
         right=QWidget(); rlay=QVBoxLayout(right); rlay.setContentsMargins(6, 0, 0, 0); rlay.setSpacing(4)
         self.sites_widget = SitesWidget()
@@ -396,13 +1256,16 @@ class TaggerPage(QWidget):
         self.progress=QProgressBar(); lay.addWidget(self.progress)
         self.console_preview_split = QSplitter(Qt.Horizontal)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True); set_bounded_log(self.log, int(self.main.settings.get("max_console_lines", 2500)))
-        self.preview_box=QLabel("Preview"); self.preview_box.setAlignment(Qt.AlignCenter); self.preview_box.setMinimumWidth(280)
+        self.preview_box=QLabel("Preview"); self.preview_box.setAlignment(Qt.AlignCenter); self.preview_box.setMinimumWidth(240)
         self.preview_box.setStyleSheet("border:1px solid #2f3541;border-radius:8px;")
-        self.console_preview_split.addWidget(self.log); self.console_preview_split.addWidget(self.preview_box)
-        self.console_preview_split.setSizes([900,320])
+        self.site_activity_table=QTableWidget(0,3); self.site_activity_table.setHorizontalHeaderLabels(["Сайт", "Состояние", "Текущий файл"]); self.site_activity_table.verticalHeader().setVisible(False); self.site_activity_table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.site_activity_table.setSelectionMode(QAbstractItemView.NoSelection); self.site_activity_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeToContents); self.site_activity_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents); self.site_activity_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.Stretch); self.site_activity_table.setMinimumWidth(430)
+        self._site_activity_rows={}; self._site_activity_paths={}; self._site_activity_preview_labels={}
+        self.console_preview_split.addWidget(self.log); self.console_preview_split.addWidget(self.preview_box); self.console_preview_split.addWidget(self.site_activity_table)
+        self.console_preview_split.setSizes([720,250,470])
         lay.addWidget(self.console_preview_split,2)
         self._last_site_table = None
         self._last_site_row = -1
+        self.low_power.toggled.connect(self.update_preview_visibility)
         self.load_values(); self.retranslate(); self.update_preview_visibility()
 
     def add_tip_row(self, label_key, widget, tip_key):
@@ -476,8 +1339,9 @@ class TaggerPage(QWidget):
     def bool_item(self, checked):
         it=QTableWidgetItem(); it.setFlags(it.flags()|Qt.ItemIsUserCheckable); it.setCheckState(Qt.Checked if checked else Qt.Unchecked); return it
     def load_values(self):
-        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.api.setText(s.get("saucenao_api_key","")); self.min_sim.setValue(float(s.get("min_similarity",85))); self.skip.setChecked(bool(s.get("skip_existing",True))); self.only_untagged.setChecked(bool(s.get("tag_only_untagged",True))); self.skip_copy_suffix.setChecked(bool(s.get("skip_copy_suffix_files",True)));  self.mark_nomatch.setChecked(bool(s.get("mark_no_match",True))); self.md5.setChecked(bool(s.get("enable_md5_lookup",True))); self.sauce.setChecked(bool(s.get("enable_saucenao",True))); self.ascii2d.setChecked(s.get("enable_ascii2d",False))
-        self.iqdb.setChecked(bool(s.get("enable_iqdb",True))); self.iqdb_min.setValue(float(s.get("iqdb_min_similarity",75))); self.delay.setValue(float(s.get("delay_seconds",8))); self.req_timeout.setValue(int(float(s.get("request_timeout_seconds",20)))); self.sauce_cooldown.setValue(int(float(s.get("saucenao_cooldown_seconds",3600))/60)); self.limit.setValue(int(s.get("limit_files",0))); self.output_suffix.setText(s.get("output_suffix",".tags.txt")); self.sources_suffix.setText(s.get("sources_suffix",".sources.txt")); self.browser.setChecked(bool(s.get("use_system_browser_cookies", s.get("use_browser_auth",False)))); self.browser_wait.setValue(int(s.get("browser_auth_wait_seconds",60)))
+        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.api.setText(s.get("saucenao_api_key","")); self.min_sim.setValue(float(s.get("min_similarity",85))); self.skip.setChecked(bool(s.get("skip_existing",True))); self.only_untagged.setChecked(bool(s.get("tag_only_untagged",True))); self.skip_copy_suffix.setChecked(bool(s.get("skip_copy_suffix_files",True))); self.md5.setChecked(bool(s.get("enable_md5_lookup",True))); self.sauce.setChecked(bool(s.get("enable_saucenao",True))); self.ascii2d.setChecked(s.get("enable_ascii2d",False))
+        self.iqdb.setChecked(bool(s.get("enable_iqdb",True))); self.iqdb_min.setValue(float(s.get("iqdb_min_similarity",75))); self.delay.setValue(float(s.get("delay_seconds",8))); self.req_timeout.setValue(int(float(s.get("request_timeout_seconds",20)))); self.sauce_cooldown.setValue(int(float(s.get("saucenao_cooldown_seconds",3600))/60)); self.limit.setValue(int(s.get("limit_files",0)))
+        self.bg_rule34_categories.setChecked(bool(s.get("tagger_background_tag_groups", s.get("tagger_background_rule34_categories", True)))); self.low_power.setChecked(bool(s.get("tagger_low_power_mode", False))); self.site_interval.setValue(max(1.10, float(s.get("tagger_site_interval_seconds", 1.10) or 1.10))); self.conveyor_window.setValue(int(s.get("tagger_conveyor_window",32) or 32)); self.update_preview_visibility()
         self.sites_widget.load(s)
     def retranslate(self):
         t=self.main.t; self.choose_btn.setText(t("Choose")); self.save_btn.setText(t("Save settings")); self.start.setText(t("START")); self.pause_btn.setText(t("RESUME") if self.pause_btn.isChecked() else t("PAUSE")); self.stop_btn.setText(t("STOP")); self.apply_tips()
@@ -489,7 +1353,7 @@ class TaggerPage(QWidget):
                 w.setToolTip(t(tip_key))
     def apply_tips(self):
         t=self.main.t
-        pairs=[(self.root,"tip_root"),(self.api,"tip_saucenao"),(self.min_sim,"tip_min_similarity"),(self.md5,"tip_md5"),(self.sauce,"tip_sauce"),(self.iqdb,"tip_iqdb"),(self.delay,"tip_delay"),(self.req_timeout,"tip_delay"),(self.sauce_cooldown,"tip_sauce"),(self.limit,"tip_limit"),(self.skip,"tip_skip"),(self.only_untagged,"tip_only_untagged"),(self.skip_copy_suffix,"tip_skip_copy_suffix"),(self.mark_nomatch,"tip_mark_nomatch"),(self.browser,"tip_browser")]
+        pairs=[(self.root,"tip_root"),(self.api,"tip_saucenao"),(self.min_sim,"tip_min_similarity"),(self.md5,"tip_md5"),(self.sauce,"tip_sauce"),(self.iqdb,"tip_iqdb"),(self.delay,"tip_delay"),(self.req_timeout,"tip_delay"),(self.sauce_cooldown,"tip_sauce"),(self.limit,"tip_limit"),(self.skip,"tip_skip"),(self.only_untagged,"tip_only_untagged"),(self.skip_copy_suffix,"tip_skip_copy_suffix"),(self.bg_rule34_categories,"tip_background_groups"),(self.low_power,"tip_low_power"),(self.site_interval,"tip_site_interval"),(self.conveyor_window,"tip_conveyor_window")]
         for w,k in pairs: w.setToolTip(t(k))
 
     def _table_clicked(self, *args, **kwargs):
@@ -569,23 +1433,27 @@ class TaggerPage(QWidget):
         s["tag_only_untagged"] = self.only_untagged.isChecked()
         s["skip_copy_suffix_files"] = self.skip_copy_suffix.isChecked()
         
-        s["mark_no_match"] = self.mark_nomatch.isChecked()
+        s.pop("mark_no_match", None)
         s["enable_md5_lookup"] = self.md5.isChecked()
         s["enable_saucenao"] = self.sauce.isChecked()
         s["enable_iqdb"] = self.iqdb.isChecked()
         s["enable_ascii2d"] = self.ascii2d.isChecked()
         # ascii2d has no public API
+        s.pop("tagger_site_conveyor_enabled", None)  # conveyor is fixed architecture
+        s["tagger_background_tag_groups"] = self.bg_rule34_categories.isChecked()
+        s["tagger_background_rule34_categories"] = self.bg_rule34_categories.isChecked()  # backward compatibility
+        s["tagger_low_power_mode"] = self.low_power.isChecked()
+        self.update_preview_visibility()
+        s["tagger_site_interval_seconds"] = max(1.10, float(self.site_interval.value()))
+        s["tagger_conveyor_window"] = int(self.conveyor_window.value())
         s["iqdb_min_similarity"] = self.iqdb_min.value()
         s["delay_seconds"] = self.delay.value()
         s["request_timeout_seconds"] = self.req_timeout.value()
         s["saucenao_cooldown_seconds"] = int(self.sauce_cooldown.value()) * 60
         s["limit_files"] = self.limit.value()
-        s["output_suffix"] = self.output_suffix.text()
-        s["sources_suffix"] = self.sources_suffix.text()
-        s["tags_suffix"] = self.output_suffix.text()
-        s["use_browser_auth"] = self.browser.isChecked()
-        s["use_system_browser_cookies"] = self.browser.isChecked()
-        s["browser_auth_wait_seconds"] = self.browser_wait.value()
+        # Retired live sidecar/cookie-mode controls are not part of the parser UI.
+        for _retired in ("output_suffix", "sources_suffix", "tags_suffix", "use_browser_auth", "use_system_browser_cookies", "browser_auth_wait_seconds"):
+            s.pop(_retired, None)
 
         collected_sites, collected_custom = self.sites_widget.collect()
 
@@ -623,12 +1491,52 @@ class TaggerPage(QWidget):
         self.pause_btn.setChecked(False)
         self.stop_btn.setEnabled(True)
 
+        self.site_activity_table.setRowCount(0); self._site_activity_rows.clear(); self._site_activity_paths.clear(); self._site_activity_preview_labels.clear(); self.update_preview_visibility()
         self.worker = TaggerWorker(self.main.settings)
         self.worker.log.connect(self.append_log)
         self.worker.progress.connect(self.on_worker_progress)
         self.worker.current_file.connect(self.show_current_preview)
+        self.worker.site_current.connect(self.update_site_activity)
         self.worker.done.connect(self.on_worker_done)
         self.worker.start()
+
+    def update_site_activity(self, site, status, path):
+        if not self.site_activity_table.isVisible():
+            return
+        site = str(site); path = str(path or "")
+        display_name = Path(path).name if path else "—"
+        row = self._site_activity_rows.get(site)
+        if row is None:
+            row = self.site_activity_table.rowCount(); self.site_activity_table.insertRow(row); self._site_activity_rows[site] = row
+            self.site_activity_table.setItem(row, 0, QTableWidgetItem(site))
+            self.site_activity_table.setItem(row, 1, QTableWidgetItem(str(status)))
+            wrap = QWidget(); h = QHBoxLayout(wrap); h.setContentsMargins(2,2,2,2); h.setSpacing(6)
+            thumb = QLabel(); thumb.setFixedSize(64,64); thumb.setAlignment(Qt.AlignCenter); thumb.setStyleSheet("border:1px solid #2f3541;border-radius:4px;")
+            name = QLabel(display_name); name.setToolTip(path); name.setWordWrap(True)
+            h.addWidget(thumb); h.addWidget(name, 1); self.site_activity_table.setCellWidget(row, 2, wrap); self.site_activity_table.setRowHeight(row, 70)
+            self._site_activity_preview_labels[site] = (thumb, name)
+        else:
+            self.site_activity_table.item(row, 1).setText(str(status))
+            thumb, name = self._site_activity_preview_labels[site]; name.setText(display_name); name.setToolTip(path)
+            if not path:
+                thumb.clear()
+        self._site_activity_paths[site] = path
+        if not path:
+            return
+        from core.thumb_service import ThumbnailService
+        svc = ThumbnailService.instance()
+        cached = svc.request(path, 64, 64, lambda received, pix, key=site: self._on_site_activity_preview(key, received, pix))
+        if cached is not None and not cached.isNull():
+            self._on_site_activity_preview(site, path, cached)
+
+    def _on_site_activity_preview(self, site, path, pix):
+        if self._site_activity_paths.get(site) != str(path):
+            return
+        labels = self._site_activity_preview_labels.get(site)
+        if not labels or pix is None or pix.isNull():
+            return
+        thumb, _name = labels
+        thumb.setPixmap(pix.scaled(thumb.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def on_worker_progress(self, v, t):
         self.progress.setMaximum(max(1, t))
@@ -636,9 +1544,19 @@ class TaggerPage(QWidget):
         if v % 100 == 0:
             self.trim_ui_memory()
 
-    def update_preview_visibility(self):
+    def update_preview_visibility(self, *_args):
+        """Exactly one activity view is visible: lightweight preview or site lanes."""
         try:
-            self.preview_box.setVisible(bool(self.main.settings.get("show_search_preview", True)))
+            conveyor_enabled = bool(self.md5.isChecked())
+            low_power = bool(self.low_power.isChecked())
+            show_single_preview = bool(self.main.settings.get("show_search_preview", True)) and (low_power or not conveyor_enabled)
+            show_lanes = conveyor_enabled and not low_power
+            self.preview_box.setVisible(show_single_preview)
+            self.site_activity_table.setVisible(show_lanes)
+            if low_power:
+                self.preview_box.setToolTip("Щадящий режим: показывается только текущий файл, без таблицы полос")
+            elif show_lanes:
+                self.site_activity_table.setToolTip("Обычный режим: отдельная полоса каждого сайта")
         except Exception:
             pass
 
@@ -714,5 +1632,11 @@ class TaggerPage(QWidget):
 
     def stop(self):
         if self.worker and self.worker.isRunning():
+            # STOP must also break a paused worker immediately.
+            self.pause_btn.setChecked(False)
+            self.pause_btn.setText(self.main.t("PAUSE"))
+            self.worker.set_paused(False)
             self.worker.requestInterruption()
-            self.append_log("STOPPING...")
+            self.stop_btn.setEnabled(False)
+            self.pause_btn.setEnabled(False)
+            self.append_log("STOPPING: cancelling queued checks and reverse-search starts...")

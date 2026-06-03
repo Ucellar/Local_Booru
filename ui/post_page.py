@@ -1,10 +1,11 @@
 from pathlib import Path
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QSizePolicy, QMessageBox
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QSizePolicy, QMessageBox, QMenu
 from PySide6.QtCore import Qt, QSize, QUrl, QTimer
 from PySide6.QtGui import QPixmap, QDesktopServices, QMovie, QImageReader, QShortcut, QKeySequence
-from core.favorites import load_favorites, save_favorites
-from core.library import normalize_tag, find_sidecar, clean_tags
-from core.image_safe import safe_thumbnail_path
+from core.favorites import load_favorites, set_favorite
+from core.library import normalize_tag, clean_tags
+from core.tag_utils import tag_display_color
+from core.image_safe import safe_thumbnail_path, configure_pillow
 
 # Try MPV first (best quality), fallback to Qt multimedia
 try:
@@ -106,7 +107,7 @@ class PostPage(QWidget):
         super().__init__()
         self.main = main
         self.index = 0
-        self.fit = "height"
+        self.fit = "contain"
         self.player = None
         self.audio = None
         self.video_widget = None
@@ -146,6 +147,8 @@ class PostPage(QWidget):
         self.img.setAlignment(Qt.AlignCenter)
         self.img.setMinimumSize(1, 1)
         self.img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.img.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.img.customContextMenuRequested.connect(self._show_media_context_menu)
         self.img_scroll.setWidget(self.img)
 
         body.addWidget(self.tags_scroll)
@@ -354,17 +357,22 @@ class PostPage(QWidget):
             sc.activated.connect(func)
             return sc
 
+        keys = {"previous":"A", "next":"D", "favorite":"F", "fit":"W", "volume":"E", "back":"Q", "fullscreen":"F11", "zoom_in":"+", "zoom_out":"-", "zoom_reset":"0"}
+        try:
+            keys.update(self.main.settings.get("hotkeys") or {})
+        except Exception:
+            pass
         self._shortcuts = [
-            add("A", lambda: self.prev_post() if self.prev.isVisible() else None),
-            add("D", lambda: self.next_post() if self.next.isVisible() else None),
-            add("F", self.toggle_fav),
-            add("W", self.toggle_fit),
-            add("E", self.toggle_volume),
-            add("Q", self.back_to_gallery),
-            add("F11", self._toggle_fullscreen),
-            add("+", self._zoom_in),
-            add("-", self._zoom_out),
-            add("0", self._zoom_reset),
+            add(keys["previous"], lambda: self.prev_post() if self.prev.isVisible() else None),
+            add(keys["next"], lambda: self.next_post() if self.next.isVisible() else None),
+            add(keys["favorite"], self.toggle_fav),
+            add(keys["fit"], self.toggle_fit),
+            add(keys["volume"], self.toggle_volume),
+            add(keys["back"], self.back_to_gallery),
+            add(keys["fullscreen"], self._toggle_fullscreen),
+            add(keys["zoom_in"], self._zoom_in),
+            add(keys["zoom_out"], self._zoom_out),
+            add(keys["zoom_reset"], self._zoom_reset),
         ]
 
     _zoom_factor: float = 1.0
@@ -441,13 +449,8 @@ class PostPage(QWidget):
             path = item.get("path", "")
             if not path:
                 return None
-            from core.database.connection import db
-            with db(self.main.settings, readonly=True) as conn:
-                row = conn.execute("SELECT id FROM images WHERE path=?", (path,)).fetchone()
-                if row:
-                    return int(row["id"])
-            from core.database.storage import ensure_image
-            return int(ensure_image(self.main.settings, path, status="manual_rating"))
+            from core.services.metadata_service import image_id_for_path
+            return image_id_for_path(self.main.settings, path, create=True, status="manual_rating")
         except Exception as e:
             import logging
             logging.getLogger("local_booru").error("Rating image id error: %s", e)
@@ -459,9 +462,8 @@ class PostPage(QWidget):
         if image_id is None:
             return
         try:
-            from core.database.connection import db
-            with db(self.main.settings, write=True) as conn:
-                conn.execute("UPDATE images SET rating=? WHERE id=?", (int(rating), int(image_id)))
+            from core.services.metadata_service import set_rating
+            set_rating(self.main.settings, int(image_id), int(rating))
             self._current_image_id = int(image_id)
             try:
                 # keep current in-memory item consistent for current session
@@ -480,14 +482,9 @@ class PostPage(QWidget):
                 self._current_image_id = None
                 self.star_rating.set_rating(0)
                 return
-            from core.database.connection import db
-            with db(self.main.settings, readonly=True) as conn:
-                row = conn.execute(
-                    "SELECT COALESCE(rating, 0) as rating FROM images WHERE id=?",
-                    (int(image_id),)
-                ).fetchone()
+            from core.services.metadata_service import get_rating
             self._current_image_id = int(image_id)
-            self.star_rating.set_rating(int(row["rating"] if row else 0))
+            self.star_rating.set_rating(get_rating(self.main.settings, int(image_id)))
         except Exception as e:
             import logging
             logging.getLogger("local_booru").error("Rating load error: %s", e)
@@ -585,6 +582,12 @@ class PostPage(QWidget):
     def back_to_gallery(self):
         self.stop_video()
         self.main.go("Gallery")
+        try:
+            gp = self.main.gallery_page
+            if getattr(gp, "_viewer_page_dirty", False):
+                QTimer.singleShot(0, gp.render_after_viewer_navigation)
+        except Exception:
+            pass
 
     def hideEvent(self, event):
         self.stop_video()
@@ -620,7 +623,7 @@ class PostPage(QWidget):
                             break
         except Exception:
             pass
-        # fit_btn: show current mode as icon (⬛ = width, ▬ = height)
+        # fit_btn: contain is safe default; width is explicit manual fit-to-width mode
         # Update fit button icon based on current mode
         try:
             from pathlib import Path as _P
@@ -643,7 +646,7 @@ class PostPage(QWidget):
                 self.fit_btn.setText("◻" if self.fit == "width" else "▭")
         except Exception:
             self.fit_btn.setText("◻" if self.fit == "width" else "▭")
-        self.fit_btn.setToolTip(self.main.t("Fit Width") if self.fit == "height" else self.main.t("Fit Height"))
+        self.fit_btn.setToolTip(self.main.t("Fit Width") if self.fit == "contain" else self.main.t("Fit Height"))
         self.play_btn.setText("▶")
         self.play_btn.setToolTip("Play/Pause")
         self.render_volume_button()
@@ -672,7 +675,7 @@ class PostPage(QWidget):
         else:
             self.context = self.main.gallery_page._batch
             self.index = idx
-        self.fit = "height"
+        self.fit = "contain"
         self.render()
 
     def showEvent(self, event):
@@ -711,7 +714,11 @@ class PostPage(QWidget):
         per = gp._per_page()
         maxp = max(1, (gp._sql_total + per - 1) // per)
         has_next_page = gp._page < maxp
-        self.prev.setVisible(self.index > 0)
+        # Button visibility must use the same navigation rules as wheel/hotkeys.
+        # When a post is opened directly on page > 1 there is no in-viewer history,
+        # but a previous SQL page still exists and must be reachable.
+        has_prev_page = bool(self._page_history) or gp._page > 1
+        self.prev.setVisible(self.index > 0 or has_prev_page)
         self.next.setVisible(self.index < len(ctx) - 1 or has_next_page)
 
     def ensure_image_widget(self):
@@ -730,6 +737,8 @@ class PostPage(QWidget):
             container.setMinimumSize(200, 150)
             container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             container.setStyleSheet("background:black;")
+            container.setContextMenuPolicy(Qt.CustomContextMenu)
+            container.customContextMenuRequested.connect(self._show_media_context_menu)
 
             # MPV needs the native window ID
             wid = int(container.winId())
@@ -740,6 +749,8 @@ class PostPage(QWidget):
                 hwdec="auto",
                 loop="inf",
                 keep_open=True,
+                keepaspect=True,
+                panscan=0.0,
                 # Quiet
                 msg_level="all=no",
             )
@@ -806,6 +817,8 @@ class PostPage(QWidget):
             self.video_widget = QVideoWidget()
             self.video_widget.setMinimumSize(200, 150)
             self.video_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.video_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.video_widget.customContextMenuRequested.connect(self._show_media_context_menu)
             try:
                 self.video_widget.setAspectRatioMode(Qt.KeepAspectRatio)
             except Exception:
@@ -1063,6 +1076,12 @@ class PostPage(QWidget):
         self.apply_volume()
 
     def render_img(self, path, item=None, zoom: float = None):
+        """Render an opened image from its original aspect ratio, never from a stale card cache.
+
+        Gallery thumbnails are deliberately tiny and asynchronous.  Reusing a cached card
+        preview here could display the wrong/cropped shape in the full post view.  The
+        viewer instead decodes a bounded preview directly from the original media.
+        """
         self.stop_video()
         self.ensure_image_widget()
         self.img.clear()
@@ -1071,25 +1090,45 @@ class PostPage(QWidget):
             area = QSize(1000, 700)
         max_w = max(50, area.width() - 24)
         max_h = max(50, area.height() - 24)
+        factor = max(0.1, float(zoom if zoom is not None else getattr(self, "_zoom_factor", 1.0)))
 
-        # Never QPixmap-load giant originals directly into UI memory.
-        # Build/load a bounded preview first.
-        _zoom = zoom if zoom is not None else getattr(self, "_zoom_factor", 1.0)
-        target_w = max_w if self.fit == "width" else max_w
-        target_h = max(50, int(max_h * 2)) if self.fit == "width" else max_h
-        thumb = safe_thumbnail_path(path, target_w, target_h)
-        raw = QPixmap(thumb) if thumb else QPixmap(str(path))
-        if raw.isNull():
-            self.img.setText(path.name)
-            self.img.adjustSize()
-            return
-        if self.fit == "width":
-            pix = raw.scaledToWidth(int(max_w * _zoom), Qt.SmoothTransformation)
+        reader = QImageReader(str(path))
+        try:
+            reader.setAutoTransform(True)
+        except Exception:
+            pass
+        source_size = reader.size()
+        if not source_size.isValid() or source_size.width() <= 0 or source_size.height() <= 0:
+            # Safe fallback still keeps the full aspect ratio.
+            thumb = safe_thumbnail_path(path, max_w, max_h)
+            raw = QPixmap(thumb) if thumb else QPixmap(str(path))
+            if raw.isNull():
+                self.img.setText(path.name); self.img.adjustSize(); return
+            source_size = raw.size()
+            if self.fit == "width":
+                target = QSize(int(max_w * factor), max(1, int(source_size.height() * max_w * factor / max(1, source_size.width()))))
+            else:
+                target = source_size.scaled(QSize(int(max_w * factor), int(max_h * factor)), Qt.KeepAspectRatio)
+            pix = raw.scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
-            pix = raw.scaled(int(max_w * _zoom), int(max_h * _zoom),
-                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if self.fit == "width":
+                target_w = max(1, int(max_w * factor))
+                target = QSize(target_w, max(1, int(source_size.height() * target_w / max(1, source_size.width()))))
+            else:
+                target = source_size.scaled(QSize(max(1, int(max_w * factor)), max(1, int(max_h * factor))), Qt.KeepAspectRatio)
+            try:
+                reader.setScaledSize(target)
+            except Exception:
+                pass
+            image = reader.read()
+            pix = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+            if pix.isNull():
+                thumb = safe_thumbnail_path(path, target.width(), target.height())
+                pix = QPixmap(thumb) if thumb else QPixmap(str(path)).scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if pix.isNull():
+            self.img.setText(path.name); self.img.adjustSize(); return
         self.img.setPixmap(pix)
-        self.img.resize(pix.size())
+        self.img.setFixedSize(pix.size())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1112,97 +1151,65 @@ class PostPage(QWidget):
                 w.deleteLater()
 
 
-    def _current_sidecars(self, item=None):
-        item = item or self.item()
-        path = Path(item["path"])
-        settings = self.main.settings
-        tag_txt = find_sidecar(path, settings.get("tags_suffix", ".tags.txt"), "tags")
-        src_txt = find_sidecar(path, settings.get("sources_suffix", ".sources.txt"), "sources")
-        tag_json = path.with_suffix(".tags.json")
-        try:
-            if path.parent.name == "media" and path.parent.parent.name in ("found", "partial_match", "no_match"):
-                tag_json = path.parent.parent / "tags" / (path.stem + ".tags.json")
-        except Exception:
-            pass
-        return path, tag_txt, src_txt, tag_json
-
     def remove_tag_from_current(self, tag):
         tag = normalize_tag(tag)
         item = self.item()
-        path, tag_txt, src_txt, tag_json = self._current_sidecars(item)
+        path = Path(item["path"])
 
         groups = item.get("tag_groups") or {"general": item.get("tags", [])}
         new_groups = {}
         removed = False
         for group, tags in groups.items():
             kept = []
-            for t in tags or []:
-                if normalize_tag(t).lower() == tag.lower():
+            for current in tags or []:
+                if normalize_tag(current).lower() == tag.lower():
                     removed = True
                     continue
-                kept.append(normalize_tag(t))
+                kept.append(normalize_tag(current))
             new_groups[group] = kept
-
         if not removed:
             return
-
+        try:
+            from core.services.metadata_service import replace_media_tag_groups
+            if not replace_media_tag_groups(self.main.settings, path, new_groups):
+                raise RuntimeError("файл не найден в SQLite")
+        except Exception as e:
+            QMessageBox.warning(self, "Tag", f"Не смог сохранить теги в базе:\n{e}")
+            return
         new_tags = []
         for xs in new_groups.values():
-            for t in xs:
-                if t and t not in new_tags:
-                    new_tags.append(t)
-
-        try:
-            if tag_txt:
-                tag_txt.parent.mkdir(parents=True, exist_ok=True)
-                tag_txt.write_text(", ".join(new_tags), encoding="utf-8")
-        except Exception as e:
-            QMessageBox.warning(self, "Tag", f"Не смог записать теги:\n{e}")
-            return
-
-        try:
-            import json
-            if tag_json:
-                tag_json.parent.mkdir(parents=True, exist_ok=True)
-                tag_json.write_text(json.dumps(new_groups, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
+            for current in xs:
+                if current and current not in new_tags:
+                    new_tags.append(current)
         item["tags"] = new_tags
         item["tag_groups"] = new_groups
         self.render_tags(item)
 
     def remove_source_from_current(self, source_url, source_host=""):
         item = self.item()
-        path, tag_txt, src_txt, tag_json = self._current_sidecars(item)
-        if not src_txt.exists():
-            return
+        path = Path(item["path"])
         try:
-            lines = src_txt.read_text(encoding="utf-8", errors="ignore").splitlines()
-            source_url = str(source_url or "")
-            source_host = str(source_host or "")
-            kept = []
-            for line in lines:
-                if source_url and source_url in line:
-                    continue
-                if source_host and source_host in line:
-                    continue
-                kept.append(line)
-            src_txt.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-            item["sources"] = [s for s in item.get("sources", []) if str(s.get("url","")) != source_url and str(s.get("host","")) != source_host]
-            item["source_hosts"] = [s.get("host","") for s in item.get("sources", [])]
+            from core.services.metadata_service import remove_media_source_link
+            if not remove_media_source_link(self.main.settings, path, source_url, source_host):
+                return
+            item["sources"] = [s for s in item.get("sources", []) if str(s.get("url", "")) != str(source_url or "") and str(s.get("host", "")) != str(source_host or "")]
+            item["source_hosts"] = [s.get("host", "") for s in item.get("sources", [])]
             self.render_tags(item)
         except Exception as e:
-            QMessageBox.warning(self, "Source", f"Не смог удалить источник:\n{e}")
+            QMessageBox.warning(self, "Source", f"Не смог удалить источник из базы:\n{e}")
 
 
     def render_tags(self, item):
         TAG_COLORS = {
             "artist":    "#ff4040",   # red
+            "contributor": "#e67e22", # e621 contributors
             "character": "#3399ff",   # blue (not green, good contrast with artist)
             "copyright": "#c050a0",   # dark pink (20-30% darker than artist-adjacent pink)
+            "species":   "#22a6b3",   # e621 species
             "general":   "#7090c0",   # muted blue-grey
             "meta":      "#cc8800",   # amber
+            "lore":      "#9b59b6",   # e621 lore
+            "invalid":   "#7f8c8d",   # e621 invalid
             "parody":    "#a040b0",   # purple
             "language":  "#558866",   # muted green
             "category":  "#4499aa",   # teal
@@ -1212,7 +1219,7 @@ class PostPage(QWidget):
         title.setStyleSheet("font-size:14px;font-weight:800;margin-bottom:4px")
         self.tags_lay.addWidget(title)
         groups = item.get("tag_groups") or {"general": item.get("tags", [])}
-        for g in ["artist","character","copyright","general","meta","parody","language","category"]:
+        for g in ["artist","contributor","character","copyright","species","general","meta","lore","invalid","parody","language","category"]:
             if not groups.get(g):
                 continue
             color = TAG_COLORS.get(g, "#888888")
@@ -1222,12 +1229,13 @@ class PostPage(QWidget):
                 "margin-top:8px;margin-bottom:1px;padding-left:2px")
             self.tags_lay.addWidget(lab)
             for tag in groups[g]:
+                tag_color = tag_display_color(tag, g, self.main.settings, TAG_COLORS)
                 btn = TagButton(tag, self.main.open_tag_single, self.main.open_tag_add)
                 btn.setStyleSheet(
                     f"QPushButton{{background:transparent;border:none;"
-                    f"border-radius:4px;padding:1px 6px;color:{color};font-size:12px;"
+                    f"border-radius:4px;padding:1px 6px;color:{tag_color};font-size:12px;"
                     f"font-weight:500;text-align:left;margin:0;}}"
-                    f"QPushButton:hover{{background:{color}20;}}"
+                    f"QPushButton:hover{{background:{tag_color}20;}}"
                 )
                 self.tags_lay.addWidget(btn)
         src_lbl = QLabel("Источники")
@@ -1237,15 +1245,9 @@ class PostPage(QWidget):
         # Try raw_metadata first (exact post URL)
         shown_urls = set()
         try:
-            from core.database.connection import get_connection
-            conn = get_connection(self.main.settings)
+            from core.services.metadata_service import raw_metadata_for_path
             path = item.get("path", "")
-            row = conn.execute(
-                """SELECT rm.post_url, rm.file_url, rm.site
-                   FROM raw_metadata rm
-                   JOIN images i ON i.id = rm.image_id
-                   WHERE i.path = ?""", (path,)
-            ).fetchone()
+            row = raw_metadata_for_path(self.main.settings, path)
             if row:
                 post_url, file_url, site = row
                 if post_url:
@@ -1293,7 +1295,7 @@ class PostPage(QWidget):
         self.tags_lay.addStretch(1)
 
     def render_fav(self, path):
-        _is_fav = str(path) in load_favorites()
+        _is_fav = str(path) in load_favorites(self.main.settings)
         try:
             from pathlib import Path as _P
             from PySide6.QtGui import QIcon
@@ -1316,15 +1318,53 @@ class PostPage(QWidget):
             pass
         self.fav.setText("❤" if _is_fav else "🤍")
 
+    def _show_media_context_menu(self, point):
+        try:
+            path = Path(self.item()["path"])
+        except Exception:
+            return
+        menu = QMenu(self)
+        delete_action = menu.addAction("Удалить (в корзину)")
+        sender = self.sender()
+        global_point = sender.mapToGlobal(point) if sender is not None and hasattr(sender, "mapToGlobal") else self.mapToGlobal(point)
+        chosen = menu.exec(global_point)
+        if chosen != delete_action:
+            return
+        if QMessageBox.question(
+            self, "Удалить файл",
+            f"Переместить в корзину?\n\n{path.name}\n\nФайл можно будет восстановить в разделе «Удалено».",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        ) != QMessageBox.Yes:
+            return
+        try:
+            from core.library_lifecycle import trash_media_paths
+            result = trash_media_paths(self.main.settings, [path], reason="post_context_delete", make_backup=True)
+            if result.get("error"):
+                raise RuntimeError(result.get("error"))
+            self.stop_video()
+            self.main.gallery_page.refresh_force()
+            try:
+                self.main.trash_page.refresh()
+            except Exception:
+                pass
+            self.main.go("Gallery")
+        except Exception as exc:
+            QMessageBox.warning(self, "Удаление", str(exc))
+
     def toggle_fav(self):
         p = str(Path(self.item()["path"]))
-        favs = load_favorites()
-        favs.remove(p) if p in favs else favs.add(p)
-        save_favorites(favs)
+        enabled = p not in load_favorites(self.main.settings)
+        # Write only the current item. Rewriting the entire favorites set was
+        # unnecessary and could leave the gallery with stale paging state.
+        set_favorite(self.main.settings, p, enabled)
         self.render_fav(Path(p))
+        try:
+            self.main.gallery_page.favorite_updated(p, enabled)
+        except Exception:
+            pass
 
     def toggle_fit(self):
-        self.fit = "width" if self.fit == "height" else "height"
+        self.fit = "width" if self.fit == "contain" else "contain"
         # Update fit button icon based on current mode
         try:
             from pathlib import Path as _P
@@ -1347,7 +1387,7 @@ class PostPage(QWidget):
                 self.fit_btn.setText("◻" if self.fit == "width" else "▭")
         except Exception:
             self.fit_btn.setText("◻" if self.fit == "width" else "▭")
-        self.fit_btn.setToolTip(self.main.t("Fit Width") if self.fit == "height" else self.main.t("Fit Height"))
+        self.fit_btn.setToolTip(self.main.t("Fit Width") if self.fit == "contain" else self.main.t("Fit Height"))
         path = Path(self.item()["path"])
         if path.suffix.lower() == ".gif":
             self.render_gif(path)
@@ -1357,30 +1397,31 @@ class PostPage(QWidget):
     def prev_post(self):
         if self.index > 0:
             self.index -= 1
-            self.fit = "height"
+            self.fit = "contain"
             self._zoom_factor = 1.0
             self._enrich_current()
             self.render()
         elif self._page_history:
-            # Return through any number of gallery pages, keeping viewer and grid in sync.
+            # Return through pages previously crossed while this viewer was open.
             page_number, previous_context = self._page_history.pop()
             self.context = list(previous_context)
             self.index = len(self.context) - 1
             gp = self.main.gallery_page
-            gp._page = page_number
-            gp._batch = list(previous_context)
-            gp._clear_grid()
-            QTimer.singleShot(0, gp._render_page)
-            self.fit = "height"
+            gp.adopt_viewer_page(page_number, previous_context)
+            self.fit = "contain"
             self._zoom_factor = 1.0
             self._enrich_current()
             self.render()
+        elif self.main.gallery_page._page > 1:
+            # Directly opening the first post of page 2+ has no page_history.
+            # Fetch the previous SQL page so the Back button matches wheel/hotkeys.
+            self._load_prev_gallery_page()
 
     def next_post(self):
         ctx = self.context or self.main.gallery_page._batch
         if self.index < len(ctx) - 1:
             self.index += 1
-            self.fit = "height"
+            self.fit = "contain"
             self._zoom_factor = 1.0
             self._enrich_current()
             self.render()
@@ -1392,10 +1433,42 @@ class PostPage(QWidget):
         try:
             ctx = self.context or self.main.gallery_page._batch
             if 0 <= self.index < len(ctx):
-                from core.database.repository import enrich_items
+                from core.services.library_service import enrich_items
                 enrich_items(self.main.settings, [ctx[self.index]])
         except Exception:
             pass
+
+    def _load_prev_gallery_page(self):
+        gp = self.main.gallery_page
+        if gp._page <= 1:
+            return
+        per = gp._per_page()
+        from core.services.library_service import search_items, enrich_items
+        previous_page = gp._page - 1
+        offset = (previous_page - 1) * per
+        batch = search_items(
+            self.main.settings,
+            query=gp._last_filter.get("q", ""),
+            source=gp._last_filter.get("src", "all"),
+            bucket=gp._last_filter.get("bucket", "all"),
+            limit=per,
+            offset=offset,
+            order=gp._last_filter.get("order", "path"),
+            extra_where=getattr(gp, "_last_extra_where", None),
+            extra_params=getattr(gp, "_last_extra_params", None),
+        ) or []
+        if not batch:
+            return
+        gp.adopt_viewer_page(previous_page, batch)
+        try:
+            enrich_items(self.main.settings, [batch[-1]])
+        except Exception:
+            pass
+        self.context = list(batch)
+        self.index = len(batch) - 1
+        self.fit = "contain"
+        self._zoom_factor = 1.0
+        self.render()
 
     def _load_next_gallery_page(self):
         gp = self.main.gallery_page
@@ -1403,7 +1476,7 @@ class PostPage(QWidget):
         maxp = max(1, (gp._sql_total + per - 1) // per)
         if gp._page >= maxp:
             return  # already on last page
-        from core.database.repository import search_items, enrich_items
+        from core.services.library_service import search_items, enrich_items
         next_page = gp._page + 1
         offset = (next_page - 1) * per
         batch = search_items(
@@ -1422,12 +1495,10 @@ class PostPage(QWidget):
         # Save a real page history so repeated previous-navigation can return
         # through page 3 -> page 2 -> page 1 rather than only one hop.
         self._page_history.append((gp._page, list(self.context or gp._batch)))
-        # Update gallery page state
-        gp._page = next_page
-        gp._batch = batch
-        gp._clear_grid()
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, gp._render_page)
+        # Keep gallery state in sync without painting its hidden thumbnails.
+        # Rebuilding the grid while the full post is visible caused a visible
+        # pause every time navigation crossed a page boundary.
+        gp.adopt_viewer_page(next_page, batch)
         # Go to first item of new page immediately (batch is ready)
         try:
             enrich_items(self.main.settings, [batch[0]])
@@ -1435,6 +1506,6 @@ class PostPage(QWidget):
             pass
         self.context = list(batch)
         self.index = 0
-        self.fit = "height"
+        self.fit = "contain"
         self._zoom_factor = 1.0
         self.render()

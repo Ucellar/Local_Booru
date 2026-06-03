@@ -8,7 +8,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
 
 from core.nomatch_db import list_nomatches, remove_nomatch, set_manual_url, upsert_nomatch
-from core.tagger_engine import Tagger, unique_keep_order, filter_numeric_tags, merge_tag_groups, groups_to_tags, promote_manual_match, result_output_base
+from core.tagger import Tagger, unique_keep_order, filter_numeric_tags, merge_tag_groups, groups_to_tags, promote_manual_match, result_output_base
 from ui.memory_tools import bounded_append, set_bounded_log
 
 
@@ -88,7 +88,7 @@ class NoMatchPage(QWidget):
 
     def refresh(self):
         root = self.main.settings.get("root", "")
-        items = list_nomatches(root)
+        items = list_nomatches(root, settings=self.main.settings)
         seen = {str(Path(x.get("path", "")).resolve()).lower() for x in items if x.get("path")}
         try:
             nm_media = result_output_base(self.main.settings) / "no_match" / "media"
@@ -201,14 +201,14 @@ class NoMatchPage(QWidget):
             p = self.current_path
             if not groups_to_tags(groups):
                 groups = {"artist": [], "character": [], "copyright": [], "general": tags, "meta": []}
-            set_manual_url(p, url)
+            set_manual_url(p, url, settings=self.main.settings)
             promote_manual_match(self.main.settings, p, tags, url, groups)
             self.append_log(f"MANUAL TAGS → FOUND: {len(tags)}")
             self.refresh()
         except Exception as e:
             self.append_log(f"URL SEARCH ERROR: {type(e).__name__}: {e}")
             try:
-                from core.tagger_engine import append_error_log
+                from core.tagger import append_error_log
                 append_error_log(f"NO_MATCH URL SEARCH {self.url.text().strip()}: {type(e).__name__}: {e}")
             except Exception:
                 pass
@@ -270,5 +270,5 @@ class NoMatchPage(QWidget):
 
     def remove_current(self):
         if self.current_path:
-            remove_nomatch(self.current_path)
+            remove_nomatch(self.current_path, settings=self.main.settings)
             self.refresh()

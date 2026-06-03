@@ -11,6 +11,22 @@ import time
 from collections import defaultdict, deque
 from urllib.parse import urlparse
 
+
+class RequestCancelled(InterruptedError):
+    """Raised when a queued HTTP request is cancelled before it is sent."""
+
+
+def _check_cancelled(settings: dict | None = None) -> None:
+    settings = settings or {}
+    callback = settings.get("_cancel_callback") if isinstance(settings, dict) else None
+    try:
+        if callback and callback():
+            raise RequestCancelled("HTTP request cancelled by user")
+    except RequestCancelled:
+        raise
+    except Exception:
+        return
+
 _LOCK = threading.Lock()
 _LAST_BY_HOST: dict[str, float] = {}
 _WINDOW_BY_HOST: dict[str, deque[float]] = defaultdict(deque)
@@ -24,7 +40,10 @@ _SITE_DELAYS = {
     "api.rule34.xxx": 0.85,
     "rule34.us": 0.85,
     "gelbooru.com": 0.85,
+    "xbooru.com": 0.85,
+    "hypnohub.net": 0.85,
     "e621.net": 1.10,
+    "e926.net": 1.10,
     "ascii2d.net": 1.10,
     "iqdb.org": 1.10,
 }
@@ -33,9 +52,12 @@ _SITE_RPM = {
     "booru.allthefallen.moe": 10,
     "danbooru.donmai.us": 20,
     "e621.net": 20,
+    "e926.net": 20,
     "rule34.xxx": 30,
     "api.rule34.xxx": 30,
     "gelbooru.com": 30,
+    "xbooru.com": 30,
+    "hypnohub.net": 30,
     "ascii2d.net": 5,
     "iqdb.org": 10,
 }
@@ -84,13 +106,15 @@ def requests_per_minute_for(host: str, settings: dict | None = None) -> int | No
 
 
 def wait_for(url_or_host: str, settings: dict | None = None) -> None:
-    """Block until both interval and per-minute limits allow one request."""
+    """Block until limits allow a request, aborting promptly when STOP is pressed."""
+    _check_cancelled(settings)
     host = _host_from_url(url_or_host)
     delay = delay_for(host, settings)
     rpm = requests_per_minute_for(host, settings)
     if delay <= 0 and not rpm:
         return
     while True:
+        _check_cancelled(settings)
         with _LOCK:
             now = time.monotonic()
             window = _WINDOW_BY_HOST[host]
@@ -100,11 +124,12 @@ def wait_for(url_or_host: str, settings: dict | None = None) -> None:
             wait_window = max(0.0, 60.0 - (now - window[0])) if rpm and len(window) >= rpm and window else 0.0
             wait = max(wait_interval, wait_window)
             if wait <= 0:
+                _check_cancelled(settings)
                 _LAST_BY_HOST[host] = now
                 if rpm:
                     window.append(now)
                 return
-        time.sleep(min(wait, 0.25))
+        time.sleep(min(wait, 0.10))
 
 
 def apply_retry_after(response, settings: dict | None = None) -> None:
@@ -123,6 +148,12 @@ def apply_retry_after(response, settings: dict | None = None) -> None:
         if host:
             with _LOCK:
                 _LAST_BY_HOST[host] = time.monotonic() + wait
-        time.sleep(wait)
+        end = time.monotonic() + wait
+        while True:
+            _check_cancelled(settings)
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(left, 0.10))
     except Exception:
         return

@@ -15,8 +15,11 @@ import shutil
 import sys
 import time
 import traceback
+import json
+import platform
 from pathlib import Path
 from typing import Callable, TypeVar
+from core.redaction import sanitize_text, sanitize_log_directory
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
@@ -28,25 +31,32 @@ def setup_logging(log_dir: Path | None = None) -> logging.Logger:
     except Exception:
         _log_dir = Path.home() / "Documents" / "Local_Booru" / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
+    # Privacy repair for historical logs created by older versions. No raw
+    # secret-bearing backup is kept; this affects logs only, not media or DB.
+    try:
+        sanitize_log_directory(_log_dir)
+    except Exception:
+        pass
 
     log_file = _log_dir / "app.log"
     error_file = _log_dir / "errors.log"
 
-    fmt = logging.Formatter(
+    from core.redaction import RedactingFormatter
+    fmt = RedactingFormatter(logging.Formatter(
         "[%(asctime)s] %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    ))
 
     # App log: INFO+
     fh = logging.handlers.TimedRotatingFileHandler(
-        log_file, when="midnight", interval=1, backupCount=7, encoding="utf-8"
+        log_file, when="midnight", interval=1, backupCount=5, encoding="utf-8"
     )
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
 
     # Error log: ERROR+
     eh = logging.handlers.TimedRotatingFileHandler(
-        error_file, when="midnight", interval=1, backupCount=7, encoding="utf-8"
+        error_file, when="midnight", interval=1, backupCount=5, encoding="utf-8"
     )
     eh.setLevel(logging.ERROR)
     eh.setFormatter(fmt)
@@ -66,6 +76,29 @@ import logging.handlers
 _log = logging.getLogger("local_booru.stability")
 
 
+def _write_crash_snapshot(message: str) -> str:
+    """Persist a small crash summary without reading or mutating media rows."""
+    try:
+        from core.paths import LOGS_DIR
+        from core.settings import load_settings
+        from core.database.connection import db_path
+        settings = load_settings()
+        database = db_path(settings)
+        payload = {
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "python": sys.version,
+            "platform": platform.platform(),
+            "database": str(database),
+            "database_size_bytes": int(database.stat().st_size) if database.exists() else 0,
+            "traceback": sanitize_text(message),
+        }
+        path = Path(LOGS_DIR) / "last_crash.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(path)
+    except Exception:
+        return ""
+
+
 # ── Global exception handler ──────────────────────────────────────────────────
 
 def install_global_exception_handler(app=None) -> None:
@@ -75,8 +108,9 @@ def install_global_exception_handler(app=None) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc_value, exc_tb)
             return
-        msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        msg = sanitize_text("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
         _log.critical("Uncaught exception:\n%s", msg)
+        _write_crash_snapshot(msg)
         # Also print to stderr so console shows it
         print(f"\n[CRASH] {exc_type.__name__}: {exc_value}", file=sys.stderr)
         # Show Qt dialog if app is running
@@ -119,34 +153,40 @@ def safe_call(fn: Callable, *args, default=None, label: str = "", **kwargs):
 
 # ── DB integrity check ────────────────────────────────────────────────────────
 
-def check_db_integrity(settings: dict) -> tuple[bool, str]:
-    """Run PRAGMA integrity_check. Returns (ok, message)."""
+def _check_existing_database(settings: dict, pragma: str) -> tuple[bool, str]:
+    """Validate an existing SQLite file without initialising or migrating it."""
+    import sqlite3
+    from core.database.connection import db_path
+    path = db_path(settings)
+    if not path.exists():
+        return True, "NEW_DATABASE"
     try:
-        from core.database.connection import db
-        with db(settings, readonly=True) as con:
-            rows = con.execute("PRAGMA integrity_check(10)").fetchall()
-            results = [r[0] for r in rows]
-            if results == ["ok"]:
-                _log.info("DB integrity: OK")
-                return True, "OK"
-            else:
-                msg = "; ".join(results[:5])
-                _log.error("DB integrity FAILED: %s", msg)
-                return False, msg
-    except Exception as e:
-        _log.error("DB integrity check error: %s", e)
-        return False, str(e)
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+        try:
+            rows = con.execute(pragma).fetchall()
+        finally:
+            con.close()
+        results = [str(r[0]) for r in rows]
+        if results == ["ok"]:
+            return True, "OK"
+        return False, "; ".join(results[:5]) or "unknown integrity failure"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def check_db_integrity(settings: dict) -> tuple[bool, str]:
+    """Run read-only PRAGMA integrity_check without changing the SQLite file."""
+    ok, msg = _check_existing_database(settings, "PRAGMA integrity_check(10)")
+    if ok:
+        _log.info("DB integrity: %s", msg)
+    else:
+        _log.error("DB integrity FAILED: %s", msg)
+    return ok, msg
 
 
 def check_db_quick(settings: dict) -> bool:
-    """Quick check: PRAGMA quick_check. Faster than full integrity_check."""
-    try:
-        from core.database.connection import db
-        with db(settings, readonly=True) as con:
-            r = con.execute("PRAGMA quick_check(5)").fetchone()
-            return r and r[0] == "ok"
-    except Exception:
-        return False
+    """Fast read-only startup check.  Missing DB is valid for a rebuildable library."""
+    return _check_existing_database(settings, "PRAGMA quick_check(5)")[0]
 
 
 # ── DB auto-backup ────────────────────────────────────────────────────────────
@@ -247,6 +287,66 @@ def run_file_maintenance(settings: dict, log: Callable | None = None,
     return stats
 
 
+def check_recent_media_after_crash(settings: dict, log: Callable | None = None, limit: int = 250) -> dict:
+    """Verify recently written media after an unclean shutdown.
+
+    The full archive may contain tens of thousands of files; after a crash we
+    inspect only the most recently indexed live rows and persist detected
+    damage as integrity issues for the existing repair/inspection tools.
+    """
+    log = log or _log.info
+    result = {"checked": 0, "damaged": 0, "missing": 0}
+    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+    video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
+    try:
+        from core.database.connection import db
+        with db(settings, readonly=True) as con:
+            rows = con.execute(
+                "SELECT id,path,is_video FROM images WHERE deleted=0 ORDER BY mtime_ns DESC, id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        issues = []
+        for row in rows:
+            result["checked"] += 1
+            path = Path(str(row["path"] or ""))
+            issue = ""
+            if not path.exists() or not path.is_file():
+                result["missing"] += 1
+                issue = "missing_after_crash"
+            else:
+                try:
+                    if path.stat().st_size <= 0:
+                        issue = "zero_size_after_crash"
+                    elif path.suffix.lower() in image_exts:
+                        from PIL import Image
+                        with Image.open(path) as im:
+                            im.verify()
+                    elif bool(row["is_video"]) or path.suffix.lower() in video_exts:
+                        # Full decoding would be expensive. A zero/truncated file
+                        # is caught here; normal playback remains the final test.
+                        if path.stat().st_size < 64:
+                            issue = "truncated_video_after_crash"
+                except Exception as exc:
+                    issue = f"unreadable_media_after_crash: {type(exc).__name__}"
+            if issue:
+                result["damaged"] += 1
+                issues.append((str(issue), int(row["id"]), str(path)))
+        if issues:
+            now = int(time.time())
+            with db(settings, write=True) as con:
+                for issue, image_id, path in issues:
+                    con.execute(
+                        "INSERT INTO integrity_issues(issue_type,severity,image_id,path,details,status,created_at) VALUES(?,?,?,?,?,'open',?)",
+                        ("media_after_crash", "warning", image_id, path, issue, now),
+                    )
+            log(f"[Stability] Crash media check: found {len(issues)} suspect recent file(s).")
+        else:
+            log(f"[Stability] Crash media check: {result['checked']} recent file(s) look OK.")
+    except Exception as exc:
+        _log.error("Crash media check failed: %s", exc)
+    return result
+
+
 # ── Network retry ─────────────────────────────────────────────────────────────
 
 T = TypeVar("T")
@@ -341,8 +441,19 @@ def run_startup_checks(settings: dict, log: Callable | None = None) -> dict:
         ok2, msg = check_db_integrity(settings)
         results["db_integrity"] = msg
         if not ok2:
+            from core.database.connection import set_writes_blocked
+            set_writes_blocked(msg)
+            results["write_blocked"] = True
             log(f"[Stability] DB INTEGRITY ERROR: {msg}")
+            log("[Stability] SAFE MODE: SQLite writes are blocked until the working DB is rebuilt or restored manually.")
+        else:
+            from core.database.connection import set_writes_blocked
+            set_writes_blocked("")
+        if bad_shutdown and ok2:
+            results["recent_media"] = check_recent_media_after_crash(settings, log=log)
     else:
+        from core.database.connection import set_writes_blocked
+        set_writes_blocked("")
         log("[Stability] DB OK")
 
     # 2. Auto-backup
@@ -353,6 +464,22 @@ def run_startup_checks(settings: dict, log: Callable | None = None) -> dict:
     results["backup"] = backup
 
     return results
+
+
+def record_health_event(settings: dict, status: str, details: str = "", check_type: str = "startup_quick_check") -> None:
+    """Persist successful/acknowledged health results after schema initialisation."""
+    try:
+        from core.database.connection import db, db_path, writes_blocked
+        if writes_blocked():
+            return
+        path = db_path(settings)
+        with db(settings, write=True) as con:
+            con.execute(
+                "INSERT INTO database_health_events(check_type,status,details,db_size_bytes,created_at) VALUES(?,?,?,?,?)",
+                (str(check_type), str(status), str(details or ""), int(path.stat().st_size) if path.exists() else 0, int(time.time())),
+            )
+    except Exception as exc:
+        _log.warning("Could not persist database health event: %s", exc)
 
 
 def on_clean_exit(settings: dict) -> None:

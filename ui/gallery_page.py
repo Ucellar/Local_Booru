@@ -7,30 +7,51 @@ from collections import Counter, OrderedDict
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QScrollArea, QGridLayout, QFrame, QComboBox, QCheckBox, QSplitter,
-    QListWidget, QSizePolicy, QListWidgetItem, QSpinBox, QListView,
-    QAbstractItemView, QStyledItemDelegate, QStyle,
+    QListWidget, QSizePolicy, QListWidgetItem, QSpinBox, QListView, QColorDialog,
+    QAbstractItemView, QStyledItemDelegate, QStyle, QMenu, QApplication, QMessageBox,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect
+from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect, QMimeData, QUrl
 from PySide6.QtGui import QPixmap, QColor, QBrush, QIcon, QPainter, QPen
 
 from core.library import sort_tag_items
-from core.tag_utils import normalize_tag
-from core.favorites import load_favorites
+from core.tag_utils import normalize_tag, tag_display_color
 from core.search.human_query_parser import parse_query, to_sql_conditions as _num_to_sql
 from core.stability import safe_call as _safe_call
 from core.database.repository import (
     count_search_items, search_items, enrich_items,
-    candidate_tags, candidate_sources, counts,
+    candidate_tags, candidate_sources, counts, source_unique_image_count,
 )
 from core.thumb_service import ThumbnailService
 
-GROUP_ORDER = ["artist", "character", "copyright", "general", "meta",
+GROUP_ORDER = ["artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid",
                "parody", "language", "category", "pages"]
 GROUP_COLORS = {
-    "artist": "#ff3838", "character": "#00a000", "copyright": "#ff54a7",
-    "general": "#004cff", "meta": "#ff9900", "parody": "#ff54a7",
+    "artist": "#ff3838", "contributor": "#e67e22", "character": "#00a000", "copyright": "#ff54a7",
+    "species": "#22a6b3", "general": "#004cff", "meta": "#ff9900", "lore": "#9b59b6", "invalid": "#7f8c8d", "parody": "#ff54a7",
     "language": "#cc8800", "category": "#00aaaa", "pages": "#888888",
 }
+
+
+def _global_tag_groups_worker(settings, progress=None, stop_check=None):
+    """Build global sidebar tag counters without blocking the GUI thread."""
+    if progress:
+        progress("Галерея: загрузка общего счётчика тегов…")
+    if stop_check and stop_check():
+        return None
+    from core.database.repository import tag_group_counts
+    return tag_group_counts(settings)
+
+def _gallery_facets_worker(settings, progress=None, stop_check=None):
+    """Load autocomplete/source counters outside the GUI thread."""
+    if progress:
+        progress("Галерея: обновление источников и тегов…")
+    if stop_check and stop_check():
+        return None
+    tags = candidate_tags(settings)
+    sources = candidate_sources(settings)
+    _unused, source_counts, _ = counts(settings)
+    source_total = source_unique_image_count(settings)
+    return {"tags": tags, "sources": sources, "source_counts": source_counts, "source_total": source_total}
 
 _PH_CACHE: dict[tuple, QPixmap] = {}
 
@@ -65,9 +86,17 @@ def _placeholder(w: int, h: int) -> QPixmap:
     key = (w, h, theme)
     if key not in _PH_CACHE:
         p = QPixmap(w, h)
-        # Keep the allocated square invisible while a thumbnail is loading.
-        # The real border is painted around the actual image, not around the cell.
-        p.fill(Qt.transparent)
+        # Never render a completely blank gallery while thumbnails are being
+        # created or a cached thumbnail fails. A visible neutral slot makes it
+        # obvious that records exist and leaves the item clickable.
+        bg, fg = _gallery_item_colors(theme)
+        p.fill(QColor(bg))
+        painter = QPainter(p)
+        painter.setPen(QPen(QColor("#303645" if theme not in ("r34", "light", "win95", "windows95") else "#788878"), 1))
+        painter.drawRect(0, 0, max(0, w - 1), max(0, h - 1))
+        painter.setPen(QColor(fg))
+        painter.drawText(p.rect(), Qt.AlignCenter, "…")
+        painter.end()
         _PH_CACHE[key] = p
     return _PH_CACHE[key]
 
@@ -174,6 +203,7 @@ class GalleryListModel(QAbstractListModel):
         self.items: list[dict] = []
         self.thumb_w = 220
         self.thumb_h = 200
+        self.quality_scale = 2
         # ThumbnailService already owns its own LRU, but the model used to keep
         # a second unbounded QPixmap dictionary for the current result set.
         self._pix_by_path: OrderedDict[str, QPixmap] = OrderedDict()
@@ -249,8 +279,9 @@ class GalleryListModel(QAbstractListModel):
                 svc = ThumbnailService.instance()
                 # Generate a larger cached thumbnail and draw it down to the tile.
                 # This prevents the blurred look on high-DPI / wide displays.
-                req_w = min(768, max(self.thumb_w, self.thumb_w * 2))
-                req_h = min(768, max(self.thumb_h, self.thumb_h * 2))
+                quality = max(1, min(3, int(getattr(self, "quality_scale", 2) or 2)))
+                req_w = min(768, max(self.thumb_w, self.thumb_w * quality))
+                req_h = min(768, max(self.thumb_h, self.thumb_h * quality))
                 got = svc.request(path, req_w, req_h, self._on_thumb)
                 if got is not None and not got.isNull():
                     self._store_pix(path, got)
@@ -479,12 +510,22 @@ class GalleryPage(QWidget):
         self._sql_total: int = 0
         self._page: int = 1
         self._render_token: int = 0
+        # When the post viewer crosses pages, do not rebuild hidden thumbnails
+        # underneath it. Render the adopted page only when returning to gallery.
+        self._viewer_page_dirty: bool = False
         self._last_filter: dict = {"q": "", "src": "all", "bucket": "all", "order": "path"}
         self._last_extra_where: list = []
         self._last_extra_params: list = []
         self._tag_list: list[str] = []
         self._sources_expanded: bool = False
         self._fav_set: set = set()
+        self._global_tag_groups_cache = None
+        self._global_tag_task = None
+        self._global_tag_generation = 0
+        self._prefetch_task = None
+        self._facets_task = None
+        self._facets_generation = 0
+        self._source_hosts: list[str] = []
         self._build_ui()
         self.retranslate()
 
@@ -503,7 +544,7 @@ class GalleryPage(QWidget):
         self.clear_btn.clicked.connect(lambda: self.search.clear())
 
         self.file_filter = QComboBox()
-        for lbl, dat in [("Все","all"),("Найденные","found"),("Не найд.","no_match"),("Скачанные","downloaded")]:
+        for lbl, dat in [("Все","all"),("Новые","inbox"),("Архив","archive"),("Удалено","trash"),("Найденные","found"),("Не найд.","no_match"),("Скачанные","downloaded")]:
             self.file_filter.addItem(lbl, dat)
 
         self.source_label = QLabel()
@@ -591,6 +632,8 @@ class GalleryPage(QWidget):
 
         self.page_tags = QListWidget()
         self.page_tags.setFixedWidth(360)
+        self.page_tags.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.page_tags.customContextMenuRequested.connect(self._tag_color_context_menu)
         ll.addWidget(self.page_tags, 1, Qt.AlignLeft)
         splitter.addWidget(left)
 
@@ -600,6 +643,11 @@ class GalleryPage(QWidget):
         rl.setContentsMargins(8, 0, 0, 0)
         self.info = QLabel("")
         rl.addWidget(self.info)
+        self.render_warning = QLabel("")
+        self.render_warning.setVisible(False)
+        self.render_warning.setWordWrap(True)
+        self.render_warning.setStyleSheet("color:#e6a23c;padding:4px 8px;background:#251b0f;border:1px solid #6d4b18;border-radius:5px;")
+        rl.addWidget(self.render_warning)
 
         self.view = QListView()
         self.view.setViewMode(QListView.IconMode)
@@ -616,6 +664,8 @@ class GalleryPage(QWidget):
         self.view.setItemDelegate(GalleryCardDelegate(self.view))
         self.view.setStyleSheet("QListView{background:transparent;border:none;} QListView::item{background:transparent;border:none;}")
         self.view.clicked.connect(lambda idx: self._open_post(idx.row()))
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
         rl.addWidget(self.view, 1)
 
         # Pager
@@ -645,12 +695,8 @@ class GalleryPage(QWidget):
         self.rating_op.currentIndexChanged.connect(self.apply_filter)
         self.rating_op.currentIndexChanged.connect(self._on_rating_op_changed)
         self.rating_stars.currentIndexChanged.connect(self.apply_filter)
-        # Also apply after 600ms idle
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(600)
-        self._search_timer.timeout.connect(self.apply_filter)
-        self.search.textEdited.connect(lambda _: self._search_timer.start())
+        # Search intentionally runs only on Enter/Refresh. On very large
+        # libraries every typed character should not rebuild the SQL result.
 
         self.clear_btn.clicked.connect(lambda: (self.search.clear(), self.apply_filter()))
         self.file_filter.currentIndexChanged.connect(self.apply_filter)
@@ -729,53 +775,53 @@ class GalleryPage(QWidget):
             self.refresh_force()
 
     def refresh_force(self):
-        s = self.main.settings
-        # Load tag list for autocomplete
-        try:
-            self._tag_list = candidate_tags(s)
-        except Exception as e:
-            print("TAG COMPLETER ERROR:", e)
-
-        # Load hosts for source combo
-        try:
-            src_list = candidate_sources(s)
-        except Exception as e:
-            print("SOURCE ERROR:", e)
-            src_list = []
-
-        # Build host → count map
-        from core.media_utils import host_from_url
-        try:
-            _, source_counts, _ = counts(s)
-        except Exception:
-            source_counts = {}
-        hosts = []
-        seen = set()
-        for url in src_list:
-            h = host_from_url(url) if "://" in url else url
-            if h and h not in seen:
-                seen.add(h)
-                hosts.append(h)
-        self._source_counts = source_counts
-
-        cur_src = self.source.currentText()
-        self.source.blockSignals(True)
-        self.source.clear()
-        self.source.addItem("all")
-        for h in sorted(hosts):
-            self.source.addItem(h)
-        i = self.source.findText(cur_src)
-        self.source.setCurrentIndex(i if i >= 0 else 0)
-        self.source.blockSignals(False)
-
-        self._render_source_list(hosts)
+        # Render the SQL page immediately, then update expensive facets in a
+        # worker.  At ~10k results these GROUP BY queries were visibly freezing
+        # the UI before any cards appeared.
+        self._global_tag_groups_cache = None
+        self._global_tag_generation += 1
         self.apply_filter()
+        self._facets_generation += 1
+        generation = self._facets_generation
+        if self._facets_task is not None:
+            try: self._facets_task.cancel()
+            except Exception: pass
+        def done(result):
+            if generation != self._facets_generation or not result:
+                return
+            self._tag_list = list(result.get("tags", []))
+            src_list = list(result.get("sources", []))
+            from core.media_utils import host_from_url
+            hosts = []
+            seen = set()
+            for url in src_list:
+                host = host_from_url(url) if "://" in str(url) else str(url)
+                if host and host not in seen:
+                    seen.add(host); hosts.append(host)
+            self._source_hosts = sorted(hosts)
+            self._source_counts = dict(result.get("source_counts", {}))
+            self._source_unique_total = int(result.get("source_total", 0) or 0)
+            cur_src = self.source.currentText() or "all"
+            self.source.blockSignals(True); self.source.clear(); self.source.addItem("all")
+            for host in self._source_hosts: self.source.addItem(host)
+            index = self.source.findText(cur_src)
+            self.source.setCurrentIndex(index if index >= 0 else 0); self.source.blockSignals(False)
+            self._render_source_list(self._source_hosts)
+        def finished():
+            if generation == self._facets_generation:
+                self._facets_task = None
+        self._facets_task = self.main.task_manager.submit(
+            _gallery_facets_worker, dict(self.main.settings or {}), name="gallery-facets",
+            on_result=done, on_finished=finished,
+            on_error=lambda error: print("GALLERY FACETS ERROR:", error),
+        )
 
     def _render_source_list(self, hosts: list):
         self.sources_list.clear()
         sc = getattr(self, "_source_counts", {})
-        # Sum all host counts for "all" total
-        all_count = sum(sc.values()) if sc else self._sql_total
+        # Each source count may include the same image. "all" must show unique
+        # files, not the sum of file↔source links.
+        all_count = int(getattr(self, "_source_unique_total", 0) or 0) if sc else self._sql_total
         items = [("all", all_count)] + sorted((h, sc.get(h, 0)) for h in hosts)
         visible = items if self._sources_expanded else items[:5]
         for h, cnt in visible:
@@ -789,18 +835,9 @@ class GalleryPage(QWidget):
         self._sources_expanded = not self._sources_expanded
         t = getattr(self.main, "t", lambda x: x)
         self.sources_toggle.setText(t("Hide") if self._sources_expanded else t("Show all"))
-        # Re-render with current hosts
-        hosts = []
-        seen = set()
-        from core.media_utils import host_from_url
-        try:
-            for url in candidate_sources(self.main.settings):
-                h = host_from_url(url) if "://" in url else url
-                if h and h not in seen:
-                    seen.add(h); hosts.append(h)
-        except Exception:
-            pass
-        self._render_source_list(hosts)
+        # Re-render from cached facets; toggling a list must never trigger a
+        # fresh full-table source aggregation query.
+        self._render_source_list(list(getattr(self, "_source_hosts", [])))
 
     def _source_from_list(self, item):
         # Strip count suffix ("host  42" → "host")
@@ -811,15 +848,17 @@ class GalleryPage(QWidget):
     # ── Favorites ─────────────────────────────────────────────────────────────
 
     def _on_fav_changed(self):
-        if self.fav.isChecked():
-            try:
-                self._fav_set = load_favorites()
-            except Exception:
-                self._fav_set = set()
-        else:
-            self._fav_set = set()
+        # Favorites are filtered in SQL, before COUNT/LIMIT/OFFSET.
+        # The old client-side filter only filtered the visible page: with one
+        # favorite on page 2 it produced empty page 1 and kept 79 total pages.
         self._page = 1
         self.apply_filter()
+
+    def favorite_updated(self, path: str, enabled: bool) -> None:
+        """Refresh a Favorites-only result when PostPage changes a star."""
+        if self.fav.isChecked():
+            self._page = 1
+            self.apply_filter()
 
     # ── Filter ────────────────────────────────────────────────────────────────
 
@@ -871,6 +910,12 @@ class GalleryPage(QWidget):
                 _extra_where.append(f"COALESCE(i.rating, 0) {op_safe} ?")
                 _extra_params.append(stars)
 
+        # Favorites-only must be part of the database result set, not a Python
+        # filter applied after pagination. Otherwise the selected favorite is
+        # visible only on its old physical page and every other page is blank.
+        if self.fav.isChecked():
+            _extra_where.append("COALESCE(i.favorite, 0) = 1")
+
         total = count_search_items(self.main.settings, q, src, ff,
                                    extra_where=_extra_where, extra_params=_extra_params)
         self._sql_total = int(total or 0)
@@ -880,6 +925,23 @@ class GalleryPage(QWidget):
         self._page = 1
         self._render_page()
 
+    def current_result_image_ids(self) -> list[int]:
+        """Return IDs in the current full gallery result, not only visible page."""
+        items = search_items(
+            self.main.settings,
+            query=self._last_filter.get("q", ""),
+            source=self._last_filter.get("src", "all"),
+            bucket=self._last_filter.get("bucket", "all"),
+            limit=None,
+            offset=0,
+            order=self._last_filter.get("order", "path"),
+            extra_where=getattr(self, "_last_extra_where", None),
+            extra_params=getattr(self, "_last_extra_params", None),
+        ) or []
+        # Favorites-only is already included in _last_extra_where, so this is
+        # the same full SQL result set the gallery paginates over.
+        return [int(x["id"]) for x in items if x.get("id") is not None]
+
     # ── Page ──────────────────────────────────────────────────────────────────
 
     def _per_page(self) -> int:
@@ -888,6 +950,7 @@ class GalleryPage(QWidget):
         return max(1, cols * rows)
 
     def _render_page(self):
+        self._viewer_page_dirty = False
         self._render_token += 1
         token = self._render_token
 
@@ -897,24 +960,33 @@ class GalleryPage(QWidget):
         self._page = max(1, min(self._page, maxp))
         offset = (self._page - 1) * per
 
-        batch = search_items(
-            self.main.settings,
-            query=self._last_filter.get("q", ""),
-            source=self._last_filter.get("src", "all"),
-            bucket=self._last_filter.get("bucket", "all"),
-            limit=per,
-            offset=offset,
-            order=self._last_filter.get("order", "path"),
-            extra_where=getattr(self, "_last_extra_where", None),
-            extra_params=getattr(self, "_last_extra_params", None),
-        ) or []
-
-        # Favorites filter (client-side — fav set is preloaded)
-        if self.fav.isChecked() and self._fav_set:
-            batch = [x for x in batch if str(Path(x.get("path", ""))) in self._fav_set]
-        elif self.fav.isChecked() and not self._fav_set:
+        try:
+            batch = search_items(
+                self.main.settings,
+                query=self._last_filter.get("q", ""),
+                source=self._last_filter.get("src", "all"),
+                bucket=self._last_filter.get("bucket", "all"),
+                limit=per,
+                offset=offset,
+                order=self._last_filter.get("order", "path"),
+                extra_where=getattr(self, "_last_extra_where", None),
+                extra_params=getattr(self, "_last_extra_params", None),
+            ) or []
+        except Exception as exc:
+            import logging
+            logging.getLogger("local_booru").exception("GALLERY PAGE QUERY FAILED")
             batch = []
+            self.render_warning.setText(f"Ошибка выдачи карточек: {exc}. Смотри журнал ошибок.")
+            self.render_warning.setVisible(True)
+        else:
+            if total > 0 and not batch and offset < total:
+                self.render_warning.setText("В базе есть файлы, но SQL-страница вернула пустой результат. Обнови галерею и пришли errors.log.")
+                self.render_warning.setVisible(True)
+            else:
+                self.render_warning.setVisible(False)
 
+        # The SQL query already applies the favorites condition before LIMIT
+        # and OFFSET, so paging remains dense and the total/page count is true.
         self._batch = batch
 
         t = getattr(self.main, "t", lambda x: x)
@@ -927,6 +999,35 @@ class GalleryPage(QWidget):
         self.prev_btn.setVisible(self._page > 1)
         self.next_btn.setVisible(self._page < maxp)
 
+        QTimer.singleShot(0, lambda b=batch, tk=token: self._render_cards(b, tk))
+
+    def adopt_viewer_page(self, page: int, batch: list[dict]):
+        """Record page reached in PostPage without painting a hidden gallery."""
+        self._page = max(1, int(page))
+        self._batch = list(batch or [])
+        self._viewer_page_dirty = True
+
+    def render_after_viewer_navigation(self):
+        """Paint the already loaded viewer page once the gallery is visible again."""
+        if not self._viewer_page_dirty:
+            return
+        self._viewer_page_dirty = False
+        self._render_token += 1
+        token = self._render_token
+        per = self._per_page()
+        total = self._sql_total
+        maxp = max(1, (total + per - 1) // per)
+        self._page = max(1, min(self._page, maxp))
+        t = getattr(self.main, "t", lambda x: x)
+        self.info.setText(f"{t('Images')}: {total}")
+        self.page_label.setText(f"Page {self._page}/{maxp}")
+        self.page_input.setMaximum(maxp)
+        self.page_input.blockSignals(True)
+        self.page_input.setValue(self._page)
+        self.page_input.blockSignals(False)
+        self.prev_btn.setVisible(self._page > 1)
+        self.next_btn.setVisible(self._page < maxp)
+        batch = list(self._batch)
         QTimer.singleShot(0, lambda b=batch, tk=token: self._render_cards(b, tk))
 
     def _clear_grid(self):
@@ -950,14 +1051,69 @@ class GalleryPage(QWidget):
         self.view.setSpacing(0)  # padding is accounted for in gridSize
         self.view.setGridSize(QSize(tile + spacing * 2, tile + spacing * 2))
         self.view.setIconSize(QSize(tile, tile))
+        self.model.quality_scale = max(1, min(3, int(self.main.settings.get("thumb_quality_scale", 2) or 2)))
+        self.model._pix_cache_max = max(50, min(2000, int(self.main.settings.get("thumb_memory_items", 400) or 400)))
         self.model.set_items(batch, tile, tile)
         QTimer.singleShot(30, self._render_page_tags)
+        QTimer.singleShot(150, self._prefetch_neighbor_pages)
 
     def _render_card_batch(self, batch, h, cols, w, token, start, chunk):
         # Compatibility for old calls; QListView/GalleryListModel handles virtual rows now.
         self._render_cards(batch, token)
 
     # ── Page tags ─────────────────────────────────────────────────────────────
+
+    def _request_global_tag_groups(self):
+        if self._global_tag_task is not None:
+            return
+        generation = self._global_tag_generation
+        settings = dict(self.main.settings or {})
+        def complete(groups):
+            if generation != self._global_tag_generation or groups is None:
+                return
+            self._global_tag_groups_cache = groups
+            QTimer.singleShot(0, self._render_page_tags)
+        def finished():
+            self._global_tag_task = None
+        self._global_tag_task = self.main.task_manager.submit(
+            _global_tag_groups_worker, settings, name="gallery-sidebar-tag-counts",
+            on_result=complete, on_error=lambda _error: complete({}), on_finished=finished,
+        )
+
+    def _prefetch_neighbor_pages(self):
+        """Warm thumbnail cache for the pages beside the visible one.
+
+        It is intentionally low-impact: database fetch and thumbnail scheduling
+        happen after the visible page was painted, and no metadata is modified.
+        """
+        if self._prefetch_task is not None or not bool(self.main.settings.get("thumb_prefetch_pages", True)):
+            return
+        per = self._per_page()
+        if per <= 0:
+            return
+        pages = []
+        maxp = max(1, (self._sql_total + per - 1) // per)
+        if self._page > 1: pages.append(self._page - 1)
+        if self._page < maxp: pages.append(self._page + 1)
+        if not pages:
+            return
+        settings = dict(self.main.settings or {})
+        filt = dict(self._last_filter); extra_where = list(self._last_extra_where); extra_params = list(self._last_extra_params)
+        def load_neighbor_paths():
+            paths = []
+            for page in pages:
+                rows = search_items(settings, query=filt.get("q", ""), source=filt.get("src", "all"), bucket=filt.get("bucket", "all"), limit=per, offset=(page - 1) * per, order=filt.get("order", "path"), extra_where=extra_where, extra_params=extra_params)
+                paths.extend(str(x.get("path", "")) for x in rows if x.get("path"))
+            return paths
+        def warm(paths):
+            svc = ThumbnailService.instance()
+            tile = max(48, min(int(self.main.settings.get("card_height", 220) or 220), 512))
+            quality = max(1, min(3, int(self.main.settings.get("thumb_quality_scale", 2) or 2)))
+            for path in paths or []:
+                svc.request(path, min(768, tile * quality), min(768, tile * quality))
+        def finished():
+            self._prefetch_task = None
+        self._prefetch_task = self.main.task_manager.submit(load_neighbor_paths, name="gallery-thumb-prefetch", on_result=warm, on_finished=finished)
 
     def _render_page_tags(self):
         batch = list(self._batch)
@@ -968,12 +1124,15 @@ class GalleryPage(QWidget):
             enrich_items(self.main.settings, batch)
         except Exception:
             pass
-        # Load GLOBAL tag counts from DB (not just current page)
-        try:
-            from core.database.repository import tag_group_counts
-            global_groups = tag_group_counts(self.main.settings)
-        except Exception:
-            global_groups = {}
+        # Load GLOBAL tag counts from DB (not just current page). Cache the
+        # aggregation: changing page/source must not re-run a GROUP BY across
+        # ten thousand+ indexed posts every time. Refresh clears this cache.
+        global_groups = getattr(self, "_global_tag_groups_cache", None)
+        if global_groups is None:
+            self.page_tags.clear()
+            self.page_tags.addItem("Загрузка общего списка тегов в фоне…")
+            self._request_global_tag_groups()
+            return
         # Build page-local tag set to filter which tags appear on this page
         page_tags_set: set[str] = set()
         for item in batch:
@@ -985,7 +1144,11 @@ class GalleryPage(QWidget):
                         page_tags_set.add(nt)
         self.page_tags.clear()
         mode = self.tag_sort.currentData() or "count_desc"
-        for group in GROUP_ORDER:
+        group_order = list(self.main.settings.get("tag_group_order") or GROUP_ORDER)
+        for _group in GROUP_ORDER:
+            if _group not in group_order: group_order.append(_group)
+        colors = dict(GROUP_COLORS); colors.update(self.main.settings.get("tag_group_colors") or {})
+        for group in group_order:
             global_g = global_groups.get(group, {})
             # Show only tags present on current page, with global counts
             filtered = {t: c for t, c in global_g.items() if normalize_tag(t) in page_tags_set}
@@ -996,14 +1159,15 @@ class GalleryPage(QWidget):
                 it = QListWidgetItem(f"    {tag}    {count}")
                 it.setData(Qt.UserRole, tag)
                 it.setToolTip(f"{group}: {tag} (всего в базе)")
-                it.setForeground(QBrush(QColor(GROUP_COLORS.get(group, "#888"))))
+                it.setForeground(QBrush(QColor(tag_display_color(tag, group, self.main.settings, colors))))
                 self.page_tags.addItem(it)
 
     def _add_header(self, group: str):
         t = getattr(self.main, "t", lambda x: x)
         it = QListWidgetItem(t(group))
         it.setFlags(Qt.NoItemFlags)
-        it.setForeground(QBrush(QColor(GROUP_COLORS.get(group, "#888"))))
+        colors = dict(GROUP_COLORS); colors.update(self.main.settings.get("tag_group_colors") or {})
+        it.setForeground(QBrush(QColor(colors.get(group, "#888"))))
         f = it.font(); f.setBold(True); f.setPointSize(max(f.pointSize(), 12)); it.setFont(f)
         self.page_tags.addItem(it)
 
@@ -1084,7 +1248,93 @@ class GalleryPage(QWidget):
                 idx = random.randrange(len(self._batch))
                 self.main.open_post(idx, self._batch)
 
+    def _show_context_menu(self, point):
+        idx = self.view.indexAt(point)
+        if not idx.isValid() or idx.row() >= len(self._batch):
+            return
+        item = self._batch[idx.row()]
+        path = Path(str(item.get("path", "")))
+        menu = QMenu(self)
+        open_action = menu.addAction("Открыть")
+        folder_action = menu.addAction("Открыть папку файла")
+        copy_file_action = menu.addAction("Копировать файл")
+        menu.addSeparator()
+        copy_path_action = menu.addAction("Копировать путь")
+        copy_md5_action = menu.addAction("Копировать MD5")
+        copy_source_action = menu.addAction("Копировать источники")
+        copy_tags_action = menu.addAction("Копировать теги")
+        menu.addSeparator()
+        delete_action = menu.addAction("Удалить (в корзину)")
+        chosen = menu.exec(self.view.viewport().mapToGlobal(point))
+        if chosen is None:
+            return
+        try:
+            if chosen == open_action:
+                self._open_post(idx.row())
+            elif chosen == folder_action:
+                import os
+                os.startfile(str(path.parent)) if hasattr(os, "startfile") else __import__("subprocess").Popen(["xdg-open", str(path.parent)])
+            elif chosen == copy_file_action:
+                mime = QMimeData(); mime.setUrls([QUrl.fromLocalFile(str(path))]); QApplication.clipboard().setMimeData(mime)
+            elif chosen == copy_path_action:
+                QApplication.clipboard().setText(str(path))
+            elif chosen == copy_md5_action:
+                QApplication.clipboard().setText(str(item.get("hash_md5") or ""))
+            elif chosen == copy_source_action:
+                enrich_items(self.main.settings, [item]); QApplication.clipboard().setText("\n".join(s.get("url", "") for s in item.get("sources", []) if s.get("url")))
+            elif chosen == copy_tags_action:
+                enrich_items(self.main.settings, [item]); QApplication.clipboard().setText(" ".join(item.get("tags", [])))
+            elif chosen == delete_action:
+                answer = QMessageBox.question(
+                    self, "Удалить файл",
+                    f"Переместить в корзину?\n\n{path.name}\n\nФайл можно будет восстановить в разделе «Удалено».",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                )
+                if answer == QMessageBox.Yes:
+                    from core.library_lifecycle import trash_media_paths
+                    result = trash_media_paths(self.main.settings, [path], reason="gallery_context_delete", make_backup=True)
+                    if result.get("error"):
+                        raise RuntimeError(result.get("error"))
+                    self.refresh_force()
+                    try:
+                        self.main.trash_page.refresh()
+                    except Exception:
+                        pass
+        except Exception as e:
+            QMessageBox.warning(self, "Галерея", str(e))
+
     # ── Tag interactions ──────────────────────────────────────────────────────
+
+    def _tag_color_context_menu(self, point):
+        item = self.page_tags.itemAt(point)
+        if item is None or not (item.flags() & Qt.ItemIsEnabled):
+            return
+        tag = str(item.data(Qt.UserRole) or "").strip()
+        if not tag:
+            return
+        menu = QMenu(self)
+        set_color = menu.addAction("Выбрать цвет тега...")
+        clear_color = menu.addAction("Сбросить цвет тега")
+        action = menu.exec(self.page_tags.viewport().mapToGlobal(point))
+        if action == set_color:
+            current = QColor(tag_display_color(tag, "general", self.main.settings, GROUP_COLORS))
+            selected = QColorDialog.getColor(current, self, f"Цвет тега: {tag}")
+            if selected.isValid():
+                colors = dict(self.main.settings.get("tag_colors") or {})
+                colors[normalize_tag(tag).lower()] = selected.name()
+                self.main.settings["tag_colors"] = colors
+                self.main.save_settings()
+                self._render_page_tags()
+                try: self.main.tags_page.render_all(); self.main.tags_page.render_group()
+                except Exception: pass
+        elif action == clear_color:
+            colors = dict(self.main.settings.get("tag_colors") or {})
+            colors.pop(normalize_tag(tag).lower(), None)
+            self.main.settings["tag_colors"] = colors
+            self.main.save_settings()
+            self._render_page_tags()
+            try: self.main.tags_page.render_all(); self.main.tags_page.render_group()
+            except Exception: pass
 
     def _tag_single(self, item):
         tag = item.data(Qt.UserRole)

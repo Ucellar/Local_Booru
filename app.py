@@ -31,6 +31,7 @@ from PySide6.QtGui import QIcon, QPixmapCache
 
 from ui.main_window import MainWindow
 from core.paths import ERROR_LOG_FILE
+from core.redaction import sanitize_text
 
 try:
     from core.image_safe import configure_pillow
@@ -38,12 +39,12 @@ try:
 except Exception:
     pass
 
-from core.tagger_engine import load_settings, cleanup_preview_cache
+from core.tagger import load_settings, cleanup_preview_cache
 
 
 def _log_exception(exc_type, exc, tb):
     import traceback, time
-    text = "".join(traceback.format_exception(exc_type, exc, tb))
+    text = sanitize_text("".join(traceback.format_exception(exc_type, exc, tb)))
     text = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] " + text
     try:
         ERROR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -103,10 +104,67 @@ def main() -> int:
     except Exception:
         pass
 
+    _db_startup_results = {}
     try:
-        cleanup_preview_cache(load_settings())
-    except Exception:
-        pass
+        _startup_settings = load_settings()
+        # Validate the existing working DB before any migration or maintenance writes.
+        # A broken disposable gallery may be rebuilt, but it must not be changed
+        # silently while the user is deciding what to do.
+        from core.stability import run_startup_checks
+        _db_startup_results = run_startup_checks(_startup_settings, log=lambda m: _applog.info(m))
+        if _db_startup_results.get("write_blocked"):
+            raise RuntimeError("SQLite is in read-only safety mode: " + str(_db_startup_results.get("db_integrity", "integrity check failed")))
+        # One-time transitions from pre-SQLite compatibility files. These are
+        # audit-preserving migrations; original media is never touched.
+        try:
+            from core.deleted_registry import migrate_legacy_registry
+            _deleted_migration = migrate_legacy_registry(_startup_settings)
+            if int(_deleted_migration.get("imported", 0) or 0):
+                _applog.info("Migrated %s legacy deleted-MD5 rule(s) into SQLite.", _deleted_migration.get("imported", 0))
+        except Exception as _registry_error:
+            _applog.warning("Deleted-MD5 registry migration failed: %s", _registry_error)
+        try:
+            from core.nomatch_db import migrate_legacy_nomatch_cache
+            _nm_migration = migrate_legacy_nomatch_cache(_startup_settings)
+            if int(_nm_migration.get("imported", 0) or 0):
+                _applog.info("Migrated %s legacy NO_MATCH item(s) into SQLite.", _nm_migration.get("imported", 0))
+        except Exception as _nm_error:
+            _applog.warning("NO_MATCH migration failed: %s", _nm_error)
+        thumb_svc.configure(
+            max_threads=int(_startup_settings.get("thumb_threads", 3) or 3),
+            memory_items=int(_startup_settings.get("thumb_memory_items", 400) or 400),
+        )
+        try:
+            from core.stability import record_health_event
+            record_health_event(_startup_settings, "ok", str(_db_startup_results.get("db_integrity", "quick_check ok")))
+        except Exception as _health_event_error:
+            _applog.warning("Could not record DB health event: %s", _health_event_error)
+        cleanup_preview_cache(_startup_settings)
+        from core.file_safety import cleanup_partial_files
+        from core.paths import result_output_base
+        _removed_parts = cleanup_partial_files(result_output_base(_startup_settings))
+        try:
+            from core.library_lifecycle import archive_expired_inbox
+            _archived = archive_expired_inbox(_startup_settings)
+            if _archived:
+                _applog.info("Auto-archived %s Inbox file(s) after their review window.", _archived)
+            try:
+                from core.library_lifecycle import purge_expired_trash
+                _purged = purge_expired_trash(_startup_settings)
+                if int(_purged.get("removed_records", 0) or 0):
+                    _applog.info("Auto-purged %s expired Trash file(s).", _purged.get("removed_records", 0))
+            except Exception as _trash_error:
+                _applog.warning("Trash expiration cleanup failed: %s", _trash_error)
+        except Exception as _inbox_error:
+            _applog.warning("Inbox expiration check failed: %s", _inbox_error)
+        if _removed_parts:
+            _applog.warning(
+                "Removed %s unfinished .part file(s) left by an interrupted write; "
+                "affected downloads remain eligible for retry.",
+                _removed_parts,
+            )
+    except Exception as _cleanup_error:
+        _applog.warning("Startup cache/.part cleanup failed: %s", _cleanup_error)
 
     icon_path = Path(__file__).parent / "assets" / "app_icon.ico"
     icon = None
@@ -146,25 +204,23 @@ def main() -> int:
     except Exception as _we:
         _applog.warning("Watcher startup failed: %s", _we)
 
-    # ── Stability: startup checks (DB integrity + backup) ──────────────
-    try:
-        from core.settings import load_settings as _ls
-        from core.stability import run_startup_checks
-        import threading
-        _settings = _ls()
-        threading.Thread(
-            target=run_startup_checks,
-            args=(_settings,),
-            kwargs={"log": lambda m: _applog.info(m)},
-            daemon=True
-        ).start()
-    except Exception as _se:
-        _applog.warning("Startup checks failed: %s", _se)
-
     w = MainWindow()
     if icon:
         w.setWindowIcon(icon)
     w.show()
+    if _db_startup_results.get("write_blocked"):
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                w,
+                "SQLite: безопасный режим",
+                "Проверка рабочей базы не пройдена. Запись в SQLite заблокирована.\n\n"
+                "Основной архив не затронут. Открой «Диагностика» и либо создай копию базы, "
+                "либо удали/пересобери рабочую библиотеку.\n\n"
+                + str(_db_startup_results.get("db_integrity", "")),
+            )
+        except Exception:
+            pass
 
     # Register clean exit handler (Hydrus pattern: marks shutdown as OK)
     def _on_clean_exit():

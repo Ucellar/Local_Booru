@@ -1,22 +1,65 @@
 {
   "engine": "e621",
-  "description": "e621 / e926 API (requires User-Agent with contact info)",
-  "known_hosts": ["e621.net", "e926.net"],
-  "requires_auth": true,
+  "description": "e621 / e926 public JSON API (identified User-Agent required; login/API key optional for public MD5 search)",
+  "known_hosts": [
+    "e621.net",
+    "e926.net"
+  ],
+  "requires_auth": false,
   "cf_protected": [],
   "user_agent_required": true,
   "md5_search": [
-    {"path": "/posts.json", "params": {"tags": "md5:{md5}", "limit": 1}, "format": "json"},
-    {"path": "/posts.json", "params": {"tags": "md5:{md5} status:any", "limit": 1}, "format": "json"}
+    {
+      "path": "/posts.json",
+      "params": {
+        "tags": "md5:{md5}",
+        "limit": 1
+      },
+      "format": "json"
+    },
+    {
+      "path": "/posts.json",
+      "params": {
+        "tags": "md5:{md5} status:any",
+        "limit": 1
+      },
+      "format": "json"
+    }
   ],
   "post_fields": {
-    "id":       ["id"],
-    "md5":      ["file.md5", "md5"],
-    "tags":     ["tags.general", "tags.artist", "tags.character", "tags.copyright", "tags.species", "tags.meta"],
-    "file_url": ["file.url", "file_url"],
-    "rating":   ["rating"],
-    "source":   ["sources", "source"]
+    "id": [
+      "id"
+    ],
+    "md5": [
+      "file.md5",
+      "md5"
+    ],
+    "tags": [
+      "tags.general",
+      "tags.artist",
+      "tags.contributor",
+      "tags.character",
+      "tags.copyright",
+      "tags.species",
+      "tags.meta",
+      "tags.lore",
+      "tags.invalid"
+    ],
+    "file_url": [
+      "file.url",
+      "file_url"
+    ],
+    "rating": [
+      "rating"
+    ],
+    "source": [
+      "sources",
+      "source"
+    ]
   },
-  "post_list_path": ["posts", null],
+  "post_list_path": [
+    "posts",
+    null
+  ],
   "post_url": "{root}/posts/{id}"
 }

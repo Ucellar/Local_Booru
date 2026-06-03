@@ -212,6 +212,45 @@ def _match_phrase(tokens: list[str], lookup: dict[str, str],
 class HumanQueryParser:
     """Parse human-language search queries into structured filters + tags."""
 
+    _SHORT_FIELDS = {
+        "size": "filesize", "filesize": "filesize", "width": "width",
+        "height": "height", "rating": "rating", "duration": "duration",
+        "tags": "tag_count", "tagcount": "tag_count",
+    }
+
+    def _parse_shorthand(self, token: str) -> list[ParsedFilter] | None:
+        """Parse compact filters such as size:+50mb or size:0.1mb-5mb."""
+        m = re.fullmatch(r"(?i)(size|filesize|width|height|rating|duration|tags|tagcount):(.+)", token.strip())
+        if not m:
+            return None
+        field = self._SHORT_FIELDS.get(m.group(1).lower())
+        value = m.group(2).strip().lower()
+        default_unit = {"filesize": "mb", "duration": "seconds", "width": "px", "height": "px", "rating": "", "tag_count": ""}.get(field, "")
+        def parse_one(raw: str):
+            raw = raw.strip()
+            if default_unit and re.fullmatch(r"\d+(?:[.,]\d+)?", raw):
+                raw += default_unit
+            return _parse_value_unit(raw)
+        range_m = re.fullmatch(r"(\d+(?:[.,]\d+)?(?:kb|mb|gb|b|s|sec|seconds?|min|minutes?|h|hours?|px)?)\-(\d+(?:[.,]\d+)?(?:kb|mb|gb|b|s|sec|seconds?|min|minutes?|h|hours?|px)?)", value, re.I)
+        if range_m:
+            lo = parse_one(range_m.group(1)); hi = parse_one(range_m.group(2))
+            if not lo or not hi:
+                return None
+            return [
+                ParsedFilter(field, ">=", lo[0], token, f"[{self._field_label(field)}] [не меньше] [{self._value_label(lo[0], lo[1], field)}]"),
+                ParsedFilter(field, "<=", hi[0], token, f"[{self._field_label(field)}] [не больше] [{self._value_label(hi[0], hi[1], field)}]"),
+            ]
+        op = "="
+        if value.startswith("+"):
+            op, value = ">=", value[1:]
+        elif value.startswith("-"):
+            op, value = "<=", value[1:]
+        parsed = parse_one(value)
+        if not parsed:
+            return None
+        num, unit = parsed
+        return [ParsedFilter(field, op, num, token, f"[{self._field_label(field)}] [{self._op_label(op)}] [{self._value_label(num, unit, field)}]")]
+
     def parse(self, query: str) -> ParseResult:
         """Parse full query string. May contain multiple conditions + tags."""
         filters: list[ParsedFilter] = []
@@ -219,22 +258,29 @@ class HumanQueryParser:
         unknown: list[str] = []
         suggestions: list[str] = []
 
-        # Split into clauses by comma or newline
-        clauses = re.split(r"[,\n]+", query)
+        # Compact filters do not require another UI panel. Regular tags and
+        # old human-language filters remain compatible.
+        residual_parts: list[str] = []
+        for token in str(query or "").split():
+            compact = self._parse_shorthand(token)
+            if compact is not None:
+                filters.extend(compact)
+            else:
+                residual_parts.append(token)
+        residual = " ".join(residual_parts)
+        clauses = re.split(r"[,\n]+", residual)
         for clause in clauses:
             clause = clause.strip()
             if not clause:
                 continue
             result = self._parse_clause(clause)
             if result is None:
-                # Not a numerical filter — treat as tag
                 for part in clause.split():
                     if part.strip():
                         tags.append(part.strip())
             elif isinstance(result, ParsedFilter):
                 filters.append(result)
             elif isinstance(result, str):
-                # suggestion
                 suggestions.append(result)
                 unknown.append(clause)
 

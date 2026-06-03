@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QColor, QPainter, QFont
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
@@ -21,7 +21,10 @@ from ui.styles.themes import stylesheet_for
 NAV_ICONS = {
     "Tagger":     ("🔍", "parser"),
     "Tags":       ("🏷", "tags"),
+    "Trash":      ("", "action_delete"),
+    "Diagnostics": ("", "diagnostics"),
     "NO_MATCH":   ("❓", "nomatch"),
+    "Overview":   ("📊", "home"),
     "Gallery":    ("🖼", "gallery"),
     "Manga":      ("📖", "manga"),
     "Games":      ("🎮", "games"),
@@ -50,7 +53,9 @@ def _load_icon(name: str, light_theme: bool = False) -> "QIcon | None":
         # Try themed variant first, fallback to base
         candidates = [
             base / f"{name}{suffix}.ico",
+            base / f"{name}{suffix}.png",
             base / f"{name}.ico",
+            base / f"{name}.png",
         ]
         for p in candidates:
             if p.exists():
@@ -93,7 +98,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.context = AppContext()
         self.settings = self.context.settings
-        self.task_manager = TaskManager(self, max_workers=int(self.settings.get("task_workers", 2)))
+        self.task_manager = TaskManager(self, max_workers=int(self.settings.get("task_max_workers", 2)))
         self.pages: dict = {}
         self.page_buttons: dict = {}
         self.setWindowTitle("Local Booru")
@@ -146,15 +151,12 @@ class MainWindow(QMainWindow):
         self.mode_btn.setObjectName("ModeBtn")
         self.mode_btn.setFixedHeight(32)
         self.mode_menu = QMenu(self)
-        for workspace, title in WORKSPACE_TITLES.items():
-            label = title.get(self.settings.get("language", "ru"), next(iter(title.values()))) if isinstance(title, dict) else str(title)
-            action = self.mode_menu.addAction(label)
-            action.triggered.connect(lambda _=False, ws=workspace: self.set_workspace(ws))
         self.mode_btn.setMenu(self.mode_menu)
         sidebar_lay.addWidget(self.mode_btn)
         sidebar_lay.addSpacing(6)
 
-        # Nav buttons (built from PAGE_SPECS)
+        # Nav buttons are reusable widgets; their order and the collapsible
+        # «Дополнительно» group are controlled from Settings by drag&drop.
         for spec in PAGE_SPECS:
             if not spec.button_attr or spec.key == "Settings":
                 continue  # Settings is pinned at bottom separately
@@ -163,7 +165,22 @@ class MainWindow(QMainWindow):
             setattr(self, spec.button_attr, btn)
             self.page_buttons[spec.key] = btn
             btn.clicked.connect(lambda _=False, key=spec.key: self.go(key))
-            sidebar_lay.addWidget(btn)
+
+        self._nav_primary_widget = QWidget()
+        self._nav_primary_layout = QVBoxLayout(self._nav_primary_widget)
+        self._nav_primary_layout.setContentsMargins(0, 0, 0, 0); self._nav_primary_layout.setSpacing(2)
+        sidebar_lay.addWidget(self._nav_primary_widget)
+        self._nav_extra_toggle = QPushButton("Дополнительно  ▸")
+        self._nav_extra_toggle.setObjectName("ModeBtn")
+        self._nav_extra_toggle.setFixedHeight(30); self._nav_extra_toggle.setFocusPolicy(Qt.NoFocus)
+        self._nav_extra_toggle.clicked.connect(self._toggle_extra_navigation)
+        sidebar_lay.addWidget(self._nav_extra_toggle)
+        self._nav_extra_widget = QWidget()
+        self._nav_extra_layout = QVBoxLayout(self._nav_extra_widget)
+        self._nav_extra_layout.setContentsMargins(8, 0, 0, 0); self._nav_extra_layout.setSpacing(2)
+        sidebar_lay.addWidget(self._nav_extra_widget)
+        self._extra_navigation_expanded = not bool(self.settings.get("interface_extra_collapsed", True))
+        self._rebuild_navigation_layout()
 
         sidebar_lay.addStretch(1)
         sidebar_lay.addWidget(_separator())
@@ -206,6 +223,17 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         content_lay.addWidget(self.stack, 1)
 
+        # Persistent compact status strip: no database queries, safe during live parsing.
+        self._status_strip = QWidget()
+        self._status_strip.setObjectName("StatusStrip")
+        status_lay = QHBoxLayout(self._status_strip)
+        status_lay.setContentsMargins(16, 4, 16, 4)
+        self._status_protection = QLabel("🛡 Исходный архив: только чтение")
+        self._status_tasks = QLabel("Фоновые задачи: 0")
+        self._status_hint = QLabel("Рабочую библиотеку можно пересобирать")
+        status_lay.addWidget(self._status_protection); status_lay.addStretch(1); status_lay.addWidget(self._status_hint); status_lay.addSpacing(20); status_lay.addWidget(self._status_tasks)
+        content_lay.addWidget(self._status_strip)
+
         root_lay.addWidget(content, 1)
         self.setCentralWidget(root)
 
@@ -214,7 +242,20 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self.apply_theme)
         self.retranslate()
-        self.set_workspace(self.settings.get("workspace", "apt"))
+        self.apply_interface_modules()
+
+        # Keep Inbox/Trash lifecycle accurate while the app remains open for
+        # long downloads; startup-only maintenance is not enough for 24h rules.
+        self._lifecycle_timer = QTimer(self)
+        self._lifecycle_timer.setInterval(5 * 60 * 1000)
+        self._lifecycle_timer.timeout.connect(self._run_lifecycle_maintenance)
+        self._lifecycle_timer.start()
+        QTimer.singleShot(1500, self._run_lifecycle_maintenance)
+        self._task_status_timer = QTimer(self)
+        self._task_status_timer.setInterval(1000)
+        self._task_status_timer.timeout.connect(self._update_task_status_strip)
+        self._task_status_timer.start()
+        self._update_task_status_strip()
 
     # ── Page construction ─────────────────────────────────────────────────────
 
@@ -224,6 +265,18 @@ class MainWindow(QMainWindow):
             setattr(self, spec.attr, page)
             self.pages[spec.key] = page
             self.stack.addWidget(page)
+
+    def _update_task_status_strip(self):
+        try:
+            tasks = self.task_manager.active_snapshot()
+            self._status_tasks.setText(f"Фоновые задачи: {len(tasks)}")
+            if tasks:
+                current = tasks[0]
+                self._status_tasks.setToolTip(f"{current.get('name', '')}: {current.get('progress', '')}")
+            else:
+                self._status_tasks.setToolTip("")
+        except Exception:
+            pass
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -377,23 +430,149 @@ class MainWindow(QMainWindow):
             return titles.get(lang) or titles.get("ru") or titles.get("en") or ws
         return str(titles)
 
+    def _ordered_navigation_specs(self):
+        available = [spec for spec in PAGE_SPECS if spec.button_attr and spec.key != "Settings"]
+        keys = [spec.key for spec in available]
+        requested = self.settings.get("interface_module_order") or []
+        order = [key for key in requested if key in keys] + [key for key in keys if key not in requested]
+        mapping = {spec.key: spec for spec in available}
+        return [mapping[key] for key in order]
+
+    def _page_is_extra(self, spec):
+        return bool(self._interface_module_config(spec.key).get("extra", False))
+
+    def _rebuild_navigation_layout(self):
+        if not hasattr(self, "_nav_primary_layout"):
+            return
+        for layout in (self._nav_primary_layout, self._nav_extra_layout):
+            while layout.count():
+                layout.takeAt(0)
+        for spec in self._ordered_navigation_specs():
+            btn = self.page_buttons.get(spec.key)
+            if btn is None:
+                continue
+            (self._nav_extra_layout if self._page_is_extra(spec) else self._nav_primary_layout).addWidget(btn)
+        self._sync_extra_navigation_visibility()
+
+    def _toggle_extra_navigation(self):
+        self._extra_navigation_expanded = not bool(getattr(self, "_extra_navigation_expanded", False))
+        self.settings["interface_extra_collapsed"] = not self._extra_navigation_expanded
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        self._sync_extra_navigation_visibility()
+
+    def _sync_extra_navigation_visibility(self):
+        if not hasattr(self, "_nav_extra_widget"):
+            return
+        ws = self.settings.get("workspace", "gallery")
+        if ws == "tagger": ws = "apt"
+        elif ws == "downloader": ws = "adp"
+        has_extra = any(self._page_visible(spec) and self._page_workspace(spec) == ws and self._page_is_extra(spec) for spec in self._ordered_navigation_specs())
+        self._nav_extra_toggle.setVisible(has_extra)
+        expanded = bool(getattr(self, "_extra_navigation_expanded", False))
+        self._nav_extra_widget.setVisible(has_extra and expanded)
+        self._nav_extra_toggle.setText("Дополнительно  ▾" if expanded else "Дополнительно  ▸")
+
+    def _interface_module_config(self, key):
+        cfg = self.settings.get("interface_modules") or {}
+        value = cfg.get(key, {}) if isinstance(cfg, dict) else {}
+        return value if isinstance(value, dict) else {}
+
+    def _page_workspace(self, spec):
+        if spec.workspace == "system":
+            return "system"
+        return str(self._interface_module_config(spec.key).get("workspace", spec.workspace) or spec.workspace)
+
+    def _page_visible(self, spec):
+        if spec.workspace == "system":
+            return True
+        return bool(self._interface_module_config(spec.key).get("visible", True))
+
+    def _visible_workspace_pages(self):
+        out = {}
+        for spec in PAGE_SPECS:
+            if spec.workspace == "system" or not spec.button_attr or not self._page_visible(spec):
+                continue
+            out.setdefault(self._page_workspace(spec), []).append(spec.key)
+        return out
+
+    def _rebuild_workspace_menu(self):
+        self.mode_menu.clear()
+        visible = self._visible_workspace_pages()
+        for workspace, title in WORKSPACE_TITLES.items():
+            if workspace not in visible:
+                continue
+            label = title.get(self.settings.get("language", "ru"), next(iter(title.values()))) if isinstance(title, dict) else str(title)
+            action = self.mode_menu.addAction(label)
+            action.triggered.connect(lambda _=False, ws=workspace: self.set_workspace(ws))
+        self.mode_btn.setVisible(not (bool(self.settings.get("auto_hide_single_workspace", True)) and len(visible) <= 1))
+        return visible
+
+    def open_interface_modules(self):
+        """Open sidebar configuration from an obvious, always-available entry."""
+        try:
+            self.settings_page.configure_interface_modules()
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Модули интерфейса", str(exc))
+
+    def _first_visible_page(self, workspace):
+        preferred = WORKSPACE_DEFAULT_PAGE.get(workspace)
+        if preferred:
+            spec = PAGE_BY_KEY.get(preferred)
+            if spec and self._page_visible(spec) and self._page_workspace(spec) == workspace:
+                return preferred
+        for spec in PAGE_SPECS:
+            if spec.button_attr and self._page_visible(spec) and self._page_workspace(spec) == workspace:
+                return spec.key
+        return "Gallery"
+
+    def apply_interface_modules(self):
+        self._extra_navigation_expanded = not bool(self.settings.get("interface_extra_collapsed", True))
+        self._rebuild_navigation_layout()
+        visible = self._rebuild_workspace_menu()
+        if not visible:
+            # Safety fallback: a broken/empty config must never hide the whole UI.
+            modules = dict(self.settings.get("interface_modules") or {})
+            modules["Gallery"] = {"visible": True, "workspace": "gallery"}
+            self.settings["interface_modules"] = modules
+            visible = self._rebuild_workspace_menu()
+        ws = self.settings.get("workspace", "gallery")
+        if ws == "tagger": ws = "apt"
+        elif ws == "downloader": ws = "adp"
+        if ws not in visible:
+            ws = next(iter(visible.keys()), "gallery")
+        self.settings["workspace"] = ws
+        self._update_workspace_buttons()
+        current = self.stack.currentWidget() if hasattr(self, "stack") else None
+        current_key = next((k for k, page in self.pages.items() if page is current), "")
+        current_spec = PAGE_BY_KEY.get(current_key)
+        if not current_spec or (current_spec.workspace != "system" and (not self._page_visible(current_spec) or self._page_workspace(current_spec) != ws)):
+            self.go(self._first_visible_page(ws))
+
     def set_workspace(self, name):
         if name == "tagger":   name = "apt"
         elif name == "downloader": name = "adp"
+        visible = self._rebuild_workspace_menu()
+        if name not in visible:
+            name = next(iter(visible.keys()), "gallery")
         self.settings["workspace"] = name
         self.save_settings()
         self._update_workspace_buttons()
-        self.go(WORKSPACE_DEFAULT_PAGE.get(name, "Tagger"))
+        self.go(self._first_visible_page(name))
 
     def _update_workspace_buttons(self):
-        ws = self.settings.get("workspace", "apt")
+        ws = self.settings.get("workspace", "gallery")
         if ws == "tagger":     ws = "apt"
         elif ws == "downloader": ws = "adp"
         self.mode_btn.setText(f"  {self.workspace_title(ws)}")
         for spec in PAGE_SPECS:
             btn = self.page_buttons.get(spec.key)
             if btn:
-                btn.setVisible(spec.workspace in (ws, "system"))
+                btn.setVisible(self._page_visible(spec) and self._page_workspace(spec) == ws)
+        self._sync_extra_navigation_visibility()
 
     # ── Retranslate ───────────────────────────────────────────────────────────
 
@@ -402,7 +581,7 @@ class MainWindow(QMainWindow):
             btn = self.page_buttons.get(spec.key)
             if btn:
                 em, ico = NAV_ICONS.get(spec.key, ("•",""))
-                label = self.t(spec.key) if spec.key in ("Tagger","Gallery","Manga","Games","Duplicates","DLER","Tags") else spec.button_text
+                label = self.t(spec.key) if spec.key in ("Overview","Tagger","Gallery","Manga","Games","Duplicates","DLER","Tags") else spec.button_text
                 icon = _load_icon(ico, _is_light_theme(self.settings.get("appearance", "dark")))
                 if icon:
                     btn.setIcon(icon); btn.setIconSize(QSize(18,18)); btn.setText(f"  {label}")
@@ -412,6 +591,7 @@ class MainWindow(QMainWindow):
             if page and hasattr(page, "retranslate"):
                 page.retranslate()
         self._update_logo()
+        self._rebuild_workspace_menu()
         self._update_workspace_buttons()
 
     # ── Navigation ────────────────────────────────────────────────────────────
@@ -470,17 +650,21 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.post_page)
 
     def open_tag_single(self, tag):
-        self.set_workspace(self.settings.get("workspace", "apt"))
+        # A tag is a gallery filter, not a parser action.  Always route to Gallery
+        # even when the Tags module was moved between interface workspaces.
+        self.set_workspace("gallery")
+        self.go("Gallery")
         self.gallery_page.search.setText(tag)
         self.gallery_page.apply_filter()
 
     def open_tag_add(self, tag):
-        self.set_workspace(self.settings.get("workspace", "apt"))
+        self.set_workspace("gallery")
+        self.go("Gallery")
         parts = self.gallery_page.search.text().split()
         if tag not in parts:
             cur = self.gallery_page.search.text().strip()
             self.gallery_page.search.setText((cur + " " + tag).strip())
-            self.gallery_page.apply_filter()
+        self.gallery_page.apply_filter()
 
     def _reload_nav_icons(self):
         """Reload all nav button icons after theme change."""
@@ -537,6 +721,22 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _run_lifecycle_maintenance(self):
+        try:
+            from core.library_lifecycle import archive_expired_inbox, purge_expired_trash
+            archived = int(archive_expired_inbox(self.settings) or 0)
+            purged = purge_expired_trash(self.settings)
+            removed = int((purged or {}).get("removed_records", 0) or 0)
+            if archived or removed:
+                gallery = getattr(self, "gallery_page", None)
+                if gallery is not None and hasattr(gallery, "refresh_force"):
+                    gallery.refresh_force()
+                trash = getattr(self, "trash_page", None)
+                if trash is not None and hasattr(trash, "refresh"):
+                    trash.refresh()
+        except Exception:
+            pass
+
     def changeEvent(self, event):
         super().changeEvent(event)
         try:
@@ -570,6 +770,11 @@ class MainWindow(QMainWindow):
         # Don't clamp during move — user is dragging the window
 
     def closeEvent(self, event):
+        try:
+            from core.library_lifecycle import trim_thumbnail_cache
+            trim_thumbnail_cache(self.settings)
+        except Exception:
+            pass
         try: self.task_manager.shutdown()
         except Exception: pass
         try:

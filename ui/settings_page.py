@@ -1,10 +1,10 @@
 from pathlib import Path
-from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLineEdit,QPushButton,QFileDialog,QLabel,QSpinBox,QMessageBox,QHBoxLayout,QComboBox,QCheckBox,QDialog,QSlider,QTextEdit,QListWidget,QSplitter,QListWidgetItem,QCompleter,QApplication,QListView,QAbstractSpinBox,QGroupBox,QSizePolicy
+from PySide6.QtWidgets import QWidget,QVBoxLayout,QFormLayout,QLineEdit,QPushButton,QFileDialog,QLabel,QSpinBox,QMessageBox,QHBoxLayout,QComboBox,QCheckBox,QDialog,QSlider,QTextEdit,QListWidget,QSplitter,QListWidgetItem,QCompleter,QApplication,QListView,QAbstractSpinBox,QGroupBox,QSizePolicy,QDoubleSpinBox,QTableWidget,QTableWidgetItem,QColorDialog,QTabBar,QAbstractItemView
 from PySide6.QtCore import Qt, QStringListModel, QSortFilterProxyModel, QEvent
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QColor, QKeySequence
 from PIL import Image
 from core.settings import save_settings
-from core.tagger_engine import result_output_base
+from core.tagger import result_output_base
 from core.paths import CACHE_FILE
 import shutil
 import json
@@ -50,6 +50,286 @@ class LogoCropDialog(QDialog):
     def save_crop(self):
         img=Image.open(self.path).convert("RGB"); crop=img.crop(self.crop_box()).resize((480,160)); out=Path("logo.png"); crop.save(out); return str(out)
 
+class TagCategoryDialog(QDialog):
+    DEFAULT_ORDER = ["artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid", "parody", "language", "category", "pages"]
+    DEFAULT_COLORS = {"artist":"#ff3838","contributor":"#e67e22","character":"#00a000","copyright":"#ff54a7","species":"#22a6b3","general":"#004cff","meta":"#ff9900","lore":"#9b59b6","invalid":"#7f8c8d","parody":"#ff54a7","language":"#cc8800","category":"#00aaaa","pages":"#888888"}
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Цвета и порядок групп тегов")
+        self.resize(470, 500)
+        order = list(settings.get("tag_group_order") or self.DEFAULT_ORDER)
+        for group in self.DEFAULT_ORDER:
+            if group not in order:
+                order.append(group)
+        colors = dict(self.DEFAULT_COLORS); colors.update(settings.get("tag_group_colors") or {})
+        lay = QVBoxLayout(self)
+        hint = QLabel("Зажми группу левой кнопкой мыши и перетащи выше или ниже.\nДвойной клик или кнопка «Изменить цвет» меняют её цвет.")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.list = QListWidget()
+        self.list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list.setDefaultDropAction(Qt.MoveAction)
+        self.list.setSelectionMode(QAbstractItemView.SingleSelection)
+        for group in order:
+            it = QListWidgetItem(group)
+            it.setData(Qt.UserRole, colors.get(group, "#888888"))
+            it.setForeground(QColor(colors.get(group, "#888888")))
+            self.list.addItem(it)
+        self.list.itemDoubleClicked.connect(lambda _it: self.choose_color())
+        lay.addWidget(self.list, 1)
+        row=QHBoxLayout(); color=QPushButton("Изменить цвет"); reset=QPushButton("Сбросить порядок"); ok=QPushButton("Сохранить"); cancel=QPushButton("Отмена")
+        row.addWidget(color); row.addWidget(reset); row.addStretch(1); row.addWidget(ok); row.addWidget(cancel); lay.addLayout(row)
+        color.clicked.connect(self.choose_color); reset.clicked.connect(self._reset_order); ok.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
+    def choose_color(self):
+        it=self.list.currentItem()
+        if not it: return
+        c=QColorDialog.getColor(QColor(it.data(Qt.UserRole) or "#888888"), self, "Цвет категории")
+        if c.isValid():
+            it.setData(Qt.UserRole, c.name()); it.setForeground(c)
+    def _reset_order(self):
+        existing={self.list.item(i).text(): self.list.item(i).data(Qt.UserRole) for i in range(self.list.count())}
+        self.list.clear()
+        for group in self.DEFAULT_ORDER:
+            it=QListWidgetItem(group); color=str(existing.get(group) or self.DEFAULT_COLORS.get(group,"#888888")); it.setData(Qt.UserRole,color); it.setForeground(QColor(color)); self.list.addItem(it)
+    def values(self):
+        order=[]; colors={}
+        for i in range(self.list.count()):
+            it=self.list.item(i); group=it.text(); order.append(group); colors[group]=str(it.data(Qt.UserRole) or "#888888")
+        return order, colors
+
+
+class HotkeysDialog(QDialog):
+    LABELS = [("previous", "Предыдущий файл"), ("next", "Следующий файл"), ("favorite", "Избранное"), ("fit", "Вписать изображение"), ("volume", "Звук"), ("back", "Назад в галерею"), ("fullscreen", "Полный экран"), ("zoom_in", "Увеличить"), ("zoom_out", "Уменьшить"), ("zoom_reset", "Сбросить масштаб")]
+    DEFAULTS = {"previous":"A","next":"D","favorite":"F","fit":"W","volume":"E","back":"Q","fullscreen":"F11","zoom_in":"+","zoom_out":"-","zoom_reset":"0"}
+    def __init__(self, settings, parent=None):
+        super().__init__(parent); self.setWindowTitle("Горячие клавиши просмотрщика"); self.resize(420, 420)
+        lay=QFormLayout(self); self.edits={}
+        values=dict(self.DEFAULTS); values.update(settings.get("hotkeys") or {})
+        for key, label in self.LABELS:
+            edit=QLineEdit(str(values.get(key, self.DEFAULTS[key]))); edit.setMaximumWidth(130); self.edits[key]=edit; lay.addRow(label+":", edit)
+        row=QHBoxLayout(); ok=QPushButton("Сохранить"); cancel=QPushButton("Отмена"); row.addStretch(1); row.addWidget(ok); row.addWidget(cancel); lay.addRow(row); ok.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
+    def values(self):
+        values={}
+        for key, edit in self.edits.items():
+            raw=edit.text().strip() or self.DEFAULTS[key]
+            values[key]=QKeySequence(raw).toString() or raw
+        return values
+
+
+class SafeModuleList(QListWidget):
+    """Drag&drop list that only moves existing sidebar modules; it never overwrites an item."""
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setDragDropOverwriteMode(False)
+        self.setDropIndicatorShown(True)
+        self.setAcceptDrops(True)
+        self.setDragEnabled(True)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+
+    def _is_own_source(self, source):
+        return source in (getattr(self.owner, "primary", None), getattr(self.owner, "extra", None))
+
+    def dragEnterEvent(self, event):
+        if self._is_own_source(event.source()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if self._is_own_source(event.source()):
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        source = event.source()
+        if not self._is_own_source(source):
+            event.ignore()
+            return
+        source_row = source.currentRow()
+        if source_row < 0:
+            event.ignore()
+            return
+        pos = event.position().toPoint()
+        under = self.itemAt(pos)
+        target_row = self.row(under) if under is not None else self.count()
+        if under is not None and pos.y() > self.visualItemRect(under).center().y():
+            target_row += 1
+        if source is self and source_row < target_row:
+            target_row -= 1
+        if source is self and source_row == target_row:
+            event.setDropAction(Qt.MoveAction)
+            event.accept()
+            return
+        item = source.takeItem(source_row)
+        if item is None:
+            event.ignore()
+            return
+        self.insertItem(max(0, min(target_row, self.count())), item)
+        self.setCurrentItem(item)
+        self.owner._selected_from(self)
+        event.setDropAction(Qt.MoveAction)
+        event.accept()
+
+
+class InterfaceModulesDialog(QDialog):
+    """Настройка бокового меню: порядок drag&drop и сворачиваемая группа."""
+    MODULES = [
+        ("Tagger", "Парсер", "apt"), ("NO_MATCH", "Брак", "apt"),
+        ("Overview", "Обзор", "gallery"), ("Gallery", "Галерея", "gallery"),
+        ("Trash", "Удалено", "gallery"), ("Diagnostics", "Диагностика", "gallery"),
+        ("Tags", "Теги", "gallery"), ("Manga", "Манга", "gallery"),
+        ("Games", "Игры", "gallery"), ("DLER", "Граббер", "adp"),
+        ("Subs", "Подписки", "adp"), ("Duplicates", "Дубли", "duplicates"),
+    ]
+    WORKSPACES = [("apt", "Парсер"), ("gallery", "Галерея"), ("adp", "Граббер"), ("duplicates", "Дубли")]
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Разделы интерфейса")
+        self.resize(720, 600)
+        self._module_by_key = {key:(label, ws) for key,label,ws in self.MODULES}
+        lay=QVBoxLayout(self)
+        info=QLabel("Зажми раздел левой кнопкой мыши и перетащи в нужное место — внутри списка или между «Основные» и «Дополнительно».\nСохранение проверяет полный набор разделов: пункт нельзя потерять или продублировать. Снятая галочка скрывает раздел полностью.")
+        info.setWordWrap(True); lay.addWidget(info)
+        columns=QHBoxLayout()
+        self.primary=self._make_list("Основные разделы")
+        self.extra=self._make_list("Дополнительно (сворачивается)")
+        lbox=QVBoxLayout(); lbox.addWidget(QLabel("Основные разделы")); lbox.addWidget(self.primary,1)
+        rbox=QVBoxLayout(); rbox.addWidget(QLabel("Дополнительно — можно свернуть")); rbox.addWidget(self.extra,1)
+        columns.addLayout(lbox,1); columns.addLayout(rbox,1); lay.addLayout(columns,1)
+        controls=QHBoxLayout()
+        self.toggle_visible=QPushButton("Скрыть / показать выбранный")
+        self.toggle_visible.clicked.connect(self._toggle_selected_visibility)
+        controls.addWidget(self.toggle_visible); controls.addStretch(1); lay.addLayout(controls)
+        workrow=QHBoxLayout(); workrow.addWidget(QLabel("Рабочий режим выбранного раздела:")); self.workspace=QComboBox()
+        for key,title in self.WORKSPACES: self.workspace.addItem(title,key)
+        self.workspace.currentIndexChanged.connect(self._workspace_changed)
+        workrow.addWidget(self.workspace); workrow.addStretch(1); lay.addLayout(workrow)
+        self.auto_hide=QCheckBox("Убирать переключатель режимов, если осталась одна используемая группа")
+        self.auto_hide.setChecked(bool(settings.get("auto_hide_single_workspace", True)))
+        self.extra_collapsed=QCheckBox("Сворачивать «Дополнительно» при запуске")
+        self.extra_collapsed.setChecked(bool(settings.get("interface_extra_collapsed", True)))
+        lay.addWidget(self.auto_hide); lay.addWidget(self.extra_collapsed)
+        row=QHBoxLayout(); reset=QPushButton("Сбросить"); ok=QPushButton("Сохранить"); cancel=QPushButton("Отмена")
+        row.addWidget(reset); row.addStretch(1); row.addWidget(ok); row.addWidget(cancel); lay.addLayout(row)
+        self._initial_settings = json.loads(json.dumps(settings))
+        reset.clicked.connect(self._reset); ok.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
+        self.primary.itemSelectionChanged.connect(lambda: self._selected_from(self.primary))
+        self.extra.itemSelectionChanged.connect(lambda: self._selected_from(self.extra))
+        self._populate(settings)
+
+    def _make_list(self, _label):
+        # Custom drop handling performs a take/insert move for both lists.
+        # Dropping on an item means insert before/after it, never overwrite it.
+        return SafeModuleList(self)
+
+    def _new_item(self, key, label, workspace, visible=True):
+        item=QListWidgetItem()
+        item.setData(Qt.UserRole, key); item.setData(Qt.UserRole + 1, workspace); item.setData(Qt.UserRole + 2, bool(visible))
+        # Do not let items accept overwrite drops: only insertion lines are legal.
+        item.setFlags((item.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
+        self._render_item(item)
+        return item
+
+    def _render_item(self, item):
+        key=str(item.data(Qt.UserRole) or "")
+        label=self._module_by_key.get(key, (key, "gallery"))[0]
+        visible=bool(item.data(Qt.UserRole + 2))
+        item.setText(label if visible else f"[скрыт]  {label}")
+        item.setForeground(QColor("#8a91a8") if visible else QColor("#5a6070"))
+
+    def _toggle_selected_visibility(self):
+        item=self._selected_item()
+        if not item: return
+        key=str(item.data(Qt.UserRole) or "")
+        if key == "Gallery" and bool(item.data(Qt.UserRole + 2)):
+            QMessageBox.information(self, "Разделы интерфейса", "Галерею нельзя скрыть: это основной раздел просмотра.")
+            return
+        item.setData(Qt.UserRole + 2, not bool(item.data(Qt.UserRole + 2)))
+        self._render_item(item)
+
+    def _populate(self, settings):
+        self.primary.clear(); self.extra.clear()
+        cfg=settings.get("interface_modules") or {}; order=list(settings.get("interface_module_order") or [])
+        defaults=[key for key,_,_ in self.MODULES]
+        ordered=[key for key in order if key in defaults] + [key for key in defaults if key not in order]
+        for key in ordered:
+            label, default_ws=self._module_by_key[key]
+            cur=cfg.get(key,{}) if isinstance(cfg,dict) else {}
+            workspace=str(cur.get("workspace", default_ws)); visible=bool(cur.get("visible", True)); extra=bool(cur.get("extra", False))
+            (self.extra if extra else self.primary).addItem(self._new_item(key,label,workspace,visible))
+        if self.primary.count(): self.primary.setCurrentRow(0)
+
+    def _selected_item(self):
+        return self.primary.currentItem() or self.extra.currentItem()
+
+    def _selected_from(self, owner):
+        item=owner.currentItem()
+        if not item: return
+        other=self.extra if owner is self.primary else self.primary
+        other.blockSignals(True); other.clearSelection(); other.blockSignals(False)
+        idx=self.workspace.findData(str(item.data(Qt.UserRole + 1) or "gallery"))
+        self.workspace.blockSignals(True); self.workspace.setCurrentIndex(max(0,idx)); self.workspace.blockSignals(False)
+
+    def _workspace_changed(self):
+        item=self._selected_item()
+        if item: item.setData(Qt.UserRole + 1, str(self.workspace.currentData() or "gallery"))
+
+    def _reset(self):
+        self.primary.clear(); self.extra.clear()
+        for key,label,ws in self.MODULES: self.primary.addItem(self._new_item(key,label,ws,True))
+        self.auto_hide.setChecked(True); self.extra_collapsed.setChecked(True); self.primary.setCurrentRow(0)
+
+    def _current_keys(self):
+        keys = []
+        for lst in (self.primary, self.extra):
+            for row in range(lst.count()):
+                keys.append(str(lst.item(row).data(Qt.UserRole) or ""))
+        return keys
+
+    def _validate_structure(self, repair=True):
+        expected = [key for key, _label, _ws in self.MODULES]
+        keys = self._current_keys()
+        missing = [key for key in expected if key not in keys]
+        duplicated = sorted({key for key in keys if keys.count(key) > 1})
+        unknown = [key for key in keys if key not in expected]
+        if not missing and not duplicated and not unknown and len(keys) == len(expected):
+            return True
+        if repair:
+            self._populate(self._initial_settings)
+            QMessageBox.warning(
+                self, "Разделы интерфейса",
+                "Перетаскивание повредило список разделов.\n"
+                "Изменения НЕ сохранены, список восстановлен из последних корректных настроек.\n\n"
+                f"Пропали: {', '.join(missing) or 'нет'}\n"
+                f"Дубли: {', '.join(duplicated) or 'нет'}"
+            )
+        return False
+
+    def accept(self):
+        # Never allow a corrupt drag/drop state to reach settings.json.
+        if self._validate_structure(repair=True):
+            super().accept()
+
+    def values(self):
+        if not self._validate_structure(repair=False):
+            raise ValueError("Повреждён список разделов интерфейса; сохранение отменено")
+        result={}; order=[]; visible_any=False
+        for lst,is_extra in ((self.primary,False),(self.extra,True)):
+            for row in range(lst.count()):
+                item=lst.item(row); key=str(item.data(Qt.UserRole)); label,default_ws=self._module_by_key[key]
+                visible=bool(item.data(Qt.UserRole + 2)); visible_any=visible_any or visible; order.append(key)
+                result[key]={"visible":visible,"workspace":str(item.data(Qt.UserRole+1) or default_ws),"extra":is_extra}
+        if not visible_any or not result.get("Gallery",{}).get("visible",False): result["Gallery"]["visible"]=True
+        return result, order, bool(self.auto_hide.isChecked()), bool(self.extra_collapsed.isChecked())
+
+
 class SettingsPage(QWidget):
     def __init__(self, main):
         super().__init__(); self.main=main
@@ -71,14 +351,17 @@ class SettingsPage(QWidget):
         self.title=QLineEdit(); self.logo=QLineEdit(); self.logo_fit=QComboBox(); self.logo_fit.addItem("Crop","crop"); self.logo_fit.addItem("Contain","contain"); self.logo_choose=QPushButton(); self.logo_choose.clicked.connect(self.choose_logo); self.logo_crop=QPushButton(); self.logo_crop.clicked.connect(self.crop_logo)
         lrow=QHBoxLayout(); lrow.addWidget(self.logo,1); lrow.addWidget(self.logo_choose); lrow.addWidget(self.logo_crop)
         self.output_dir=QLineEdit(); self.choose_output=QPushButton("..."); self.choose_output.clicked.connect(self.choose_output_dir); outrow=QHBoxLayout(); outrow.addWidget(self.output_dir,1); outrow.addWidget(self.choose_output)
-        self.copy_results=QCheckBox()
+        self.separate_settings = QCheckBox("Хранить настройки/базу/кэш отдельно от стандартной папки")
+        self.settings_storage_dir = QLineEdit(); self.settings_storage_dir.setPlaceholderText("пусто = Local_Booru_Archive/settings рядом с output")
+        self.choose_settings_storage = QPushButton("..."); self.choose_settings_storage.clicked.connect(self.choose_settings_storage_dir)
+        storage_row = QHBoxLayout(); storage_row.addWidget(self.separate_settings); storage_row.addWidget(self.settings_storage_dir,1); storage_row.addWidget(self.choose_settings_storage)
         self.debug_logging=QCheckBox()
         self.debug_logging.setChecked(False)
 
         self.cols=QSpinBox(); self.cols.setRange(1,12); self.rows=QSpinBox(); self.rows.setRange(1,20); self.card=QSpinBox(); self.card.setRange(100,700); self.ignore_numeric=QCheckBox(); self.show_preview=QCheckBox(); self.error_console=QCheckBox(); self.max_console_lines=QSpinBox(); self.max_console_lines.setRange(200,20000); self.max_console_lines.setSingleStep(100); self.manga_root=QLineEdit(); self.choose_manga=QPushButton("..."); self.choose_manga.clicked.connect(self.choose_manga_root); mrow=QHBoxLayout(); mrow.addWidget(self.manga_root,1); mrow.addWidget(self.choose_manga)
         self.games_root=QLineEdit(); self.choose_games=QPushButton("..."); self.choose_games.clicked.connect(self.choose_games_root); grow=QHBoxLayout(); grow.addWidget(self.games_root,1); grow.addWidget(self.choose_games)
         # Bare checkbox fields: show only the indicator, never a painted tail.
-        for _cb in (self.copy_results, self.debug_logging, self.ignore_numeric, self.show_preview, self.error_console):
+        for _cb in (self.debug_logging, self.ignore_numeric, self.show_preview, self.error_console):
             _cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             _cb.setFixedSize(23, 23)
         for _spin in (self.cols, self.rows, self.card, self.max_console_lines):
@@ -105,9 +388,9 @@ class SettingsPage(QWidget):
             ("Columns", self.cols, "tip_columns"),
             ("Rows/page", self.rows, "tip_rows"),
             ("Card height", self.card, "tip_card"),
-            ("Copy results", self.copy_results, "tip_copy_results"),
             ("Debug logging", self.debug_logging, "tip_debug_logging"),
             ("Output folder", outrow, "tip_output_folder"),
+            ("Хранение настроек", storage_row, "tip_output_folder"),
             ("Ignore numeric tags", self.ignore_numeric, "tip_numeric"),
             ("Search preview", self.show_preview, "tip_preview"),
             ("Console line limit", self.max_console_lines, "tip_console_limit"),
@@ -121,6 +404,14 @@ class SettingsPage(QWidget):
         _scroll = _SA(); _scroll.setWidgetResizable(True)
         _scroll.setFrameShape(_SA.Shape.NoFrame)
         _inner = __import__("PySide6.QtWidgets",fromlist=["QWidget"]).QWidget()
+        self.section_title = QLabel("Основные")
+        self.section_title.setObjectName("SettingsSectionTitle")
+        self.section_title.setStyleSheet("font-size:18px;font-weight:800;margin:4px 0 2px 2px")
+        self.section_description = QLabel("")
+        self.section_description.setWordWrap(True)
+        self.section_description.setStyleSheet("color:#8991a8;margin:0 0 8px 2px")
+        _ilay.addWidget(self.section_title)
+        _ilay.addWidget(self.section_description)
         _ilay.addLayout(self.form)
 
         # FlareSolverr is not useful for Danbooru, but the current Ascii2D
@@ -133,15 +424,22 @@ class SettingsPage(QWidget):
         _advanced_form.setContentsMargins(6, 6, 6, 6)
         _advanced_form.setSpacing(5)
         _advanced_form.addRow("FlareSolverr (Ascii2D / совместимость)", _fs_row)
+        self.large_download_count = QSpinBox(); self.large_download_count.setRange(1, 1000000); self.large_download_count.setSuffix(" файлов"); self.large_download_count.setMaximumWidth(180)
+        self.disk_reserve_gb = QDoubleSpinBox(); self.disk_reserve_gb.setRange(0.0, 1000.0); self.disk_reserve_gb.setDecimals(1); self.disk_reserve_gb.setSuffix(" ГБ резерва"); self.disk_reserve_gb.setMaximumWidth(180)
+        _advanced_form.addRow("Предупреждать о большой загрузке от:", self.large_download_count)
+        _advanced_form.addRow("Свободное место не опускать ниже:", self.disk_reserve_gb)
         self.advanced_box.setVisible(False)
         self.advanced_btn.toggled.connect(self.advanced_box.setVisible)
         _ilay.addWidget(self.advanced_btn)
         _ilay.addWidget(self.advanced_box)
 
-        _primary_row = QHBoxLayout()
-        self.save_btn=QPushButton(); self.save_btn.clicked.connect(self.save); _primary_row.addWidget(self.save_btn, 1)
-        self.instruction_btn=QPushButton("Инструкция"); self.instruction_btn.clicked.connect(self.show_instruction); _primary_row.addWidget(self.instruction_btn, 1)
-        _ilay.addLayout(_primary_row)
+        # Global actions are created here, but inserted into a fixed footer below
+        # the scroll area. They must not move together with whichever subsection
+        # happens to be open.
+        self.save_btn = QPushButton()
+        self.save_btn.clicked.connect(self.save)
+        self.instruction_btn = QPushButton("Инструкция")
+        self.instruction_btn.clicked.connect(self.show_instruction)
 
         self.maintenance_box = QGroupBox("Обслуживание библиотеки")
         _maintenance = QVBoxLayout(self.maintenance_box)
@@ -161,6 +459,13 @@ class SettingsPage(QWidget):
         self.sql_stats_btn.clicked.connect(self.show_sqlite_stats)
         _mrow2.addWidget(self.sql_optimize_btn, 1); _mrow2.addWidget(self.sql_stats_btn, 1)
         _maintenance.addLayout(_mrow2)
+        _mrow2b = QHBoxLayout()
+        self.sql_backup_btn = QPushButton("Создать backup SQLite")
+        self.sql_backup_btn.clicked.connect(self.force_sqlite_backup)
+        self.sql_vacuum_btn = QPushButton("Сжать SQLite (VACUUM)")
+        self.sql_vacuum_btn.clicked.connect(self.vacuum_sqlite)
+        _mrow2b.addWidget(self.sql_backup_btn, 1); _mrow2b.addWidget(self.sql_vacuum_btn, 1)
+        _maintenance.addLayout(_mrow2b)
         _mrow3 = QHBoxLayout()
         self.integrity_check_btn=QPushButton("Проверить целостность")
         self.integrity_check_btn.clicked.connect(self.check_library_integrity)
@@ -168,22 +473,153 @@ class SettingsPage(QWidget):
         self.integrity_repair_btn.clicked.connect(self.repair_library_integrity)
         _mrow3.addWidget(self.integrity_check_btn, 1); _mrow3.addWidget(self.integrity_repair_btn, 1)
         _maintenance.addLayout(_mrow3)
+        _mrow4 = QHBoxLayout()
+        self.repair_thumbs_btn = QPushButton("Проверить файлы / достроить превью")
+        self.repair_thumbs_btn.clicked.connect(self.repair_missing_thumbnails)
+        self.relocate_root_btn = QPushButton("Найти перенесённый архив")
+        self.relocate_root_btn.clicked.connect(self.relocate_library_root)
+        _mrow4.addWidget(self.repair_thumbs_btn, 1); _mrow4.addWidget(self.relocate_root_btn, 1)
+        _maintenance.addLayout(_mrow4)
+        _mrow5 = QHBoxLayout()
+        self.repair_e621_btn = QPushButton("Исправить загрязнённые e621-теги")
+        self.repair_e621_btn.clicked.connect(self.repair_e621_tags)
+        self.legacy_sidecars_btn = QPushButton("Импортировать старые sidecar в SQLite")
+        self.legacy_sidecars_btn.clicked.connect(self.import_legacy_sidecars)
+        _mrow5.addWidget(self.repair_e621_btn, 1); _mrow5.addWidget(self.legacy_sidecars_btn, 1)
+        _maintenance.addLayout(_mrow5)
         self.sql_status=QLabel("")
         self.sql_status.setWordWrap(True)
         self.sql_status.setVisible(False)
         _maintenance.addWidget(self.sql_status)
         _ilay.addWidget(self.maintenance_box)
 
+        # Settings are split into compact topic cards.  Do not return to the
+        # old "every action and every checkbox in one box" layout: at 1080p it
+        # was unreadable and made unrelated controls look like one workflow.
+        self.library_policy_box = QGroupBox("Новые файлы и корзина")
+        _library_policy = QVBoxLayout(self.library_policy_box)
+        _library_policy.setContentsMargins(10, 10, 10, 10); _library_policy.setSpacing(8)
+        _wrow1 = QHBoxLayout()
+        self.imports_to_inbox = QCheckBox("После скачивания добавлять в «Новые»")
+        self.inbox_hours = QSpinBox(); self.inbox_hours.setRange(1, 24 * 365); self.inbox_hours.setSuffix(" ч до архива")
+        self.inbox_hours.setMaximumWidth(170)
+        _wrow1.addWidget(self.imports_to_inbox); _wrow1.addWidget(self.inbox_hours); _wrow1.addStretch(1)
+        _library_policy.addLayout(_wrow1)
+        _wrow_policy = QHBoxLayout()
+        self.deleted_reimport = QComboBox()
+        self.deleted_reimport.addItem("Не скачивать обратно", "skip")
+        self.deleted_reimport.addItem("Вернуть в «Новые»", "return_inbox")
+        self.trash_days = QComboBox()
+        self.trash_days.addItem("Очищать корзину только вручную", 0)
+        self.trash_days.addItem("Очищать корзину через 7 дней", 7)
+        self.trash_days.addItem("Очищать корзину через 30 дней", 30)
+        _wrow_policy.addWidget(QLabel("Если снова найден удалённый файл:")); _wrow_policy.addWidget(self.deleted_reimport)
+        _wrow_policy.addWidget(self.trash_days); _wrow_policy.addStretch(1)
+        _library_policy.addLayout(_wrow_policy)
+        _ilay.addWidget(self.library_policy_box)
+
+        self.library_transfer_box = QGroupBox("Перенос и экспорт данных")
+        _library_transfer = QVBoxLayout(self.library_transfer_box)
+        _library_transfer.setContentsMargins(10, 10, 10, 10); _library_transfer.setSpacing(8)
+        _wrow3 = QHBoxLayout()
+        self.archive_stats_btn = QPushButton("Статистика архива")
+        self.archive_stats_btn.clicked.connect(self.show_archive_stats)
+        self.metadata_export_btn = QPushButton("Экспорт тегов и источников")
+        self.metadata_export_btn.clicked.connect(self.export_metadata_dialog)
+        _wrow3.addWidget(self.archive_stats_btn); _wrow3.addWidget(self.metadata_export_btn); _wrow3.addStretch(1)
+        _library_transfer.addLayout(_wrow3)
+        _wrow_profile = QHBoxLayout()
+        self.settings_export_btn = QPushButton("Экспорт профиля настроек")
+        self.settings_import_btn = QPushButton("Импорт профиля настроек")
+        self.settings_include_secrets = QCheckBox("Включить логины / API-ключи в экспорт")
+        self.settings_export_btn.clicked.connect(self.export_settings_profile)
+        self.settings_import_btn.clicked.connect(self.import_settings_profile)
+        _wrow_profile.addWidget(self.settings_export_btn); _wrow_profile.addWidget(self.settings_import_btn); _wrow_profile.addWidget(self.settings_include_secrets); _wrow_profile.addStretch(1)
+        _library_transfer.addLayout(_wrow_profile)
+        _ilay.addWidget(self.library_transfer_box)
+
+        self.preview_cache_box = QGroupBox("Превью и кэш")
+        _preview_cache = QVBoxLayout(self.preview_cache_box)
+        _preview_cache.setContentsMargins(10, 10, 10, 10); _preview_cache.setSpacing(8)
+        _wrow2 = QHBoxLayout()
+        self.thumb_cleanup_exit = QCheckBox("Очищать лишний кэш превью при закрытии")
+        self.thumb_keep_recent = QSpinBox(); self.thumb_keep_recent.setRange(50, 10000); self.thumb_keep_recent.setSingleStep(50); self.thumb_keep_recent.setSuffix(" последних превью")
+        self.thumb_keep_recent.setMaximumWidth(190)
+        _wrow2.addWidget(self.thumb_cleanup_exit); _wrow2.addWidget(self.thumb_keep_recent); _wrow2.addStretch(1)
+        _preview_cache.addLayout(_wrow2)
+        _wrow_thumb_perf = QHBoxLayout()
+        self.thumb_quality = QComboBox()
+        self.thumb_quality.addItem("Низкое качество", 1)
+        self.thumb_quality.addItem("Среднее качество", 2)
+        self.thumb_quality.addItem("Высокое качество", 3)
+        self.thumb_memory_items = QSpinBox(); self.thumb_memory_items.setRange(50, 2000); self.thumb_memory_items.setSingleStep(50); self.thumb_memory_items.setSuffix(" превью в памяти")
+        self.thumb_threads = QSpinBox(); self.thumb_threads.setRange(1, 6); self.thumb_threads.setSuffix(" потока")
+        self.thumb_prefetch = QCheckBox("Предзагружать соседние страницы")
+        _wrow_thumb_perf.addWidget(self.thumb_quality); _wrow_thumb_perf.addWidget(self.thumb_memory_items); _wrow_thumb_perf.addWidget(self.thumb_threads); _wrow_thumb_perf.addWidget(self.thumb_prefetch); _wrow_thumb_perf.addStretch(1)
+        _preview_cache.addLayout(_wrow_thumb_perf)
+        _cache_actions = QHBoxLayout()
+        self.cache_info_btn = QPushButton("Размер кэша / очистка")
+        self.cache_info_btn.clicked.connect(self.show_cache_tools)
+        _cache_actions.addWidget(self.cache_info_btn); _cache_actions.addStretch(1)
+        _preview_cache.addLayout(_cache_actions)
+        _ilay.addWidget(self.preview_cache_box)
+
+        self.gallery_display_box = QGroupBox("Отображение и управление")
+        _gallery_display = QVBoxLayout(self.gallery_display_box)
+        _gallery_display.setContentsMargins(10, 10, 10, 10); _gallery_display.setSpacing(8)
+        _wrow5 = QHBoxLayout()
+        self.tag_categories_btn = QPushButton("Цвета / порядок тегов")
+        self.tag_categories_btn.clicked.connect(self.configure_tag_categories)
+        self.hotkeys_btn = QPushButton("Горячие клавиши")
+        self.hotkeys_btn.clicked.connect(self.configure_hotkeys)
+        self.interface_modules_btn = QPushButton("Разделы интерфейса")
+        self.interface_modules_btn.clicked.connect(self.configure_interface_modules)
+        _wrow5.addWidget(self.tag_categories_btn); _wrow5.addWidget(self.hotkeys_btn); _wrow5.addWidget(self.interface_modules_btn); _wrow5.addStretch(1)
+        _gallery_display.addLayout(_wrow5)
+        _wrow6 = QHBoxLayout()
+        self.hide_single_char_tags = QCheckBox("Скрывать теги из одного символа")
+        self.hide_technical_tags = QCheckBox("Скрывать технический мусор")
+        self.hide_meta_tags = QCheckBox("Скрывать meta-теги")
+        self.hide_rating_tags = QCheckBox("Скрывать rating-теги")
+        _wrow6.addWidget(self.hide_single_char_tags); _wrow6.addWidget(self.hide_technical_tags)
+        _wrow6.addWidget(self.hide_meta_tags); _wrow6.addWidget(self.hide_rating_tags); _wrow6.addStretch(1)
+        _gallery_display.addLayout(_wrow6)
+        _ilay.addWidget(self.gallery_display_box)
+
+        self.developer_tools_box = QGroupBox("Логи и служебные инструменты")
+        _developer_tools = QVBoxLayout(self.developer_tools_box)
+        _developer_tools.setContentsMargins(10, 10, 10, 10); _developer_tools.setSpacing(8)
+        _wrow_perf = QHBoxLayout()
+        self.performance_slow_ms = QSpinBox(); self.performance_slow_ms.setRange(25, 10000); self.performance_slow_ms.setSingleStep(25); self.performance_slow_ms.setSuffix(" мс")
+        _wrow_perf.addWidget(QLabel("Записывать медленные операции дольше:")); _wrow_perf.addWidget(self.performance_slow_ms); _wrow_perf.addStretch(1)
+        _developer_tools.addLayout(_wrow_perf)
+        _wrow4 = QHBoxLayout()
+        self.logs_btn = QPushButton("Открыть папку логов")
+        self.logs_btn.clicked.connect(self.open_logs_folder)
+        self.diagnostics_btn = QPushButton("Собрать отчёт об ошибке")
+        self.diagnostics_btn.clicked.connect(self.create_diagnostic_report)
+        _wrow4.addWidget(self.logs_btn); _wrow4.addWidget(self.diagnostics_btn); _wrow4.addStretch(1)
+        _developer_tools.addLayout(_wrow4)
+        _ilay.addWidget(self.developer_tools_box)
+
+        # This is a global action displayed in the fixed footer, not a setting.
+        self.changelog_btn = QPushButton("Что нового")
+        self.changelog_btn.clicked.connect(self.show_changelog)
+
+        self.danger_box = QGroupBox("Опасные действия")
+        _danger_lay = QVBoxLayout(self.danger_box)
+        _danger_lay.setContentsMargins(8, 8, 8, 8)
+        _danger_lay.setSpacing(6)
         self.danger=QLabel("Удаление данных")
         self.danger.setStyleSheet("font-size:16px;font-weight:900;color:#ff3838;margin-top:12px")
-        _ilay.addWidget(self.danger)
+        _danger_lay.addWidget(self.danger)
 
         self.tag_cleanup_info = QLabel(
             "Удаление по тегу или источнику. Сначала выбери вариант и нажми «Показать связанные файлы». "
-            "Удаляются только показанные результаты и их служебные данные. Исходная папка не затрагивается."
+            "Показанные результаты перемещаются в «Удалено» и могут быть восстановлены. Исходная папка не затрагивается."
         )
         self.tag_cleanup_info.setWordWrap(True)
-        _ilay.addWidget(self.tag_cleanup_info)
+        _danger_lay.addWidget(self.tag_cleanup_info)
 
         self.tag_cleanup_scope = QComboBox()
         self.tag_cleanup_scope.addItem("Все результаты", "all")
@@ -219,25 +655,25 @@ class SettingsPage(QWidget):
         _target_row.addWidget(self.tag_cleanup_kind, 1)
         _target_row.addWidget(self.tag_cleanup_query, 4)
         _target_row.addWidget(self.tag_cleanup_find_btn, 2)
-        _ilay.addLayout(_target_row)
+        _danger_lay.addLayout(_target_row)
 
         self.tag_cleanup_list = QListWidget()
         self.tag_cleanup_list.setMaximumHeight(120)
         self.tag_cleanup_list.setVisible(False)
-        _ilay.addWidget(self.tag_cleanup_list)
+        _danger_lay.addWidget(self.tag_cleanup_list)
 
-        self.tag_cleanup_delete_btn = QPushButton("Удалить показанные связанные файлы")
+        self.tag_cleanup_delete_btn = QPushButton("Переместить показанные файлы в «Удалено»")
         self.tag_cleanup_delete_btn.setEnabled(False)
         self.tag_cleanup_delete_btn.setStyleSheet("QPushButton{background:#7f1d1d;border:1px solid #ff3838;color:white;font-weight:900}QPushButton:disabled{background:#2a2020;color:#777}")
         self.tag_cleanup_delete_btn.clicked.connect(self.delete_tag_cleanup_matches)
         self.tag_cleanup_delete_btn.setVisible(False)
-        _ilay.addWidget(self.tag_cleanup_delete_btn)
+        _danger_lay.addWidget(self.tag_cleanup_delete_btn)
 
         self.output_cleanup_info = QLabel(
             "Или очистить раздел целиком. Удаляются результаты и их записи в базе, исходная папка не затрагивается."
         )
         self.output_cleanup_info.setWordWrap(True)
-        _ilay.addWidget(self.output_cleanup_info)
+        _danger_lay.addWidget(self.output_cleanup_info)
 
         _parser_delete_row = QHBoxLayout()
         self.delete_mode = QComboBox()
@@ -248,7 +684,7 @@ class SettingsPage(QWidget):
         self.delete_results_btn.clicked.connect(self.delete_tags)
         _parser_delete_row.addWidget(self.delete_mode, 1)
         _parser_delete_row.addWidget(self.delete_results_btn)
-        _ilay.addLayout(_parser_delete_row)
+        _danger_lay.addLayout(_parser_delete_row)
 
         _downloader_delete_row = QHBoxLayout()
         self.downloader_delete_mode = QComboBox()
@@ -260,7 +696,7 @@ class SettingsPage(QWidget):
         self.delete_downloader_btn.clicked.connect(self.delete_downloader_results)
         _downloader_delete_row.addWidget(self.downloader_delete_mode, 1)
         _downloader_delete_row.addWidget(self.delete_downloader_btn)
-        _ilay.addLayout(_downloader_delete_row)
+        _danger_lay.addLayout(_downloader_delete_row)
 
         self.video_note=QLabel()  # Текст перенесён в инструкцию, здесь больше не занимает место.
 
@@ -269,23 +705,23 @@ class SettingsPage(QWidget):
         _cleanup_btn.setToolTip("Убирает из БД записи на файлы которые уже удалены с диска")
         def _do_cleanup():
             try:
-                from core.database.storage import cleanup_missing
-                n = cleanup_missing(self.main.settings)
+                from core.services.library_service import cleanup_missing_records
+                n = cleanup_missing_records(self.main.settings)
                 QMessageBox.information(self, "Готово", f"Удалено {n} записей без файлов.")
             except Exception as e:
                 QMessageBox.warning(self, "Ошибка", str(e))
         _cleanup_btn.clicked.connect(_do_cleanup)
-        _ilay.addWidget(_cleanup_btn)
+        _danger_lay.addWidget(_cleanup_btn)
 
         _nuke_label = QLabel("")
         _nuke_label.setVisible(False)
 
         _nuke_info = QLabel(
-            "Полный сброс: удаляет все файлы, теги, источники, кэш и базу данных. "
-            "Для подтверждения введи слово DELETE."
+            "Полный сброс тестовой библиотеки: удаляет рабочую галерею, теги, источники, кэш и базу данных. "
+            "Исходный архив защищён и не изменяется. Для подтверждения введи слово DELETE."
         )
         _nuke_info.setWordWrap(True)
-        _ilay.addWidget(_nuke_info)
+        _danger_lay.addWidget(_nuke_info)
 
         _nuke_row = QHBoxLayout()
         self.nuke_confirm_input = QLineEdit()
@@ -314,7 +750,8 @@ class SettingsPage(QWidget):
         _nuke_row.addWidget(self.nuke_subs_check)
         _nuke_row.addWidget(self.nuke_btn)
         _nuke_row.addStretch()
-        _ilay.addLayout(_nuke_row)
+        _danger_lay.addLayout(_nuke_row)
+        _ilay.addWidget(self.danger_box)
         # ─────────────────────────────────────────────────────────────────────
 
         _ilay.addStretch(1)
@@ -329,9 +766,87 @@ class SettingsPage(QWidget):
             pass
         self._scroll.setWidget(self._inner)
         self._scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+        # Settings subsections live in a horizontal top tab strip, matching the
+        # diagnostics page; do not create a second sidebar inside Settings.
+        self._sections = [
+            ("Основные", "Внешний вид, язык и подпись приложения."),
+            ("Библиотека", "Исходный архив только читается; рабочую галерею можно пересобирать."),
+            ("Галерея и превью", "Сетка, кэш, фильтры тегов и экспорт метаданных."),
+            ("Обслуживание", "Проверки, индексы и безопасный ремонт рабочей библиотеки."),
+            ("Удаление и сброс", "Опасные действия только над рабочей библиотекой."),
+            ("Для разработчика", "Логи, консоль, совместимость и внутренние параметры."),
+        ]
+        self.section_tabs = QTabBar()
+        self.section_tabs.setObjectName("SettingsSectionTabs")
+        self.section_tabs.setExpanding(False)
+        self.section_tabs.setDrawBase(True)
+        self.section_tabs.setElideMode(Qt.ElideRight)
+        for title, _desc in self._sections:
+            self.section_tabs.addTab(title)
+        self.section_tabs.currentChanged.connect(self._show_settings_section)
+        # The selected tab already provides the heading; keep only its useful hint below.
+        self.section_title.setVisible(False)
+        lay.addWidget(self.section_tabs)
         lay.addWidget(self._scroll, 1)
+
+        # Fixed footer: global page actions never travel with the currently
+        # selected settings subsection or with the scroll position.
+        self.settings_footer = QWidget()
+        self.settings_footer.setObjectName("SettingsFooter")
+        _footer = QHBoxLayout(self.settings_footer)
+        _footer.setContentsMargins(10, 8, 10, 8)
+        _footer.setSpacing(8)
+        _footer.addWidget(self.instruction_btn)
+        _footer.addWidget(self.changelog_btn)
+        _footer.addStretch(1)
+        self.save_btn.setMinimumWidth(190)
+        self.save_btn.setObjectName("PrimarySettingsAction")
+        _footer.addWidget(self.save_btn)
+        lay.addWidget(self.settings_footer)
         self.load_values(); self.retranslate(); self.apply_tips(); self.refresh_cleanup_candidates()
+        self.section_tabs.setCurrentIndex(0)
+        self._show_settings_section(0)
         self._install_wheel_guards()
+
+    def _show_settings_section(self, row):
+        """Show one readable settings subsection; keep technical controls out of the ordinary path."""
+        if row < 0 or row >= len(getattr(self, "_sections", [])):
+            row = 0
+        title, description = self._sections[row]
+        self.section_title.setText(title)
+        self.section_description.setText(description)
+        form_groups = {
+            "Основные": {"Language", "Appearance", "Title", "Logo path", "Logo fit"},
+            "Библиотека": {"Images folder", "Output folder", "Хранение настроек", "Manga folder", "Папка игр"},
+            "Галерея и превью": {"Columns", "Rows/page", "Card height", "Ignore numeric tags", "Search preview"},
+            "Для разработчика": {"Debug logging", "Console line limit", "Error console"},
+        }
+        visible_keys = form_groups.get(title, set())
+        for index, (_label, key, _widget, _tip) in enumerate(getattr(self, "form_rows", [])):
+            show = key in visible_keys
+            try:
+                self.form.setRowVisible(index, show)
+            except Exception:
+                _label.setVisible(show)
+                item = self.form.itemAt(index, QFormLayout.FieldRole)
+                if item and item.widget():
+                    item.widget().setVisible(show)
+        # Topic cards: each subsection shows only related values/actions.
+        self.library_policy_box.setVisible(title == "Библиотека")
+        self.library_transfer_box.setVisible(title == "Библиотека")
+        self.preview_cache_box.setVisible(title == "Галерея и превью")
+        self.gallery_display_box.setVisible(title == "Галерея и превью")
+        self.maintenance_box.setVisible(title == "Обслуживание")
+        self.danger_box.setVisible(title == "Удаление и сброс")
+        self.developer_tools_box.setVisible(title == "Для разработчика")
+        is_developer = title == "Для разработчика"
+        self.advanced_btn.setVisible(is_developer)
+        self.advanced_box.setVisible(is_developer and self.advanced_btn.isChecked())
+        # Footer actions remain visible for every subsection without scrolling.
+        try:
+            self._scroll.verticalScrollBar().setValue(0)
+        except Exception:
+            pass
 
     def _install_wheel_guards(self):
         """Mouse wheel scrolls the settings page, not values under the cursor."""
@@ -446,8 +961,9 @@ class SettingsPage(QWidget):
     def _nuke_everything(self):
         include_subs = self.nuke_subs_check.isChecked()
         extra = " и папку подписок" if include_subs else ""
-        msg = ("Это удалит ВСЕ файлы, теги, источники, кэш и базу данных" + extra + "."
-               + chr(10) + chr(10) + "Это действие НЕОБРАТИМО. Продолжить?")
+        msg = ("Это удалит ВСЮ РАБОЧУЮ галерею, теги, источники, кэш и базу данных" + extra + "."
+               + chr(10) + "Исходный архив не будет изменён: из него Local Booru может только читать и копировать."
+               + chr(10) + chr(10) + "Это действие НЕОБРАТИМО для рабочей выдачи. Продолжить?")
         reply = QMessageBox.question(
             self, "ВЫ ТОЧНО УВЕРЕНЫ?", msg,
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
@@ -462,28 +978,27 @@ class SettingsPage(QWidget):
 
         settings = self.main.settings
         from core.paths import result_output_base as _rob
+        from core.source_protection import require_managed_media_mutation
         out = _rob(settings)
-        # Also check output_dir directly in case paths differ
-        out_direct = Path(settings.get("output_dir", ""))
         deleted = []
         errors = []
 
-        # Collect unique candidate paths for each bucket
-        for bucket in ("found", "partial_match", "no_match", "downloads"):
-            candidates = [out / bucket]
-            if out_direct and out_direct != out:
-                candidates.append(out_direct / bucket)
-            for p in candidates:
-                if p.exists():
-                    try:
-                        shutil.rmtree(p)
-                        deleted.append(str(p))
-                        break  # deleted, no need to try other candidate
-                    except Exception as e:
-                        errors.append(str(p) + ": " + str(e))
+        # Generated output is disposable; original archive is not. Never use a
+        # raw setting path as a deletion fallback because it may be the source.
+        for bucket in ("found", "partial_match", "no_match", "downloads", "trash"):
+            target = out / bucket
+            if target.exists():
+                try:
+                    if not require_managed_media_mutation(settings, target, "reset_generated_library"):
+                        errors.append(str(target) + ": заблокировано защитой исходного архива")
+                        continue
+                    shutil.rmtree(target)
+                    deleted.append(str(target))
+                except Exception as e:
+                    errors.append(str(target) + ": " + str(e))
 
         if include_subs:
-            subs_dir = Path(settings.get("output_dir", str(out))) / "subscriptions"
+            subs_dir = out / "subscriptions"
             if subs_dir.exists():
                 try:
                     shutil.rmtree(subs_dir)
@@ -540,8 +1055,16 @@ class SettingsPage(QWidget):
 
     def load_values(self):
         s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.title.setText(s.get("theme_title","Local Booru")); self.logo.setText(s.get("logo_path","")); self.cols.setValue(int(s.get("columns",4))); self.rows.setValue(int(s.get("rows_per_page",4))); self.card.setValue(int(s.get("card_height",220))); self.ignore_numeric.setChecked(bool(s.get("ignore_numeric_tags",False))); self.show_preview.setChecked(bool(s.get("show_search_preview", True))); self.error_console.setChecked(bool(s.get("enable_error_console", True))); self.max_console_lines.setValue(int(s.get("max_console_lines",2500))); self.manga_root.setText(s.get("manga_root",""))
-        self.flaresolverr_url.setText(s.get("flaresolverr_url","")); self.games_root.setText(s.get("games_root","")); self.output_dir.setText(s.get("output_dir","")); self.copy_results.setChecked(bool(s.get("copy_results_enabled", True)))
+        self.flaresolverr_url.setText(s.get("flaresolverr_url","")); self.games_root.setText(s.get("games_root","")); self.output_dir.setText(s.get("output_dir",""))
+        self.separate_settings.setChecked(bool(s.get("separate_settings_storage", False))); self.settings_storage_dir.setText(str(s.get("settings_storage_dir", "") or ""))
+        self.large_download_count.setValue(int(s.get("large_download_warning_count", 1000) or 1000)); self.disk_reserve_gb.setValue(float(s.get("disk_free_reserve_gb", 2.0) or 2.0))
         self.lang.setCurrentIndex(max(0,self.lang.findData(s.get("language","ru")))); self.appearance.setCurrentIndex(max(0,self.appearance.findData(s.get("appearance","dark")))); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData(s.get("logo_fit","crop"))))
+        self.imports_to_inbox.setChecked(bool(s.get("imports_to_inbox", True))); self.inbox_hours.setValue(int(s.get("inbox_auto_archive_hours", 24) or 24)); self.thumb_cleanup_exit.setChecked(bool(s.get("thumb_cleanup_on_exit", True))); self.thumb_keep_recent.setValue(int(s.get("thumb_keep_recent", 500) or 500))
+        self.thumb_quality.setCurrentIndex(max(0, self.thumb_quality.findData(int(s.get("thumb_quality_scale", 2) or 2))))
+        self.thumb_memory_items.setValue(int(s.get("thumb_memory_items", 400) or 400)); self.thumb_threads.setValue(int(s.get("thumb_threads", 3) or 3)); self.thumb_prefetch.setChecked(bool(s.get("thumb_prefetch_pages", True))); self.performance_slow_ms.setValue(int(s.get("performance_slow_ms", 100) or 100))
+        self.hide_single_char_tags.setChecked(bool(s.get("hide_single_char_tags", True))); self.hide_technical_tags.setChecked(bool(s.get("hide_technical_tags", True))); self.hide_meta_tags.setChecked(bool(s.get("hide_meta_tags", False))); self.hide_rating_tags.setChecked(bool(s.get("hide_rating_tags", False)))
+        self.deleted_reimport.setCurrentIndex(max(0, self.deleted_reimport.findData(s.get("deleted_reimport_policy", "skip"))))
+        self.trash_days.setCurrentIndex(max(0, self.trash_days.findData(int(s.get("trash_auto_purge_days", 0) or 0))))
     def choose_root(self):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.root.text())
         if f: self.root.setText(f)
@@ -557,6 +1080,13 @@ class SettingsPage(QWidget):
             self.output_dir.setText(str(safe))
             QMessageBox.information(self, "Output", f"Файлы будут складываться в:\n{safe}")
 
+    def choose_settings_storage_dir(self):
+        start = self.settings_storage_dir.text().strip() or self.output_dir.text().strip() or self.root.text()
+        f = QFileDialog.getExistingDirectory(self, "Папка настроек / базы / кэша", start)
+        if f:
+            self.settings_storage_dir.setText(str(Path(f) / "settings" if Path(f).name.lower() == "local_booru_archive" else Path(f)))
+            self.separate_settings.setChecked(True)
+
     def choose_games_root(self):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.games_root.text() or self.root.text())
         if f: self.games_root.setText(f)
@@ -571,7 +1101,230 @@ class SettingsPage(QWidget):
         if dlg.exec():
             self.logo.setText(dlg.save_crop()); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData("crop")))
     def save(self):
-        s=self.main.settings; s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["copy_results_enabled"]=self.copy_results.isChecked(); save_settings(s); self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate(); QMessageBox.information(self,self.main.t("Saved"),self.main.t("Settings saved"))
+        s=self.main.settings; old_separate = bool(s.get("separate_settings_storage", False)); old_dir = str(s.get("settings_storage_dir", "") or "")
+        s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["imports_to_inbox"]=self.imports_to_inbox.isChecked(); s["inbox_auto_archive_hours"]=self.inbox_hours.value(); s["thumb_cleanup_on_exit"]=self.thumb_cleanup_exit.isChecked(); s["thumb_keep_recent"]=self.thumb_keep_recent.value(); s["deleted_reimport_policy"]=self.deleted_reimport.currentData(); s["trash_auto_purge_days"]=int(self.trash_days.currentData() or 0); s["hide_single_char_tags"]=self.hide_single_char_tags.isChecked(); s["hide_technical_tags"]=self.hide_technical_tags.isChecked(); s["hide_meta_tags"]=self.hide_meta_tags.isChecked(); s["hide_rating_tags"]=self.hide_rating_tags.isChecked()
+        s["separate_settings_storage"] = self.separate_settings.isChecked(); s["settings_storage_dir"] = self.settings_storage_dir.text().strip(); s["large_download_warning_count"] = self.large_download_count.value(); s["disk_free_reserve_gb"] = self.disk_reserve_gb.value()
+        s["thumb_quality_scale"] = int(self.thumb_quality.currentData() or 2); s["thumb_memory_items"] = self.thumb_memory_items.value(); s["thumb_threads"] = self.thumb_threads.value(); s["thumb_prefetch_pages"] = self.thumb_prefetch.isChecked(); s["performance_slow_ms"] = self.performance_slow_ms.value()
+        if s["separate_settings_storage"] and not s["settings_storage_dir"]:
+            from core.paths import suggested_settings_storage_dir
+            s["settings_storage_dir"] = str(suggested_settings_storage_dir(s)); self.settings_storage_dir.setText(s["settings_storage_dir"])
+        save_settings(s)
+        try:
+            from core.thumb_service import ThumbnailService
+            ThumbnailService.instance().configure(max_threads=s["thumb_threads"], memory_items=s["thumb_memory_items"])
+        except Exception:
+            pass
+        self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate()
+        msg = self.main.t("Settings saved")
+        if old_separate != s["separate_settings_storage"] or old_dir != s["settings_storage_dir"]:
+            msg += "\n\nПапка настроек/базы/кэша изменится после перезапуска программы. Старые данные скопированы, а не удалены."
+        QMessageBox.information(self,self.main.t("Saved"),msg)
+
+    def _fmt_bytes(self, value):
+        value = float(value or 0)
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if value < 1024 or unit == "ТБ":
+                return f"{value:.2f} {unit}"
+            value /= 1024
+
+    def show_cache_tools(self):
+        from core.library_lifecycle import folder_size
+        from core.paths import CACHE_DIR
+        cache = Path(CACHE_DIR) / "thumbs"
+        size = folder_size(cache)
+        ret = QMessageBox.question(self, "Кэш превью", f"Размер кэша превью: {self._fmt_bytes(size)}\n\nОчистить весь кэш? Он будет создан заново при открытии галереи.", QMessageBox.Yes | QMessageBox.No)
+        if ret == QMessageBox.Yes:
+            try:
+                if cache.exists(): shutil.rmtree(cache)
+                cache.mkdir(parents=True, exist_ok=True)
+                QMessageBox.information(self, "Кэш превью", "Кэш очищен.")
+            except Exception as e:
+                QMessageBox.warning(self, "Кэш превью", str(e))
+
+    def show_archive_stats(self):
+        try:
+            from core.library_lifecycle import library_stats
+            st = library_stats(self.main.settings)
+            text = (f"Всего файлов: {st['files']}\nИзображений: {st['images']}\nВидео: {st['videos']}\n"
+                    f"Новые: {st['inbox']}\nУдалено: {st['trash']}\n"
+                    f"С тегами: {st['tagged']}\nС источниками: {st['sourced']}\n"
+                    f"Размер архива: {self._fmt_bytes(st['bytes'])}\nРазмер кэша: {self._fmt_bytes(st['cache_bytes'])}\nРазмер базы: {self._fmt_bytes(st['db_bytes'])}")
+            QMessageBox.information(self, "Статистика архива", text)
+        except Exception as e:
+            QMessageBox.warning(self, "Статистика", str(e))
+
+    def export_metadata_dialog(self):
+        current_ids = []
+        try:
+            current_ids = self.main.gallery_page.current_result_image_ids()
+        except Exception:
+            current_ids = []
+        use_current = False
+        if current_ids:
+            answer = QMessageBox.question(
+                self, "Экспорт тегов и источников",
+                f"Экспортировать текущую выдачу галереи ({len(current_ids)} файлов)?\n\nНажми «Нет», чтобы экспортировать всю библиотеку.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes
+            )
+            if answer == QMessageBox.Cancel:
+                return
+            use_current = answer == QMessageBox.Yes
+        path, selected = QFileDialog.getSaveFileName(self, "Экспорт тегов и источников", "local_booru_metadata.json", "JSON (*.json);;CSV (*.csv)")
+        if not path:
+            return
+        fmt = "csv" if str(path).lower().endswith(".csv") or "CSV" in selected else "json"
+        try:
+            from core.library_lifecycle import export_metadata
+            n = export_metadata(self.main.settings, path, fmt, image_ids=current_ids if use_current else None)
+            scope = "текущей выдачи" if use_current else "всей библиотеки"
+            QMessageBox.information(self, "Экспорт", f"Экспортировано файлов из {scope}: {n}\n{path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Экспорт", str(e))
+
+    def export_settings_profile(self):
+        include_secrets = bool(self.settings_include_secrets.isChecked())
+        if include_secrets:
+            if QMessageBox.warning(self, "Экспорт настроек", "В архив попадут логины и API-ключи. Не отправляй этот ZIP посторонним. Продолжить?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт профиля настроек", "Local_Booru_settings_profile.zip", "ZIP (*.zip)")
+        if not path:
+            return
+        try:
+            from core.settings_bundle import export_profile
+            out = export_profile(self.main.settings, path, include_secrets=include_secrets)
+            note = "с логинами/API-ключами" if include_secrets else "без логинов/API-ключей"
+            QMessageBox.information(self, "Экспорт настроек", f"Профиль сохранён ({note}):\n{out}\n\nSQLite и медиа в этот архив не входят.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Экспорт настроек", str(exc))
+
+    def import_settings_profile(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Импорт профиля настроек", "", "Профиль ZIP/JSON (*.zip *.json)")
+        if not path:
+            return
+        if QMessageBox.question(self, "Импорт настроек", "Импортировать настройки из профиля?\n\nТекущие настройки будут сохранены в backup. База и медиа не изменяются. Для смены папки хранения данных может потребоваться перезапуск.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            from core.settings_bundle import import_profile
+            result = import_profile(path, self.main.settings, apply=True)
+            self.main.settings.clear(); self.main.settings.update(result["settings"])
+            self.load_values(); self.main.apply_theme(); self.main.retranslate()
+            QMessageBox.information(self, "Импорт настроек", f"Профиль применён.\nBackup предыдущих настроек:\n{result.get('backup','')}\n\nЕсли менялась папка хранения базы/кэша, перезапусти приложение.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Импорт настроек", str(exc))
+
+    def open_logs_folder(self):
+        from core.paths import LOGS_DIR
+        try:
+            import os, subprocess, sys
+            if hasattr(os, "startfile"): os.startfile(str(LOGS_DIR))
+            elif sys.platform == "darwin": subprocess.Popen(["open", str(LOGS_DIR)])
+            else: subprocess.Popen(["xdg-open", str(LOGS_DIR)])
+        except Exception as e:
+            QMessageBox.warning(self, "Логи", str(e))
+
+    def show_changelog(self):
+        QMessageBox.information(self, "Что нового", "v30 Danbooru JSON-only и корректные API-запросы\n\n- официальный Danbooru берёт теги только из posts.json / posts/<id>.json, без HTML-fallback\n- для Danbooru используется User-Agent LocalBooru вместо имитации браузера в API-запросах\n- если API заблокирован Cloudflare/403, источник честно пропускается без попытки разобрать страницу как теги\n- граббер и подписки используют ту же безопасную логику для официального Danbooru\n\nv29 e621 JSON-only и очистка загрязнённых тегов\n\n- e621/e926 берут теги только из posts.json, без HTML-панели со счётчиками и Uploaded by the artist\n- восстановлены официальные категории contributor / species / lore / invalid\n- обслуживание чистит *_Uploaded_by_the_artist вместе со *_3.0k / *_4.2m\n- e926 получил те же API-ограничения, что e621\n\nv28 просмотрщик, e621 и интерфейс\n\n- открытый пост декодируется с исходным соотношением сторон, без кропа карточного превью\n- исправлен e621 species и очистка тегов со счётчиками\n- «Удалено» получило предпросмотр, теги и источники\n- ПКМ по тегу позволяет выбрать свой цвет\n- клик по тегу всегда открывает Галерею\n- из дубликатора убран шум по одному только разрешению\n- настройка разделов находится только в Настройках\n\nv27 навигация и темы\n\n- переход между страницами через открытый пост больше не пересобирает скрытую галерею\n- для «Удалено» используется нормальная иконка корзины\n- галочки в тёмных темах стали контрастными\n\nv26 исправления просмотрщика и модульного интерфейса\n\n- ПКМ в галерее: удаление в корзину с подтверждением\n- переход назад между страницами в просмотрщике\n- безопасное вписывание медиа целиком по умолчанию\n- species и очистка e621-счётчиков в тегах\n- настройка видимости и групп модулей интерфейса\n\nv25 завершение большого прохода\n\n- очистка загрузчика и подписок теперь идёт через «Удалено»\n- защита от возврата окончательно удалённого MD5 в граббере\n- Новые автоматически уходят в Архив во время работы программы\n- экспорт текущей выдачи и скрытие технических тегов\n- точечная очистка превью вместо сброса всего кэша\n\nv24: хранилище, диагностика, категории и горячие клавиши\nv23: Корзина / Новые / дубликатор / поиск")
+
+    def repair_missing_thumbnails(self):
+        self.sql_status.setVisible(True); self.sql_status.setText("Проверка файлов и достройка превью запущена...")
+        self.repair_thumbs_btn.setEnabled(False)
+        try:
+            from core.maintenance_tasks import repair_missing_thumbnails
+            task = self.main.task_manager.submit(
+                repair_missing_thumbnails, dict(self.main.settings or {}),
+                on_progress=lambda msg: self.sql_status.setText(str(msg)),
+                on_result=lambda result: self._maintenance_thumb_done(result),
+                on_error=lambda err: self._maintenance_thumb_error(err),
+            )
+            self._thumb_task = task
+        except Exception as exc:
+            self.repair_thumbs_btn.setEnabled(True); QMessageBox.warning(self, "Превью", str(exc))
+
+    def _maintenance_thumb_done(self, result):
+        self.repair_thumbs_btn.setEnabled(True)
+        self.sql_status.setText(f"Превью: проверено={result.get('checked',0)}, создано/готово={result.get('created',0)}, отсутствует={result.get('missing',0)}, ошибок={result.get('errors',0)}")
+
+    def _maintenance_thumb_error(self, error):
+        self.repair_thumbs_btn.setEnabled(True); self.sql_status.setText("Ошибка обслуживания: " + str(error))
+
+    def relocate_library_root(self):
+        chosen = QFileDialog.getExistingDirectory(self, "Выбери новое расположение архива", self.output_dir.text() or self.root.text())
+        if not chosen: return
+        try:
+            from core.library_lifecycle import relocate_missing_library_paths
+            preview = relocate_missing_library_paths(self.main.settings, chosen, apply=False)
+            if not preview.get("found"):
+                QMessageBox.information(self, "Перенос архива", "Совпадающие потерянные файлы в выбранной папке не найдены.")
+                return
+            ans = QMessageBox.question(self, "Перенос архива", f"Найдено файлов по старым относительным путям: {preview['found']}\n\nОбновить пути в базе?", QMessageBox.Yes | QMessageBox.No)
+            if ans == QMessageBox.Yes:
+                done = relocate_missing_library_paths(self.main.settings, chosen, apply=True)
+                self.output_dir.setText(str(done.get("new_base", chosen)))
+                QMessageBox.information(self, "Перенос архива", f"Обновлено путей: {done.get('updated',0)}\nСохрани настройки, чтобы использовать эту папку дальше.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Перенос архива", str(exc))
+
+    def create_diagnostic_report(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Собрать отчёт об ошибке", "Local_Booru_diagnostics.zip", "ZIP (*.zip)")
+        if not path: return
+        try:
+            from core.diagnostics import create_diagnostic_zip
+            out = create_diagnostic_zip(self.main.settings, path)
+            QMessageBox.information(self, "Диагностика", f"Отчёт создан:\n{out}\n\nКлючи, логины и cookies в настройки отчёта не записываются.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Диагностика", str(exc))
+
+    def repair_e621_tags(self):
+        if QMessageBox.question(self, "Исправить e621-теги", "Исправить сохранённые e621-теги вида horse_231k / canine_3.0k / yourumi_Uploaded_by_the_artist и восстановить категории из сохранённых JSON-данных?\n\nРезервная копия базы будет создана автоматически.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        try:
+            from core.library_lifecycle import force_backup_database
+            from core.database.maintenance import repair_e621_tag_metadata
+            backup = force_backup_database(self.main.settings, "repair_e621_tags")
+            if not backup:
+                QMessageBox.warning(self, "e621-теги", "Не удалось создать резервную копию базы. Исправление отменено.")
+                return
+            result = repair_e621_tag_metadata(self.main.settings)
+            try: self.main.tags_page.refresh_force(); self.main.gallery_page.refresh_force()
+            except Exception: pass
+            QMessageBox.information(self, "e621-теги", f"Исправлено загрязнённых связей: {result.get('renamed_links', 0)}\nИсправлено категорий: {result.get('species_fixed', 0)}\nЗатронуто файлов: {result.get('images', 0)}\n\nЕсли у старого файла не сохранился JSON поста, категорию можно окончательно восстановить повторным тегированием этого файла.")
+        except Exception as exc:
+            QMessageBox.warning(self, "e621-теги", str(exc))
+
+    def configure_interface_modules(self):
+        dlg = InterfaceModulesDialog(self.main.settings, self)
+        if dlg.exec():
+            try:
+                modules, order, auto_hide, extra_collapsed = dlg.values()
+            except ValueError as exc:
+                QMessageBox.warning(self, "Разделы интерфейса", str(exc))
+                return
+            self.main.settings["interface_modules"] = modules
+            self.main.settings["interface_module_order"] = order
+            self.main.settings["auto_hide_single_workspace"] = auto_hide
+            self.main.settings["interface_extra_collapsed"] = extra_collapsed
+            save_settings(self.main.settings)
+            try:
+                self.main.apply_interface_modules()
+            except Exception as exc:
+                QMessageBox.warning(self, "Модули интерфейса", str(exc)); return
+            QMessageBox.information(self, "Разделы интерфейса", "Порядок, видимость и группа «Дополнительно» применены.")
+
+    def configure_tag_categories(self):
+        dlg = TagCategoryDialog(self.main.settings, self)
+        if dlg.exec():
+            order, colors = dlg.values(); self.main.settings["tag_group_order"] = order; self.main.settings["tag_group_colors"] = colors
+            try: self.main.tags_page.reload_category_configuration()
+            except Exception: pass
+            try: self.main.gallery_page._render_page_tags()
+            except Exception: pass
+            QMessageBox.information(self, "Категории тегов", "Изменения применены. Нажми «Сохранить настройки», чтобы оставить их после перезапуска.")
+
+    def configure_hotkeys(self):
+        dlg = HotkeysDialog(self.main.settings, self)
+        if dlg.exec():
+            self.main.settings["hotkeys"] = dlg.values()
+            QMessageBox.information(self, "Горячие клавиши", "Сохранены в текущих настройках. Для уже открытого просмотрщика клавиши обновятся после его повторного открытия.")
 
     def _run_maintenance(self):
         from core.stability import run_file_maintenance
@@ -666,6 +1419,46 @@ class SettingsPage(QWidget):
     def _sql_index_error(self, text):
         self.rebuild_sql_btn.setEnabled(True)
         self.sql_status.setText("SQLite ERROR:\n" + str(text)[-3000:])
+
+    def import_legacy_sidecars(self):
+        answer = QMessageBox.question(
+            self, "Импорт старых метаданных",
+            "Импортировать старые .tags/.sources sidecar-файлы в SQLite?\n\n"
+            "Это отдельная миграция для старых библиотек. После неё живой режим использует только SQLite.\n"
+            "Перед импортом будет создана резервная копия базы.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.legacy_sidecars_btn.setEnabled(False)
+        self.sql_status.setVisible(True); self.sql_status.setText("Sidecar → SQLite: импорт запущен...")
+        try:
+            from core.services.index_service import import_legacy_sidecar_metadata
+            self._legacy_import_task = self.main.task_manager.submit(
+                import_legacy_sidecar_metadata, dict(self.main.settings or {}),
+                name="legacy-sidecar-import",
+                on_progress=lambda msg: self.sql_status.setText("Sidecar → SQLite: " + str(msg)),
+                on_result=self._legacy_sidecars_done,
+                on_error=self._legacy_sidecars_error,
+            )
+        except Exception as e:
+            self.legacy_sidecars_btn.setEnabled(True)
+            self.sql_status.setText(f"Sidecar → SQLite ERROR: {e}")
+
+    def _legacy_sidecars_done(self, result):
+        self.legacy_sidecars_btn.setEnabled(True)
+        self.sql_status.setText(
+            "Sidecar импортированы в SQLite: "
+            f"indexed={result.get('indexed', 0)} scanned={result.get('scanned', 0)}; "
+            f"backup={result.get('backup', '') or 'нет'}"
+        )
+        try:
+            self.main.gallery_page.refresh_force()
+        except Exception:
+            pass
+
+    def _legacy_sidecars_error(self, text):
+        self.legacy_sidecars_btn.setEnabled(True)
+        self.sql_status.setText("Sidecar → SQLite ERROR:\n" + str(text)[-3000:])
 
     def show_instruction(self):
         dlg = InstructionDialog(self.main, self)
@@ -765,17 +1558,6 @@ class SettingsPage(QWidget):
             return []
         return [f for f in media.iterdir() if f.is_file() and f.stem == stem]
 
-    def _sidecars_for_stem(self, bucket_dir, stem):
-        files = []
-        for sub in ("tags", "source", "searched", "cache"):
-            d = bucket_dir / sub
-            if not d.exists():
-                continue
-            for f in d.iterdir():
-                if f.is_file() and (f.stem == stem or f.stem.startswith(stem + ".")):
-                    files.append(f)
-        return files
-
     def _cleanup_process_events(self):
         try:
             QApplication.processEvents()
@@ -786,9 +1568,9 @@ class SettingsPage(QWidget):
         scope = self.tag_cleanup_scope.currentData() or "all"
         try:
             if kind == "source":
-                from core.database.repository import candidate_sources
+                from core.services.library_service import candidate_sources
                 return candidate_sources(self.main.settings, scope)
-            from core.database.repository import candidate_tags
+            from core.services.library_service import candidate_tags
             return candidate_tags(self.main.settings, scope)
         except Exception as e:
             QMessageBox.warning(self, "SQLite", f"Не удалось прочитать варианты из SQLite:\n{e}")
@@ -827,13 +1609,6 @@ class SettingsPage(QWidget):
             return qn
         return q
 
-    def _stem_from_sidecar(self, f):
-        stem = f.stem
-        for suffix in (".tags", ".raw", ".searched", ".sources", ".source"):
-            if stem.endswith(suffix):
-                stem = stem[: -len(suffix)]
-        return stem
-
     def _find_tag_cleanup_matches(self):
         value = self._selected_cleanup_value()
         if not value:
@@ -842,12 +1617,12 @@ class SettingsPage(QWidget):
         scope = self.tag_cleanup_scope.currentData() or "all"
         try:
             if kind == "source":
-                from core.database.repository import find_images_by_source
+                from core.services.library_service import find_images_by_source
                 rows = find_images_by_source(self.main.settings, value, scope)
             else:
-                from core.database.repository import find_images_by_tag
+                from core.services.library_service import find_images_by_tag
                 rows = find_images_by_tag(self.main.settings, value, scope)
-            return [{"id": r["id"], "path": r["path"], "file_name": r["file_name"], "bucket": r["bucket"], "hits": [value]} for r in rows]
+            return [{"id": r["id"], "path": r["path"], "file_name": r["file_name"], "bucket": r["bucket"], "size_bytes": int(r.get("size_bytes", 0) if isinstance(r, dict) else r["size_bytes"] or 0), "hits": [value]} for r in rows]
         except Exception as e:
             QMessageBox.warning(self, "SQLite", f"Ошибка поиска связанных файлов:\n{e}")
             return []
@@ -899,11 +1674,13 @@ class SettingsPage(QWidget):
         if not value or not matches:
             QMessageBox.information(self, self.main.t("Done"), "Ничего не найдено.")
             return
+        total_bytes = sum(int(m.get("size_bytes") or 0) for m in matches)
         if QMessageBox.warning(
             self,
             self.main.t("Confirm"),
-            f"Удалить {len(matches)} файлов/результатов, связанных с {kind_label}: {value!r}?\n"
-            "Будут удалены медиа и связанные tags/source/searched/cache.",
+            f"Переместить в «Удалено» {len(matches)} файлов, связанных с {kind_label}: {value!r}?\n"
+            f"Общий размер: {self._fmt_bytes(total_bytes)}\n\n"
+            "Файлы можно будет восстановить из раздела «Удалено». Перед операцией создаётся резервная копия базы.",
             QMessageBox.Yes | QMessageBox.No
         ) != QMessageBox.Yes:
             return
@@ -932,7 +1709,7 @@ class SettingsPage(QWidget):
         except Exception:
             pass
         self.refresh_cleanup_candidates()
-        QMessageBox.information(self, self.main.t("Done"), f"Удалено записей: {records}\nУдалено файлов: {deleted}\nОшибки: {errors}")
+        QMessageBox.information(self, self.main.t("Done"), f"Перемещено записей в «Удалено»: {records}\nПеремещено файлов: {deleted}\nОшибки: {errors}")
 
     def _refresh_after_delete(self):
         try:
@@ -950,28 +1727,14 @@ class SettingsPage(QWidget):
             pass
 
     def _delete_leftovers_in_buckets(self, base: Path, buckets: list[str]) -> tuple[int, int]:
-        """Delete files not indexed in SQLite after DB-backed removal."""
-        deleted = errors = 0
-        for bucket in buckets:
-            folder = Path(base) / bucket
-            if not folder.exists():
-                continue
-            for f in [p for p in folder.rglob("*") if p.is_file()]:
-                try:
-                    f.unlink()
-                    deleted += 1
-                except Exception:
-                    errors += 1
-            for d in sorted([p for p in folder.rglob("*") if p.is_dir()], key=lambda p: len(p.parts), reverse=True):
-                try:
-                    d.rmdir()
-                except Exception:
-                    pass
-            try:
-                folder.rmdir()
-            except Exception:
-                pass
-        return deleted, errors
+        """Unindexed files are never removed automatically.
+
+        SQLite-backed files go to Trash; deleting unknown disk files here would
+        bypass restoration and the backup preview. A later maintenance pass can
+        index them first.
+        """
+        return 0, 0
+
 
     def delete_downloader_results(self):
         """Delete downloader results from disk and SQLite in one operation."""
@@ -986,7 +1749,7 @@ class SettingsPage(QWidget):
         msg = (
             "Удалить результаты загрузчика?\n\n"
             f"Разделы: {', '.join(disk_buckets)}\n"
-            "Файлы будут удалены с диска и из базы. Исходная папка не затрагивается."
+            "Файлы будут перемещены в «Удалено» и останутся доступными для восстановления."
         )
         if QMessageBox.warning(self, self.main.t("Confirm"), msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
@@ -998,7 +1761,7 @@ class SettingsPage(QWidget):
             records = int(result.get("deleted_records", 0))
             errors = int(result.get("errors", 0)) + extra_errors
             self._refresh_after_delete()
-            QMessageBox.information(self, self.main.t("Done"), f"Удалено записей из базы: {records}\nУдалено файлов: {deleted}\nОшибки: {errors}")
+            QMessageBox.information(self, self.main.t("Done"), f"Перемещено записей в «Удалено»: {records}\nПеремещено файлов: {deleted}\nОшибки: {errors}")
         except Exception as e:
             QMessageBox.warning(self, "Удаление", f"Ошибка удаления результатов загрузчика:\n{e}")
 
@@ -1013,7 +1776,7 @@ class SettingsPage(QWidget):
         msg = (
             "Удалить выбранные результаты парсера?\n\n"
             f"Разделы: {', '.join(buckets)}\n"
-            "Файлы будут удалены с диска и из базы. Исходная папка не затрагивается."
+            "Файлы будут перемещены в «Удалено» и останутся доступными для восстановления."
         )
         if QMessageBox.warning(self, self.main.t("Confirm"), msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
@@ -1030,7 +1793,7 @@ class SettingsPage(QWidget):
             except Exception:
                 pass
             self._refresh_after_delete()
-            QMessageBox.information(self, self.main.t("Done"), f"Удалено записей из базы: {records}\nУдалено файлов: {deleted}\nОшибки: {errors}")
+            QMessageBox.information(self, self.main.t("Done"), f"Перемещено записей в «Удалено»: {records}\nПеремещено файлов: {deleted}\nОшибки: {errors}")
         except Exception as e:
             QMessageBox.warning(self, "Удаление", f"Ошибка удаления результатов парсера:\n{e}")
 
@@ -1071,17 +1834,58 @@ class SettingsPage(QWidget):
         try:
             from core.database.maintenance import optimize
             res = optimize(self.main.settings)
-            self.sql_status.setText("SQLite optimized: " + str(res.get("db", "")))
+            self.sql_status.setVisible(True)
+            self.sql_status.setText("SQLite: ANALYZE / PRAGMA optimize выполнены. " + str(res.get("db", "")))
         except Exception as e:
-            self.sql_status.setText("SQLite optimize error: " + str(e))
+            self.sql_status.setVisible(True); self.sql_status.setText("SQLite optimize error: " + str(e))
 
     def show_sqlite_stats(self):
         try:
-            from core.database.maintenance import stats
-            data = stats(self.main.settings)
-            self.sql_status.setText("SQLite stats: " + ", ".join(f"{k}={v}" for k,v in data.items()))
+            from core.database.maintenance import stats, storage_report
+            data = stats(self.main.settings); storage = storage_report(self.main.settings)
+            mib = lambda value: float(value or 0) / (1024 * 1024)
+            text = ("SQLite v{version}: {size:.2f} MB; свободных страниц: {free} ({reclaim:.2f} MB); "
+                    "images={images}, tags={tags}, sources={sources}").format(
+                version=storage.get("schema_version", "?"), size=mib(storage.get("size_bytes")),
+                free=storage.get("freelist_pages", 0), reclaim=mib(storage.get("reclaimable_bytes")),
+                images=data.get("images", 0), tags=data.get("tags", 0), sources=data.get("sources", 0))
+            self.sql_status.setVisible(True); self.sql_status.setText(text)
         except Exception as e:
-            self.sql_status.setText("SQLite stats error: " + str(e))
+            self.sql_status.setVisible(True); self.sql_status.setText("SQLite stats error: " + str(e))
+
+    def force_sqlite_backup(self):
+        try:
+            from core.database.maintenance import force_backup
+            out = force_backup(self.main.settings, "manual_sqlite_backup")
+            if not out:
+                raise RuntimeError("Не удалось создать backup SQLite")
+            self.sql_status.setVisible(True); self.sql_status.setText("Backup SQLite создан: " + str(out))
+            QMessageBox.information(self, "Backup SQLite", "Резервная копия создана:\n" + str(out))
+        except Exception as e:
+            QMessageBox.warning(self, "Backup SQLite", str(e))
+
+    def vacuum_sqlite(self):
+        tagger = getattr(self.main, "pages", {}).get("Tagger")
+        if tagger is not None and getattr(tagger, "worker", None) is not None and tagger.worker.isRunning():
+            QMessageBox.warning(self, "VACUUM SQLite", "Останови парсер перед сжатием SQLite. VACUUM блокирует рабочую базу на время операции.")
+            return
+        try:
+            from core.database.maintenance import storage_report
+            before = storage_report(self.main.settings)
+            reclaim_mb = float(before.get("reclaimable_bytes", 0) or 0) / (1024 * 1024)
+            size_mb = float(before.get("size_bytes", 0) or 0) / (1024 * 1024)
+            message = (f"Сжать рабочую SQLite?\n\nРазмер: {size_mb:.2f} MB\n"
+                       f"Потенциально освобождается: {reclaim_mb:.2f} MB\n\n"
+                       "Перед операцией будет создан backup. Основной архив не затрагивается.")
+            if QMessageBox.question(self, "VACUUM SQLite", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            from core.database.maintenance import vacuum
+            result = vacuum(self.main.settings, make_backup=True)
+            freed = float(result.get("reclaimed_bytes", 0) or 0) / (1024 * 1024)
+            self.sql_status.setVisible(True); self.sql_status.setText(f"VACUUM завершён. Освобождено: {freed:.2f} MB; backup: {result.get('backup','')}")
+            QMessageBox.information(self, "VACUUM SQLite", f"Готово. Освобождено: {freed:.2f} MB\nBackup: {result.get('backup','')}")
+        except Exception as e:
+            QMessageBox.warning(self, "VACUUM SQLite", str(e))
 
 
 
@@ -1102,6 +1906,16 @@ Danbooru может не работать из-за Cloudflare. Сейчас э�
   fox_girl    — найти все с этим тегом
   -loli       — исключить тег
   tag1 tag2   — оба тега одновременно
+  tag1/tag2   — любой из двух тегов в одной выдаче
+
+── Быстрые фильтры Local Booru ─────────
+  size:+50mb         — размер от 50 МБ
+  size:-500kb        — размер до 500 КБ
+  size:0.1mb-5mb    — размер от 0.1 до 5 МБ
+  width:+1920       — ширина от 1920
+  height:+1080      — высота от 1080
+  rating:+4         — рейтинг от 4
+  duration:+60s     — видео длиннее минуты
 
 ── Числовой поиск (человеческий язык) ─
   размер файла больше 50мб
@@ -1136,7 +1950,7 @@ Danbooru может не работать из-за Cloudflare. Сейчас э�
 
         "Перед поиском тегов": """1. Проверь cookies для сайтов через br34
 2. Укажи папку с картинками
-3. Укажи output-папку (программа создаст Local_Booru_Output)
+3. Укажи output-папку (программа создаст Local_Booru_Archive/output)
 4. Не перемещай файлы во время поиска
 5. Для долгого прогона: лимит строк консоли + пауза между запросами
 
@@ -1157,12 +1971,6 @@ IQDB и SauceNAO находят по содержимому — работают
 Danbooru:
   Cloudflare может вернуть 403 даже после входа. Это известное ограничение сайта,
   поэтому Danbooru не должен останавливать поиск по другим источникам.""",
-
-        "Синонимы тегов": """В разделе «Теги» внизу — редактор синонимов.
-Пример: добавь  catgirl → cat_girl
-Тогда при поиске «catgirl» найдутся файлы с тегом «cat_girl».
-
-Синонимы хранятся в БД, работают в обе стороны.""",
 
         "VP-tree (похожие файлы)": """В Настройках → «Пересобрать VP-tree»
 Строит индекс для быстрого поиска похожих изображений.
@@ -1188,7 +1996,7 @@ Danbooru:
   Рандом           — случайный пост""",
 
         "Папки и данные": """Настройки, cookies, БД:  Documents/Local_Booru/
-Output-папка:            выбираешь сам (Local_Booru_Output внутри)
+Output-папка:            выбираешь сам (Local_Booru_Archive/output внутри)
 Куки для сайтов:         Local_Booru/runtime/browser_cookies/
 
 Программу можно обновить заменой файлов — данные не потеряются.""",

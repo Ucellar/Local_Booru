@@ -9,12 +9,12 @@ from __future__ import annotations
 from typing import Callable
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtCore import Qt, Signal, QSize, QThread
 from PySide6.QtGui import QColor, QBrush, QFont, QIcon
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QFrame, QSizePolicy, QLineEdit, QCheckBox, QApplication,
+    QAbstractItemView, QFrame, QSizePolicy, QLineEdit, QCheckBox, QApplication, QPlainTextEdit,
 )
 
 from core.settings import SITES_BY_ENGINE, ALL_KNOWN_SITES
@@ -87,6 +87,24 @@ class _SectionHeader(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(28)
 
+    def _start_site_check(self):
+        if self._check_worker is not None and self._check_worker.isRunning():
+            return
+        sites, custom = self.collect()
+        merged = list(sites.items()) + [(str(x.get("domain", "")), x) for x in custom]
+        enabled = [(domain, cfg) for domain, cfg in merged if domain and bool(cfg.get("enabled", True))]
+        self.test_result.setVisible(True)
+        self.test_result.setPlainText("Проверка включённых сайтов...")
+        self.test_btn.setEnabled(False)
+        self._check_worker = _SiteCheckWorker(enabled, self)
+        self._check_worker.done.connect(self._finish_site_check)
+        self._check_worker.start()
+
+    def _finish_site_check(self, lines: list[str]):
+        self.test_btn.setEnabled(True)
+        self.test_result.setVisible(True)
+        self.test_result.setPlainText("\n".join(lines) if lines else "Нет включённых сайтов для проверки.")
+
     def apply_theme_style(self, theme_name: str | None = None):
         if theme_name is None:
             try:
@@ -148,6 +166,72 @@ class _SectionHeader(QWidget):
         self._count_lbl.setText(f"({n})")
 
 
+class _SiteCheckWorker(QThread):
+    done = Signal(list)
+
+    def __init__(self, sites: list[tuple[str, dict]], parent=None):
+        super().__init__(parent)
+        self.sites = sites
+
+    @staticmethod
+    def _probe_url(domain: str, cfg: dict) -> tuple[str, dict]:
+        typ = str(cfg.get("type", "") or "").lower()
+        params = {}
+        if domain == "rule34.xxx" or typ == "rule34xxx":
+            params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "limit": "1", "tags": "all"}
+            if cfg.get("user_id") and cfg.get("api_key"):
+                params.update({"user_id": str(cfg.get("user_id")), "api_key": str(cfg.get("api_key"))})
+            return "https://api.rule34.xxx/index.php", params
+        if "e621" in domain or "e926" in domain or typ == "e621":
+            params = {"limit": "1"}
+            if cfg.get("login") and cfg.get("api_key"):
+                params.update({"login": str(cfg.get("login")), "api_key": str(cfg.get("api_key"))})
+            return f"https://{domain}/posts.json", params
+        if typ in ("moebooru", "rule34us"):
+            return f"https://{domain}/post.json", {"limit": "1"}
+        if typ.startswith("gelbooru"):
+            params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "limit": "1", "tags": "all"}
+            if cfg.get("user_id") and cfg.get("api_key"):
+                params.update({"user_id": str(cfg.get("user_id")), "api_key": str(cfg.get("api_key"))})
+            return f"https://{domain}/index.php", params
+        return f"https://{domain}/posts.json", {"limit": "1"}
+
+    def run(self):
+        import requests
+        results = []
+        for domain, cfg in self.sites:
+            url, params = self._probe_url(domain, cfg)
+            login = str(cfg.get("login") or "").strip()
+            if "e621" in domain or "e926" in domain or str(cfg.get("type", "")).lower() == "e621":
+                identity = f"by {login} on e621" if login else "local archive manager"
+                headers = {"User-Agent": f"LocalBooru/3.1 ({identity})", "Accept": "application/json"}
+            else:
+                headers = {"User-Agent": "Local-Booru/site-check (desktop app)"}
+            auth_mark = " + auth" if cfg.get("api_key") or cfg.get("login") else ""
+            try:
+                r = requests.get(url, params=params, headers=headers, timeout=10)
+                content_type = str(r.headers.get("Content-Type", "")).lower()
+                if r.status_code == 200 and ("json" in content_type or r.text.lstrip().startswith(("[", "{"))):
+                    msg = f"{domain}: OK / API отвечает{auth_mark}"
+                elif r.status_code == 200:
+                    msg = f"{domain}: доступен, но ответ не похож на API ({content_type or 'без типа'})"
+                elif r.status_code in (401, 403):
+                    msg = f"{domain}: {r.status_code} / нужна авторизация или защита сайта"
+                elif r.status_code == 429:
+                    msg = f"{domain}: 429 / лимит запросов"
+                else:
+                    msg = f"{domain}: HTTP {r.status_code}"
+            except requests.exceptions.Timeout:
+                msg = f"{domain}: timeout"
+            except requests.exceptions.ConnectionError as exc:
+                low = str(exc).lower()
+                msg = f"{domain}: нет соединения / DNS / VPN" if ("resolve" in low or "getaddrinfo" in low or "connection" in low) else f"{domain}: ошибка соединения"
+            except Exception as exc:
+                msg = f"{domain}: {type(exc).__name__}: {exc}"
+            results.append(msg)
+        self.done.emit(results)
+
+
 class SitesWidget(QWidget):
     """All sites in one table with collapsible engine section headers."""
     changed = Signal()
@@ -158,6 +242,7 @@ class SitesWidget(QWidget):
         self._section_headers: dict[str, _SectionHeader] = {}
         self._row_engine: dict[int, str] = {}  # row -> engine name
         self._custom_start_row: int = 0
+        self._check_worker = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -196,15 +281,40 @@ class SitesWidget(QWidget):
         self.login_btn  = QPushButton("Войти (выбранный)")
         self.all_login_btn = QPushButton("Войти (все)")
         self.import_btn = QPushButton("Импорт cookies.txt")
+        self.test_btn = QPushButton("Проверить сайты")
         self.save_btn   = QPushButton("Сохранить")
         self.apply_theme_style()
-        for b in [self.add_btn, self.del_btn, self.login_btn, self.all_login_btn, self.import_btn, self.save_btn]:
+        for b in [self.add_btn, self.del_btn, self.login_btn, self.all_login_btn, self.import_btn, self.test_btn, self.save_btn]:
             btn_row.addWidget(b)
         outer.addLayout(btn_row)
+        self.test_result = QPlainTextEdit()
+        self.test_result.setReadOnly(True)
+        self.test_result.setMaximumHeight(110)
+        self.test_result.setVisible(False)
+        outer.addWidget(self.test_result)
 
         self.add_btn.clicked.connect(self._add_custom)
         self.del_btn.clicked.connect(self._del_selected)
         self.import_btn.clicked.connect(self._import_cookies_txt)
+        self.test_btn.clicked.connect(self._start_site_check)
+
+    def _start_site_check(self):
+        if self._check_worker is not None and self._check_worker.isRunning():
+            return
+        sites, custom = self.collect()
+        merged = list(sites.items()) + [(str(x.get("domain", "")), x) for x in custom]
+        enabled = [(domain, cfg) for domain, cfg in merged if domain and bool(cfg.get("enabled", True))]
+        self.test_result.setVisible(True)
+        self.test_result.setPlainText("Проверка включённых сайтов...")
+        self.test_btn.setEnabled(False)
+        self._check_worker = _SiteCheckWorker(enabled, self)
+        self._check_worker.done.connect(self._finish_site_check)
+        self._check_worker.start()
+
+    def _finish_site_check(self, lines: list[str]):
+        self.test_btn.setEnabled(True)
+        self.test_result.setVisible(True)
+        self.test_result.setPlainText("\n".join(lines) if lines else "Нет включённых сайтов для проверки.")
 
     def apply_theme_style(self, theme_name: str | None = None):
         """Reload action icons with enough contrast for the active theme."""

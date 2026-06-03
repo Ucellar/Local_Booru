@@ -40,6 +40,16 @@ class _PixmapCache:
         with QMutexLocker(self._lock):
             self._d.clear()
 
+    def set_maxsize(self, maxsize: int) -> None:
+        with QMutexLocker(self._lock):
+            self._max = max(50, min(int(maxsize or 400), 2000))
+            while len(self._d) > self._max:
+                self._d.popitem(last=False)
+
+    def size(self) -> int:
+        with QMutexLocker(self._lock):
+            return len(self._d)
+
 
 _PIX_CACHE = _PixmapCache(400)
 
@@ -93,6 +103,7 @@ class ThumbnailService(QObject):
         self._lock = QMutex()
         self._signals = _Signals()
         self._signals.done.connect(self._on_done)
+        self._reported_failures: set[str] = set()
 
     @classmethod
     def instance(cls, max_threads: int = 3) -> "ThumbnailService":
@@ -137,6 +148,13 @@ class ThumbnailService(QObject):
 
         if not pix.isNull():
             _PIX_CACHE.put(cache_key, pix)
+        elif path and path not in self._reported_failures:
+            self._reported_failures.add(path)
+            try:
+                import logging
+                logging.getLogger("local_booru").warning("THUMBNAIL FAILED: %s", path)
+            except Exception:
+                pass
 
         with QMutexLocker(self._lock):
             self._pending.discard(key)
@@ -157,3 +175,13 @@ class ThumbnailService(QObject):
 
     def clear_memory_cache(self) -> None:
         _PIX_CACHE.clear()
+
+    def configure(self, *, max_threads: int | None = None, memory_items: int | None = None) -> None:
+        """Apply lightweight thumbnail settings without rebuilding the service."""
+        if max_threads is not None:
+            self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 6)))
+        if memory_items is not None:
+            _PIX_CACHE.set_maxsize(int(memory_items or 400))
+
+    def memory_cache_items(self) -> int:
+        return _PIX_CACHE.size()

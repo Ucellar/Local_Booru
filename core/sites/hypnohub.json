@@ -1,21 +1,52 @@
 {
   "engine": "hypnohub",
-  "description": "Hypnohub - Danbooru fork, requires auth for API",
-  "known_hosts": ["hypnohub.net"],
-  "requires_auth": true,
+  "description": "HypnoHub Gelbooru-compatible DAPI: exact MD5 through JSON post listing",
+  "known_hosts": [
+    "hypnohub.net"
+  ],
+  "requires_auth": false,
   "cf_protected": [],
   "md5_search": [
-    {"path": "/posts.json", "params": {"tags": "md5:{md5}", "limit": 1}, "format": "json"},
-    {"path": "/posts.json", "params": {"search[md5]": "{md5}", "limit": 1}, "format": "json"}
+    {
+      "path": "/index.php",
+      "params": {
+        "page": "dapi",
+        "s": "post",
+        "q": "index",
+        "json": "1",
+        "tags": "md5:{md5}",
+        "limit": 1
+      },
+      "format": "json"
+    }
   ],
   "post_fields": {
-    "id":       ["id"],
-    "md5":      ["md5"],
-    "tags":     ["tag_string", "tags"],
-    "file_url": ["file_url"],
-    "rating":   ["rating"],
-    "source":   ["source"]
+    "id": [
+      "id"
+    ],
+    "md5": [
+      "md5",
+      "hash"
+    ],
+    "tags": [
+      "tags",
+      "tag_string"
+    ],
+    "file_url": [
+      "file_url",
+      "image"
+    ],
+    "rating": [
+      "rating"
+    ],
+    "source": [
+      "source"
+    ]
   },
-  "post_list_path": ["posts", null],
-  "post_url": "{root}/posts/{id}"
+  "post_list_path": [
+    "post",
+    "@post",
+    null
+  ],
+  "post_url": "{root}/index.php?page=post&s=view&id={id}"
 }

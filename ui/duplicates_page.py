@@ -14,9 +14,10 @@ from PySide6.QtWidgets import (
     QFrame, QCheckBox, QSizePolicy, QMessageBox, QDialog, QSpinBox
 )
 
-from core.tagger_engine import result_output_base
+from core.tagger import result_output_base
 from core.settings import save_settings
-from core.deleted_registry import record_deleted_file
+from core.services.library_service import trash_duplicate_paths, remember_duplicate_relation
+from core.database.connection import db
 
 MEDIA_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
@@ -95,68 +96,9 @@ def copy_suffix_number(path: Path) -> int | None:
         return None
 
 
-def sidecar_paths(media: Path) -> list[Path]:
-    out = [
-        media.with_suffix(".tags.json"),
-        media.with_suffix(".tags.txt"),
-        media.with_suffix(".txt"),
-        media.with_suffix(".sources.txt"),
-        Path(str(media) + ".tags.txt"),
-        Path(str(media) + ".sources.txt"),
-    ]
-    try:
-        if media.parent.name == "media":
-            bucket = media.parent.parent
-            out += [
-                bucket / "tags" / f"{media.stem}.tags.json",
-                bucket / "tags" / f"{media.stem}.tags.txt",
-                bucket / "source" / f"{media.stem}.sources.txt",
-                bucket / "searched" / f"{media.stem}.searched.json",
-                bucket / "cache" / f"{media.stem}.raw.json",
-            ]
-    except Exception:
-        pass
-    return list(dict.fromkeys(out))
 
-
-def delete_media_with_sidecars(path: Path) -> tuple[bool, str]:
-    try:
-        md5 = ""
-        size = 0
-        pixels = []
-        try:
-            size = path.stat().st_size if path.exists() else 0
-        except Exception:
-            size = 0
-        try:
-            md5 = file_md5(path) if path.exists() else ""
-        except Exception:
-            md5 = ""
-        try:
-            pixels = list(image_size(path)) if path.exists() else []
-        except Exception:
-            pixels = []
-
-        # Remember exact deleted duplicates so APT does not later rescan the
-        # same recreated "name (1).png" copy. Exact name+md5 matching means the
-        # original "name.png" remains allowed.
-        record_deleted_file(path, reason="duplicates_page_delete", md5=md5, size=size, pixels=pixels)
-
-        for s in sidecar_paths(path):
-            try:
-                s.unlink(missing_ok=True)
-            except Exception:
-                pass
-        path.unlink(missing_ok=True)
-        try:
-            from core.database.storage import delete_image_records
-            delete_image_records({}, [path])
-        except Exception:
-            pass
-        return True, str(path)
-    except Exception as e:
-        return False, f"{path}: {type(e).__name__}: {e}"
-
+# Physical duplicate removal is handled by core.services.library_service -> Trash.
+# The UI never unlinks media or legacy sidecars directly.
 
 def collect_media_roots(settings: dict) -> list[Path]:
     base = result_output_base(settings)
@@ -265,16 +207,8 @@ class DuplicateScanWorker(QThread):
                 if len(xs) > 1 and any(x.get("copy_no") is not None for x in xs):
                     groups.append({"reason": "Похожее имя: отличается только (1)/(2)/(3)", "items": xs})
 
-            # Same pixel dimensions but different binary file: possible censored/uncensored/edit.
-            by_pixels = defaultdict(list)
-            for it in infos:
-                px = tuple(it.get("pixels") or [0, 0])
-                if px != (0, 0):
-                    by_pixels[px].append(it)
-            for px, xs in by_pixels.items():
-                md5s = {x.get("md5") for x in xs}
-                if len(xs) > 1 and len(md5s) > 1:
-                    groups.append({"reason": "Одинаковые пиксели, но разный файл: возможна цензура/другая версия", "items": xs})
+            # Equal width/height alone is not evidence of a duplicate; it caused huge noise.
+            # Dimensions remain visible in comparison cards, while candidates come from MD5/pHash.
 
             # Visual similarity. Default is strict enough to avoid garbage groups.
             threshold = float(self.visual_threshold)
@@ -295,13 +229,34 @@ class DuplicateScanWorker(QThread):
                             "items": local,
                         })
 
+            ignored_pairs = set()
+            try:
+                with db(self.settings, readonly=True) as con:
+                    rows = con.execute(
+                        "SELECT md5_a, md5_b FROM ignored_duplicate_pairs "
+                        "WHERE relation IN ('not_duplicate','alternative')"
+                    ).fetchall()
+                    ignored_pairs = {(str(r[0]), str(r[1])) for r in rows}
+            except Exception:
+                ignored_pairs = set()
+
+            def suppressed_visual_group(group: dict) -> bool:
+                reason = str(group.get("reason", ""))
+                if group.get("safe") or reason.startswith("Точный дубль"):
+                    return False  # MD5 duplicates always win over remembered visual decisions.
+                md5s = sorted({str(x.get("md5") or "") for x in group.get("items", []) if x.get("md5")})
+                if len(md5s) < 2:
+                    return False
+                pairs = {(md5s[i], md5s[j]) for i in range(len(md5s)) for j in range(i + 1, len(md5s))}
+                return bool(pairs) and pairs.issubset(ignored_pairs)
+
             uniq = []
             seen = set()
             for g in groups:
                 paths = tuple(sorted(x["path"] for x in g["items"]))
                 # Keep safe group before generic duplicates.
                 key = (paths, bool(g.get("safe")))
-                if len(paths) < 2 or key in seen:
+                if len(paths) < 2 or key in seen or suppressed_visual_group(g):
                     continue
                 seen.add(key)
                 uniq.append(g)
@@ -397,9 +352,10 @@ class DuplicateItemCard(QFrame):
 
 
 class DuplicateGroupWidget(QFrame):
-    def __init__(self, group: dict, on_deleted):
+    def __init__(self, group: dict, settings: dict, on_deleted):
         super().__init__()
         self.group = group
+        self.settings = dict(settings or {})
         self.on_deleted = on_deleted
         self.cards = []
         self.setStyleSheet("QFrame{background:#11141a;border:1px solid #343b49;border-radius:12px;}")
@@ -416,6 +372,17 @@ class DuplicateGroupWidget(QFrame):
             note.setWordWrap(True)
             note.setStyleSheet("color:#9fb3c8;")
             lay.addWidget(note)
+        elif len(group.get("items", [])) >= 2:
+            _items = list(group.get("items", []))
+            def _quality(item):
+                px = item.get("pixels") or [0, 0]
+                return (int(px[0] or 0) * int(px[1] or 0), int(item.get("bytes") or 0))
+            _best = max(_items, key=_quality)
+            _px = _best.get("pixels") or [0, 0]
+            if int(_px[0] or 0) * int(_px[1] or 0) > 0:
+                suggest = QLabel(f"Подсказка: версия «{_best.get('name','')}» выглядит качественнее по разрешению ({_px[0]}x{_px[1]}). Решение всё равно принимаешь ты.")
+                suggest.setWordWrap(True); suggest.setStyleSheet("color:#9fb3c8;")
+                lay.addWidget(suggest)
 
         sc = QScrollArea()
         sc.setWidgetResizable(True)
@@ -437,38 +404,69 @@ class DuplicateGroupWidget(QFrame):
         lay.addWidget(sc)
 
         buttons = QHBoxLayout()
-        delete_btn = QPushButton("Удалить отмеченные")
+        delete_btn = QPushButton("В Удалено отмеченные")
+        relation_allowed = not bool(group.get("safe")) and not str(group.get("reason", "")).startswith("Точный дубль")
+        alt_btn = QPushButton("Альтернативная версия")
+        not_dup_btn = QPushButton("Не дубль / ложное совпадение")
+        alt_btn.setEnabled(relation_allowed)
+        not_dup_btn.setEnabled(relation_allowed)
+        if not relation_allowed:
+            alt_btn.setToolTip("Для точных MD5-дублей связь не заменяет удаление/сохранение.")
+            not_dup_btn.setToolTip("Точные MD5-дубли всегда считаются дублями.")
         skip_btn = QPushButton("Пропустить")
         buttons.addWidget(delete_btn)
+        buttons.addWidget(alt_btn)
+        buttons.addWidget(not_dup_btn)
         buttons.addWidget(skip_btn)
         buttons.addStretch(1)
         lay.addLayout(buttons)
         delete_btn.clicked.connect(self.delete_checked)
+        alt_btn.clicked.connect(lambda: self.remember_relation("alternative"))
+        not_dup_btn.clicked.connect(lambda: self.remember_relation("not_duplicate"))
         skip_btn.clicked.connect(self.hide)
 
     def checked_cards(self):
         return [c for c in self.cards if c.checkbox.isEnabled() and c.checkbox.isChecked()]
+
+    def remember_relation(self, relation: str):
+        try:
+            count = remember_duplicate_relation(self.settings, self.group.get("items", []), relation=relation)
+        except Exception as exc:
+            QMessageBox.warning(self, "Дубликаты", f"Не удалось сохранить решение:\n{exc}")
+            return
+        label = "Альтернативная версия" if relation == "alternative" else "Не дубль"
+        QMessageBox.information(
+            self, "Дубликаты",
+            f"Сохранено: {label}.\nЗапомнено пар: {count}.\n\n"
+            "Новые неизвестные файлы всё равно будут проверяться, а точные MD5-дубли не скрываются."
+        )
+        self.hide()
 
     def delete_checked(self):
         checked = self.checked_cards()
         if not checked:
             QMessageBox.information(self, "Дубликаты", "Ничего не отмечено.")
             return
-        if len(checked) >= len([c for c in self.cards if c.checkbox.isEnabled()]):
-            ok = QMessageBox.question(self, "Дубликаты", "Отмечены все удаляемые файлы в группе. Точно удалить?")
+        enabled = [c for c in self.cards if c.checkbox.isEnabled()]
+        if len(checked) >= len(enabled):
+            ok = QMessageBox.question(self, "Дубликаты", "Отмечены все удаляемые файлы в группе. Переместить их в «Удалено»?")
             if ok != QMessageBox.Yes:
                 return
-        deleted = []
-        errors = []
-        for card in checked:
-            ok, msg = delete_media_with_sidecars(Path(card.info["path"]))
-            if ok:
-                deleted.append(msg)
+        deleted_paths = [str(c.info.get("path", "")) for c in checked]
+        keep_cards = [c for c in self.cards if c not in checked and Path(str(c.info.get("path", ""))).exists()]
+        keep_path = str(keep_cards[0].info.get("path", "")) if keep_cards else ""
+        try:
+            result = trash_duplicate_paths(self.settings, deleted_paths, keep_path=keep_path)
+            moved = int(result.get("deleted_files", 0) or 0)
+            _err_count = int(result.get("errors", 0) or 0)
+            errors = ([f"Ошибок при перемещении в корзину: {_err_count}"] if _err_count else [])
+        except Exception as exc:
+            moved, errors = 0, [str(exc)]
+        if moved:
+            for card in checked:
                 card.setVisible(False)
-            else:
-                errors.append(msg)
-        self.on_deleted(len(deleted), errors)
-        if not errors:
+        self.on_deleted(moved, errors)
+        if not errors and moved:
             self.hide()
 
 
@@ -568,7 +566,7 @@ class DuplicatesPage(QWidget):
         batch = 4
         end = min(len(self.pending_groups), self.render_index + batch)
         for g in self.pending_groups[self.render_index:end]:
-            w = DuplicateGroupWidget(g, self.on_deleted)
+            w = DuplicateGroupWidget(g, self.main.settings, self.on_deleted)
             self.group_widgets.append(w)
             self.body_lay.insertWidget(self.body_lay.count() - 1, w)
         self.render_index = end
@@ -581,25 +579,34 @@ class DuplicatesPage(QWidget):
             self.status.setText(f"Готово. Групп: {len(self.pending_groups)}{extra}")
 
     def delete_all_checked(self):
-        total = 0
-        errors = []
+        selected = []
         for w in list(self.group_widgets):
-            if not w.isVisible():
-                continue
-            checked = w.checked_cards()
-            for card in checked:
-                ok, msg = delete_media_with_sidecars(Path(card.info["path"]))
-                if ok:
-                    total += 1
-                    card.setVisible(False)
-                else:
-                    errors.append(msg)
-            if checked and not errors:
-                w.hide()
+            if w.isVisible():
+                selected.extend([str(c.info.get("path", "")) for c in w.checked_cards()])
+        selected = list(dict.fromkeys(p for p in selected if p))
+        if not selected:
+            QMessageBox.information(self, "Дубликаты", "Ничего не отмечено.")
+            return
+        ok = QMessageBox.question(
+            self, "Дубликаты",
+            f"Переместить отмеченные файлы в «Удалено»?\nФайлов: {len(selected)}\n\n"
+            "Перед операцией будет создана резервная копия базы."
+        )
+        if ok != QMessageBox.Yes:
+            return
+        try:
+            result = trash_duplicate_paths(self.main.settings, selected, keep_path="")
+            total = int(result.get("deleted_files", 0) or 0)
+            _err_count = int(result.get("errors", 0) or 0)
+            errors = ([f"Ошибок при перемещении в корзину: {_err_count}"] if _err_count else [])
+        except Exception as exc:
+            total, errors = 0, [str(exc)]
+        if total:
+            self.clear_results()
         self.on_deleted(total, errors)
 
     def on_deleted(self, count: int, errors: list[str]):
-        msg = f"Удалено: {count}"
+        msg = f"Перемещено в «Удалено»: {count}"
         if errors:
             msg += f"; ошибок: {len(errors)}"
         self.status.setText(msg)

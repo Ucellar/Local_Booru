@@ -99,7 +99,7 @@ def upsert_tags(con, image_id, groups):
             row = con.execute("SELECT id, category FROM tags WHERE normalized_name=?", (norm,)).fetchone()
             if row:
                 old = row["category"] or "general"
-                if cat != "general" and old in ("", "general"):
+                if (cat == "species" and old != "species") or (cat != "general" and old in ("", "general")):
                     con.execute("UPDATE tags SET category=? WHERE id=?", (cat, int(row["id"])))
                 con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, row["id"]))
 
@@ -116,7 +116,7 @@ def upsert_sources(con, image_id, sources):
             con.execute("INSERT OR IGNORE INTO image_sources(image_id, source_id) VALUES(?,?)", (image_id, row["id"]))
 
 
-def index_library(settings, force=False, progress=None, stop_check=None, compute_md5=None):
+def index_library(settings, force=False, progress=None, stop_check=None, compute_md5=None, import_legacy_sidecars=False):
     """Rebuild/update SQLite index.
 
     Heavy full-file MD5 remains opt-in. UI must call this from a worker, not
@@ -151,15 +151,16 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                         pass
                 skipped += 1
                 continue
-            # SQLite is the source of truth for metadata. Sidecars are import
-            # inputs, not a reason to erase DB-only tags/sources created by
-            # subscriptions/parser. Only replace links when sidecar metadata
-            # actually exists.
-            groups = read_tag_json(path, settings)
-            if not groups:
-                tags = read_tags_txt(path, settings)
-                groups = {"general": tags} if tags else None
-            sources = read_sources(path, settings)
+            # SQLite is the only live metadata store. Sidecar files are read
+            # only during the explicit one-time legacy import operation.
+            groups = None
+            sources = []
+            if import_legacy_sidecars:
+                groups = read_tag_json(path, settings)
+                if not groups:
+                    tags = read_tags_txt(path, settings)
+                    groups = {"general": tags} if tags else None
+                sources = read_sources(path, settings)
             width, height = image_size(path)
             md5 = None
             if compute_md5:

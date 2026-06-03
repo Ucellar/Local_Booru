@@ -19,6 +19,7 @@ from ui.login_browser import open_br34
 from ui.memory_tools import bounded_append
 from core.paths import BROWSER_COOKIES_DIR, ensure_output_base
 from core.settings import save_settings
+from core.file_safety import atomic_write_chunks
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
 try:
@@ -44,7 +45,7 @@ DEFAULT_BLOCKLIST = (
 
 from ui.downloader.helpers import *
 from ui.downloader.worker import DownloaderWorker
-from ui.duplicates_page import delete_media_with_sidecars, image_size as _duplicate_image_size
+from ui.duplicates_page import image_size as _duplicate_image_size
 
 class DownloaderPage(QWidget):
     """
@@ -283,11 +284,49 @@ class DownloaderPage(QWidget):
         low = {str(t).lower() for t in tags or []}
         return bool(bad & low)
 
-    def _write_sidecars(self, stem, post_url, file_url, post, groups):
-        """Compatibility name: store downloader metadata in SQLite only."""
+    def _register_download_metadata_for_path(self, media_path, post_url, file_url, post, groups, *, hash_md5=""):
+        """Attach post metadata to one canonical physical file.
+
+        When a second booru exposes the exact same bytes, its URL/tags belong
+        to the existing image row; they must not be lost merely because a
+        second download is skipped.
+        """
+        if not media_path:
+            return None
+        groups = _dedupe_group_dict(groups or _groups_from_post(post))
+        tags = []
+        for g in ("artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid"):
+            tags += groups.get(g, [])
+        try:
+            from core.import_pipeline import register_media_import
+            _settings = self.main.settings if hasattr(self, "main") else self.settings
+            return register_media_import(
+                _settings,
+                Path(media_path),
+                tags=tags,
+                groups=groups,
+                sources=[x for x in (post_url, file_url) if x],
+                status="downloaded_found",
+                original_path="",
+                hash_md5=str(hash_md5 or (post.get("md5") if isinstance(post, dict) else "") or ""),
+                raw=post,
+                post_url=post_url,
+                file_url=file_url,
+                site=_host(post_url or file_url),
+                origin="downloader",
+                merge_existing=True,
+            )
+        except Exception as e:
+            try:
+                self.append_log(f"SQLITE METADATA ERROR: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+            return None
+
+    def _register_download_metadata_by_stem(self, stem, post_url, file_url, post, groups):
+        """Attach downloader metadata to the SQLite row for the stored media."""
         dirs = self.status_dirs("found")
         media_path = None
-        # The caller writes media first, then calls this with final stem. Locate the media file.
         try:
             for f in dirs["media"].iterdir():
                 if f.is_file() and f.stem == stem:
@@ -295,43 +334,63 @@ class DownloaderPage(QWidget):
                     break
         except Exception:
             media_path = None
-        if media_path is None:
-            return
-        groups = _dedupe_group_dict(groups or _groups_from_post(post))
-        tags = []
-        for g in ("artist", "character", "copyright", "general", "meta"):
-            tags += groups.get(g, [])
-        try:
-            from core.database.storage import upsert_media_metadata
-            upsert_media_metadata(
-                self.main.settings if hasattr(self, "main") else self.settings,
-                media_path,
-                tags=tags,
-                groups=groups,
-                source_text="\n".join([x for x in (post_url, file_url) if x]),
-                status="downloaded_found",
-                original_path="",
-                hash_md5=str(post.get("md5") or "") if isinstance(post, dict) else None,
-                raw=post,
-                post_url=post_url,
-                file_url=file_url,
-                site=_host(post_url or file_url),
-            )
-        except Exception as e:
-            try:
-                self.append_log(f"SQLITE METADATA ERROR: {type(e).__name__}: {e}")
-            except Exception:
-                pass
+        return self._register_download_metadata_for_path(media_path, post_url, file_url, post, groups)
 
+
+    def _trash_downloaded_media(self, paths, *, reason: str, kept_path: str = "", make_backup: bool = True):
+        from core.library_lifecycle import trash_media_paths
+        result = trash_media_paths(self.main.settings, [Path(p) for p in paths], reason=reason, make_backup=make_backup)
+        if result.get("error"):
+            self.append_log("TRASH ERROR: " + str(result.get("error")))
+        return result
+
+    def _deleted_md5_policy_blocks(self, md5: str) -> bool:
+        if not str(md5 or "").strip():
+            return False
+        try:
+            from core.deleted_registry import has_deleted_md5
+            return has_deleted_md5(str(md5).strip().lower(), settings=self.main.settings) and str(self.main.settings.get("deleted_reimport_policy", "skip")) != "return_inbox"
+        except Exception:
+            return False
 
     def _download_file(self, session, file_url, post_url, stem_hint="download", post=None, groups=None):
         dirs = self.status_dirs("found")
         remote_md5 = ""
         if isinstance(post, dict):
             remote_md5 = str(post.get("md5") or "")
+        # Same exact bytes from another source are not a skipped post: attach
+        # this source/tags to the existing image row without downloading again.
+        # A live copy wins over any obsolete "previously deleted" marker.
+        if remote_md5 and post is not None:
+            try:
+                from core.services.metadata_service import found_media_path_by_md5
+                canonical = found_media_path_by_md5(self.main.settings, remote_md5)
+                if canonical:
+                    self._register_download_metadata_for_path(canonical, post_url, file_url, post, groups, hash_md5=remote_md5)
+                    from core.library_lifecycle import update_url_history
+                    update_url_history(self.main.settings, file_url, status="merged_exact_md5", error=f"same bytes as {canonical}")
+                    self.append_log(f"MERGED EXACT MD5 SOURCE: existing media {canonical}")
+                    return Path(canonical)
+            except Exception as e:
+                self.append_log(f"EXACT MD5 MERGE WARN: {e}")
+
+        if self._deleted_md5_policy_blocks(remote_md5):
+            self.append_log("SKIP DELETED: exact MD5 was permanently removed earlier")
+            try:
+                from core.library_lifecycle import update_url_history
+                update_url_history(self.main.settings, file_url, status="skipped_deleted", error="exact MD5 previously deleted")
+            except Exception:
+                pass
+            return None
+
         dup, reason = self.is_duplicate_download(file_url, stem_hint, remote_md5)
         if dup:
             self.append_log(f"SKIP DUPLICATE: {reason}")
+            try:
+                from core.library_lifecycle import update_url_history
+                update_url_history(self.main.settings, file_url, status="duplicate", error=reason)
+            except Exception:
+                pass
             return None
 
         headers = {"Referer": post_url or file_url}
@@ -349,35 +408,80 @@ class DownloaderPage(QWidget):
             out = dirs["media"] / f"{stem}_{n}{ext}"
             n += 1
 
-        total = 0
-        with out.open("wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 512):
-                self.wait_if_paused()
-                if self.should_stop():
-                    self.append_log("STOPPED DURING FILE DOWNLOAD")
-                    try:
-                        out.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    return None
-                if chunk:
-                    f.write(chunk)
-                    total += len(chunk)
-
-        # Exact duplicate safety after download. Delete media and sidecars so the
-        # gallery/tag database does not keep orphan metadata.
         try:
-            is_dup, old_path = self.is_exact_existing_file(out)
-            if is_dup:
-                delete_media_with_sidecars(out)
-                self.append_log(f"DELETE JUST-DOWNLOADED DUPLICATE: same as {old_path}")
+            from core.preflight import ensure_space_for_write
+            _settings = self.main.settings if hasattr(self, "main") else self.settings
+            _expected = int(r.headers.get("Content-Length", 0) or 0)
+            _ok_space, _space_msg = ensure_space_for_write(_settings, out, _expected)
+            if not _ok_space:
+                self.append_log("STOP NO DISK SPACE: " + _space_msg)
+                return None
+            _, total = atomic_write_chunks(
+                out,
+                r.iter_content(chunk_size=1024 * 512),
+                should_stop=self.should_stop,
+                before_chunk=self.wait_if_paused,
+            )
+        except InterruptedError:
+            self.append_log("STOPPED DURING FILE DOWNLOAD")
+            return None
+
+        # Resolve exact bytes after download even when a site did not expose a
+        # remote MD5. Any existing live row is canonical regardless of filename.
+        try:
+            actual_md5 = _file_md5(out).lower()
+        except Exception:
+            actual_md5 = ""
+        if actual_md5:
+            try:
+                from core.services.metadata_service import found_media_path_by_md5
+                canonical = found_media_path_by_md5(self.main.settings, actual_md5, exclude_path=str(out))
+                if canonical:
+                    if post is not None:
+                        self._register_download_metadata_for_path(canonical, post_url, file_url, post, groups, hash_md5=actual_md5)
+                    from core.services.media_storage_service import unlink_managed
+                    unlink_managed(self.main.settings, out, operation="downloader.discard_exact_copy")
+                    from core.library_lifecycle import update_url_history
+                    update_url_history(self.main.settings, file_url, status="merged_exact_md5", error=f"same bytes as {canonical}")
+                    self.append_log(f"MERGED JUST-DOWNLOADED EXACT MD5 SOURCE: {canonical}")
+                    return Path(canonical)
+            except Exception as e:
+                self.append_log(f"POST-DOWNLOAD EXACT MD5 MERGE WARN: {e}")
+
+        # Sites do not always provide a post MD5. If there is no live canonical
+        # copy and the exact content was intentionally removed, keep it rejected.
+        try:
+            if actual_md5 and self._deleted_md5_policy_blocks(actual_md5):
+                self._trash_downloaded_media([out], reason="reimport_deleted_rejected", make_backup=False)
+                from core.library_lifecycle import update_url_history
+                update_url_history(self.main.settings, file_url, status="skipped_deleted", error="downloaded content MD5 was permanently deleted")
+                self.append_log("SKIP DELETED AFTER DOWNLOAD: moved rejected copy to «Удалено»")
                 return None
         except Exception:
             pass
 
+        # Files missing a historical MD5 row still receive one final byte-exact
+        # filesystem fallback; metadata is merged before the transient copy dies.
+        try:
+            is_dup, old_path = self.is_exact_existing_file(out)
+            if is_dup and old_path:
+                if post is not None:
+                    self._register_download_metadata_for_path(old_path, post_url, file_url, post, groups, hash_md5=actual_md5)
+                from core.services.media_storage_service import unlink_managed
+                unlink_managed(self.main.settings, out, operation="downloader.discard_exact_fallback")
+                try:
+                    from core.library_lifecycle import update_url_history
+                    update_url_history(self.main.settings, file_url, status="merged_exact_md5", error=f"same bytes as {old_path}")
+                except Exception:
+                    pass
+                self.append_log(f"MERGED JUST-DOWNLOADED EXACT MD5 SOURCE: {old_path}")
+                return Path(old_path)
+        except Exception as e:
+            self.append_log(f"POST-DOWNLOAD EXACT MD5 MERGE WARN: {e}")
+
         final_stem = out.stem
         if post is not None:
-            self._write_sidecars(final_stem, post_url, file_url, post, groups or _groups_from_post(post))
+            self._register_download_metadata_by_stem(final_stem, post_url, file_url, post, groups or _groups_from_post(post))
 
         self.append_log(f"SAVED: {out} ({total} bytes)")
         return out
@@ -386,15 +490,20 @@ class DownloaderPage(QWidget):
         """
         DAPI/rule34 XML often returns only flat 'tags'.
         The visible post page has grouped sidebar tags. Merge those groups
-        into the post dict before writing sidecars.
+        into the post dict before saving it in SQLite.
         """
         try:
+            # Official JSON APIs are authoritative. Their visible HTML pages
+            # are UI output (and can be login/Cloudflare pages), not metadata.
+            if _host(post_url) in ("e621.net", "e926.net", "danbooru.donmai.us", "donmai.us"):
+                return post, _groups_from_post(post)
             # Only bother if groups are empty or everything is general.
             cur_groups = _groups_from_post(post)
             has_grouped = bool(
                 cur_groups.get("artist")
                 or cur_groups.get("character")
                 or cur_groups.get("copyright")
+                or cur_groups.get("species")
                 or cur_groups.get("meta")
             )
 
@@ -414,11 +523,12 @@ class DownloaderPage(QWidget):
                 post["tag_string_artist"] = " ".join(html_groups.get("artist", []))
                 post["tag_string_character"] = " ".join(html_groups.get("character", []))
                 post["tag_string_copyright"] = " ".join(html_groups.get("copyright", []))
+                post["tag_string_species"] = " ".join(html_groups.get("species", []))
                 post["tag_string_general"] = " ".join(html_groups.get("general", []))
                 post["tag_string_meta"] = " ".join(html_groups.get("meta", []))
 
                 all_tags = []
-                for g in ("artist", "character", "copyright", "general", "meta"):
+                for g in ("artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid"):
                     all_tags += html_groups.get(g, [])
                 post["tag_string"] = " ".join(all_tags)
 
@@ -427,6 +537,7 @@ class DownloaderPage(QWidget):
                     f"artist={len(html_groups.get('artist', []))} "
                     f"character={len(html_groups.get('character', []))} "
                     f"copyright={len(html_groups.get('copyright', []))} "
+                    f"species={len(html_groups.get('species', []))} "
                     f"general={len(html_groups.get('general', []))} "
                     f"meta={len(html_groups.get('meta', []))}"
                 )
@@ -457,6 +568,9 @@ class DownloaderPage(QWidget):
             except Exception as e:
                 self.append_log(f"API ERROR: {type(e).__name__}: {e}")
 
+        if _host(post_url) in ("e621.net", "e926.net", "danbooru.donmai.us", "donmai.us"):
+            raise RuntimeError("Official JSON API did not return usable post data; HTML tag fallback disabled to avoid polluted tags or protection pages")
+
         self.append_log(f"HTML TRY: {post_url}")
         r = session.get(post_url, timeout=30)
         self.append_log(f"HTML STATUS: {r.status_code} {r.headers.get('content-type', '')}")
@@ -466,13 +580,14 @@ class DownloaderPage(QWidget):
         file_url = _extract_file_url_from_html(r.text, post_url)
         html_groups = self._groups_from_html(r.text)
         html_tags = []
-        for g in ("artist", "character", "copyright", "general", "meta"):
+        for g in ("artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid"):
             html_tags += html_groups.get(g, [])
         post = {
             "tag_string": " ".join(html_tags),
             "tag_string_artist": " ".join(html_groups.get("artist", [])),
             "tag_string_character": " ".join(html_groups.get("character", [])),
             "tag_string_copyright": " ".join(html_groups.get("copyright", [])),
+            "tag_string_species": " ".join(html_groups.get("species", [])),
             "tag_string_general": " ".join(html_groups.get("general", [])),
             "tag_string_meta": " ".join(html_groups.get("meta", [])),
             "source": post_url,
@@ -480,7 +595,7 @@ class DownloaderPage(QWidget):
         return post, file_url
 
     def _groups_from_html(self, html_text):
-        groups = {"artist": [], "character": [], "copyright": [], "general": [], "meta": []}
+        groups = {"artist": [], "contributor": [], "character": [], "copyright": [], "species": [], "general": [], "meta": [], "lore": [], "invalid": []}
 
         try:
             soup = BeautifulSoup(html_text or "", "html.parser")
@@ -501,6 +616,11 @@ class DownloaderPage(QWidget):
                     ".tag-type-copyright a[href*='tags=']",
                     "li[class*='copyright'] a[href*='tags=']",
                 ],
+                "species": [
+                    "li.tag-type-species a[href*='tags=']",
+                    ".tag-type-species a[href*='tags=']",
+                    "li[class*='species'] a[href*='tags=']",
+                ],
                 "general": [
                     "li.tag-type-general a[href*='tags=']",
                     ".tag-type-general a[href*='tags=']",
@@ -517,10 +637,9 @@ class DownloaderPage(QWidget):
             }
 
             def candidates_from_link(a):
+                # Display text may contain counters/UI labels (for example
+                # ``horse 231k``); tag identity comes only from ``tags=`` href.
                 out = []
-                text = a.get_text(" ", strip=True)
-                if text:
-                    out.append(text)
                 href = a.get("href", "") or ""
                 try:
                     q = parse_qs(urlparse(href).query)
@@ -554,7 +673,7 @@ class DownloaderPage(QWidget):
     def _tags_from_html(self, html_text):
         groups = self._groups_from_html(html_text)
         out = []
-        for g in ("artist", "character", "copyright", "general", "meta"):
+        for g in ("artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid"):
             out += groups.get(g, [])
         return list(dict.fromkeys(out))
 
@@ -687,52 +806,44 @@ class DownloaderPage(QWidget):
             return
 
         base = self._runtime_base()
-
-        roots = [
-            base / "found" / "media",
-            base / "downloads" / "found" / "media",
-        ]
-
-        deleted = 0
-
+        roots = [base / "found" / "media", base / "downloads" / "found" / "media"]
+        blocked_media = []
         for media_root in roots:
             if not media_root.exists():
                 continue
-
             bucket = media_root.parent
-
             for media in media_root.rglob("*"):
                 if not media.is_file():
                     continue
-
-                stem = media.stem
-                tags_json = bucket / "tags" / f"{stem}.tags.json"
-                tags_txt = bucket / "tags" / f"{stem}.tags.txt"
-                source_txt = bucket / "source" / f"{stem}.sources.txt"
-
                 tags = set()
-
+                # SQLite is the only live source of truth for downloaded metadata.
                 try:
-                    if tags_json.exists():
-                        import json
-                        d = json.loads(tags_json.read_text(encoding="utf-8"))
-                        for t in d.get("tags", []):
-                            tags.add(str(t).lower())
+                    from core.database.connection import db
+                    with db(self.main.settings, readonly=True) as con:
+                        rows = con.execute(
+                            """SELECT LOWER(t.normalized_name) AS name FROM tags t
+                               JOIN image_tags it ON it.tag_id=t.id
+                               JOIN images i ON i.id=it.image_id
+                               WHERE i.path=? AND i.deleted=0""",
+                            (str(media),),
+                        ).fetchall()
+                        tags.update(str(r["name"] or "").lower() for r in rows)
                 except Exception:
                     pass
-
                 if bad & tags:
-                    try:
-                        media.unlink(missing_ok=True)
-                        tags_json.unlink(missing_ok=True)
-                        tags_txt.unlink(missing_ok=True)
-                        source_txt.unlink(missing_ok=True)
-                        deleted += 1
-                        self.append_log(f"BLOCKLIST DELETE: {media.name}")
-                    except Exception as e:
-                        self.append_log(f"BLOCKLIST DELETE ERROR: {e}")
+                    blocked_media.append(media)
 
-        self.append_log(f"BLOCKLIST CLEANUP DONE: {deleted}")
+        if not blocked_media:
+            self.append_log("BLOCKLIST CLEANUP DONE: совпадений нет")
+            return
+        try:
+            result = self._trash_downloaded_media(blocked_media, reason="downloader_blocklist_cleanup", make_backup=True)
+            deleted = int(result.get("trashed_files", 0) or 0)
+            self.append_log(f"BLOCKLIST → Удалено: {deleted} файлов")
+            if result.get("error"):
+                self.append_log("BLOCKLIST TRASH ERROR: " + str(result.get("error")))
+        except Exception as e:
+            self.append_log(f"BLOCKLIST TRASH ERROR: {e}")
 
     def _scan_and_clean_duplicates_impl(self):
         files = self.all_known_media_files()
@@ -756,9 +867,9 @@ class DownloaderPage(QWidget):
             for p in group[1:]:
                 if _base_without_copy_suffix(p.stem).lower() == _base_without_copy_suffix(keep.stem).lower() and _is_copy_suffix(p.stem):
                     try:
-                        delete_media_with_sidecars(p)
-                        auto_deleted += 1
-                        self.append_log(f"AUTO DELETE EXACT COPY: {p}")
+                        result = self._trash_downloaded_media([p], reason="downloader_exact_copy", make_backup=True)
+                        auto_deleted += int(result.get("trashed_files", 0) or 0)
+                        self.append_log(f"AUTO TRASH EXACT COPY: {p}")
                     except Exception as e:
                         self.append_log(f"DELETE ERROR: {p}: {e}")
                 else:
@@ -809,8 +920,8 @@ class DownloaderPage(QWidget):
         row.addWidget(del_a); row.addWidget(del_b); row.addWidget(keep)
         lay.addLayout(row)
 
-        del_a.clicked.connect(lambda: (delete_media_with_sidecars(Path(a)), dlg.accept()))
-        del_b.clicked.connect(lambda: (delete_media_with_sidecars(Path(b)), dlg.accept()))
+        del_a.clicked.connect(lambda: (self._trash_downloaded_media([Path(a)], reason="downloader_manual_duplicate", make_backup=True), dlg.accept()))
+        del_b.clicked.connect(lambda: (self._trash_downloaded_media([Path(b)], reason="downloader_manual_duplicate", make_backup=True), dlg.accept()))
         keep.clicked.connect(dlg.reject)
         dlg.exec()
 
@@ -847,7 +958,7 @@ class DownloaderPage(QWidget):
         pid = str(post.get("id") or "")
         if not pid:
             return base_url
-        if "allthefallen" in host or "danbooru" in host or "donmai" in host or host == "e621.net":
+        if "allthefallen" in host or "danbooru" in host or "donmai" in host or host in ("e621.net", "e926.net"):
             return f"https://{host}/posts/{pid}"
         if host == "gelbooru.com":
             return f"https://gelbooru.com/index.php?page=post&s=view&id={pid}"
@@ -865,6 +976,18 @@ class DownloaderPage(QWidget):
         if not site or not tags:
             self.append_log("ERROR: сайт или тег пустой")
             return
+
+        _settings = self.main.settings if hasattr(self, "main") else self.settings
+        _threshold = max(1, int(_settings.get("large_download_warning_count", 1000) or 1000))
+        if limit_total >= _threshold:
+            from core.preflight import output_disk_info, format_bytes
+            _disk = output_disk_info(_settings)
+            _msg = (f"Запрошено до {limit_total} файлов.\n"
+                    f"Свободно на диске: {format_bytes(_disk.get('free', 0))}.\n\n"
+                    "Загрузка может занять много времени из-за ограничений сайтов. "
+                    "При временных ошибках задача может остановиться или ждать повторной попытки.\n\nПродолжить?")
+            if QMessageBox.question(self, "Большая загрузка", _msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
 
         self.start_downloader_worker(
             "tag",

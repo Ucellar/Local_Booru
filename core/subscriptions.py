@@ -40,6 +40,7 @@ SUBS_FILE = SETTINGS_DIR / "subscriptions.json"
 DEFAULT_SITE_PRIORITY: dict[str, int] = {
     "danbooru.donmai.us":       5,
     "e621.net":                 5,
+    "e926.net":                 5,
     "booru.allthefallen.moe":   4,
     "gelbooru.com":             4,
     "rule34.xxx":               3,
@@ -192,6 +193,36 @@ def _extract_post_tags(post: dict) -> list[str]:
     return [t.strip() for t in tags if t.strip() and not t.strip().startswith("-")]
 
 
+def _extract_post_groups(post: dict) -> dict[str, list[str]]:
+    """Preserve grouped API tags, especially official e621/e926 categories."""
+    out = {
+        "artist": [], "contributor": [], "character": [], "copyright": [],
+        "species": [], "general": [], "meta": [], "lore": [], "invalid": [],
+    }
+    if not isinstance(post, dict):
+        return out
+    raw = post.get("tags")
+    if isinstance(raw, dict):
+        for group in out:
+            vals = raw.get(group, [])
+            if isinstance(vals, list):
+                out[group].extend(str(v).strip() for v in vals if str(v).strip())
+        return out
+    field_map = {
+        "artist": "tag_string_artist", "character": "tag_string_character",
+        "copyright": "tag_string_copyright", "species": "tag_string_species",
+        "general": "tag_string_general", "meta": "tag_string_meta",
+        "lore": "tag_string_lore", "invalid": "tag_string_invalid",
+    }
+    for group, field in field_map.items():
+        value = post.get(field, "")
+        if isinstance(value, str):
+            out[group].extend(value.split())
+    if not any(out.values()):
+        out["general"] = _extract_post_tags(post)
+    return out
+
+
 def _post_source_url(site: str, post: dict) -> str:
     pid = post.get("id", "")
     return f"https://{site}/posts/{pid}" if pid else ""
@@ -214,19 +245,26 @@ def _index_and_tag(dest_path, candidates: list, settings: dict, log) -> None:
     site had the better download priority.
     """
     from pathlib import Path
-    from core.database.storage import upsert_media_metadata
+    from core.import_pipeline import register_media_import
 
     ordered = sorted(candidates, key=lambda x: -x[0])
 
-    # Merge tags from all candidate sites (highest priority first).
+    # Merge tags from all candidate sites while preserving real API categories.
+    all_groups = {
+        "artist": [], "contributor": [], "character": [], "copyright": [],
+        "species": [], "general": [], "meta": [], "lore": [], "invalid": [],
+    }
     all_tags: list[str] = []
     seen_tags: set[str] = set()
     for _priority, _site, post in ordered:
-        for tag in _extract_post_tags(post):
-            key = tag.lower()
-            if key not in seen_tags:
-                seen_tags.add(key)
-                all_tags.append(tag)
+        groups = _extract_post_groups(post)
+        for group, values in groups.items():
+            for tag in values:
+                key = tag.lower()
+                if key not in seen_tags:
+                    seen_tags.add(key)
+                    all_tags.append(tag)
+                    all_groups[group].append(tag)
 
     # Preserve all sources, not only the site that successfully downloaded.
     all_sources: list[str] = []
@@ -255,17 +293,19 @@ def _index_and_tag(dest_path, candidates: list, settings: dict, log) -> None:
     file_url = all_sources[1] if len(all_sources) > 1 else ""
 
     try:
-        upsert_media_metadata(
+        result = register_media_import(
             settings,
             Path(dest_path),
             tags=all_tags,
-            source_text=source_text,
+            groups=all_groups,
+            sources=all_sources,
             status="tagged",
             post_url=post_url,
             file_url=file_url,
             site=metadata_sites[0] if metadata_sites else "",
             hash_md5=best_md5 or None,
             merge_existing=True,
+            origin="subscription",
             raw={
                 "subscription_metadata_sites": metadata_sites,
                 "subscription_candidates": [
@@ -274,6 +314,9 @@ def _index_and_tag(dest_path, candidates: list, settings: dict, log) -> None:
                 ],
             },
         )
+        if result.get("action") == "skip_deleted":
+            log("  SKIP DELETED: exact MD5 was permanently removed earlier")
+            return
         log(
             f"  TAGGED: {Path(dest_path).name} ({len(all_tags)} tags; "
             f"sources={', '.join(metadata_sites) or 'none'})"
@@ -330,7 +373,7 @@ def _post_page_url(site: str, post: dict) -> str:
     if not pid:
         return ""
     host = str(site).lower().replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
-    if "gelbooru" in host or host in {"rule34.xxx", "rule34.us", "xbooru.com"}:
+    if "gelbooru" in host or host in {"rule34.xxx", "rule34.us", "xbooru.com", "hypnohub.net"}:
         return f"https://{host}/index.php?page=post&s=view&id={pid}"
     if "e621" in host or "e926" in host:
         return f"https://{host}/posts/{pid}"
@@ -339,7 +382,8 @@ def _post_page_url(site: str, post: dict) -> str:
 
 def run_subscription(sub: dict, settings: dict,
                      log=None, progress=None, stop_flag=None,
-                     on_file_ready=None, run_mode: str = "all") -> int:
+                     on_file_ready=None, run_mode: str = "all",
+                     confirm_plan=None) -> int:
     """Run one subscription using a Hydrus-like seed-cache/import pipeline.
 
     Pipeline:
@@ -472,6 +516,29 @@ def run_subscription(sub: dict, settings: dict,
     scan_was_stopped = bool(stop_flag and getattr(stop_flag, "_stop_requested", False))
     stop_import = False
 
+    # Large-import preflight: warn once after scanning, before the first download.
+    # Counts refer to grouped files, so the same MD5 found on several sites is
+    # not presented as several downloads.
+    try:
+        from core.preflight import build_large_download_plan, format_bytes
+        _ready = candidate_seeds(sub_id, include_failed=True, limit=0)
+        _all_groups = build_import_groups(_ready, direction=direction)
+        _plan = build_large_download_plan(settings, _all_groups)
+        if _plan.get("warn"):
+            _disk = _plan.get("disk", {})
+            log(
+                f"  PREFLIGHT: files={_plan.get('groups', 0)}, "
+                f"known_size={format_bytes(_plan.get('known_bytes', 0))} "
+                f"for {_plan.get('known_files', 0)} file(s), "
+                f"disk_free={format_bytes(_disk.get('free', 0))}"
+            )
+            if confirm_plan is not None and not bool(confirm_plan(_plan)):
+                log("  SUB: массовая загрузка отменена пользователем до скачивания файлов")
+                finish_run(run_id, status="cancelled", found=discovered, queued=len(_all_groups), downloaded=0, skipped=0, failed=0, note="preflight cancelled")
+                return 0
+    except Exception as _preflight_error:
+        log(f"  PREFLIGHT WARN: {_preflight_error}")
+
     # Keep memory bounded but process all ready candidates in this same run.
     # Previously only the first queue slice was imported on very large tags.
     while not stop_import:
@@ -531,8 +598,8 @@ def run_subscription(sub: dict, settings: dict,
 
             if real_md5:
                 try:
-                    from core.database.storage import media_path_by_md5
-                    existing_path = media_path_by_md5(settings, real_md5)
+                    from core.database.storage import found_media_path_by_md5
+                    existing_path = found_media_path_by_md5(settings, real_md5)
                     if existing_path:
                         # The file is already downloaded, but a new site may provide
                         # tags or source links that are not in the library yet.
