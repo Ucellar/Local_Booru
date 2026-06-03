@@ -34,7 +34,7 @@ XnView просто не закрывал все хотелки.
 
 # Скачать
 
-[Скачать Local_Booru_Windows_x64 v1.2.zip](https://github.com/Ucellar/Local_Booru/releases/download/v1.2/Local_Booru_windows.v1.2)
+[Скачать Local_Booru_Windows_x64 v1.2.zip](https://github.com/Ucellar/Local_Booru/releases/tag/v1.3)
 
 ---
 
