@@ -87,11 +87,11 @@ def import_profile(source: str | Path, current_settings: dict, *, apply: bool = 
     """
     manifest, imported = read_profile(source)
     from core.settings import deep_merge, DEFAULT_SETTINGS, save_settings
-    from core.paths import SETTINGS_FILE, SETTINGS_DIR
+    from core.paths import SETTINGS_FILE, BACKUPS_DIR
     merged = deep_merge(DEFAULT_SETTINGS, {**dict(current_settings or {}), **imported})
     backup = ""
     if apply:
-        backups = Path(SETTINGS_DIR) / "backups"
+        backups = Path(BACKUPS_DIR) / "config"
         backups.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = backups / f"app_settings_before_import_{stamp}.json"

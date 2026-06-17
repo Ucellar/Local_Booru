@@ -97,7 +97,7 @@ class ThumbnailService(QObject):
     def __init__(self, max_threads: int = 3, parent: QObject | None = None):
         super().__init__(parent)
         self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(max(1, min(max_threads, 6)))
+        self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 16)))
         self._pending: set[tuple] = set()
         self._callbacks: dict[tuple, list[Callable]] = {}
         self._lock = QMutex()
@@ -179,7 +179,7 @@ class ThumbnailService(QObject):
     def configure(self, *, max_threads: int | None = None, memory_items: int | None = None) -> None:
         """Apply lightweight thumbnail settings without rebuilding the service."""
         if max_threads is not None:
-            self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 6)))
+            self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 16)))
         if memory_items is not None:
             _PIX_CACHE.set_maxsize(int(memory_items or 400))
 

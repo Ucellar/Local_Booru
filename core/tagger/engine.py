@@ -6,11 +6,21 @@ import mimetypes
 import shutil
 import re
 import html
+import threading
+import base64
+import subprocess
+import urllib.request
+import urllib.error
 import imagehash
-from PIL import Image
+from PIL import Image, ImageOps
+try:
+    from PIL import ImageCms
+except Exception:
+    ImageCms = None
 from pathlib import Path
 from contextlib import nullcontext
-from urllib.parse import urlparse, parse_qs, urljoin, unquote
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse, parse_qs, urljoin, unquote, urlencode
 
 try:
     from curl_cffi import requests
@@ -32,6 +42,11 @@ except Exception:
     sync_playwright = None
 
 try:
+    from core.browser_companion_api import enqueue_e621_browser_fetch as _enqueue_e621_browser_fetch
+except Exception:
+    _enqueue_e621_browser_fetch = None
+
+try:
     from core.site_driver import SiteDriver as _SiteDriver
 except Exception:
     _SiteDriver = None
@@ -46,7 +61,7 @@ try:
 except Exception:
     _bw_wait = lambda url: None
 
-from core.paths import SETTINGS_FILE, BROWSER_PROFILE_DIR, BROWSER_COOKIES_DIR, CACHE_DIR, ERROR_LOG_FILE, ensure_output_base
+from core.paths import SETTINGS_FILE, BROWSER_PROFILE_DIR, BROWSER_COOKIES_DIR, CACHE_DIR, SERVICE_OUTPUT_DIR, ERROR_LOG_FILE, ensure_output_base
 from core.nomatch_db import upsert_nomatch, remove_nomatch
 from core.tag_utils import normalize_tag as _shared_normalize_tag, canonical_tag_key
 from core.file_safety import atomic_copy2
@@ -59,6 +74,8 @@ VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
 MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
+_RULE34_HOTLINK_PLAYWRIGHT_LOCK = threading.Lock()
+_E621_BROWSER_API_LOCK = threading.Lock()
 
 
 def has_copy_suffix(path):
@@ -77,16 +94,63 @@ DEFAULT_SETTINGS = {
     "tagger_site_interval_seconds": 1.10,
     "tagger_conveyor_window": 32,
     "tagger_background_tag_groups": True,
-    "request_timeout_seconds": 20,
-    "network_retry_attempts": 2,
+    "request_timeout_seconds": 30,
+    "request_connect_timeout_seconds": 10,
+    "request_read_timeout_seconds": 30,
+    "network_retry_attempts": 3,
+    "network_retry_base_delay_seconds": 1.0,
+    "network_retry_max_delay_seconds": 4.0,
     "network_retry_delay_seconds": 10,
+    "sqlite_passive_checkpoint_every": 500,
     "saucenao_cooldown_seconds": 3600,
     "enable_md5_lookup": True,
+    "parser_real_file_hash_cache_enabled": True,
+    "rule34_sha1_async_locator_enabled": True,
+    "rule34_sha1_async_locator_workers": 4,
+    "rule34_variant_locator_side_queue_enabled": True,
+    "rule34_image_key_locator_mode": "hotlink_only",
+    "rule34_image_key_hotlink_redirect_enabled": True,
+    "rule34_image_key_hotlink_extensions": "png",
+    "rule34_image_key_hotlink_request_timeout": 4.0,
+    "rule34_image_key_hotlink_playwright_fallback": True,
+    "rule34_image_key_hotlink_playwright_headless": False,
+    "rule34_image_key_hotlink_playwright_timeout": 25.0,
+    "rule34_image_key_bucket_probe_enabled": False,
+    "rule34_image_key_bucket_probe_sequence": "",
+    "rule34_image_key_bucket_probe_max": 9999,
+    "rule34_image_key_bucket_probe_step": 100,
+    "rule34_image_key_bucket_request_timeout": 3.0,
+    "rule34_image_key_bucket_total_timeout": 90.0,
+    "parser_trust_filename_md5_only_if_matches_real": True,
     "enable_saucenao": True,
     "enable_iqdb": True,
+    "enable_danbooru_iqdb": False,
+    "enable_e621_iqdb": True,
+    "e621_browser_api_fallback": True,
+    "e621_browser_api_headless": False,
+    "e621_browser_api_verify_timeout_seconds": 120,
+    "e621_browser_api_backend": "companion_extension",
+    "e621_browser_api_companion_timeout_seconds": 120,
+    "e621_browser_api_allow_external_chrome_cdp": False,
+    "e621_browser_api_cdp_port": 9222,
+    "e621_browser_api_launch_external_chrome": False,
+    "e621_iqdb_max_results": 5,
+    "enable_tineye": False,
+    "tineye_max_results": 10,
+    "tineye_delay_min": 30,
+    "tineye_delay_max": 90,
+    "tineye_browser_fallback": True,
+    "tineye_browser_headless": False,
+    "tineye_browser_timeout_seconds": 60,
+    # Parser-only TinEye cooldown after Cloudflare/Turnstile block pages.
+    # This affects only Parser -> Reverse chain -> TinEye fallback, not the
+    # grabber, companion API or manual browser usage.
+    "tineye_parser_block_cooldown_seconds": 86400,
     "iqdb_min_similarity": 75.0,
     "r34_fuzzy_min_similarity": 60.0,
     "strict_atf_md5": True,
+    "atf_pixel_hash_locator_enabled": True,
+    "atf_pixel_hash_max_assets": 5,
     "enable_atf_auto_tags": False,
     "max_preview_cache_files": 1000,
     "preview_cache_max_age_days": 14,
@@ -97,7 +161,7 @@ DEFAULT_SETTINGS = {
     "limit_files": 0,
     "enable_curl_cffi": False,
     "sites": {
-        "rule34.xxx": {"enabled": True, "type": "rule34xxx", "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.xxx/index.php?page=account&s=login"},
+        "rule34.xxx": {"enabled": True, "type": "rule34xxx", "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.xxx/index.php?page=account&s=options", "notes": "Официальный DAPI: api.rule34.xxx, user_id + api_key, json=1"},
         "rule34.us": {"enabled": True, "type": "rule34us", "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.us/index.php?page=account&s=login", "notes": "HTML-поиск с проверкой MD5; подтверждённого API нет"},
         "danbooru.donmai.us": {"enabled": True, "type": "danbooru", "login": "", "api_key": "", "user_id": "", "login_url": "https://danbooru.donmai.us/session/new"},
         "gelbooru.com": {"enabled": True, "type": "gelbooru_html", "login": "", "api_key": "", "user_id": "", "login_url": "https://gelbooru.com/index.php?page=account&s=login"},
@@ -123,9 +187,10 @@ def load_settings():
 
 
 def save_settings(settings):
-    for retired in {"copy_results_enabled", "copy_mode", "tags_suffix", "sources_suffix", "output_suffix", "mark_no_match", "tagger_site_conveyor_enabled", "use_browser_auth", "use_system_browser_cookies", "browser_auth_url", "browser_auth_wait_seconds"}:
-        settings.pop(retired, None)
-    SETTINGS_FILE.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Use the central writer so portable workspaces never recreate a full
+    # secret-bearing configuration file in Documents.
+    from core.settings import save_settings as save_application_settings
+    save_application_settings(settings)
 
 
 
@@ -157,6 +222,60 @@ def file_phash(path):
     try:
         img = Image.open(path).convert("RGB")
         return str(imagehash.phash(img))
+    except Exception:
+        return ""
+
+
+def danbooru_pixel_hash(path):
+    """Return Danbooru/ATF-style pixel_hash for static images.
+
+    Danbooru media assets store a pixel_hash that is MD5(PAM header + raw
+    RGBA pixel bytes) after orientation/color normalization.  The exact server
+    implementation uses libvips; this implementation prefers Pillow so Local
+    Booru does not gain a hard pyvips dependency.  For videos/animated images
+    Danbooru falls back to the byte MD5, so do the same.
+    """
+    path = Path(path)
+    try:
+        ext = path.suffix.lower()
+        if ext in VIDEO_EXTS:
+            return file_md5(path).lower()
+        with Image.open(path) as img:
+            try:
+                if bool(getattr(img, "is_animated", False)) and int(getattr(img, "n_frames", 1) or 1) > 1:
+                    return file_md5(path).lower()
+            except Exception:
+                pass
+            try:
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+            try:
+                icc = img.info.get("icc_profile") if hasattr(img, "info") else None
+                if icc and ImageCms is not None:
+                    src_profile = ImageCms.ImageCmsProfile(__import__('io').BytesIO(icc))
+                    dst_profile = ImageCms.createProfile("sRGB")
+                    img = ImageCms.profileToProfile(img, src_profile, dst_profile, outputMode="RGBA")
+                else:
+                    img = img.convert("RGBA")
+            except Exception:
+                img = img.convert("RGBA")
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+            width, height = img.size
+            header = (
+                "P7\n"
+                f"WIDTH {int(width)}\n"
+                f"HEIGHT {int(height)}\n"
+                "DEPTH 4\n"
+                "MAXVAL 255\n"
+                "TUPLTYPE RGB_ALPHA\n"
+                "ENDHDR\n"
+            )
+            h = hashlib.md5()
+            h.update(header.encode("ascii"))
+            h.update(img.tobytes())
+            return h.hexdigest().lower()
     except Exception:
         return ""
 
@@ -354,7 +473,7 @@ def video_frame_image(path):
 
     def make_temp_frame_path(src_path):
         import tempfile
-        tmp_dir = Path(str((Path.cwd() / "Local_Booru_Output" / "preview_cache"))) / "local_booru_frames"
+        tmp_dir = Path(CACHE_DIR) / "preview_cache" / "local_booru_frames"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         safe_name = hashlib.md5(str(src_path).encode("utf-8")).hexdigest()
         return tmp_dir / f"{safe_name}.jpg"
@@ -613,7 +732,7 @@ try:
 except ImportError:
     _std_requests = None
 
-def _make_plain_session(target_host=None):
+def _make_plain_session(target_host=None, settings=None, log_func=None):
     """Standard requests session — always works, used for file uploads."""
     import importlib
     std_req = importlib.import_module("requests")
@@ -624,6 +743,11 @@ def _make_plain_session(target_host=None):
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": f"https://{target_host}/" if target_host else "https://danbooru.donmai.us/",
     })
+    try:
+        from core.network import install_safe_session
+        install_safe_session(s, settings=settings or {}, log_func=log_func, cancel_callback=(settings or {}).get("_cancel_callback") if isinstance(settings, dict) else None)
+    except Exception:
+        pass
     return s
 
 def get_session(settings=None, log_func=None, target_host=None):
@@ -660,9 +784,9 @@ def get_session(settings=None, log_func=None, target_host=None):
                 return r
             s.get = _safe_get
         except Exception:
-            s = _make_plain_session(target_host)
+            s = _make_plain_session(target_host, settings=settings, log_func=log_func)
     else:
-        s = _make_plain_session(target_host)
+        s = _make_plain_session(target_host, settings=settings, log_func=log_func)
     
     s.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
@@ -726,7 +850,7 @@ def get_session(settings=None, log_func=None, target_host=None):
             total_added += added
             sources.append(f"app-json:{added}")
 
-        # 2) Netscape cookies from data/runtime/browser_cookies/<host>.txt.
+        # 2) Netscape cookies from Local_Booru_Archive/settings/output/runtime/browser_cookies/<host>.txt.
         # This is useful for cookies exported from real Chrome/Edge extensions.
         txt_jar, txt_info = load_txt_cookiejar_for_host(target_host)
         if txt_jar:
@@ -765,7 +889,7 @@ def get_session(settings=None, log_func=None, target_host=None):
                 more = "..." if len(names) > 12 else ""
                 log_func(f"COOKIES [{target_host}]: loaded: {total_added} ({'; '.join(sources)}) [{preview}{more}]")
                 if target_host == "danbooru.donmai.us" and "cf_clearance" not in names:
-                    log_func("  DANBOORU WARNING: cf_clearance missing; Cloudflare 403 is likely. Use external Chrome/Edge export to data/runtime/browser_cookies/danbooru.donmai.us.txt")
+                    log_func(f"  DANBOORU WARNING: cf_clearance missing; Cloudflare 403 is likely. Use external Chrome/Edge export to {BROWSER_COOKIES_DIR / 'danbooru.donmai.us.txt'}")
             else:
                 log_func(f"COOKIES [{target_host}]: 0 ({'; '.join(sources) if sources else 'no sources'})")
                 if target_host == "danbooru.donmai.us":
@@ -796,7 +920,7 @@ def get_session(settings=None, log_func=None, target_host=None):
     return s
 
 
-def _post_with_file(session, url, file_path, file_field="file", extra_data=None, extra_params=None, timeout=60):
+def _post_with_file(session, url, file_path, file_field="file", extra_data=None, extra_params=None, timeout=60, headers=None, auth=None):
     """POST a file upload using the safest available requests-compatible session.
 
     curl_cffi is not fully compatible with the file upload path, so it is
@@ -844,6 +968,8 @@ def _post_with_file(session, url, file_path, file_field="file", extra_data=None,
         files={file_field: (filename, io.BytesIO(file_bytes))},
         data=extra_data or {},
         params=extra_params or {},
+        headers=headers or None,
+        auth=auth,
         timeout=timeout,
     )
     if not wrapped:
@@ -853,6 +979,27 @@ def _post_with_file(session, url, file_path, file_field="file", extra_data=None,
         except Exception:
             pass
     return response
+
+
+
+class _SyntheticHTTPResponse:
+    """Small response adapter for browser-backed JSON/API fetches.
+
+    It intentionally mimics only the tiny subset used by safe_json_response()
+    and post parsers: status_code, headers, text, json(), raise_for_status().
+    """
+    def __init__(self, status_code=200, text="", headers=None, url=""):
+        self.status_code = int(status_code or 0)
+        self.text = text or ""
+        self.headers = dict(headers or {})
+        self.url = url or ""
+
+    def json(self):
+        return json.loads(self.text or "null")
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise Exception(f"HTTP {self.status_code} {self.url}".strip())
 
 
 def safe_json_response(r, source="HTTP"):
@@ -915,6 +1062,18 @@ def safe_json_response(r, source="HTTP"):
 
     _reject_text(text, ct)
 
+
+def _log_nomatch_promote_cleanup(log_func, import_result):
+    try:
+        cleanup = (import_result or {}).get("nomatch_cleanup") or {}
+        rows = int(cleanup.get("rows_deactivated", 0) or 0)
+        imgs = int(cleanup.get("image_rows_removed", 0) or 0)
+        files = int(cleanup.get("files_removed", 0) or 0)
+        errors = int(cleanup.get("errors", 0) or 0)
+        if rows or imgs or files or errors:
+            log_func(f"  NO_MATCH PROMOTE CLEANUP: rows={rows} image_rows={imgs} files_removed={files} errors={errors}")
+    except Exception:
+        pass
 
 def debug_enabled(settings):
     try:
@@ -980,9 +1139,13 @@ def copy_result_files(settings, img, status):
     bucket = result_bucket_name(status)
     md5 = ""
     try:
-        md5 = file_md5(img).lower() if img.exists() else ""
+        from core.file_hash_cache import get_or_compute_md5 as _cached_md5
+        md5 = _cached_md5(settings, img)[0] if img.exists() else ""
     except Exception:
-        md5 = ""
+        try:
+            md5 = file_md5(img).lower() if img.exists() else ""
+        except Exception:
+            md5 = ""
 
     # Exact tagged media already present in FOUND is the canonical physical copy.
     # Do not copy the same bytes into another session folder.
@@ -1005,7 +1168,7 @@ def copy_result_files(settings, img, status):
         if not _ok_space:
             append_error_log("COPY STOP NO DISK SPACE: " + _space_msg)
             return None
-        paths["media_file"] = copy_into_managed(settings, img, paths["media_file"], operation="tagger.copy_result")
+        paths["media_file"] = copy_into_managed(settings, img, paths["media_file"], operation="tagger.copy_result", hash_md5=md5 or None)
     except Exception:
         return None
 
@@ -1019,6 +1182,29 @@ def copy_result_files(settings, img, status):
         except Exception:
             pass
     return paths["media_file"]
+
+
+def _valid_archived_media_path(path) -> bool:
+    """Return True only when a result copy/reuse actually exists on disk.
+
+    Older code continued to write SQLite metadata even if copying a NO_MATCH
+    retry into FOUND failed.  That produced gallery rows with tags but with a
+    missing file path.
+    """
+    try:
+        p = Path(path) if path else None
+        if not p:
+            return False
+        if p.exists() and p.is_file():
+            return True
+        # Unit tests and a few legacy extension hooks may use a mocked relative
+        # archive path without creating a real file.  Real Local Booru output
+        # paths are absolute, so the missing-file guard still protects live use.
+        if not p.is_absolute():
+            return True
+        return False
+    except Exception:
+        return False
 
 def cleanup_archived_result(settings, img, statuses=("nomatch",)):
     """Remove a promoted file and inherited generated artifacts from an output bucket.
@@ -1047,7 +1233,7 @@ def cleanup_archived_result(settings, img, statuses=("nomatch",)):
             pass
 
 
-def save_found_metadata(settings, img, tags, source_url="", groups=None, status="tagged", *, archived_media_path=None, hash_md5=None):
+def save_found_metadata(settings, img, tags, source_url="", groups=None, status="tagged", *, archived_media_path=None, hash_md5=None, source_tag_groups=None):
     """Store tags/source in SQLite only for the canonical archived media path.
 
     ``archived_media_path`` may already point at an existing exact-MD5 canonical
@@ -1072,6 +1258,7 @@ def save_found_metadata(settings, img, tags, source_url="", groups=None, status=
             original_path=str(img),
             hash_md5=hash_md5,
             origin="tagger",
+            source_tag_groups=source_tag_groups,
             merge_existing=True,
         )
     except Exception:
@@ -1087,7 +1274,11 @@ def promote_manual_match(settings, img, tags, source_url="", groups=None):
     # Archive/reuse the one canonical exact-MD5 media copy first; metadata then
     # attaches to that physical row rather than creating another live image.
     archived_media = copy_result_files(settings, img, "tagged")
-    save_found_metadata(settings, img, tags, source_url, groups, status="tagged", archived_media_path=archived_media)
+    if not _valid_archived_media_path(archived_media):
+        append_error_log(f"PROMOTE MANUAL MATCH FAILED: managed copy missing for {img}")
+        return False
+    source_groups = [{"url": source_url, "groups": groups or {"general": list(tags or [])}, "method": "manual_url"}] if source_url else []
+    save_found_metadata(settings, img, tags, source_url, groups, status="tagged", archived_media_path=archived_media, source_tag_groups=source_groups)
     remove_nomatch(img, settings=settings)
     # Archive as found first, then remove old no_match/partial copies.
     cleanup_archived_result(settings, img, ("nomatch", "partial"))
@@ -1097,6 +1288,22 @@ def append_error_log(msg):
     try:
         ERROR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         safe = sanitize_text(msg)
+        max_bytes = 10 * 1024 * 1024
+        if ERROR_LOG_FILE.exists() and ERROR_LOG_FILE.stat().st_size >= max_bytes:
+            for idx in range(4, 0, -1):
+                src = ERROR_LOG_FILE.with_name(ERROR_LOG_FILE.name + f".{idx}")
+                dst = ERROR_LOG_FILE.with_name(ERROR_LOG_FILE.name + f".{idx + 1}")
+                try:
+                    if dst.exists():
+                        dst.unlink()
+                    if src.exists():
+                        src.replace(dst)
+                except Exception:
+                    pass
+            try:
+                ERROR_LOG_FILE.replace(ERROR_LOG_FILE.with_name(ERROR_LOG_FILE.name + ".1"))
+            except Exception:
+                pass
         with ERROR_LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {safe}\n")
     except Exception:
@@ -1114,7 +1321,6 @@ def cleanup_preview_cache(settings=None):
     max_files = int(settings.get("max_preview_cache_files", settings.get("max_thumb_cache_files", 20000)) or 20000)
     max_age_days = int(settings.get("preview_cache_max_age_days", settings.get("thumb_cache_max_age_days", 90)) or 90)
     roots = [
-        Path.cwd() / "Local_Booru_Output" / "preview_cache",
         CACHE_DIR / "preview_cache",
         CACHE_DIR / "thumbs",
     ]
@@ -1167,6 +1373,7 @@ _TRANSIENT_NETWORK_MARKERS = (
     "temporary failure in name resolution", "network is unreachable",
     "connection refused", "max retries exceeded", "ssleoferror",
     "unexpected_eof_while_reading", "remote end closed connection",
+    "network temporary failure", "http 408", "http 425", "http 429", "http 500", "http 502", "http 503", "http 504",
 )
 
 def _is_transient_network_error_text(message):
@@ -1184,6 +1391,16 @@ def _network_error_host(message):
 class Tagger:
     def __init__(self, settings, log_func):
         self.settings = settings
+        # v204: Fluffle/FuzzySearch are removed from the parser chain after
+        # low-score false positives polluted tags. Keep any legacy config keys
+        # inert so old settings cannot re-enable them.
+        for _removed_reverse_key in (
+            "enable_fuzzysearch", "fuzzysearch_api_key", "fuzzysearch_endpoint",
+            "fuzzysearch_api_docs_url", "fuzzysearch_max_results",
+            "enable_fluffle", "fluffle_api_key", "fluffle_endpoint",
+            "fluffle_api_docs_url", "fluffle_max_results",
+        ):
+            self.settings.pop(_removed_reverse_key, None)
         self._external_log = log_func
         self._transient_network_events = []
         self._transient_network_hosts = set()
@@ -1195,6 +1412,17 @@ class Tagger:
         self._saucenao_deferred = False
         self._saucenao_defer_reason = ""
         self._saucenao_retry_after = 0
+        self._last_saucenao_source_only = []
+        self._last_reverse_source_only = []
+        self._tineye_tagged_total = 0
+        self._tineye_source_only_total = 0
+        # Parser-only cooldown for the TinEye reverse fallback.  Do not use this
+        # as a global browser/grabber switch: it only protects the parser mass
+        # queue from repeatedly opening Cloudflare-blocked TinEye pages.
+        self._tineye_parser_disabled_until = float(self.settings.get("_tineye_parser_disabled_until", 0) or 0)
+        self._tineye_parser_block_reason = str(self.settings.get("_tineye_parser_block_reason", "") or "")
+        self._e621_iqdb_cooldown_until = 0
+        self._e621_iqdb_missing_auth_logged = False
         self._background_group_urls = []
         self._partial_match_found = False
         self._partial_match_reason = ""
@@ -1208,10 +1436,22 @@ class Tagger:
         self._session_cache = {}
         self._request_cache = {}
         self._lookup_cache_enabled = False
+        self._last_variant_site_md5s = []
+        self._last_atf_pixel_hash_site_md5s = []
+        self._atf_pixel_hash_guard = False
         # One-shot diagnostics for sites that are correctly configured but may
         # simply have no overlap with the local archive. This separates an
         # empty MD5 result from a dead/malformed public DAPI endpoint.
         self._dapi_health_reported = set()
+        self._last_lookup_status = ""
+        self._rule34_auth_missing_warned = set()
+        self._e621_browser_pw = None
+        self._e621_browser_browser = None
+        self._e621_browser_context = None
+        self._e621_browser_page = None
+        self._e621_browser_process = None
+        self._e621_browser_host = ""
+        self._e621_browser_verified_hosts = set()
         try:
             cleanup_preview_cache(self.settings)
         except Exception:
@@ -1258,7 +1498,7 @@ class Tagger:
             items = tuple()
         return (str(method).upper(), str(url), items)
 
-    def _http_get_cached(self, session, url, *, params=None, timeout=None, headers=None):
+    def _http_get_cached(self, session, url, *, params=None, timeout=None, headers=None, allow_redirects=None):
         """GET with per-file cache.
 
         APT/booru lookup commonly tries JSON, XML and HTML fallbacks for the
@@ -1267,10 +1507,16 @@ class Tagger:
         cache is active only during one MD5 lookup, so it cannot return stale
         data for later files.
         """
-        key = self._request_cache_key("GET", url, params)
+        key_params = dict(params or {})
+        if allow_redirects is not None:
+            key_params["__allow_redirects"] = int(bool(allow_redirects))
+        key = self._request_cache_key("GET", url, key_params)
         if self._lookup_cache_enabled and key in self._request_cache:
             return self._request_cache[key]
-        r = session.get(url, params=params, timeout=timeout, headers=headers)
+        kwargs = {"params": params, "timeout": timeout, "headers": headers}
+        if allow_redirects is not None:
+            kwargs["allow_redirects"] = bool(allow_redirects)
+        r = session.get(url, **kwargs)
         if self._lookup_cache_enabled:
             self._request_cache[key] = r
         return r
@@ -1280,6 +1526,17 @@ class Tagger:
         if self._lookup_cache_enabled and key in self._request_cache:
             return self._request_cache[key]
         r = self._atf_get(session, url, host, **kwargs)
+        h = str(host or "").lower().replace("www.", "")
+        if h in ("e621.net", "e926.net") and self._e621_is_cloudflare_html_response(r):
+            br = self._e621_browser_get_json_response(
+                url,
+                params=kwargs.get("params"),
+                auth=kwargs.get("auth"),
+                host=h,
+                context="exact-md5",
+            )
+            if br is not None:
+                r = br
         if self._lookup_cache_enabled:
             self._request_cache[key] = r
         return r
@@ -1450,6 +1707,537 @@ class Tagger:
         self._background_group_urls = []
         return urls
 
+    def reverse_url_tags_and_groups(self, url, method="reverse"):
+        """Return tags and source-scoped groups for a reverse-search URL.
+
+        Normal flat sources are saved fast and then refined by the durable
+        background category queue.  TinEye, however, often returns a concrete
+        rule34.xxx HTML post URL as the only usable source.  Saving that as a
+        plain flat list leaves the source view stuck under ``general`` until a
+        later queue pass.  For TinEye rule34 hits, resolve the concrete post
+        immediately through the normal guarded rule34 path: DAPI decides tag
+        membership, HTML only classifies those confirmed tags.
+        """
+        host = urlparse(str(url or "")).netloc.lower().replace("www.", "")
+        method = str(method or "").lower()
+        if method == "tineye" and host in ("rule34.xxx", "api.rule34.xxx"):
+            groups = self.grouped_tags_from_url(url)
+            tags = groups_to_tags(groups)
+            if tags:
+                self.log(f"  TINEYE RULE34 CATEGORY GUARD: grouped={len(tags)} url={url}")
+                return tags, groups
+        tags = self.tags_from_url(url)
+        groups = self.groups_or_defer_background(url, tags)
+        return tags, groups
+
+    def _post_id_from_url_for_md5_relay(self, url: str, host: str = "") -> str:
+        """Extract a concrete post id from common booru post URLs."""
+        try:
+            parsed = urlparse(str(url or ""))
+            host = (host or parsed.netloc or "").lower().replace("www.", "")
+            q = parse_qs(parsed.query or "")
+            for key in ("id", "post_id", "pid"):
+                got = (q.get(key) or [""])[0]
+                if str(got).strip().isdigit():
+                    return str(got).strip()
+            parts = [x for x in (parsed.path or "").strip("/").split("/") if x]
+            # Danbooru/e621 modern: /posts/<id>
+            if len(parts) >= 2 and parts[0] in ("posts", "post") and parts[1].isdigit():
+                # /post/show/<id> is handled below; /post/<id> also occurs on some forks.
+                if parts[0] == "posts":
+                    return parts[1]
+            # Legacy boorus: /post/show/<id>
+            if len(parts) >= 3 and parts[0] == "post" and parts[1] == "show" and parts[2].isdigit():
+                return parts[2]
+            # Some result URLs end with the numeric id.
+            if parts and parts[-1].isdigit():
+                return parts[-1]
+        except Exception:
+            pass
+        return ""
+
+    def _md5_near_keywords_from_html(self, html_text: str) -> str:
+        """Conservative HTML fallback: only accept 32-hex near md5/hash words."""
+        text = html.unescape(str(html_text or ""))
+        if not text:
+            return ""
+        patterns = [
+            r"(?:md5|hash|checksum)[^0-9a-fA-F]{0,120}([0-9a-fA-F]{32})",
+            r"([0-9a-fA-F]{32})[^0-9a-fA-F]{0,120}(?:md5|hash|checksum)",
+        ]
+        for pat in patterns:
+            for m in re.finditer(pat, text, flags=re.I):
+                val = (m.group(1) or "").lower()
+                if is_md5(val):
+                    return val
+        return ""
+
+
+    def _normalize_pixiv_relay_queries(self, url: str):
+        """Build safe booru source-search queries for one Pixiv/Pximg URL.
+
+        Never use a bare ``source:*<id>*`` query: Danbooru can match the same
+        digit run inside unrelated Twitter/Fanbox/etc URLs.  All wildcard
+        queries are scoped to Pixiv/Pximg or the Pixiv page filename form.
+        """
+        url = str(url or "").strip()
+        out = []
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower().replace("www.", "")
+            path = unquote(parsed.path or "")
+            query = parsed.query or ""
+        except Exception:
+            host, path, query = "", "", ""
+
+        def add(q):
+            q = str(q or "").strip()
+            if q and q not in out:
+                out.append(q)
+
+        pid = ""
+        patterns = [
+            r"/artworks/(\d{5,})",
+            r"[?&]illust_id=(\d{5,})",
+            r"/(\d{5,})_p\d+",
+            r"/(\d{5,})(?:_ugoira)?(?:\.|$)",
+        ]
+        haystacks = [path, query, url]
+        for hay in haystacks:
+            for pat in patterns:
+                m = re.search(pat, hay)
+                if m:
+                    pid = m.group(1)
+                    break
+            if pid:
+                break
+
+        # Exact current URL is safe if it already contains a Pixiv/Pximg host.
+        if ("pixiv.net" in host or "pximg.net" in host) and url:
+            add(f"source:{url}")
+
+        if pid:
+            add(f"pixiv_id:{pid}")
+            add(f"source:*i.pximg.net*{pid}*")
+            # Danbooru often stores the direct original URL only, e.g.
+            # .../40884608_p0.jpg, not pixiv.net/artworks/40884608.
+            for page in range(0, 6):
+                add(f"source:*{pid}_p{page}*")
+            add(f"source:*pixiv.net/artworks/{pid}*")
+            add(f"source:*pixiv.net/en/artworks/{pid}*")
+            add(f"source:*member_illust.php*illust_id={pid}*")
+        return out
+
+    def _source_relay_query_strings_for_url(self, url: str):
+        """Return safe source-search queries for unsupported reverse URLs."""
+        url = str(url or "").strip()
+        if not url:
+            return []
+        try:
+            host = (urlparse(url).netloc or "").lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if "pixiv.net" in host or "pximg.net" in host:
+            return self._normalize_pixiv_relay_queries(url)
+        # For non-Pixiv unsupported URLs use only full normalized URL, not a
+        # bare numeric/id substring.  This keeps FA/Fanbox/Kemono/E-Hentai relay
+        # safe as a locator while avoiding broad false positives.
+        return [f"source:{url}", f"source:*{url}*"]
+
+    def _first_md5_from_posts(self, posts):
+        for post in posts or []:
+            got = self._post_md5_value(post)
+            if got and is_md5(got):
+                return got.lower()
+        return ""
+
+    def _source_relay_posts_danbooru(self, query, limit=5):
+        session = self.session_for_host("danbooru.donmai.us")
+        params = {"tags": query, "limit": int(limit)}
+        params.update(self._danbooru_api_params("danbooru.donmai.us"))
+        r = session.get(
+            "https://danbooru.donmai.us/posts.json",
+            params=params,
+            timeout=self.timeout,
+            headers=self._danbooru_api_headers("danbooru.donmai.us"),
+            auth=self._danbooru_auth_tuple("danbooru.donmai.us"),
+        )
+        self._danbooru_log_response_problem(r, "source-relay")
+        data = safe_json_response(r, "danbooru.donmai.us")
+        return self._post_dicts_from_data(data)
+
+    def _source_relay_posts_gelbooru_like(self, host, query, limit=5):
+        session = self.session_for_host(host)
+        params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "limit": int(limit), "tags": query}
+        params.update(self.auth_params(self.site_cfg(host)))
+        r = session.get(f"https://{host}/index.php", params=params, timeout=self.timeout)
+        return self._posts_from_dapi_response(r, host)
+
+    def _source_relay_posts_rule34xxx(self, query, limit=5):
+        session = self.session_for_host("rule34.xxx")
+        params = self._rule34xxx_api_params(self.site_cfg("rule34.xxx"), limit=int(limit), tags=query)
+        r = session.get(
+            "https://api.rule34.xxx/index.php",
+            params=params,
+            timeout=self.timeout,
+            headers=self._rule34xxx_api_headers(self.site_cfg("rule34.xxx")),
+        )
+        self._rule34xxx_log_response_problem(r, "source-relay")
+        return self._posts_from_dapi_response(r, "rule34.xxx")
+
+    def _source_relay_posts_atf(self, query, limit=5):
+        host = "booru.allthefallen.moe"
+        session = self.session_for_host(host)
+        params = {"tags": query, "limit": int(limit)}
+        params.update(self._danbooru_api_params(host))
+        r = self._atf_get(
+            session,
+            "https://booru.allthefallen.moe/posts.json",
+            host,
+            params=params,
+            timeout=self.timeout,
+            headers=self._danbooru_api_headers(host),
+            auth=self._danbooru_auth_tuple(host),
+        )
+        self._danbooru_log_response_problem(r, "source-relay", host)
+        data = safe_json_response(r, host)
+        return self._post_dicts_from_data(data)
+
+    def _atf_media_assets_by_pixel_hash(self, pixel_hash, limit=5):
+        """Return ATF media_assets for a Danbooru-style pixel_hash.
+
+        This is a locator, not a tag source.  The media_asset response gives an
+        authoritative original file md5; tags still come from /posts.json by
+        that md5 through the normal ATF JSON path.
+        """
+        pixel_hash = str(pixel_hash or "").strip().lower()
+        if not is_md5(pixel_hash):
+            return []
+        host = "booru.allthefallen.moe"
+        session = self.session_for_host(host)
+        params = {"search[pixel_hash]": pixel_hash, "limit": int(limit)}
+        params.update(self._danbooru_api_params(host))
+        r = self._atf_get_cached(
+            session,
+            "https://booru.allthefallen.moe/media_assets.json",
+            host,
+            params=params,
+            timeout=self.timeout,
+            headers=self._danbooru_api_headers(host),
+            auth=self._danbooru_auth_tuple(host),
+        )
+        self._danbooru_log_response_problem(r, "media-asset-pixel-hash", host)
+        data = safe_json_response(r, host)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            for key in ("media_assets", "assets", "results"):
+                if isinstance(data.get(key), list):
+                    return [x for x in data.get(key) if isinstance(x, dict)]
+            if data.get("id") is not None:
+                return [data]
+        return []
+
+    def _atf_pixel_hash_locator_lookup(self, site, local_md5):
+        """ATF fallback: local file -> pixel_hash -> media_asset.md5 -> post tags.
+
+        Useful for resized/recompressed derivatives where byte MD5 differs but
+        ATF's Danbooru-style pixel_hash still points to the original asset.
+        """
+        if bool(getattr(self, "_atf_pixel_hash_guard", False)):
+            return [], "", empty_tag_groups()
+        if not bool(self.settings.get("atf_pixel_hash_locator_enabled", True)):
+            return [], "", empty_tag_groups()
+        path = str(getattr(self, "_current_md5_lookup_path", "") or "").strip()
+        if not path:
+            return [], "", empty_tag_groups()
+        try:
+            p = Path(path)
+            if not p.exists() or p.suffix.lower() not in MEDIA_EXTS:
+                return [], "", empty_tag_groups()
+        except Exception:
+            return [], "", empty_tag_groups()
+
+        pixel_hash = danbooru_pixel_hash(path)
+        if not pixel_hash:
+            self.log("    ATF PIXEL HASH: local pixel_hash unavailable")
+            return [], "", empty_tag_groups()
+
+        self.log(f"    ATF PIXEL HASH: search media_assets pixel_hash={pixel_hash}")
+        try:
+            assets = self._atf_media_assets_by_pixel_hash(pixel_hash, limit=int(self.settings.get("atf_pixel_hash_max_assets", 5) or 5))
+        except Exception as e:
+            self.log(f"    ATF PIXEL HASH ERROR: {type(e).__name__}: {e}")
+            return [], "", empty_tag_groups()
+        if not assets:
+            self.log("    ATF PIXEL HASH MISS: no media_asset")
+            return [], "", empty_tag_groups()
+
+        local_md5 = str(local_md5 or "").strip().lower()
+        seen = set()
+        for asset in assets:
+            asset_md5 = str(asset.get("md5") or "").strip().lower()
+            if not is_md5(asset_md5) or asset_md5 in seen:
+                continue
+            seen.add(asset_md5)
+            if asset_md5 == local_md5:
+                self.log(f"    ATF PIXEL HASH SKIP: asset md5 equals local md5 {asset_md5}")
+                continue
+            self.log(
+                f"    ATF PIXEL HASH ASSET: asset={asset.get('id','?')} "
+                f"md5={asset_md5} size={asset.get('image_width','?')}x{asset.get('image_height','?')}"
+            )
+            try:
+                old_guard = getattr(self, "_atf_pixel_hash_guard", False)
+                self._atf_pixel_hash_guard = True
+                tags, source, groups = self.engine_by_md5(site, asset_md5)
+            finally:
+                self._atf_pixel_hash_guard = old_guard
+            if tags:
+                try:
+                    self._last_atf_pixel_hash_site_md5s = unique_keep_order(list(getattr(self, "_last_atf_pixel_hash_site_md5s", []) or []) + [asset_md5])
+                    self._last_variant_site_md5s = unique_keep_order(list(getattr(self, "_last_variant_site_md5s", []) or []) + [asset_md5])
+                except Exception:
+                    pass
+                self._last_lookup_match_method = "atf_pixel_hash"
+                self.log(f"    ATF PIXEL HASH TAGS: md5={asset_md5} tags={len(tags)} source={redact_sensitive_url(source)}")
+                return tags, source or f"https://booru.allthefallen.moe/media_assets/{asset.get('id','')}", groups
+            self.log(f"    ATF PIXEL HASH POST MISS: md5={asset_md5}")
+        return [], "", empty_tag_groups()
+
+    def _source_relay_posts_e621(self, query, limit=5):
+        host = "e621.net"
+        session = self.session_for_host(host)
+        params = {"tags": query, "limit": int(limit)}
+        params.update(self._e621_api_params(host, include_v2=True))
+        api_url = "https://e621.net/posts.json"
+        auth = self._e621_auth_tuple(host)
+        r = session.get(
+            api_url,
+            params=params,
+            timeout=self.timeout,
+            headers=self._e621_api_headers(host),
+            auth=auth,
+        )
+        self._e621_log_response_problem(r, "source-relay")
+        if self._e621_is_cloudflare_html_response(r):
+            br = self._e621_browser_get_json_response(api_url, params=params, auth=auth, host=host, context="source-relay")
+            if br is not None:
+                r = br
+        data = safe_json_response(r, host)
+        posts = []
+        if isinstance(data, dict) and isinstance(data.get("posts"), list):
+            posts = data.get("posts")
+        else:
+            posts = self._post_dicts_from_data(data)
+        return [p for p in posts if isinstance(p, dict)]
+
+    def _source_relay_probe_sites(self, query):
+        """Try one safe source query across trusted booru APIs and return md5/site."""
+        attempts = [
+            ("danbooru.donmai.us", self._source_relay_posts_danbooru),
+            ("gelbooru.com", lambda q: self._source_relay_posts_gelbooru_like("gelbooru.com", q)),
+            ("rule34.xxx", self._source_relay_posts_rule34xxx),
+            ("booru.allthefallen.moe", self._source_relay_posts_atf),
+            ("e621.net", self._source_relay_posts_e621),
+        ]
+        for site, func in attempts:
+            try:
+                posts = func(query)
+                got = self._first_md5_from_posts(posts)
+                if got:
+                    return got, site, len(posts or [])
+            except Exception as e:
+                # Auth-required/no-match on one relay site must not cancel the
+                # whole relay; the next trusted booru may still have it.
+                try:
+                    self.log(f"  SOURCE MD5 RELAY PROBE SKIP [{site}]: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
+        return "", "", 0
+
+    def extract_md5_from_post_url(self, url: str) -> str:
+        """Try to recover a verified post MD5 from a reverse-search result URL.
+
+        This is a source locator, not a tag source.  Known booru hosts are read
+        through their JSON/DAPI post endpoint first; arbitrary HTML is used only
+        as a last-resort regex and only when a 32-hex value is close to md5/hash
+        wording.
+        """
+        url = str(url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return ""
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower().replace("www.", "")
+        except Exception:
+            return ""
+        if not host:
+            return ""
+
+        post_id = self._post_id_from_url_for_md5_relay(url, host)
+
+        def _md5_from_posts(posts):
+            for post in posts or []:
+                got = self._post_md5_value(post)
+                if got and is_md5(got):
+                    return got.lower()
+            return ""
+
+        try:
+            if host in ("rule34.xxx", "api.rule34.xxx") and post_id:
+                posts = self._rule34xxx_dapi_posts_by_id(self.site_cfg("rule34.xxx"), post_id)
+                got = _md5_from_posts(posts)
+                if got:
+                    return got
+
+            if host in ("gelbooru.com", "xbooru.com", "hypnohub.net"):
+                q = parse_qs(parsed.query or "")
+                lookup = {}
+                if post_id:
+                    lookup = {"id": post_id}
+                elif (q.get("md5") or [""])[0]:
+                    md5q = str((q.get("md5") or [""])[0]).strip().lower()
+                    if is_md5(md5q):
+                        return md5q
+                elif str((q.get("tags") or [""])[0]).lower().startswith("md5:"):
+                    md5q = str((q.get("tags") or [""])[0]).split(":", 1)[1].strip().lower()
+                    if is_md5(md5q):
+                        return md5q
+                if lookup:
+                    params = {"page": "dapi", "s": "post", "q": "index", "json": "1", **lookup}
+                    params.update(self.auth_params(self.site_cfg(host)))
+                    r = self.session_for_host(host).get(f"https://{host}/index.php", params=params, timeout=self.timeout)
+                    got = _md5_from_posts(self._posts_from_dapi_response(r, host))
+                    if got:
+                        return got
+
+            if host in ("danbooru.donmai.us", "donmai.us") and post_id:
+                r = self.session_for_host("danbooru.donmai.us").get(
+                    f"https://danbooru.donmai.us/posts/{post_id}.json",
+                    params=self._danbooru_api_params("danbooru.donmai.us"),
+                    timeout=self.timeout,
+                    headers=self._danbooru_api_headers("danbooru.donmai.us"),
+                    auth=self._danbooru_auth_tuple("danbooru.donmai.us"),
+                )
+                self._danbooru_log_response_problem(r, "post-md5-extract", "danbooru.donmai.us")
+                data = safe_json_response(r, "danbooru.donmai.us")
+                post = data if isinstance(data, dict) else {}
+                got = self._post_md5_value(post)
+                if got and is_md5(got):
+                    return got.lower()
+
+            if host in ("booru.allthefallen.moe", "allthefallen.moe") and post_id:
+                atf_host = "booru.allthefallen.moe"
+                r = self._atf_get(
+                    self.session_for_host(atf_host),
+                    f"https://booru.allthefallen.moe/posts/{post_id}.json",
+                    atf_host,
+                    params=self._danbooru_api_params(atf_host),
+                    timeout=self.timeout,
+                    headers=self._danbooru_api_headers(atf_host),
+                    auth=self._danbooru_auth_tuple(atf_host),
+                )
+                self._danbooru_log_response_problem(r, "post-md5-extract", atf_host)
+                data = safe_json_response(r, atf_host)
+                post = data if isinstance(data, dict) else {}
+                got = self._post_md5_value(post)
+                if got and is_md5(got):
+                    return got.lower()
+
+            if host in ("e621.net", "e926.net") and post_id:
+                params = self._e621_api_params(host, include_v2=True)
+                api_url = f"https://{host}/posts/{post_id}.json"
+                auth = self._e621_auth_tuple(host)
+                r = self.session_for_host(host).get(
+                    api_url,
+                    params=params,
+                    timeout=self.timeout,
+                    headers=self._e621_api_headers(host),
+                    auth=auth,
+                )
+                self._e621_log_response_problem(r, "md5-relay-post-json")
+                if self._e621_is_cloudflare_html_response(r):
+                    br = self._e621_browser_get_json_response(api_url, params=params, auth=auth, host=host, context="md5-relay-post-json")
+                    if br is not None:
+                        r = br
+                data = safe_json_response(r, host)
+                post = data.get("post", data) if isinstance(data, dict) else {}
+                got = self._post_md5_value(post)
+                if got and is_md5(got):
+                    return got.lower()
+
+            if host in ("yande.re", "konachan.com", "konachan.net") and post_id:
+                session = self.session_for_host(host)
+                attempts = [
+                    (f"https://{host}/post/show/{post_id}.json", None),
+                    (f"https://{host}/post.json", {"tags": f"id:{post_id}", "limit": 1}),
+                ]
+                for api_url, params in attempts:
+                    try:
+                        r = session.get(api_url, params=params, timeout=self.timeout, headers={"Accept": "application/json, */*"})
+                        data = safe_json_response(r, host)
+                        got = _md5_from_posts(self._post_dicts_from_data(data))
+                        if got:
+                            return got
+                    except Exception:
+                        continue
+
+            # Direct static/data URLs often contain the MD5 as media filename.
+            media_md5 = self._md5_from_urlish(url)
+            if media_md5:
+                return media_md5
+
+            # Last resort: HTML page regex near md5/hash/checksum.  Do not scan
+            # arbitrary 32-hex strings far away from hash wording.
+            r = self.session_for_host(host).get(url, timeout=self.timeout, headers={"Accept": "text/html,application/xhtml+xml,*/*"})
+            got = self._md5_near_keywords_from_html(getattr(r, "text", "") or "")
+            if got:
+                return got
+        except Exception as e:
+            try:
+                self.log(f"  MD5 RELAY EXTRACT ERROR [{host}]: {type(e).__name__}: {e}")
+            except Exception:
+                pass
+        return ""
+
+    def extract_md5_from_source_url_relay(self, url: str) -> str:
+        """Source URL -> trusted booru/API -> MD5 relay.
+
+        Unsupported reverse-search hits (Pixiv/Fanbox/FA/Kemono/etc.) are not
+        tag sources.  They are only locators.  We search the URL/source ID on
+        trusted booru APIs, take an authoritative MD5 from the found post, then
+        pass that MD5 through the ordinary MD5 pipeline.
+        """
+        url = str(url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return ""
+        queries = self._source_relay_query_strings_for_url(url)
+        if not queries:
+            return ""
+        seen = set()
+        for query in queries:
+            query = str(query or "").strip()
+            if not query or query in seen:
+                continue
+            seen.add(query)
+            # Absolute safety: never run bare source:*12345678* style probes.
+            if re.fullmatch(r"source:\*?\d{5,}\*?", query):
+                self.log(f"  SOURCE MD5 RELAY UNSAFE QUERY SKIPPED: {query}")
+                continue
+            try:
+                md5v, site, count = self._source_relay_probe_sites(query)
+                if md5v:
+                    self.log(f"  SOURCE MD5 RELAY FOUND: md5={md5v} via={site} query={query} posts={count}")
+                    return md5v.lower()
+            except Exception as e:
+                try:
+                    self.log(f"  SOURCE MD5 RELAY ERROR: {type(e).__name__}: {e}")
+                except Exception:
+                    pass
+        self.log(f"  SOURCE MD5 RELAY MISS: {url}")
+        return ""
+
     def tags_from_url(self, url):
         host = urlparse(url).netloc.lower().replace("www.", "")
         try:
@@ -1461,6 +2249,8 @@ class Tagger:
                 return self.rule34us_tags(url)
             if host in ("danbooru.donmai.us", "donmai.us"):
                 return self.danbooru_tags(url)
+            if host in ("booru.allthefallen.moe", "allthefallen.moe"):
+                return self.atf_tags(url)
             if host == "gelbooru.com":
                 return self.gelbooru_tags(url)
             if host in ("xbooru.com", "hypnohub.net"):
@@ -1481,20 +2271,98 @@ class Tagger:
             return []
         return []
 
+    def _guarded_category_projection(self, authoritative_tags, candidate_groups, baseline_groups=None):
+        """Return categories only for tags confirmed by a structured post response.
+
+        Gelbooru/Rule34 HTML exposes useful colour/category information, but the
+        rendered page may also contain sidebar, recommendation or navigation
+        tags.  ``authoritative_tags`` comes from the exact DAPI/API post and is
+        the only tag set permitted to enter source-scoped metadata.
+        """
+        ordered = unique_keep_order([normalize_tag(tag) for tag in (authoritative_tags or []) if normalize_tag(tag)])
+        allowed = set(ordered)
+        out = empty_tag_groups()
+        assigned = set()
+
+        def merge(groups):
+            for group, values in (groups or {}).items():
+                for raw in values or []:
+                    norm = normalize_tag(raw)
+                    if not norm or norm not in allowed or norm in assigned:
+                        continue
+                    safe_group = "meta" if norm == "artist_request" else str(group or "general")
+                    add_tags_to_groups(out, safe_group, [norm])
+                    assigned.add(norm)
+
+        # HTML classification takes precedence when available; an already
+        # structured API response fills any missing classifications afterwards.
+        merge(candidate_groups)
+        merge(baseline_groups)
+        for norm in ordered:
+            if norm not in assigned:
+                add_tags_to_groups(out, "meta" if norm == "artist_request" else "general", [norm])
+        return out
+
+    def _flat_general_groups(self, tags):
+        groups = empty_tag_groups()
+        groups["general"] = unique_keep_order([normalize_tag(t) for t in (tags or []) if normalize_tag(t)])
+        return groups
+
+    def _groups_have_classified_tags(self, groups):
+        return any((groups or {}).get(key) for key in ("artist", "character", "copyright", "species", "meta", "contributor", "lore", "invalid"))
+
+    def _flat_source_html_category_overlay(self, host, url, api_tags, api_groups=None):
+        """Classify an already-confirmed flat API tag set using page HTML only.
+
+        The API/post response remains authoritative for membership.  HTML is
+        allowed to move those same tags between categories, but it is never
+        allowed to add sidebar/recommendation/search tags to the source record.
+        When the durable background queue is enabled, failed HTML classification
+        deliberately falls back to the original flat general set instead of
+        running extra tag-catalogue requests in the same job.
+        """
+        host = (host or "").lower().replace("www.", "")
+        api_tags = unique_keep_order([normalize_tag(t) for t in (api_tags or []) if normalize_tag(t)])
+        if not api_tags:
+            return empty_tag_groups()
+        baseline = api_groups if groups_to_tags(api_groups or {}) else self._flat_general_groups(api_tags)
+        try:
+            session_host = "rule34.xxx" if host == "api.rule34.xxx" else host
+            html = self.session_for_host(session_host).get(
+                url, timeout=self.timeout,
+                headers={"Accept": "text/html,application/xhtml+xml,*/*"},
+            ).text
+            if host in ("rule34.xxx", "api.rule34.xxx"):
+                html_groups = self.booru_groups_from_html(html)
+                shown = "rule34.xxx"
+            else:
+                html_groups = self.gelbooru_groups_from_html(html)
+                shown = host
+            safe_groups = self._guarded_category_projection(api_tags, html_groups, baseline)
+            classified = sum(len(safe_groups.get(key, []) or []) for key in ("artist", "character", "copyright", "species", "meta"))
+            if groups_to_tags(safe_groups):
+                self.log(f"    {shown} TAG CATEGORY SOURCE: guarded_html_overlay classified={classified} general={len(safe_groups.get('general', []) or [])}")
+                return safe_groups
+        except Exception as e:
+            self.log(f"    {host} HTML CATEGORY OVERLAY ERROR: {type(e).__name__}: {e}")
+
+        # In the background category pipeline HTML is the sorter.  The tag-index
+        # API remains a non-background fallback only, so foreground/queue work
+        # never mutates the old flat-list contract.
+        if self._needs_background_tag_groups(url):
+            return self._guarded_category_projection(api_tags, {}, baseline)
+        return self._categorize_flat_tags("rule34.xxx" if host == "api.rule34.xxx" else host, api_tags)
+
     def grouped_tags_from_url(self, url):
         host = urlparse(url).netloc.lower().replace("www.", "")
 
         try:
             if host in ("rule34.xxx", "api.rule34.xxx"):
-                try:
-                    html = self.session_for_host("rule34.xxx").get(url, timeout=self.timeout).text
-                    groups = self.booru_groups_from_html(html)
-                    if groups_to_tags(groups):
-                        return groups
-                except Exception:
-                    pass
-                tags = self.tags_from_url(url)
-                return self._categorize_flat_tags("rule34.xxx", tags)
+                # Rule34 API decides membership; HTML only sorts those exact tags.
+                api_tags = unique_keep_order(self.rule34xxx_tags(url))
+                if not api_tags:
+                    return empty_tag_groups()
+                return self._flat_source_html_category_overlay(host, url, api_tags, self._flat_general_groups(api_tags))
 
             if host == "rule34.us":
                 # No verified JSON API exists here. On a concrete post page,
@@ -1523,17 +2391,30 @@ class Tagger:
                 s = self.session_for_host("danbooru.donmai.us")
                 r = s.get(
                     f"https://danbooru.donmai.us/posts/{post_id}.json",
-                    params=self.auth_params(self.site_cfg("danbooru.donmai.us")),
+                    params=self._danbooru_api_params("danbooru.donmai.us"),
                     timeout=self.timeout,
-                    headers=self._danbooru_api_headers(),
+                    headers=self._danbooru_api_headers("danbooru.donmai.us"),
+                    auth=self._danbooru_auth_tuple("danbooru.donmai.us"),
                 )
+                self._danbooru_log_response_problem(r, "post-md5-extract")
                 data = safe_json_response(r, "danbooru.donmai.us")
                 return self._groups_from_post_dict_general(data if isinstance(data, dict) else {})
 
+            if host in ("booru.allthefallen.moe", "allthefallen.moe"):
+                return self.atf_groups_from_url(url)
+
             if host in ("gelbooru.com", "xbooru.com", "hypnohub.net"):
-                # Documented DAPI sources: read grouped metadata from their
-                # API, never from display text in the rendered page.
-                return self.documented_dapi_groups_from_url(url, host)
+                # Gelbooru-family DAPI decides membership.  If the post API is
+                # flat, HTML is used only as a guarded category overlay; it never
+                # contributes new tags.  If the API itself already contains
+                # split categories, preserve them directly.
+                api_groups = self.documented_dapi_groups_from_url(url, host, categorize_flat=False)
+                api_tags = unique_keep_order(groups_to_tags(api_groups))
+                if not api_tags:
+                    return empty_tag_groups()
+                if self._groups_have_classified_tags(api_groups):
+                    return self._guarded_category_projection(api_tags, {}, api_groups)
+                return self._flat_source_html_category_overlay(host, url, api_tags, api_groups)
 
             if host in ("e621.net", "e926.net"):
                 # e621 post JSON already exposes clean grouped tags. Never parse the
@@ -1541,12 +2422,22 @@ class Tagger:
                 # ``Uploaded by the artist`` and ``4.2m`` that polluted SQLite.
                 post_id = urlparse(url).path.strip("/").split("/")[-1]
                 session = self.session_for_host(host)
-                data = safe_json_response(session.get(
-                    f"https://{host}/posts/{post_id}.json",
-                    params=self.auth_params(self.site_cfg(host)),
+                api_url = f"https://{host}/posts/{post_id}.json"
+                params = self._e621_api_params(host, include_v2=True)
+                auth = self._e621_auth_tuple(host)
+                r = session.get(
+                    api_url,
+                    params=params,
                     timeout=self.timeout,
                     headers=self._e621_api_headers(host),
-                ), host)
+                    auth=auth,
+                )
+                self._e621_log_response_problem(r, "post-groups")
+                if self._e621_is_cloudflare_html_response(r):
+                    br = self._e621_browser_get_json_response(api_url, params=params, auth=auth, host=host, context="post-groups")
+                    if br is not None:
+                        r = br
+                data = safe_json_response(r, host)
                 post = data.get("post", data) if isinstance(data, dict) else {}
                 return self._groups_from_post_dict_general(post)
 
@@ -1560,10 +2451,12 @@ class Tagger:
         if not post_id:
             return []
         api = "https://api.rule34.xxx/index.php"
-        params = {"page": "dapi", "s": "post", "q": "index", "json": "1", "id": post_id}
-        params.update(self.auth_params(self.site_cfg("rule34.xxx")))
+        site = self.site_cfg("rule34.xxx")
+        params = self._rule34xxx_api_params(site, id=post_id, limit=1)
         session = self.session_for_host("rule34.xxx")
-        data = safe_json_response(session.get(api, params=params, timeout=self.timeout), "rule34.xxx")
+        response = session.get(api, params=params, timeout=self.timeout, headers=self._rule34xxx_api_headers(site))
+        self._rule34xxx_log_response_problem(response, "post-tags")
+        data = safe_json_response(response, "rule34.xxx")
         if isinstance(data, list) and data:
             return data[0].get("tags", "").split()
         if isinstance(data, dict):
@@ -1592,6 +2485,38 @@ class Tagger:
         except Exception:
             return []
 
+    def _post_id_from_danbooru_like_url(self, url):
+        parts = urlparse(url).path.strip("/").split("/")
+        if len(parts) >= 3 and parts[0] == "post" and parts[1] == "show":
+            return parts[2]
+        if len(parts) >= 2 and parts[0] == "posts":
+            return parts[1]
+        return parts[-1] if parts else ""
+
+    def atf_groups_from_url(self, url):
+        """Read ATF/AllTheFallen post tags only from its Danbooru-compatible JSON API."""
+        post_id = self._post_id_from_danbooru_like_url(url)
+        if not post_id:
+            return empty_tag_groups()
+        host = "booru.allthefallen.moe"
+        session = self.session_for_host(host)
+        r = self._atf_get(
+            session,
+            f"https://booru.allthefallen.moe/posts/{post_id}.json",
+            host,
+            params=self._danbooru_api_params(host),
+            timeout=self.timeout,
+            headers=self._danbooru_api_headers(host),
+            auth=self._danbooru_auth_tuple(host),
+        )
+        self._danbooru_log_response_problem(r, "post-json", host)
+        data = safe_json_response(r, host)
+        post = data.get("post", data) if isinstance(data, dict) else {}
+        return self._groups_from_post_dict_general(post)
+
+    def atf_tags(self, url):
+        return groups_to_tags(self.atf_groups_from_url(url))
+
     def danbooru_tags(self, url):
         """Read official Danbooru post tags only from its JSON API."""
         parts = urlparse(url).path.strip("/").split("/")
@@ -1606,10 +2531,12 @@ class Tagger:
         session = self.session_for_host("danbooru.donmai.us")
         r = session.get(
             f"https://danbooru.donmai.us/posts/{post_id}.json",
-            params=self.auth_params(self.site_cfg("danbooru.donmai.us")),
+            params=self._danbooru_api_params("danbooru.donmai.us"),
             timeout=self.timeout,
-            headers=self._danbooru_api_headers(),
+            headers=self._danbooru_api_headers("danbooru.donmai.us"),
+            auth=self._danbooru_auth_tuple("danbooru.donmai.us"),
         )
+        self._danbooru_log_response_problem(r, "post-json")
         data = safe_json_response(r, "danbooru.donmai.us")
         return groups_to_tags(self._groups_from_post_dict_general(data if isinstance(data, dict) else {}))
 
@@ -1928,39 +2855,63 @@ class Tagger:
         return self._filter_recovered_gelbooru_tags(unique_keep_order(tags))
 
     def gelbooru_groups_from_html(self, html):
-        """Dormant compatibility parser: group Gelbooru href tag values only."""
+        """Extract Gelbooru sidebar categories from href tag values only.
+
+        Gelbooru has used several sidebar layouts over time: named classes such
+        as ``tag-type-artist``, numeric classes such as ``tag-type-1``, and
+        heading-based sections (``Artist`` / ``Character`` / ``Metadata``).
+        The caller still guards membership against the exact DAPI post tags, so
+        this method is permitted to classify tags but never to introduce a new
+        source tag into SQLite.
+        """
         soup = BeautifulSoup(html or "", "html.parser")
         groups = empty_tag_groups()
-        selectors = {
-            "artist": ["li.tag-type-artist a[href*='tags=']"],
-            "character": ["li.tag-type-character a[href*='tags=']"],
-            "copyright": ["li.tag-type-copyright a[href*='tags=']", "li.tag-type-copyrights a[href*='tags=']"],
-            "general": ["li.tag-type-general a[href*='tags=']"],
-            "meta": ["li.tag-type-metadata a[href*='tags=']", "li.tag-type-meta a[href*='tags=']"],
+        class_selectors = {
+            # Gelbooru numeric classes follow the common booru category IDs:
+            # 0 general, 1 artist, 3 copyright, 4 character, 5 metadata.
+            "artist": ["li.tag-type-artist", ".tag-type-artist", "li.tag-type-1", ".tag-type-1", "li.category-1", ".category-1"],
+            "character": ["li.tag-type-character", ".tag-type-character", "li.tag-type-4", ".tag-type-4", "li.category-4", ".category-4"],
+            "copyright": ["li.tag-type-copyright", "li.tag-type-copyrights", ".tag-type-copyright", ".tag-type-copyrights", "li.tag-type-3", ".tag-type-3", "li.category-3", ".category-3"],
+            "general": ["li.tag-type-general", ".tag-type-general", "li.tag-type-0", ".tag-type-0", "li.category-0", ".category-0"],
+            "meta": ["li.tag-type-metadata", "li.tag-type-meta", ".tag-type-metadata", ".tag-type-meta", "li.tag-type-5", ".tag-type-5", "li.category-5", ".category-5"],
         }
-        for group, sels in selectors.items():
-            for sel in sels:
-                for a in soup.select(sel):
-                    href = a.get("href", "") or ""
-                    try:
-                        for raw in parse_qs(urlparse(href).query).get("tags", []):
-                            for tag in str(raw).replace("+", " ").split():
-                                tag = normalize_tag(tag)
-                                if tag and not tag.startswith(("rating:", "sort:", "md5:")):
-                                    groups[group].append(tag)
-                    except Exception:
-                        pass
+
+        def append_links(group, node):
+            for a in node.select("a[href*='tags=']"):
+                href = a.get("href", "") or ""
+                for tag in self._clean_booru_tag_candidate("", href):
+                    tag = normalize_tag(tag)
+                    if tag and tag not in groups[group]:
+                        groups[group].append(tag)
+
+        for group, selectors in class_selectors.items():
+            seen_nodes = set()
+            for selector in selectors:
+                for node in soup.select(selector):
+                    marker = id(node)
+                    if marker in seen_nodes:
+                        continue
+                    seen_nodes.add(marker)
+                    append_links(group, node)
+
+        # Current/alternate Gelbooru themes can render only textual section
+        # headings while the tag links themselves have no category class.
+        section_groups = self._groups_from_sidebar_sections(soup)
+        for group, values in (section_groups or {}).items():
+            for tag in values or []:
+                tag = normalize_tag(tag)
+                if tag and tag not in groups[group]:
+                    groups[group].append(tag)
+
+        # Preserve compatibility with uncategorised pages; the DAPI guard in the
+        # caller will still discard all non-post/sidebar pollution.
         if not groups_to_tags(groups):
             for a in soup.select("a[href*='tags=']"):
-                href = a.get("href", "") or ""
-                try:
-                    for raw in parse_qs(urlparse(href).query).get("tags", []):
-                        for tag in str(raw).replace("+", " ").split():
-                            tag = normalize_tag(tag)
-                            if tag and not tag.startswith(("rating:", "sort:", "md5:", "page:", "id:")):
-                                groups["general"].append(tag)
-                except Exception:
-                    pass
+                for tag in self._clean_booru_tag_candidate("", a.get("href", "") or ""):
+                    tag = normalize_tag(tag)
+                    if tag and tag not in groups["general"]:
+                        groups["general"].append(tag)
+
         for key in groups:
             groups[key] = self._filter_recovered_gelbooru_tags(unique_keep_order(groups[key]))
         return groups
@@ -1992,6 +2943,18 @@ class Tagger:
             return groups
 
         remaining = set(clean)
+        cache_updates = {}
+        try:
+            from core.database.storage import cached_tag_categories
+            cached = cached_tag_categories(self.settings, host, clean)
+        except Exception:
+            cached = {}
+        for _name, _cat in dict(cached or {}).items():
+            if _name in remaining:
+                add_tags_to_groups(groups, _cat or "general", [_name])
+                remaining.discard(_name)
+        if not remaining:
+            return groups
         s = self.session_for_host(session_host)
 
         # Small chunks keep URLs below browser/server limits.
@@ -2004,9 +2967,16 @@ class Tagger:
                 "json": "1",
                 "names": " ".join(chunk),
             }
-            params.update(self.auth_params(self.site_cfg(session_host)))
+            if host == "rule34.xxx":
+                params.update(self._rule34xxx_api_auth_params(self.site_cfg("rule34.xxx")))
+                req_headers = self._rule34xxx_api_headers(self.site_cfg("rule34.xxx"))
+            else:
+                params.update(self.auth_params(self.site_cfg(session_host)))
+                req_headers = None
             try:
-                r = s.get(base, params=params, timeout=self.timeout)
+                r = s.get(base, params=params, timeout=self.timeout, headers=req_headers)
+                if host == "rule34.xxx":
+                    self._rule34xxx_log_response_problem(r, "tag-category")
                 data = None
                 try:
                     data = r.json()
@@ -2043,18 +3013,30 @@ class Tagger:
                     typ = row.get("type", row.get("category", row.get("tag_type")))
                     group = group_from_tag_type(typ)
                     add_tags_to_groups(groups, group, [name])
+                    cache_updates[name] = group
                     remaining.discard(name)
             except Exception as e:
                 self.log(f"    TAG CATEGORY ERROR [{host}]: {e}")
 
-        # Some old DAPI implementations do not support names=<many tags>.
-        # Fallback: ask exact tag info one-by-one for the still unknown tags.
-        for tag in list(remaining):
+        # Gelbooru's current documentation explicitly supports names=<many tags>.
+        # Do not turn one matched post into tens of API requests in its live
+        # lane; a failed/unclassified batch will be retried by the guarded
+        # background overlay.  Keep the expensive compatibility fallback only
+        # for other Gelbooru-family engines whose API behaviour is uncertain.
+        single_tag_fallback = host != "gelbooru.com"
+        for tag in list(remaining) if single_tag_fallback else []:
             for key in ("name", "name_pattern"):
                 try:
                     params = {"page": "dapi", "s": "tag", "q": "index", "json": "1", key: tag}
-                    params.update(self.auth_params(self.site_cfg(session_host)))
-                    r = s.get(base, params=params, timeout=self.timeout)
+                    if host == "rule34.xxx":
+                        params.update(self._rule34xxx_api_auth_params(self.site_cfg("rule34.xxx")))
+                        req_headers = self._rule34xxx_api_headers(self.site_cfg("rule34.xxx"))
+                    else:
+                        params.update(self.auth_params(self.site_cfg(session_host)))
+                        req_headers = None
+                    r = s.get(base, params=params, timeout=self.timeout, headers=req_headers)
+                    if host == "rule34.xxx":
+                        self._rule34xxx_log_response_problem(r, "tag-category-single")
                     rows = []
                     try:
                         data = r.json()
@@ -2084,7 +3066,9 @@ class Tagger:
                         if name != tag:
                             continue
                         typ = row.get("type", row.get("category", row.get("tag_type")))
-                        add_tags_to_groups(groups, group_from_tag_type(typ), [tag])
+                        group = group_from_tag_type(typ)
+                        add_tags_to_groups(groups, group, [tag])
+                        cache_updates[tag] = group
                         remaining.discard(tag)
                         found = True
                         break
@@ -2093,8 +3077,19 @@ class Tagger:
                 except Exception:
                     pass
 
-        # Do not lose unknown tags.
-        add_tags_to_groups(groups, "general", sorted(remaining))
+        try:
+            if cache_updates:
+                from core.database.storage import upsert_tag_category_cache
+                upsert_tag_category_cache(self.settings, host, cache_updates, method="dapi_tag_api")
+        except Exception:
+            pass
+
+        # Do not lose unknown tags. They still belong to the exact post, even
+        # when the tag catalogue does not return a category for them.
+        add_tags_to_groups(groups, "general", [tag for tag in clean if tag in remaining])
+        if host in ("gelbooru.com", "rule34.xxx"):
+            classified = sum(len(groups.get(key, []) or []) for key in ("artist", "character", "copyright", "meta"))
+            self.log(f"    {host} TAG CATEGORY SOURCE: dapi_tag_api classified={classified} general={len(groups.get('general', []) or [])}")
         return groups
 
     def _categorize_flat_tags(self, source_host, tags):
@@ -2107,7 +3102,7 @@ class Tagger:
         groups["general"] = unique_keep_order([normalize_tag(t) for t in tags or [] if normalize_tag(t)])
         return groups
 
-    def gelbooru_groups_from_post(self, post, source_host="gelbooru.com"):
+    def gelbooru_groups_from_post(self, post, source_host="gelbooru.com", *, categorize_flat=True):
         groups = empty_tag_groups()
         if not isinstance(post, dict):
             return groups
@@ -2135,10 +3130,14 @@ class Tagger:
             add_tags_to_groups(groups, "general", [t for t in flat if normalize_tag(t) not in known])
             return groups
 
-        # Older Gelbooru DAPI exposes only flat "tags". Categorize them using
-        # page=dapi&s=tag&q=index&names=...
+        # Older Gelbooru-family DAPI exposes only a flat "tags" field.  In the
+        # live conveyor/background path this must stay flat and be sorted later
+        # by guarded HTML overlay; the tag-list API is only a fallback when
+        # explicit immediate categorisation is requested.
         flat = self.gelbooru_tags_from_post(post)
         if flat:
+            if not categorize_flat:
+                return self._flat_general_groups(flat)
             return self._categorize_flat_tags(source_host, flat)
         return groups
 
@@ -2153,7 +3152,7 @@ class Tagger:
             return unique_keep_order(value)
         return []
 
-    def documented_dapi_groups_from_url(self, url, host):
+    def documented_dapi_groups_from_url(self, url, host, *, categorize_flat=True):
         """Read Gelbooru-family post metadata only from exact JSON DAPI calls."""
         host = str(host or "").lower().replace("www.", "")
         if host not in {"gelbooru.com", "xbooru.com", "hypnohub.net"}:
@@ -2175,7 +3174,7 @@ class Tagger:
         r = self.session_for_host(host).get(f"https://{host}/index.php", params=params, timeout=self.timeout)
         posts = self._posts_from_dapi_response(r, host)
         if posts:
-            return self.gelbooru_groups_from_post(posts[0], host)
+            return self.gelbooru_groups_from_post(posts[0], host, categorize_flat=categorize_flat)
         return empty_tag_groups()
 
     def gelbooru_dapi_posts(self, params):
@@ -2234,36 +3233,530 @@ class Tagger:
         return []
 
 
-    def _danbooru_api_headers(self):
-        """Headers for official Danbooru JSON calls.
+    def _danbooru_site_cfg(self, host="danbooru.donmai.us"):
+        """Return saved settings for official Danbooru.
 
-        Danbooru requests a unique application User-Agent rather than a browser
-        impersonation. Login is included only as a harmless identifier when it
-        is already configured for the site's API.
+        Danbooru accepts API credentials either as query params or as HTTP
+        Basic auth.  Prefer the canonical saved host so transient ``donmai.us``
+        URLs and normalized site rows do not lose the user's configured key.
         """
-        cfg = self.site_cfg("danbooru.donmai.us")
+        host = str(host or "danbooru.donmai.us").lower().replace("www.", "")
+        candidates = []
+        if host in ("danbooru.donmai.us", "donmai.us"):
+            candidates.extend(["danbooru.donmai.us", host])
+        elif "allthefallen" in host:
+            candidates.extend(["booru.allthefallen.moe", host])
+        else:
+            candidates.append(host)
+        for key in candidates:
+            cfg = self.site_cfg(key)
+            if isinstance(cfg, dict) and cfg:
+                return cfg
+        return {}
+
+    def _danbooru_api_headers(self, host="danbooru.donmai.us"):
+        """Headers for the official Danbooru JSON API.
+
+        Danbooru's API documentation asks clients to identify themselves with a
+        unique application User-Agent and not to impersonate browsers or the
+        default library header.  Browser cookies may still be loaded by the
+        session layer for Cloudflare/login pages, but API requests must override
+        that browser UA with a truthful Local Booru API UA.
+        """
+        cfg = self._danbooru_site_cfg(host)
         login = str(cfg.get("login") or "").strip() if isinstance(cfg, dict) else ""
-        identity = f"{login}" if login else "local-user"
+        configured = str((cfg or {}).get("user_agent") or (cfg or {}).get("api_user_agent") or "").strip() if isinstance(cfg, dict) else ""
+        if configured:
+            ua = configured
+        else:
+            if "allthefallen" in host:
+                product = "ATF"
+            elif host in ("danbooru.donmai.us", "donmai.us"):
+                product = "Danbooru"
+            else:
+                product = host or "Danbooru-compatible API"
+            identity = f"by {login} on {product}" if login else "local archive manager"
+            ua = f"LocalBooru/3.6 ({identity})"
         return {
             "Accept": "application/json",
             "Accept-Encoding": "gzip, deflate",
-            "User-Agent": f"LocalBooru/3.2 ({identity})",
+            "User-Agent": ua,
         }
+
+    def _danbooru_auth_tuple(self, host="danbooru.donmai.us"):
+        """Return HTTP Basic auth tuple for official Danbooru, if configured."""
+        cfg = self._danbooru_site_cfg(host)
+        if not isinstance(cfg, dict):
+            return None
+        login = str(cfg.get("login") or "").strip()
+        api_key = str(cfg.get("api_key") or "").strip()
+        if not login or not api_key:
+            return None
+        return (login, api_key)
+
+    def _danbooru_api_params(self, host="danbooru.donmai.us"):
+        """Official Danbooru query params, without credentials when Basic auth exists."""
+        if self._danbooru_auth_tuple(host) is not None:
+            return {}
+        return self.auth_params(self._danbooru_site_cfg(host))
+
+    def _danbooru_is_cloudflare_html_response(self, response):
+        try:
+            status = int(getattr(response, "status_code", 0) or 0)
+            ct = str(getattr(response, "headers", {}).get("content-type", "") or "").lower()
+            text = (getattr(response, "text", "") or "")[:4000].lower()
+        except Exception:
+            return False
+        return (
+            status in (403, 503, 520, 522, 524)
+            and "html" in ct
+            and ("cloudflare" in text or "just a moment" in text or "verify you are human" in text or "security verification" in text)
+        )
+
+    def _danbooru_log_response_problem(self, response, context="API", host="danbooru.donmai.us"):
+        """Log actionable Danbooru-compatible API diagnostics before JSON parsing."""
+        try:
+            shown = str(host or "danbooru.donmai.us").lower().replace("www.", "")
+            if shown == "donmai.us":
+                shown = "danbooru.donmai.us"
+            status = int(getattr(response, "status_code", 0) or 0)
+            ct = str(getattr(response, "headers", {}).get("content-type", "") or "")
+            text = (getattr(response, "text", "") or "")[:220].replace("\n", " ").replace("\r", " ")
+            if self._danbooru_is_cloudflare_html_response(response):
+                self.log(
+                    f"    {shown} {context}: CLOUDFLARE/403 HTML instead of JSON; "
+                    f"pass browser verification, save cookies, and check official User-Agent + Basic Auth"
+                )
+                return True
+            if status == 401:
+                self.log(f"    {shown} {context}: 401 Unauthorized; login/api_key invalid")
+                return True
+            if status == 403:
+                self.log(f"    {shown} {context}: 403 Forbidden; check permissions, official User-Agent and API auth (ct={ct!r})")
+                return True
+            if status in (421, 429):
+                self.log(f"    {shown} {context}: {status} throttled/rate limited; response={text!r}")
+                return True
+            if status in (502, 503):
+                self.log(f"    {shown} {context}: server/load status={status}; response={text!r}")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _e621_client_param(self, host="e621.net"):
+        """Value for e621's browser-extension/userscript _client parameter.
+
+        e621 asks browser-bound clients that cannot set a custom User-Agent to
+        identify themselves with _client. The normal requests path still uses
+        the official User-Agent header; the browser fallback uses _client
+        because fetch() runs inside a real browser context.
+        """
+        try:
+            cfg = self.site_cfg(host)
+            login = str((cfg or {}).get("login") or "").strip() if isinstance(cfg, dict) else ""
+        except Exception:
+            login = ""
+        identity = f"by {login} on e621" if login else "local archive manager"
+        return f"LocalBooru/3.7 ({identity})"
+
+    def _e621_url_with_client_param(self, url, params=None, host="e621.net"):
+        params2 = dict(params or {})
+        params2.setdefault("_client", self._e621_client_param(host))
+        qs = urlencode(params2, doseq=True)
+        return str(url) + (("&" if "?" in str(url) else "?") + qs if qs else "")
+
+    def _e621_auth_header_value(self, auth):
+        try:
+            if not auth:
+                return ""
+            login, api_key = auth[0], auth[1]
+            token = base64.b64encode(f"{login}:{api_key}".encode("utf-8")).decode("ascii")
+            return f"Basic {token}"
+        except Exception:
+            return ""
+
+    def _e621_browser_api_enabled(self):
+        return bool(self.settings.get("e621_browser_api_fallback", True))
+
+    def _e621_browser_backend(self):
+        backend = str(self.settings.get("e621_browser_api_backend") or "companion_extension").strip().lower()
+        if backend not in ("companion_extension", "external_chrome_cdp", "playwright_chromium"):
+            backend = "companion_extension"
+        # v314's default external CDP profile is unreliable with e621 Cloudflare and
+        # can hang forever on the managed challenge.  Keep it available only as an
+        # explicit advanced option; the normal fallback is the user-installed
+        # browser companion extension running in the user's real browser session.
+        if backend == "external_chrome_cdp" and not bool(self.settings.get("e621_browser_api_allow_external_chrome_cdp", False)):
+            backend = "companion_extension"
+        return backend
+
+    def _e621_cdp_port(self):
+        try:
+            return int(self.settings.get("e621_browser_api_cdp_port", 9222) or 9222)
+        except Exception:
+            return 9222
+
+    def _e621_cdp_version_url(self):
+        return f"http://127.0.0.1:{self._e621_cdp_port()}/json/version"
+
+    def _e621_cdp_is_ready(self):
+        try:
+            with urllib.request.urlopen(self._e621_cdp_version_url(), timeout=1.5) as r:
+                return 200 <= int(getattr(r, "status", 200) or 200) < 300
+        except Exception:
+            return False
+
+    def _find_external_chrome_exe(self):
+        candidates = []
+        for env_name in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+            base = os.environ.get(env_name)
+            if not base:
+                continue
+            candidates.extend([
+                Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe",
+                Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            ])
+        candidates.extend([
+            Path("C:/Program Files/Google/Chrome/Application/chrome.exe"),
+            Path("C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"),
+            Path("C:/Program Files/Microsoft/Edge/Application/msedge.exe"),
+            Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"),
+        ])
+        for c in candidates:
+            try:
+                if c.exists():
+                    return str(c)
+            except Exception:
+                pass
+        for name in ("chrome.exe", "msedge.exe", "chrome", "chromium", "google-chrome", "microsoft-edge"):
+            try:
+                found = shutil.which(name)
+                if found:
+                    return found
+            except Exception:
+                pass
+        return ""
+
+    def _launch_external_chrome_for_e621(self, host="e621.net"):
+        if not bool(self.settings.get("e621_browser_api_launch_external_chrome", True)):
+            return False
+        if self._e621_cdp_is_ready():
+            return True
+        exe = self._find_external_chrome_exe()
+        if not exe:
+            self.log("    e621.net BROWSER API: external Chrome/Edge not found; fallback to Playwright Chromium")
+            return False
+        profile_dir = Path(BROWSER_PROFILE_DIR) / "e621_external_chrome_cdp"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        port = self._e621_cdp_port()
+        args = [
+            exe,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-features=Translate",
+            f"https://{host}/",
+        ]
+        try:
+            self.log(f"    e621.net BROWSER API: launching external Chrome/Edge via CDP port={port} profile={profile_dir}")
+            self._e621_browser_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.log(f"    e621.net BROWSER API: external Chrome launch failed: {type(e).__name__}: {e}")
+            return False
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline:
+            if self._e621_cdp_is_ready():
+                return True
+            time.sleep(0.35)
+        self.log("    e621.net BROWSER API: external Chrome CDP did not become ready; fallback to Playwright Chromium")
+        return False
+
+    def _ensure_e621_browser_page(self, host="e621.net"):
+        if sync_playwright is None:
+            self.log("    e621.net BROWSER API SKIP: Playwright not installed; install: python -m pip install playwright")
+            return None
+        host = str(host or "e621.net").lower().replace("www.", "")
+        if host not in ("e621.net", "e926.net"):
+            host = "e621.net"
+        backend = self._e621_browser_backend()
+        try:
+            if (self._e621_browser_context is not None and self._e621_browser_page is not None
+                    and self._e621_browser_host == host and getattr(self, "_e621_browser_backend_active", "") == backend):
+                return self._e621_browser_page
+        except Exception:
+            pass
+        try:
+            self._e621_browser_pw = sync_playwright().start()
+            if backend == "external_chrome_cdp":
+                if self._launch_external_chrome_for_e621(host):
+                    self.log(f"    e621.net BROWSER API: connecting to external Chrome/Edge CDP port={self._e621_cdp_port()}")
+                    self._e621_browser_browser = self._e621_browser_pw.chromium.connect_over_cdp(f"http://127.0.0.1:{self._e621_cdp_port()}")
+                    self._e621_browser_context = self._e621_browser_browser.contexts[0] if self._e621_browser_browser.contexts else self._e621_browser_browser.new_context()
+                    pages = list(self._e621_browser_context.pages or [])
+                    self._e621_browser_page = pages[0] if pages else self._e621_browser_context.new_page()
+                    try:
+                        self._e621_browser_page.goto(f"https://{host}/", wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+                    self._e621_browser_host = host
+                    self._e621_browser_backend_active = backend
+                    return self._e621_browser_page
+                # If external browser cannot be launched/attached, continue with old Playwright backend.
+
+            profile_dir = Path(BROWSER_PROFILE_DIR) / "e621_browser_api"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            headless = bool(self.settings.get("e621_browser_api_headless", False))
+            self.log(f"    e621.net BROWSER API: opening Playwright Chromium profile={profile_dir} headless={headless}")
+            self._e621_browser_context = self._e621_browser_pw.chromium.launch_persistent_context(
+                str(profile_dir),
+                headless=headless,
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+            )
+            self._e621_browser_page = self._e621_browser_context.pages[0] if self._e621_browser_context.pages else self._e621_browser_context.new_page()
+            self._e621_browser_host = host
+            self._e621_browser_backend_active = "playwright_chromium"
+            return self._e621_browser_page
+        except Exception as e:
+            self.log(f"    e621.net BROWSER API ERROR: {type(e).__name__}: {e}")
+            try:
+                if self._e621_browser_context:
+                    self._e621_browser_context.close()
+            except Exception:
+                pass
+            try:
+                if getattr(self, "_e621_browser_browser", None):
+                    self._e621_browser_browser.close()
+            except Exception:
+                pass
+            try:
+                if self._e621_browser_pw:
+                    self._e621_browser_pw.stop()
+            except Exception:
+                pass
+            self._e621_browser_context = None
+            self._e621_browser_page = None
+            self._e621_browser_browser = None
+            self._e621_browser_pw = None
+            return None
+
+    def _e621_page_has_cloudflare(self, page):
+        try:
+            text = (page.content() or "")[:5000].lower()
+            title = ""
+            try:
+                title = (page.title() or "").lower()
+            except Exception:
+                pass
+            return any(x in (text + " " + title) for x in ("cloudflare", "just a moment", "verify you are human", "security verification"))
+        except Exception:
+            return False
+
+    def _e621_wait_browser_verification(self, page, host="e621.net"):
+        host = str(host or "e621.net").lower().replace("www.", "")
+        if host in self._e621_browser_verified_hosts:
+            return True
+        try:
+            page.goto(f"https://{host}/", wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
+        if not self._e621_page_has_cloudflare(page):
+            self._e621_browser_verified_hosts.add(host)
+            return True
+        timeout_s = max(5, int(float(self.settings.get("e621_browser_api_verify_timeout_seconds", 120) or 120)))
+        self.log(f"    e621.net BROWSER API: Cloudflare page is open; pass verification in the browser window ({timeout_s}s)")
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if self.cancelled():
+                return False
+            try:
+                page.wait_for_timeout(1500)
+            except Exception:
+                time.sleep(1.5)
+            if not self._e621_page_has_cloudflare(page):
+                self.log("    e621.net BROWSER API: browser verification passed")
+                self._e621_browser_verified_hosts.add(host)
+                return True
+        self.log("    e621.net BROWSER API: verification timeout; request remains blocked")
+        return False
+
+    def _e621_companion_get_json_response(self, url, *, params=None, auth=None, host="e621.net", context="api"):
+        if _enqueue_e621_browser_fetch is None:
+            self.log("    e621.net COMPANION API SKIP: browser companion bridge is unavailable")
+            return None
+        host = str(host or "e621.net").lower().replace("www.", "")
+        if host not in ("e621.net", "e926.net"):
+            host = "e621.net"
+        full_url = self._e621_url_with_client_param(url, params=params, host=host)
+        auth_header = self._e621_auth_header_value(auth)
+        try:
+            timeout_s = float(self.settings.get("e621_browser_api_companion_timeout_seconds", 120) or 120)
+        except Exception:
+            timeout_s = 120
+        self.log("    e621.net COMPANION API: waiting for installed Chrome extension/e621 tab to fetch JSON")
+        result = _enqueue_e621_browser_fetch(full_url, auth_header=auth_header, timeout_s=timeout_s)
+        if not result:
+            self.log("    e621.net COMPANION API: no response; install/update companion extension and keep e621.net open in normal Chrome")
+            return None
+        status = int((result or {}).get("status") or 0)
+        text = str((result or {}).get("text") or "")
+        headers = dict((result or {}).get("headers") or {})
+        if "content-type" not in {str(k).lower(): v for k, v in headers.items()}:
+            headers["content-type"] = "application/json" if text.strip().startswith(("{", "[")) else "text/html"
+        if (result or {}).get("error"):
+            self.log(f"    e621.net COMPANION API {context} ERROR: {(result or {}).get('error')}")
+        bridge_mode = str((result or {}).get("bridge_mode") or "")
+        page_title = str((result or {}).get("page_title") or "")
+        page_fetch_error = str((result or {}).get("page_fetch_error") or "")
+        mode_note = f" mode={bridge_mode}" if bridge_mode else ""
+        self.log(f"    e621.net COMPANION API {context}: status={status} ct={headers.get('content-type','')}{mode_note}")
+        if page_fetch_error:
+            self.log(f"    e621.net COMPANION API {context}: page-context fetch failed; fallback used: {page_fetch_error}")
+        if status in (403, 503) and page_title:
+            self.log(f"    e621.net COMPANION API {context}: e621 tab title={page_title!r}")
+        return _SyntheticHTTPResponse(status, text, headers, (result or {}).get("url") or full_url)
+
+    def _e621_browser_get_json_response(self, url, *, params=None, auth=None, host="e621.net", context="api"):
+        """Fetch e621 JSON from a real browser context after Cloudflare verification.
+
+        This is not an HTML tag parser and not a proxy/antidetect bypass. It is
+        the same official JSON endpoint, but executed inside the user-verified
+        browser session. The request includes e621's documented _client param so
+        Local Booru is still identified even though fetch() uses the browser UA.
+        """
+        if not self._e621_browser_api_enabled():
+            return None
+        host = str(host or "e621.net").lower().replace("www.", "")
+        if host not in ("e621.net", "e926.net"):
+            host = "e621.net"
+        with _E621_BROWSER_API_LOCK:
+            backend = self._e621_browser_backend()
+            if backend == "companion_extension":
+                return self._e621_companion_get_json_response(url, params=params, auth=auth, host=host, context=context)
+            page = self._ensure_e621_browser_page(host)
+            if page is None:
+                return None
+            if not self._e621_wait_browser_verification(page, host):
+                return None
+            full_url = self._e621_url_with_client_param(url, params=params, host=host)
+            auth_header = self._e621_auth_header_value(auth)
+            try:
+                result = page.evaluate(
+                    """async ({url, authHeader}) => {
+                        const headers = {"Accept": "application/json"};
+                        if (authHeader) headers["Authorization"] = authHeader;
+                        const resp = await fetch(url, {
+                            method: "GET",
+                            credentials: "include",
+                            headers
+                        });
+                        const text = await resp.text();
+                        const outHeaders = {};
+                        resp.headers.forEach((v, k) => { outHeaders[k] = v; });
+                        return {status: resp.status, url: resp.url, headers: outHeaders, text};
+                    }""",
+                    {"url": full_url, "authHeader": auth_header},
+                )
+                status = int((result or {}).get("status") or 0)
+                text = str((result or {}).get("text") or "")
+                headers = dict((result or {}).get("headers") or {})
+                if "content-type" not in {str(k).lower(): v for k, v in headers.items()}:
+                    headers["content-type"] = "application/json" if text.strip().startswith(("{", "[")) else "text/html"
+                self.log(f"    e621.net BROWSER API {context}: status={status} ct={headers.get('content-type','')}")
+                return _SyntheticHTTPResponse(status, text, headers, (result or {}).get("url") or full_url)
+            except Exception as e:
+                self.log(f"    e621.net BROWSER API {context} ERROR: {type(e).__name__}: {e}")
+                return None
 
     def _e621_api_headers(self, host="e621.net"):
-        """Headers required by the e621/e926 JSON API.
+        """Headers required by the official e621/e926 JSON API.
 
-        e621 explicitly asks applications to identify themselves and not
-        impersonate a browser. Include the configured login when available.
+        e621 requires a descriptive non-empty User-Agent and explicitly asks
+        clients not to impersonate a browser.  Do not reuse the Cloudflare/browser
+        User-Agent saved with cookies here; API requests must identify Local
+        Booru as an API client.
         """
+        host = str(host or "e621.net").lower().replace("www.", "")
         cfg = self.site_cfg(host)
         login = str(cfg.get("login") or "").strip() if isinstance(cfg, dict) else ""
-        identity = f"by {login} on e621" if login else "local archive manager"
+        configured = str((cfg or {}).get("user_agent") or (cfg or {}).get("api_user_agent") or "").strip() if isinstance(cfg, dict) else ""
+        if configured:
+            ua = configured
+        else:
+            identity = f"by {login} on e621" if login else "local archive manager"
+            ua = f"LocalBooru/3.3 ({identity})"
         return {
             "Accept": "application/json",
             "Accept-Encoding": "gzip, deflate",
-            "User-Agent": f"LocalBooru/3.1 ({identity})",
+            "User-Agent": ua,
         }
+
+    def _e621_auth_tuple(self, host="e621.net"):
+        """Return Basic-auth tuple for e621/e926 or None for public calls.
+
+        The API docs prefer HTTP Basic auth.  Keeping login/api_key out of query
+        parameters also prevents secrets from leaking into request URLs/logs.
+        """
+        host = str(host or "e621.net").lower().replace("www.", "")
+        cfg = self.site_cfg(host)
+        if not isinstance(cfg, dict):
+            return None
+        login = str(cfg.get("login") or "").strip()
+        api_key = str(cfg.get("api_key") or "").strip()
+        if not login or not api_key:
+            return None
+        return (login, api_key)
+
+    def _e621_api_params(self, host="e621.net", *, include_v2=True):
+        """Common e621 query params, excluding credentials when Basic auth exists."""
+        params = {}
+        if include_v2:
+            params.update({"v2": "true", "mode": "extended"})
+        if self._e621_auth_tuple(host) is None:
+            # Legacy fallback only: if the user configured login/api_key but the
+            # auth tuple cannot be built, auth_params keeps older setups working.
+            params.update(self.auth_params(self.site_cfg(host)))
+        return params
+
+    def _e621_is_cloudflare_html_response(self, response):
+        try:
+            status = int(getattr(response, "status_code", 0) or 0)
+            ct = str(getattr(response, "headers", {}).get("content-type", "") or "").lower()
+            text = (getattr(response, "text", "") or "")[:4000].lower()
+        except Exception:
+            return False
+        return (
+            status in (403, 503, 520, 522, 524)
+            and "html" in ct
+            and ("cloudflare" in text or "just a moment" in text or "verify you are human" in text or "security verification" in text)
+        )
+
+    def _e621_log_response_problem(self, response, context="API"):
+        """Return True if a clearer e621 diagnostic was logged."""
+        try:
+            status = int(getattr(response, "status_code", 0) or 0)
+            ct = str(getattr(response, "headers", {}).get("content-type", "") or "")
+            text = (getattr(response, "text", "") or "")[:220].replace("\n", " ").replace("\r", " ")
+            if self._e621_is_cloudflare_html_response(response):
+                self.log(
+                    f"    e621.net {context}: CLOUDFLARE/403 HTML instead of JSON; "
+                    f"pass browser verification, save cookies, and check official User-Agent + Basic Auth"
+                )
+                return True
+            if status == 401:
+                self.log(f"    e621.net {context}: 401 Unauthorized; login/api_key invalid or API access disabled")
+                return True
+            if status == 403:
+                self.log(f"    e621.net {context}: 403 Forbidden; check official User-Agent and API auth (ct={ct!r})")
+                return True
+            if status in (429, 503):
+                self.log(f"    e621.net {context}: rate/server limit status={status}; response={text!r}")
+                return True
+        except Exception:
+            pass
+        return False
 
     def e621_tags(self, url, host="e621.net"):
         post_id = urlparse(url).path.strip("/").split("/")[-1]
@@ -2271,13 +3764,30 @@ class Tagger:
         if host not in ("e621.net", "e926.net"):
             host = "e621.net"
         session = self.session_for_host(host)
-        data = safe_json_response(session.get(
-            f"https://{host}/posts/{post_id}.json",
-            params=self.auth_params(self.site_cfg(host)),
+        params = self._e621_api_params(host, include_v2=True)
+        # e621 is rolling out v2 post responses.  Request extended tags so the
+        # old grouped-tag path and the new v2 grouped response both preserve
+        # artist/character/copyright/species/meta categories.  If the server is
+        # still on legacy defaults, these parameters are harmless.
+        api_url = f"https://{host}/posts/{post_id}.json"
+        auth = self._e621_auth_tuple(host)
+        response = session.get(
+            api_url,
+            params=params,
             timeout=self.timeout,
             headers=self._e621_api_headers(host),
-        ), host)
-        post = data.get("post", data) if isinstance(data, dict) else {}
+            auth=auth,
+        )
+        self._e621_log_response_problem(response, "post-json")
+        if self._e621_is_cloudflare_html_response(response):
+            br = self._e621_browser_get_json_response(api_url, params=params, auth=auth, host=host, context="post-json")
+            if br is not None:
+                response = br
+        data = safe_json_response(response, host)
+        if isinstance(data, list):
+            post = data[0] if data and isinstance(data[0], dict) else {}
+        else:
+            post = data.get("post", data) if isinstance(data, dict) else {}
         return groups_to_tags(self._groups_from_post_dict_general(post))
 
     def custom_tags_from_url(self, site, url):
@@ -2455,123 +3965,307 @@ class Tagger:
                 key = (site["domain"], site["engine"])
                 by_key[key] = merge_site(by_key.get(key), site)
 
-        return list(by_key.values())
+        result = list(by_key.values())
+        try:
+            order = [str(x).lower().replace("www.", "") for x in (self.settings.get("_parser_blueprint_site_order") or []) if str(x).strip()]
+            if order:
+                by_domain = {}
+                for site in result:
+                    by_domain.setdefault(str(site.get("domain", "")).lower().replace("www.", ""), site)
+                # v321: blueprint site blocks stay visible even when the site is
+                # disabled, but runtime respects the normal site table by default.
+                # Disabled blocks are visual skip/pass-through; they must not force
+                # network lanes unless the user explicitly re-enables the site.
+                if bool(self.settings.get("_parser_blueprint_sites_only", False)) and not bool(self.settings.get("parser_blueprint_respect_site_enabled", True)):
+                    raw_candidates = []
+                    if isinstance(sites, dict):
+                        for domain, cfg in sites.items():
+                            if isinstance(cfg, dict):
+                                item = dict(cfg); item.setdefault("domain", str(domain).lower().replace("www.", "")); raw_candidates.append(item)
+                    if isinstance(custom_sites, list):
+                        raw_candidates.extend([dict(x) for x in custom_sites if isinstance(x, dict)])
+                    for raw in raw_candidates:
+                        raw["enabled"] = True
+                        site = normalize_site(raw, is_custom=False)
+                        if site:
+                            by_domain.setdefault(str(site.get("domain", "")).lower().replace("www.", ""), site)
+                ordered = [by_domain[d] for d in order if d in by_domain]
+                if bool(self.settings.get("_parser_blueprint_sites_only", False)):
+                    result = ordered
+                else:
+                    used = {str(s.get("domain", "")).lower().replace("www.", "") for s in ordered}
+                    result = ordered + [s for s in result if str(s.get("domain", "")).lower().replace("www.", "") not in used]
+        except Exception:
+            pass
+        return result
 
     def _auth_params_for_site(self, site):
         return self.auth_params(site if isinstance(site, dict) else {})
 
-    def _engine_api_attempts(self, site, md5):
-        """Build MD5 lookup attempts from JSON site configs (imgbrd-grabber pattern).
+    def _site_driver_for(self, site):
+        site = site if isinstance(site, dict) else {}
+        if not _SiteDriver:
+            return None
+        root = self._site_root_from_cfg(site).rstrip("/")
+        host = urlparse(root).netloc.lower().replace("www.", "")
+        engine = self._normalize_engine_type(site)
+        try:
+            return _SiteDriver.for_site(site, engine_name=engine, host=host)
+        except AttributeError:
+            # Backward compatibility with older driver modules if a stale import
+            # is still present in an interactive process.
+            return _SiteDriver.for_host(host) or _SiteDriver.for_engine(engine)
 
-        Falls back to hardcoded logic for unknown engines.
+    def _engine_api_attempts(self, site, md5):
+        """Build MD5 lookup attempts only from JSON site configs.
+
+        Site-specific endpoint paths/params live in settings/sites/*.json.
+        This executor only resolves root/auth and delegates request construction
+        to SiteDriver; adding/fixing a site must not require editing this method.
         """
         site = site if isinstance(site, dict) else {}
-        root = self._site_root_from_cfg(site).rstrip("/")
-        engine = self._normalize_engine_type(site)
-        auth = self._auth_params_for_site(site)
-        host = urlparse(root).netloc.lower().replace("www.", "")
-
-        # Danbooru-style exact MD5 endpoints documented by the sites use the
-        # ``tags=md5:<hash>`` meta-tag. Do not try guessed params such as
-        # ``search[md5]`` or ``md5`` on official Danbooru or ATF: ATF accepts
-        # those requests but can return an unrelated ordinary post, which used
-        # to create repeated MD5 rejects and unsafe HTML recovery attempts.
-        exact_tags_only_hosts = {
-            "danbooru.donmai.us", "donmai.us", "booru.allthefallen.moe",
-        }
-        if host in exact_tags_only_hosts:
-            return [
-                (f"{root}/posts.json", {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-            ]
-
-        # rule34.us exposes browser search syntax compatible with Gelbooru,
-        # but no confirmed JSON/DAPI endpoint. Do not manufacture API calls.
-        # It is handled later through strict HTML search + explicit MD5 proof.
-        if host == "rule34.us":
+        driver = self._site_driver_for(site)
+        if not driver:
             return []
+        root = self._site_root_from_cfg(site).rstrip("/")
+        host = urlparse(root).netloc.lower().replace("www.", "")
+        engine = self._normalize_engine_type(site)
+        # v250: rule34.xxx often reaches this method through normalized site rows
+        # created by the parser/site conveyor.  Those transient rows may omit
+        # api_key/user_id even though the saved APT site settings contain them.
+        # The preflight auth guard already uses _rule34xxx_api_auth_params() with
+        # the saved-rule34 fallback, but the actual request previously used only
+        # _auth_params_for_site(site), so api.rule34.xxx received no credentials
+        # and returned HTTP 200 + "Missing authentication".
+        if host in {"rule34.xxx", "api.rule34.xxx"} or engine == "rule34xxx":
+            auth = self._rule34xxx_api_auth_params(site)
+        elif engine == "e621":
+            # e621 credentials are sent by HTTP Basic auth in engine_by_md5(),
+            # not as login/api_key URL parameters.  The public endpoint still
+            # works without credentials.
+            auth = self._e621_api_params(host, include_v2=False)
+        elif engine == "danbooru" and (host in {"danbooru.donmai.us", "donmai.us"} or "allthefallen" in host):
+            # Danbooru-compatible official APIs (Danbooru and ATF) support
+            # Basic auth. Keep login/api_key out of URLs/logs when configured.
+            auth = self._danbooru_api_params(host)
+        else:
+            auth = self._auth_params_for_site(site)
+        return driver.md5_attempts(root, md5, auth or None, site=site)
 
-        # rule34.xxx has a working DAPI API host. Keep its conveyor lane to a
-        # single exact JSON request: the previous generic Gelbooru driver tried
-        # raw hashes/XML/HTML on misses and then performed expensive tag-category
-        # lookups for every hit, making the lane appear frozen for minutes.
-        if host in {"rule34.xxx", "api.rule34.xxx"}:
-            return [
-                ("https://api.rule34.xxx/index.php", {"page": "dapi", "s": "post", "q": "index",
-                                                       "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-            ]
-
-        # Gelbooru, Xbooru and HypnoHub publish the Gelbooru-compatible DAPI
-        # listing contract with `tags` meta-tags and JSON output. For these
-        # concrete hosts never try guessed raw-hash/custom endpoints, XML
-        # variants, or browser-page recovery after a miss.
-        exact_dapi_only_hosts = {"gelbooru.com", "xbooru.com", "hypnohub.net"}
-        if host in exact_dapi_only_hosts:
-            return [
-                (f"{root}/index.php", {"page": "dapi", "s": "post", "q": "index",
-                                        "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-            ]
-
-        # Try JSON driver first
-        driver = (_SiteDriver.for_engine(engine) or _SiteDriver.for_host(host)) if _SiteDriver else None
+    def _configured_response_posts(self, r, site, driver=None, label="site"):
+        """Parse API response using JSON post_list_path before generic fallback."""
+        # v249: rule34.xxx may return HTTP 200 + application/json while the
+        # body is a plain "Missing authentication" string.  Detect this before
+        # the generic parser logs it as a harmless non-json response and before
+        # the HTML locator wastes time verifying unrelated recent posts.
+        try:
+            host = urlparse(self._site_root_from_cfg(site)).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if host in {"rule34.xxx", "api.rule34.xxx"} or "rule34.xxx" in str(label).lower():
+            if self._rule34xxx_auth_missing_response(r):
+                self._rule34xxx_mark_auth_required(label or "rule34.xxx")
+                return []
+        driver = driver or self._site_driver_for(site)
         if driver:
-            # rule34.us has its own config override
-            if "rule34.us" in host:
-                from core.site_driver import _load_config
-                from pathlib import Path as _P
-                _r34_cfg = _load_config(str(_P(__file__).parent.parent / "sites" / "rule34us.json"))
-                driver = _SiteDriver(_r34_cfg)
-            return driver.md5_attempts(root, md5, auth or None)
+            try:
+                data = safe_json_response(r, label)
+                posts = driver.extract_post_list(data)
+                if posts:
+                    return posts
+            except Exception:
+                pass
+        return self._posts_from_dapi_response(r, label)
 
-        # Fallback for truly unknown engines
-        return [
-            (f"{root}/posts.json",     {"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-            (f"{root}/posts.json",     {"md5": md5, "limit": 1, **auth}, "json"),
-            (f"{root}/post/index.json",{"tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-            (f"{root}/index.php",      {"page": "dapi", "s": "post", "q": "index",
-                                        "json": "1", "tags": f"md5:{md5}", "limit": 1, **auth}, "json"),
-        ]
+    def _configured_post_id(self, site, post):
+        driver = self._site_driver_for(site)
+        if driver and isinstance(post, dict):
+            got = driver.extract_field(post, "id")
+            if got not in (None, "", [], {}):
+                return got
+        return post.get("id") or post.get("post_id") or post.get("pid") if isinstance(post, dict) else None
+
+    def _configured_post_md5(self, site, post):
+        driver = self._site_driver_for(site)
+        if driver and isinstance(post, dict):
+            got = driver.extract_field(post, "md5")
+            if isinstance(got, str) and is_md5(got.strip().lower()):
+                return got.strip().lower()
+        return self._post_md5_value(post)
+
+    def _configured_tags_from_post(self, site, post):
+        driver = self._site_driver_for(site)
+        tags = []
+        if driver and isinstance(post, dict):
+            try:
+                tags = driver.extract_tags(post)
+            except Exception:
+                tags = []
+        if not tags:
+            tags = self._tags_from_post_dict(post)
+        return unique_keep_order([normalize_tag(t) for t in tags if normalize_tag(t)])
 
     def _post_url_for_engine(self, site, post):
         site = site if isinstance(site, dict) else {}
         if not isinstance(post, dict):
             return ""
         root = self._site_root_from_cfg(site).rstrip("/")
-        engine = self._normalize_engine_type(site)
-        post_id = post.get("id") or post.get("post_id") or post.get("pid")
+        post_id = self._configured_post_id(site, post)
         if not post_id:
             return ""
+        driver = self._site_driver_for(site)
+        if driver:
+            try:
+                url = driver.post_url(root, post_id)
+                if url:
+                    return url
+            except Exception:
+                pass
+        engine = self._normalize_engine_type(site)
         if engine == "gelbooru":
             return f"{root}/index.php?page=post&s=view&id={post_id}"
         if engine == "moebooru":
-            # rule34.us behaves more like a Gelbooru frontend despite being
-            # listed in the Moebooru group by users.
-            host = urlparse(root).netloc.lower()
-            if "rule34.us" in host:
-                return f"{root}/index.php?page=post&s=view&id={post_id}"
             return f"{root}/post/show/{post_id}"
-        if engine == "e621":
-            return f"{root}/posts/{post_id}"
         return f"{root}/posts/{post_id}"
 
+    def _rule34xxx_groups_from_tag_info(self, post, flat_tags=None):
+        """Build groups from rule34.xxx DAPI fields=tag_info when present.
+
+        rule34.xxx documents ``fields=tag_info`` on the post endpoint.  The
+        exact shape is not guaranteed across XML/JSON variants, so this parser
+        accepts the common forms: a list of row dicts, a dict of group names to
+        tag lists, and row dicts containing name/tag plus type/category.
+        """
+        groups = empty_tag_groups()
+        if not isinstance(post, dict):
+            return groups
+        allowed = set(unique_keep_order([normalize_tag(t) for t in (flat_tags or []) if normalize_tag(t)]))
+        if not allowed:
+            allowed = set(self._configured_tags_from_post({"domain": "rule34.xxx", "type": "rule34xxx"}, post))
+        if not allowed:
+            return groups
+
+        candidates = []
+        for key in ("tag_info", "tagInfo", "tags_info", "taginfo", "tag_types", "tag_categories"):
+            if key in post and post.get(key) not in (None, "", [], {}):
+                candidates.append(post.get(key))
+        if not candidates:
+            return groups
+
+        group_aliases = {
+            "artist": "artist", "artists": "artist", "creator": "artist", "creators": "artist",
+            "character": "character", "characters": "character",
+            "copyright": "copyright", "copyrights": "copyright", "series": "copyright",
+            "meta": "meta", "metadata": "meta", "metas": "meta",
+            "general": "general", "tags": "general",
+        }
+
+        def add_named(name, typ=None, fallback_group="general"):
+            tag = normalize_tag(name)
+            if not tag or tag not in allowed:
+                return
+            group = group_from_tag_type(typ) if typ not in (None, "", [], {}) else fallback_group
+            add_tags_to_groups(groups, group, [tag])
+
+        def parse_value(value, fallback_group="general"):
+            if value in (None, "", [], {}):
+                return
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return
+                if text[:1] in "[{":
+                    try:
+                        parse_value(json.loads(text), fallback_group=fallback_group)
+                        return
+                    except Exception:
+                        pass
+                # Last resort: only accept plain tag strings when the caller
+                # already told us the group name, never arbitrary text blobs.
+                if fallback_group != "general":
+                    for part in text.replace(",", " ").split():
+                        add_named(part, None, fallback_group)
+                return
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    parse_value(item, fallback_group=fallback_group)
+                return
+            if isinstance(value, dict):
+                # Row form: {name/tag: "foo", type/category: 1}
+                name = value.get("name") or value.get("tag") or value.get("label") or value.get("tag_name")
+                typ = value.get("type", value.get("category", value.get("tag_type", value.get("tagType"))))
+                if name not in (None, "", [], {}):
+                    add_named(name, typ, fallback_group)
+                # Grouped form: {artist: [...], character: [...], ...}
+                for key, sub in value.items():
+                    key_s = str(key or "").strip().lower()
+                    if key_s in {"name", "tag", "label", "tag_name", "type", "category", "tag_type", "tagtype"}:
+                        continue
+                    parse_value(sub, fallback_group=group_aliases.get(key_s, fallback_group))
+
+        for candidate in candidates:
+            parse_value(candidate)
+
+        # Do not add missing general tags here.  Caller will fall back to the
+        # tag catalogue/general preservation path.  This function's job is only
+        # to use authoritative tag_info categories when they exist.
+        return groups
+
     def _groups_from_engine_post(self, site, post, source_url=""):
+        driver = self._site_driver_for(site)
+        if driver and isinstance(post, dict):
+            try:
+                raw_groups = driver.extract_tag_groups(post)
+                groups = empty_tag_groups()
+                for group, values in (raw_groups or {}).items():
+                    add_tags_to_groups(groups, group, values)
+                if groups_to_tags(groups):
+                    return groups
+            except Exception:
+                pass
+
         engine = self._normalize_engine_type(site)
         root = self._site_root_from_cfg(site).rstrip("/")
         host = urlparse(root).netloc.lower().replace("www.", "")
-        if host in {"rule34.xxx", "api.rule34.xxx", "gelbooru.com", "xbooru.com", "hypnohub.net"}:
-            # Flat-tag DAPI responses are intentionally kept flat in the live
-            # exact-search lane. Category recovery may require HTML or many tag
-            # API requests and therefore belongs to the durable background
-            # enrichment worker, never to a source lane that must keep moving.
+        driver_cfg = getattr(driver, "cfg", {}) if driver else {}
+
+        if bool(driver_cfg.get("fast_flat_tags", False)):
+            flat_tags = self._configured_tags_from_post(site, post)
+            # Keep exact-MD5 source lanes fast and deterministic: they collect
+            # the authoritative flat tag set from the post API and persist it
+            # immediately.  Category recovery for flat-tag sites belongs to the
+            # durable background enrichment queue, where HTML is used only as a
+            # guarded category overlay over these already-confirmed API tags.
+            # This restores the original pipeline:
+            #   rule34 API -> flat tags -> SQL -> background HTML classification.
+            if host in ("rule34.xxx", "api.rule34.xxx"):
+                # rule34.xxx foreground MD5 lanes are intentionally flat-only.
+                # Categories are recovered later by the background HTML overlay
+                # over the already-confirmed API tags.  Do not request/use
+                # post-level tag_info here: it previously made the exact-MD5
+                # endpoint noisy and moved classification back into the hot path.
+                groups = empty_tag_groups()
+                groups["general"] = flat_tags
+                return groups
             groups = empty_tag_groups()
-            groups["general"] = self.gelbooru_tags_from_post(post)
+            groups["general"] = flat_tags
             return groups
-        if engine == "e621" or host in {"danbooru.donmai.us", "donmai.us", "booru.allthefallen.moe"}:
-            # These JSON API responses are the only authoritative automatic
-            # metadata source. In particular, ATF HTML previously produced
-            # unrelated/repeated candidates and interface-text tags.
-            return self._groups_from_post_dict_general(post)
+
+        if str(driver_cfg.get("tag_category_mode") or "") == "gelbooru_tag_list_api":
+            if source_url and self._needs_background_tag_groups(source_url):
+                return self.gelbooru_groups_from_post(post, host, categorize_flat=False)
+            return self.gelbooru_groups_from_post(post, host)
+
+        if engine == "e621" or bool(driver_cfg.get("strict_json_only", False)):
+            groups = self._groups_from_post_dict_general(post)
+            if not groups_to_tags(groups):
+                groups["general"] = self._configured_tags_from_post(site, post)
+            return groups
+
         if engine == "gelbooru":
-            groups = self.gelbooru_groups_from_post(post, host)
+            groups = self.gelbooru_groups_from_post(
+                post, host, categorize_flat=not (source_url and self._needs_background_tag_groups(source_url))
+            )
         else:
             groups = self._groups_from_post_dict_general(post)
 
@@ -2582,18 +4276,6 @@ class Tagger:
                     groups = html_groups
             except Exception:
                 pass
-        elif source_url and engine == "danbooru" and groups_to_tags(groups):
-            # ATF (danbooru-engine) returns only a flat "tags" string in its JSON.
-            # If all tags ended up in general (no tag_string_artist/character etc.),
-            # try the post HTML for proper artist/character/copyright grouping.
-            _categorized = any(groups.get(k) for k in ("artist", "character", "copyright", "meta"))
-            if not _categorized:
-                try:
-                    html_groups = self.grouped_tags_from_url(source_url)
-                    if groups_to_tags(html_groups) and any(html_groups.get(k) for k in ("artist", "character", "copyright")):
-                        groups = html_groups
-                except Exception:
-                    pass
         return groups
 
     def _html_search_params_for_engine(self, site, md5):
@@ -2728,6 +4410,1536 @@ class Tagger:
         else:
             self.log(f"  CF AUTO: failed to get cf_clearance for {host}")
 
+
+    def _rule34xxx_site_cfg(self, site=None):
+        """Return the effective saved rule34.xxx site settings.
+
+        rule34.xxx official DAPI authentication is not Basic Auth: the docs use
+        ``user_id`` + ``api_key`` URL parameters.  The transient site rows built
+        for conveyor lanes can miss those fields, so always merge them with the
+        saved ``rule34.xxx`` row before building API requests.
+        """
+        merged = {}
+        saved = self.site_cfg("rule34.xxx")
+        if isinstance(saved, dict):
+            merged.update(saved)
+        if isinstance(site, dict):
+            merged.update({k: v for k, v in site.items() if v not in (None, "")})
+        return merged
+
+    def _rule34xxx_api_headers(self, site=None):
+        """Headers for the official rule34.xxx DAPI.
+
+        The official endpoint is https://api.rule34.xxx/index.php.  It does not
+        document browser impersonation as an auth method; use a truthful Local
+        Booru User-Agent and pass user_id/api_key in query params.
+        """
+        cfg = self._rule34xxx_site_cfg(site)
+        login = str(cfg.get("login") or "").strip()
+        user_id = str(cfg.get("user_id") or "").strip()
+        configured = str(cfg.get("user_agent") or cfg.get("api_user_agent") or "").strip()
+        if configured:
+            ua = configured
+        else:
+            identity = f"by {login} on rule34.xxx" if login else (f"user_id {user_id} on rule34.xxx" if user_id else "local archive manager")
+            ua = f"LocalBooru/3.5 ({identity})"
+        return {
+            "Accept": "application/json, application/xml, text/xml, */*",
+            "Accept-Encoding": "gzip, deflate",
+            "User-Agent": ua,
+        }
+
+    def _rule34xxx_api_auth_params(self, site=None):
+        """Return official rule34.xxx DAPI credentials: user_id + api_key only."""
+        cfg = self._rule34xxx_site_cfg(site)
+        out = {}
+        api_key = str(cfg.get("api_key") or "").strip()
+        user_id = str(cfg.get("user_id") or "").strip()
+        if api_key:
+            out["api_key"] = api_key
+        if user_id:
+            out["user_id"] = user_id
+        return out
+
+    def _rule34xxx_api_params(self, site=None, **extra):
+        """Build official DAPI query params for rule34.xxx.
+
+        Unlike Danbooru/e621, rule34.xxx does not use Basic Auth for this API;
+        it documents ``user_id`` and ``api_key`` as request parameters.  Keep
+        login out of DAPI URLs because it is not part of the official contract.
+        """
+        params = {"page": "dapi", "s": "post", "q": "index", "json": "1"}
+        params.update({k: v for k, v in (extra or {}).items() if v not in (None, "")})
+        params.update(self._rule34xxx_api_auth_params(site))
+        return params
+
+    def _rule34xxx_has_required_api_auth(self, site=None):
+        auth = self._rule34xxx_api_auth_params(site)
+        return bool(auth.get("api_key") and auth.get("user_id"))
+
+    def _rule34xxx_response_text_for_auth_check(self, response):
+        """Best-effort response body read used only for rule34.xxx diagnostics."""
+        chunks = []
+        try:
+            text = getattr(response, "text", "") or ""
+            if text:
+                chunks.append(str(text))
+        except Exception:
+            pass
+        try:
+            content = getattr(response, "content", b"") or b""
+            if isinstance(content, bytes) and content:
+                chunks.append(content[:4096].decode("utf-8", "ignore"))
+            elif content:
+                chunks.append(str(content)[:4096])
+        except Exception:
+            pass
+        try:
+            data = response.json()
+            if isinstance(data, str):
+                chunks.append(data)
+            elif isinstance(data, dict):
+                chunks.append(" ".join(str(v) for v in data.values()))
+            elif isinstance(data, list):
+                chunks.append(" ".join(str(v) for v in data[:5]))
+        except Exception:
+            pass
+        return " ".join(chunks)
+
+    def _rule34xxx_auth_missing_response(self, response):
+        text = self._rule34xxx_response_text_for_auth_check(response).lower()
+        if not text:
+            return False
+        return (
+            "missing authentication" in text
+            or "go to api.rule34.xxx" in text
+            or ("authentication" in text and "api.rule34.xxx" in text)
+            or "api key" in text and "user" in text and "required" in text
+        )
+
+    def _rule34xxx_is_cloudflare_html_response(self, response):
+        try:
+            status = int(getattr(response, "status_code", 0) or 0)
+            ct = str(getattr(response, "headers", {}).get("content-type", "") or "").lower()
+            text = (getattr(response, "text", "") or "")[:4000].lower()
+        except Exception:
+            return False
+        return (
+            status in (403, 503, 520, 522, 524)
+            and "html" in ct
+            and ("cloudflare" in text or "just a moment" in text or "verify you are human" in text or "security verification" in text)
+        )
+
+    def _rule34xxx_log_response_problem(self, response, context="DAPI"):
+        """Return True if a clearer rule34.xxx API diagnostic was logged."""
+        try:
+            status = int(getattr(response, "status_code", 0) or 0)
+            ct = str(getattr(response, "headers", {}).get("content-type", "") or "")
+            text = (self._rule34xxx_response_text_for_auth_check(response) or "")[:220].replace("\n", " ").replace("\r", " ")
+            if self._rule34xxx_auth_missing_response(response):
+                self._rule34xxx_mark_auth_required("rule34.xxx")
+                return True
+            if self._rule34xxx_is_cloudflare_html_response(response):
+                self.log(
+                    f"    rule34.xxx {context}: CLOUDFLARE/HTML instead of DAPI data; "
+                    f"official DAPI is api.rule34.xxx with user_id+api_key"
+                )
+                return True
+            if status == 403:
+                self.log(f"    rule34.xxx {context}: 403 Forbidden; check user_id/api_key and DAPI access (ct={ct!r})")
+                return True
+            if status in (429, 503):
+                self.log(f"    rule34.xxx {context}: rate/server limit status={status}; response={text!r}")
+                return True
+            if status >= 500:
+                self.log(f"    rule34.xxx {context}: server status={status}; response={text!r}")
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _rule34xxx_mark_auth_required(self, label="rule34.xxx"):
+        self._last_lookup_status = "auth_required"
+        key = str(label or "rule34.xxx")
+        warned = getattr(self, "_rule34_auth_missing_warned", set())
+        if key not in warned:
+            warned.add(key)
+            self._rule34_auth_missing_warned = warned
+            self.log(f"    {key} AUTH REQUIRED: нужен официальный rule34.xxx API key + User ID; cookies/cf_clearance не заменяют DAPI-доступ")
+
+
+
+    def _rule34xxx_current_image_key_candidates(self):
+        """Return rule34.xxx 40-hex image keys found in the current media filename.
+
+        This is intentionally filename/path based, not a cryptographic claim:
+        rule34.xxx may store images under a 40-hex ``image`` key that is not the
+        local file MD5/SHA1.  The key is only used as a post locator after the
+        real local MD5 has already missed.
+        """
+        texts = []
+        for attr in ("_current_md5_lookup_path", "_current_scan_media_path", "_current_source_path"):
+            try:
+                value = getattr(self, attr, "")
+            except Exception:
+                value = ""
+            if value:
+                texts.append(str(value))
+                try:
+                    pp = Path(str(value))
+                    texts.append(pp.name)
+                    texts.append(pp.stem)
+                except Exception:
+                    pass
+        keys = []
+        seen = set()
+        rx = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
+        for text in texts:
+            for m in rx.findall(text or ""):
+                key = m.lower()
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+        return keys
+
+    def _rule34xxx_post_contains_image_key(self, post, image_key):
+        """Verify that a DAPI post really belongs to a rule34.xxx image key."""
+        if not isinstance(post, dict):
+            return False
+        wanted = (image_key or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", wanted):
+            return False
+        fields = (
+            "image", "file_url", "sample_url", "preview_url", "large_file_url",
+            "jpeg_url", "source_url", "url", "download_url", "original_url",
+        )
+        for key in fields:
+            try:
+                value = post.get(key)
+            except Exception:
+                value = None
+            if value is None:
+                continue
+            if wanted in str(value).lower():
+                return True
+        for obj_key in ("file", "media", "sample", "preview", "original", "asset", "files"):
+            obj = post.get(obj_key) if isinstance(post, dict) else None
+            if isinstance(obj, dict):
+                for value in obj.values():
+                    if value is not None and wanted in str(value).lower():
+                        return True
+        return False
+
+    def _rule34xxx_dapi_posts_by_id(self, site, post_id, headers=None):
+        """Fetch a concrete rule34.xxx post id through the official DAPI JSON endpoint."""
+        pid = str(post_id or "").strip()
+        if not pid.isdigit():
+            return []
+        site = site if isinstance(site, dict) else {}
+        label = self._site_label(site)
+        session = self.session_for_host("rule34.xxx")
+        dapi_headers = self._rule34xxx_api_headers(site)
+        params = self._rule34xxx_api_params(site, id=pid, limit=1)
+        try:
+            r = self._http_get_cached(
+                session,
+                "https://api.rule34.xxx/index.php",
+                params=params,
+                timeout=self.timeout,
+                headers=dapi_headers,
+            )
+            self._rule34xxx_log_response_problem(r, "post-by-id")
+            if self._rule34xxx_auth_missing_response(r):
+                self._rule34xxx_mark_auth_required(label)
+                self.log(f"    {label} IMAGE KEY LOCATOR DAPI SKIP: API authentication required")
+                return []
+            return self._configured_response_posts(r, site, None, label) or []
+        except Exception as e:
+            self.log(f"    {label} IMAGE KEY LOCATOR DAPI ERROR: api.rule34.xxx json post={pid} {e}")
+        return []
+
+    def _rule34xxx_image_key_locator_lookup(self, site, md5, headers=None):
+        """Locate a rule34.xxx post by the 40-hex image key after local MD5 miss.
+
+        The preferred locator is the rule34 hotlink endpoint:
+        ``https://hl.rule34.xxx/public/hotlink.php?img=<40hex>.png``.
+        Browser testing showed this endpoint can redirect directly to the post
+        page while sample-bucket URLs are slow and unreliable.  The redirect is
+        used only to obtain a post id; tags are fetched only through DAPI by id.
+        Sample-bucket probing is now opt-in legacy fallback only.
+        """
+        site = site if isinstance(site, dict) else {}
+        label = self._site_label(site)
+        local_md5 = (md5 or "").strip().lower()
+        image_keys = self._rule34xxx_current_image_key_candidates()
+        if not image_keys:
+            return [], "", empty_tag_groups()
+        if getattr(self, "_last_lookup_status", "") == "auth_required":
+            return [], "", empty_tag_groups()
+
+        session = self.session_for_host("rule34.xxx")
+        request_headers = dict(headers or {})
+        request_headers.setdefault("Accept", "text/html,application/xhtml+xml,*/*")
+        request_headers.setdefault("User-Agent", "LocalBooru/3.2 (local archive manager)")
+        request_headers.setdefault("Referer", "https://rule34.xxx/")
+
+        trusted_hotlink_candidates = set()
+
+        def _add_candidate(candidates, pid, trusted_hotlink=False):
+            pid = str(pid or "").strip()
+            if pid.isdigit() and pid not in candidates:
+                candidates.append(pid)
+            if pid.isdigit() and trusted_hotlink:
+                trusted_hotlink_candidates.add(pid)
+
+        def _extract_post_ids_from_text_blob(candidates, text):
+            text = str(text or "")
+            if not text:
+                return
+            # Normal post URLs: index.php?page=post&s=view&id=123
+            for pid in re.findall(r"[?&]id=(\d+)", text):
+                _add_candidate(candidates, pid)
+            # HTML-escaped post URLs: page=post&amp;s=view&amp;id=123
+            for pid in re.findall(r"(?:[?&]|&amp;)id=(\d+)", text):
+                _add_candidate(candidates, pid)
+            # Sample-image quirk: sample_<key>.jpg?12345678
+            for pid in re.findall(r"sample_[0-9a-fA-F]{40}\.(?:jpg|jpeg|png|webp)\?(\d{4,})", text):
+                _add_candidate(candidates, pid)
+            for pid in re.findall(r'page=post[^\s"\'<>]*?s=view[^\s"\'<>]*?(?:[?&]|&amp;)id=(\d+)', text):
+                _add_candidate(candidates, pid)
+            for pid in re.findall(r"post[^\d]{0,32}(\d{4,})", text, flags=re.I):
+                # Weak fallback: keep only after DAPI image-key verification.
+                _add_candidate(candidates, pid)
+
+        def _extract_post_ids_from_locator_response(response):
+            candidates = []
+            blobs = []
+            final_url = str(getattr(response, "url", "") or "")
+            blobs.append(final_url)
+            # Redirect chain can contain the only Location with id=... before requests
+            # follows it or normalizes the final URL back to the sample path.
+            try:
+                for h in getattr(response, "history", []) or []:
+                    blobs.append(str(getattr(h, "url", "") or ""))
+                    try:
+                        blobs.append(str((getattr(h, "headers", {}) or {}).get("Location", "") or ""))
+                        blobs.append(str((getattr(h, "headers", {}) or {}).get("Refresh", "") or ""))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            try:
+                hdrs = getattr(response, "headers", {}) or {}
+                blobs.append(str(hdrs.get("Location", "") or ""))
+                blobs.append(str(hdrs.get("Refresh", "") or ""))
+            except Exception:
+                pass
+            body = ""
+            try:
+                body = getattr(response, "text", "") or ""
+            except Exception:
+                body = ""
+            blobs.append(body)
+            for text in blobs:
+                _extract_post_ids_from_text_blob(candidates, text)
+                parsed = urlparse(str(text or ""))
+                if parsed.query and re.fullmatch(r"\d+", parsed.query.strip()):
+                    _add_candidate(candidates, parsed.query.strip())
+            try:
+                soup = BeautifulSoup(body, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a.get("href") or ""
+                    _extract_post_ids_from_text_blob(candidates, href)
+                    if "page=post" not in href or "s=view" not in href:
+                        continue
+                    query = parse_qs(urlparse(urljoin("https://rule34.xxx/", href.replace("&amp;", "&"))).query)
+                    _add_candidate(candidates, (query.get("id") or [""])[0])
+                for tag in soup.find_all(["link", "meta", "script"]):
+                    for attr in ("href", "content", "src"):
+                        value = tag.get(attr) or ""
+                        _extract_post_ids_from_text_blob(candidates, value)
+                        if "page=post" in value and "id=" in value:
+                            query = parse_qs(urlparse(urljoin("https://rule34.xxx/", value.replace("&amp;", "&"))).query)
+                            _add_candidate(candidates, (query.get("id") or [""])[0])
+            except Exception:
+                pass
+            return candidates
+
+        def _hotlink_ext_from_url(url, image_key):
+            try:
+                parsed = urlparse(str(url or ""))
+                query = parse_qs(parsed.query or "")
+                img_values = query.get("img") or []
+                for value in img_values:
+                    m = re.search(rf"{re.escape(image_key)}\.([a-zA-Z0-9]+)", str(value or ""), flags=re.I)
+                    if m:
+                        ext = m.group(1).lower()
+                        if ext in ("jpg", "jpeg", "png", "webp", "gif"):
+                            return ext
+                m = re.search(rf"sample_{re.escape(image_key)}\.([a-zA-Z0-9]+)", str(url or ""), flags=re.I)
+                if m:
+                    ext = m.group(1).lower()
+                    if ext in ("jpg", "jpeg", "png", "webp", "gif"):
+                        return ext
+            except Exception:
+                pass
+            return ""
+
+        def _hotlink_url_for_key(image_key, ext):
+            ext = (ext or "").strip().lower().lstrip(".")
+            if ext == "jpeg":
+                ext = "jpg"
+            if ext not in ("jpg", "png", "webp", "gif"):
+                return ""
+            return f"https://hl.rule34.xxx/public/hotlink.php?img={image_key}.{ext}"
+
+        def _looks_like_hotlink_url(url):
+            try:
+                parsed = urlparse(str(url or ""))
+                host = (parsed.netloc or "").lower().replace("www.", "")
+                return host == "hl.rule34.xxx" and "/public/hotlink.php" in (parsed.path or "")
+            except Exception:
+                return False
+
+        def _hotlink_urls_from_response(response, fallback_url=""):
+            urls = []
+            def add(value):
+                value = str(value or "")
+                if value and value not in urls and _looks_like_hotlink_url(value):
+                    urls.append(value)
+            try:
+                add(getattr(response, "url", ""))
+            except Exception:
+                pass
+            try:
+                for h in getattr(response, "history", []) or []:
+                    add(getattr(h, "url", ""))
+                    hdrs = getattr(h, "headers", {}) or {}
+                    add(hdrs.get("Location", ""))
+            except Exception:
+                pass
+            try:
+                hdrs = getattr(response, "headers", {}) or {}
+                add(hdrs.get("Location", ""))
+            except Exception:
+                pass
+            add(fallback_url)
+            return urls
+
+        def _probe_hotlink_redirect(image_key, ext, referer_url="", source_url=""):
+            """Probe rule34 hotlink.php as an exact 40hex locator.
+
+            The hotlink endpoint can redirect to /index.php?page=post&s=view&id=...
+            even when sample bucket probing returns 403/404.  A post id from this
+            redirect is trusted as an exact locator for the requested img=<key>.<ext>;
+            tags are still fetched only through DAPI by id.
+            """
+            if not bool(self.settings.get("rule34_image_key_hotlink_redirect_enabled", True)):
+                return []
+            hotlink_url = source_url or _hotlink_url_for_key(image_key, ext)
+            if not hotlink_url or not _looks_like_hotlink_url(hotlink_url):
+                return []
+            try:
+                hotlink_timeout = float(self.settings.get("rule34_image_key_hotlink_request_timeout", 4.0) or 4.0)
+            except Exception:
+                hotlink_timeout = 4.0
+            hotlink_timeout = max(1.5, min(float(self.timeout or 10.0), hotlink_timeout))
+            base_headers = dict(request_headers or {})
+            # Direct browser navigation to hotlink.php normally has no Referer.
+            # A Referer can trigger hotlink protection and return 403 instead of
+            # the post redirect, so try a no-referer browser-like request first.
+            browser_ua = (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+            common_headers = {
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "User-Agent": browser_ua,
+                "Upgrade-Insecure-Requests": "1",
+            }
+            hheaders_variants = []
+            h0 = dict(base_headers)
+            h0.update(common_headers)
+            h0.pop("Referer", None)
+            hheaders_variants.append(("noreferrer", h0))
+            if referer_url:
+                h1 = dict(base_headers)
+                h1.update(common_headers)
+                h1["Referer"] = referer_url
+                hheaders_variants.append(("referer", h1))
+            candidates = []
+
+            def _cookie_names(jar):
+                names = []
+                try:
+                    for c in jar:
+                        name = getattr(c, "name", None)
+                        if name:
+                            names.append(str(name))
+                except Exception:
+                    pass
+                return sorted(set(names))
+
+            def _copy_rule34_cookies_to_hotlink_session(src, dst):
+                """Bridge rule34.xxx browser cookies to hl.rule34.xxx.
+
+                The embedded browser can open hl.rule34.xxx, but parser requests
+                previously loaded zero cookies for hl.rule34.xxx.  Exported
+                Cloudflare cookies are often stored as host-only rule34.xxx
+                cookies, so requests will not send them to the hotlink subdomain
+                unless we explicitly mirror them.
+                """
+                copied = 0
+                try:
+                    for c in getattr(src, "cookies", []) or []:
+                        name = getattr(c, "name", None)
+                        value = getattr(c, "value", None)
+                        path = getattr(c, "path", "/") or "/"
+                        if not name or value is None:
+                            continue
+                        name = str(name)
+                        value = str(value)
+                        path = str(path or "/")
+                        for kwargs in (
+                            {"domain": "hl.rule34.xxx", "path": path},
+                            {"domain": ".rule34.xxx", "path": path},
+                            {"path": path},
+                        ):
+                            try:
+                                dst.cookies.set(name, value, **kwargs)
+                                copied += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                return copied
+
+            sessions = []
+            try:
+                hs = self.session_for_host("hl.rule34.xxx")
+                copied = _copy_rule34_cookies_to_hotlink_session(session, hs)
+                sessions.append((hs, "hl"))
+                try:
+                    names = _cookie_names(getattr(hs, "cookies", []))
+                    preview = ", ".join(names[:12])
+                    more = "..." if len(names) > 12 else ""
+                    self.log(
+                        f"    {label} IMAGE KEY HOTLINK COOKIE BRIDGE: copied={copied} "
+                        f"cookies={len(names)} [{preview}{more}]"
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                sessions.append((session, "rule34"))
+
+            def _playwright_cookie_records():
+                records = []
+                seen = set()
+
+                def add_record(name, value, domain, path="/", expires=None, secure=True, http_only=False):
+                    try:
+                        if not name or value is None:
+                            return
+                        name = str(name)
+                        value = str(value)
+                        domain = str(domain or "").strip()
+                        path = str(path or "/")
+                        key = (name, value, domain, path)
+                        if key in seen:
+                            return
+                        seen.add(key)
+                        rec = {"name": name, "value": value, "domain": domain, "path": path}
+                        try:
+                            exp = int(float(expires)) if expires not in (None, "", 0, -1) else None
+                            if exp and exp > int(time.time()) - 60:
+                                rec["expires"] = exp
+                        except Exception:
+                            pass
+                        rec["secure"] = bool(secure)
+                        rec["httpOnly"] = bool(http_only)
+                        records.append(rec)
+                    except Exception:
+                        pass
+
+                # Playwright must get the same site state as the app browser: both
+                # rule34.xxx and the hotlink subdomain need the rule34 cookies.
+                for src_sess, _src_name in sessions + [(session, "rule34")]:
+                    try:
+                        for c in getattr(src_sess, "cookies", []) or []:
+                            name = getattr(c, "name", None)
+                            value = getattr(c, "value", None)
+                            path = getattr(c, "path", "/") or "/"
+                            expires = getattr(c, "expires", None)
+                            secure = getattr(c, "secure", True)
+                            http_only = getattr(c, "rest", {}).get("HttpOnly", False) if hasattr(c, "rest") else False
+                            for dom in ("rule34.xxx", "hl.rule34.xxx", ".rule34.xxx"):
+                                add_record(name, value, dom, path, expires, secure, http_only)
+                    except Exception:
+                        pass
+                return records
+
+            def _probe_hotlink_with_playwright():
+                if not bool(self.settings.get("rule34_image_key_hotlink_playwright_fallback", True)):
+                    return []
+                try:
+                    from playwright.sync_api import sync_playwright as _sync_playwright
+                except Exception as e:
+                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT SKIP: not installed ({type(e).__name__}); install: python -m pip install playwright && python -m playwright install chromium")
+                    return []
+                try:
+                    timeout_sec = float(self.settings.get("rule34_image_key_hotlink_playwright_timeout", 25.0) or 25.0)
+                except Exception:
+                    timeout_sec = 25.0
+                timeout_ms = int(max(8000, min(90000, timeout_sec * 1000)))
+                headless = bool(self.settings.get("rule34_image_key_hotlink_playwright_headless", False))
+                # Keep one persistent profile and one launch at a time.  Chromium
+                # profile locking makes concurrent launch_persistent_context calls fail.
+                profile_dir = Path(BROWSER_PROFILE_DIR) / "rule34_hotlink_playwright"
+                profile_dir.mkdir(parents=True, exist_ok=True)
+                cookie_records = _playwright_cookie_records()
+                self.log(
+                    f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT START: url={hotlink_url} "
+                    f"mode={'headless' if headless else 'visible'} cookies={len(cookie_records)}"
+                )
+                out = []
+                with _RULE34_HOTLINK_PLAYWRIGHT_LOCK:
+                    try:
+                        with _sync_playwright() as pw:
+                            context = None
+                            try:
+                                context = pw.chromium.launch_persistent_context(
+                                    user_data_dir=str(profile_dir),
+                                    headless=headless,
+                                    viewport={"width": 1280, "height": 900},
+                                    user_agent=browser_ua,
+                                    accept_downloads=False,
+                                    args=["--disable-blink-features=AutomationControlled"],
+                                )
+                                try:
+                                    if cookie_records:
+                                        context.add_cookies(cookie_records)
+                                except Exception as ce:
+                                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT COOKIES WARN: {type(ce).__name__}: {str(ce)[:120]}")
+                                page = context.pages[0] if context.pages else context.new_page()
+                                try:
+                                    page.goto(hotlink_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                                except Exception as ge:
+                                    # Cloudflare/browser redirects can finish after Playwright
+                                    # reports a navigation timeout.  Continue and inspect URL/DOM.
+                                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT GOTO WARN: {type(ge).__name__}: {str(ge)[:120]}")
+                                deadline = time.time() + min(12.0, timeout_ms / 1000.0)
+                                while time.time() < deadline:
+                                    try:
+                                        cur = str(page.url or "")
+                                        _extract_post_ids_from_text_blob(out, cur)
+                                        if out:
+                                            break
+                                    except Exception:
+                                        pass
+                                    try:
+                                        page.wait_for_timeout(250)
+                                    except Exception:
+                                        time.sleep(0.25)
+                                try:
+                                    cur = str(page.url or "")
+                                    _extract_post_ids_from_text_blob(out, cur)
+                                    if not out:
+                                        html_text = page.content() or ""
+                                        _extract_post_ids_from_text_blob(out, html_text)
+                                except Exception:
+                                    pass
+                                final_url = ""
+                                try:
+                                    final_url = str(page.url or "")
+                                except Exception:
+                                    pass
+                                if out:
+                                    self.log(
+                                        f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT CANDIDATES: key={image_key} "
+                                        f"ids={','.join(out[:5])} url={final_url}"
+                                    )
+                                else:
+                                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT MISS: url={final_url or hotlink_url}")
+                            finally:
+                                try:
+                                    if context is not None:
+                                        context.close()
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT ERROR: {type(e).__name__}: {str(e)[:180]}")
+                return out
+
+            # Keep the rule34 session as a fallback only after the bridged hl
+            # session.  Do not let a naked rule34-session 403 become the only
+            # observed result.
+            if not any(obj is session for obj, _name in sessions):
+                sessions.append((session, "rule34"))
+            seen_req = set()
+            last_status = ""
+            last_ctype = ""
+            last_final = hotlink_url
+            for sess_index, (hs, session_label) in enumerate(sessions):
+                for header_label, hheaders in hheaders_variants:
+                    for follow in (False, True):
+                        cache_key = (id(hs), header_label, follow, hotlink_url)
+                        if cache_key in seen_req:
+                            continue
+                        seen_req.add(cache_key)
+                        try:
+                            # Hotlink probing intentionally bypasses the per-file
+                            # GET cache: the same URL is tried with different cookie
+                            # jars and browser-like headers.  The generic cache key
+                            # does not include cookies/headers, so caching the first
+                            # 403 would hide the successful browser-equivalent probe.
+                            if "_http_get_cached" in getattr(self, "__dict__", {}):
+                                # Unit tests monkeypatch this instance method with
+                                # fake responses; keep that path testable without
+                                # restoring the production cache bug.
+                                r = self._http_get_cached(hs, hotlink_url, timeout=hotlink_timeout, headers=hheaders, allow_redirects=follow)
+                            else:
+                                r = hs.get(hotlink_url, timeout=hotlink_timeout, headers=hheaders, allow_redirects=follow)
+                            try:
+                                last_status = str(getattr(r, "status_code", "") or "")
+                                last_ctype = str((getattr(r, "headers", {}) or {}).get("content-type", "") or "")
+                                last_final = str(getattr(r, "url", hotlink_url) or hotlink_url)
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            last_status = type(e).__name__
+                            last_ctype = ""
+                            last_final = hotlink_url
+                            continue
+                        for pid in _extract_post_ids_from_locator_response(r):
+                            _add_candidate(candidates, pid, trusted_hotlink=True)
+                        if candidates:
+                            try:
+                                final = getattr(r, "url", hotlink_url)
+                                self.log(
+                                    f"    {label} IMAGE KEY HOTLINK REDIRECT CANDIDATES: key={image_key} ext={ext} "
+                                    f"ids={','.join(candidates[:5])} url={final} follow={int(follow)} "
+                                    f"session={session_label}/{sess_index+1} headers={header_label}"
+                                )
+                            except Exception:
+                                pass
+                            return candidates
+                        # If the first response contains another hotlink URL in Location,
+                        # probe that exact URL too.  This covers sample -> hl redirect chains
+                        # where requests stops on hl with HTTP 403.
+                        for next_hotlink in _hotlink_urls_from_response(r):
+                            if next_hotlink == hotlink_url:
+                                continue
+                            next_ext = _hotlink_ext_from_url(next_hotlink, image_key) or ext
+                            nested = _probe_hotlink_redirect(image_key, next_ext, referer_url or hotlink_url, next_hotlink)
+                            for pid in nested:
+                                _add_candidate(candidates, pid, trusted_hotlink=True)
+                            if candidates:
+                                return candidates
+            if not candidates and str(last_status) == "403":
+                try:
+                    self.log(f"    {label} IMAGE KEY HOTLINK REQUESTS 403: trying automatic Playwright browser resolver")
+                except Exception:
+                    pass
+                for pid in _probe_hotlink_with_playwright():
+                    _add_candidate(candidates, pid, trusted_hotlink=True)
+                if candidates:
+                    return candidates
+            if not candidates:
+                try:
+                    self.log(
+                        f"    {label} IMAGE KEY HOTLINK MISS DETAIL: key={image_key} ext={ext} "
+                        f"status={last_status or 'missing'} type={last_ctype} url={last_final}"
+                    )
+                except Exception:
+                    pass
+            return candidates
+
+        def _image_key_hotlink_extensions():
+            raw = str(self.settings.get("rule34_image_key_hotlink_extensions", "png") or "png")
+            exts = []
+            for part in re.split(r"[,;\s]+", raw):
+                ext = part.strip().lower().lstrip(".")
+                if ext == "jpeg":
+                    ext = "jpg"
+                if ext in ("png", "jpg", "webp", "gif") and ext not in exts:
+                    exts.append(ext)
+            return exts or ["png"]
+
+        def _image_key_bucket_sequence():
+            """Return sample directory buckets for rule34 image-key probing.
+
+            User-observed rule34 behavior: the same 40hex key can resolve with
+            /samples/1/sample_<key>.jpg, while PNG may require another bucket
+            such as /samples/100/.  Probe 1, 100, 200, ... up to 9999 by
+            default, with settings overrides for future tuning.
+            """
+            raw = str(self.settings.get("rule34_image_key_bucket_probe_sequence", "") or "")
+            buckets = []
+            for part in re.split(r"[,;\s]+", raw):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    value = int(part)
+                except Exception:
+                    continue
+                if 0 <= value <= 9999 and value not in buckets:
+                    buckets.append(value)
+            if buckets:
+                return buckets
+
+            try:
+                max_bucket = int(self.settings.get("rule34_image_key_bucket_probe_max", 9999) or 9999)
+            except Exception:
+                max_bucket = 9999
+            try:
+                step = int(self.settings.get("rule34_image_key_bucket_probe_step", 100) or 100)
+            except Exception:
+                step = 100
+            max_bucket = max(1, min(9999, max_bucket))
+            step = max(1, min(1000, step))
+
+            buckets = [1]
+            for value in range(100, max_bucket + 1, step):
+                if value not in buckets:
+                    buckets.append(value)
+            if max_bucket not in buckets:
+                buckets.append(max_bucket)
+            return buckets
+
+        def _image_key_sample_url_plan(image_key):
+            """Build optional legacy sample URLs for rule34 image-key probing.
+
+            v279 changes the default locator to direct hotlink only:
+            https://hl.rule34.xxx/public/hotlink.php?img=<key>.png
+
+            The old 1/100/200/... sample bucket sweep is kept only as an
+            explicit legacy mode because it is slow and can starve the worker
+            before the useful hotlink/tag-query locators run.
+            """
+            mode = str(self.settings.get("rule34_image_key_locator_mode", "hotlink_only") or "hotlink_only").strip().lower()
+            if mode not in ("bucket_sweep", "sample_bucket_sweep", "legacy_bucket_sweep"):
+                return [], []
+            if not bool(self.settings.get("rule34_image_key_bucket_probe_enabled", False)):
+                return [], []
+
+            urls = []
+            seen = set()
+
+            def add(url):
+                if url not in seen:
+                    seen.add(url)
+                    urls.append(url)
+
+            buckets = _image_key_bucket_sequence()
+            for bucket in buckets:
+                add(f"https://rule34.xxx//samples/{bucket}/sample_{image_key}.jpg")
+                add(f"https://rule34.xxx//samples/{bucket}/sample_{image_key}.png")
+            add(f"https://rule34.xxx/samples/1/sample_{image_key}.jpg")
+            add(f"https://rule34.xxx/samples/1/sample_{image_key}.png")
+            return urls, buckets
+
+        try:
+            image_key_request_timeout = float(self.settings.get("rule34_image_key_bucket_request_timeout", 3.0) or 3.0)
+        except Exception:
+            image_key_request_timeout = 3.0
+        try:
+            image_key_total_timeout = float(self.settings.get("rule34_image_key_bucket_total_timeout", 90.0) or 90.0)
+        except Exception:
+            image_key_total_timeout = 90.0
+        image_key_request_timeout = max(1.5, min(float(self.timeout or 10.0), image_key_request_timeout))
+        image_key_total_timeout = max(10.0, image_key_total_timeout)
+
+        for image_key in image_keys[:3]:
+            sample_urls, buckets = _image_key_sample_url_plan(image_key)
+            hotlink_exts = _image_key_hotlink_extensions()
+            self.log(
+                f"    {label} IMAGE KEY LOCATOR START: key={image_key} local_md5={local_md5 or 'missing'} "
+                f"mode={str(self.settings.get('rule34_image_key_locator_mode', 'hotlink_only') or 'hotlink_only')} "
+                f"hotlink_exts={','.join(hotlink_exts)} sample_urls={len(sample_urls)} "
+                f"timeout={image_key_request_timeout:.1f}s total_timeout={image_key_total_timeout:.1f}s"
+            )
+            candidates = []
+            # Probe direct hotlink first without counting it as a sample bucket.
+            # Browser tests showed that hl.rule34.xxx/public/hotlink.php?img=<key>.<ext>
+            # can redirect straight to the post page even when sample bucket URLs
+            # return 403/404 or stop on the hotlink host.
+            for ext in hotlink_exts:
+                for pid in _probe_hotlink_redirect(image_key, ext, ""):
+                    _add_candidate(candidates, pid, trusted_hotlink=True)
+                if candidates:
+                    break
+            miss_logged = 0
+            started_at = time.monotonic()
+            if not candidates:
+                for idx, sample_url in enumerate(sample_urls, start=1):
+                    if time.monotonic() - started_at >= image_key_total_timeout:
+                        self.log(f"    {label} IMAGE KEY LOCATOR TIME BUDGET EXHAUSTED: key={image_key} tried={idx-1}/{len(sample_urls)}")
+                        break
+                    responses = []
+                    # First request keeps redirects visible.  If the server returns
+                    # 404, do not waste a second followed-redirect request.  If it
+                    # returns 2xx/3xx without an id in headers/location, follow once
+                    # to parse the final HTML/URL.
+                    try:
+                        r0 = self._http_get_cached(session, sample_url, timeout=image_key_request_timeout, headers=request_headers, allow_redirects=False)
+                        responses.append(r0)
+                    except Exception as e:
+                        if miss_logged < 10:
+                            self.log(f"    {label} IMAGE KEY LOCATOR ERROR: key={image_key} url={sample_url} redirects=0 {e}")
+                            miss_logged += 1
+                        continue
+
+                    direct_hotlink_url = _looks_like_hotlink_url(sample_url)
+                    for pid in _extract_post_ids_from_locator_response(r0):
+                        _add_candidate(candidates, pid, trusted_hotlink=direct_hotlink_url)
+                    if candidates and direct_hotlink_url:
+                        try:
+                            final = getattr(r0, "url", sample_url)
+                            self.log(f"    {label} IMAGE KEY HOTLINK REDIRECT CANDIDATES: key={image_key} ext={_hotlink_ext_from_url(sample_url, image_key) or 'unknown'} ids={','.join(candidates[:5])} url={final} follow=0 session=sample")
+                        except Exception:
+                            pass
+
+                    # Direct hotlink URL or sample->hotlink redirect: the important
+                    # post id may be in the next Location/final URL from hotlink.php,
+                    # not in the sample URL itself.
+                    if not candidates:
+                        hotlink_urls = _hotlink_urls_from_response(r0, sample_url)
+                        for hotlink_url in hotlink_urls:
+                            ext = _hotlink_ext_from_url(hotlink_url, image_key) or _hotlink_ext_from_url(sample_url, image_key)
+                            for pid in _probe_hotlink_redirect(image_key, ext, sample_url, hotlink_url):
+                                _add_candidate(candidates, pid, trusted_hotlink=True)
+                            if candidates:
+                                break
+
+                    if not candidates:
+                        status0 = int(getattr(r0, 'status_code', 0) or 0)
+                        should_follow = status0 and status0 != 404
+                        if should_follow:
+                            try:
+                                r1 = self._http_get_cached(session, sample_url, timeout=image_key_request_timeout, headers=request_headers, allow_redirects=True)
+                                responses.append(r1)
+                                r1_direct_hotlink = _looks_like_hotlink_url(sample_url)
+                                for pid in _extract_post_ids_from_locator_response(r1):
+                                    _add_candidate(candidates, pid, trusted_hotlink=r1_direct_hotlink)
+                                if candidates and r1_direct_hotlink:
+                                    try:
+                                        final = getattr(r1, "url", sample_url)
+                                        self.log(f"    {label} IMAGE KEY HOTLINK REDIRECT CANDIDATES: key={image_key} ext={_hotlink_ext_from_url(sample_url, image_key) or 'unknown'} ids={','.join(candidates[:5])} url={final} follow=1 session=sample")
+                                    except Exception:
+                                        pass
+                                if not candidates:
+                                    hotlink_urls = _hotlink_urls_from_response(r1, sample_url)
+                                    for hotlink_url in hotlink_urls:
+                                        ext = _hotlink_ext_from_url(hotlink_url, image_key) or _hotlink_ext_from_url(sample_url, image_key)
+                                        for pid in _probe_hotlink_redirect(image_key, ext, sample_url, hotlink_url):
+                                            _add_candidate(candidates, pid, trusted_hotlink=True)
+                                        if candidates:
+                                            break
+                            except Exception as e:
+                                if miss_logged < 10:
+                                    self.log(f"    {label} IMAGE KEY LOCATOR ERROR: key={image_key} url={sample_url} redirects=1 {e}")
+                                    miss_logged += 1
+
+                    if candidates:
+                        try:
+                            final = getattr(responses[-1], 'url', sample_url) if responses else sample_url
+                            self.log(f"    {label} IMAGE KEY LOCATOR POST CANDIDATES: key={image_key} ids={','.join(candidates[:5])} url={final} tried={idx}/{len(sample_urls)}")
+                        except Exception:
+                            pass
+                        break
+
+                    try:
+                        if responses and miss_logged < 10:
+                            r0 = responses[-1]
+                            ctype = (getattr(r0, 'headers', {}) or {}).get('content-type', '')
+                            status = getattr(r0, 'status_code', '')
+                            final = getattr(r0, 'url', sample_url)
+                            self.log(f"    {label} IMAGE KEY LOCATOR MISS DETAIL: key={image_key} status={status} type={ctype} url={final}")
+                            miss_logged += 1
+                    except Exception:
+                        pass
+
+            if not candidates:
+                tried_count = 0
+                try:
+                    tried_count = min(len(sample_urls), idx if 'idx' in locals() else 0)
+                except Exception:
+                    tried_count = 0
+                self.log(f"    {label} IMAGE KEY LOCATOR: no post id for key={image_key} sample_urls_tried={tried_count}/{len(sample_urls)}")
+                continue
+
+            for pid in candidates[:5]:
+                posts = self._rule34xxx_dapi_posts_by_id(site, pid, headers=headers)
+                if getattr(self, "_last_lookup_status", "") == "auth_required":
+                    return [], "", empty_tag_groups()
+                for post in posts or []:
+                    if not isinstance(post, dict):
+                        continue
+                    trusted_hotlink = str(pid) in trusted_hotlink_candidates
+                    if not trusted_hotlink and not self._rule34xxx_post_contains_image_key(post, image_key):
+                        self.log(f"    {label} IMAGE KEY LOCATOR REJECT: post={pid} key not present in DAPI media fields")
+                        continue
+                    source_url = self._post_url_for_engine(site, post) or f"https://rule34.xxx/index.php?page=post&s=view&id={pid}"
+                    groups = self._groups_from_engine_post(site, post, source_url)
+                    tags = groups_to_tags(groups) or self._configured_tags_from_post(site, post)
+                    site_md5 = self._configured_post_md5(site, post)
+                    if not tags:
+                        self.log(f"    {label} IMAGE KEY LOCATOR REJECT: post={pid} verified key but no tags")
+                        continue
+                    classified = sum(len(groups.get(k, []) or []) for k in ("artist", "character", "copyright", "meta")) if isinstance(groups, dict) else 0
+                    match_method = "image_key_hotlink_redirect" if trusted_hotlink else "image_key_locator_variant"
+                    self.log(
+                        f"    {label} TAG SOURCE: {match_method} post={pid} "
+                        f"key={image_key} trusted_hotlink={1 if trusted_hotlink else 0} "
+                        f"site_md5={site_md5 or 'missing'} local_md5={local_md5 or 'missing'} "
+                        f"tags={len(tags)} classified={classified}"
+                    )
+                    site_md5s = list(getattr(self, "_last_rule34_image_key_site_md5s", []) or [])
+                    if site_md5 and site_md5 not in site_md5s:
+                        site_md5s.append(site_md5)
+                    self._last_rule34_image_key_site_md5s = site_md5s
+                    self._last_lookup_match_method = "rule34_image_key_hotlink_redirect" if trusted_hotlink else "rule34_image_key_variant"
+                    return tags, source_url, groups
+        return [], "", empty_tag_groups()
+
+    def _rule34xxx_sha1_async_search_queries(self, image_key):
+        """Return conservative rule34.xxx tag-search operators for a 40-hex key.
+
+        These are only one part of the SHA1/40hex locator.  v274 also probes
+        structured DAPI/list parameters such as ``sha1=<key>`` and
+        ``image=<key>.png`` because rule34.xxx does not consistently expose
+        filename/SHA1 fields through the normal tag search syntax.
+        """
+        key = str(image_key or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", key):
+            return []
+        return unique_keep_order([
+            f"sha1:{key}",
+            f"hash:{key}",
+            f"image:{key}",
+            f"image:*{key}*",
+            f"filename:{key}",
+            f"file:{key}",
+            f"source:{key}",
+            f"source:*{key}*",
+            f"source:*{key}",
+            f"source:{key}*",
+            key,
+        ])
+
+    def _rule34xxx_sha1_async_param_probes(self, image_key):
+        """Return structured rule34.xxx locator probes for SHA1/40hex values.
+
+        These probes are intentionally accepted only as locators.  If a post
+        returned by a probe does not expose the 40hex key in media fields, tags
+        are accepted only for a single-result exact structured probe (for
+        example ``sha1=<key>``), because an unknown parameter may otherwise be
+        ignored by the site and return unrelated recent posts.
+        """
+        key = str(image_key or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{40}", key):
+            return []
+        exts = ["png", "jpg", "jpeg", "webp", "gif"]
+        probes = []
+
+        def add(name, params, exact_single=False):
+            clean = {str(k): str(v) for k, v in (params or {}).items() if v is not None and str(v) != ""}
+            probes.append({"name": name, "params": clean, "exact_single": bool(exact_single)})
+
+        # The likely path when the user says “found by SHA1”.
+        add("sha1-param", {"sha1": key}, True)
+        add("sha1-param-dash", {"sha1": key.upper()}, True)
+
+        # Rule34/booru forks have used inconsistent internal names for media fields.
+        add("hash-param", {"hash": key}, True)
+        add("image-param", {"image": key}, True)
+        add("file-param", {"file": key}, True)
+        add("filename-param", {"filename": key}, True)
+        add("file-url-param", {"file_url": key}, True)
+        add("source-param", {"source": key}, True)
+
+        for ext in exts:
+            add(f"image-param-{ext}", {"image": f"{key}.{ext}"}, True)
+            add(f"file-param-{ext}", {"file": f"{key}.{ext}"}, True)
+            add(f"filename-param-{ext}", {"filename": f"{key}.{ext}"}, True)
+
+        # Some front-end list pages are not DAPI-compatible but still produce
+        # post links.  These must later be verified by DAPI-by-id.
+        add("list-sha1-param", {"sha1": key}, False)
+        add("list-hash-param", {"hash": key}, False)
+        add("list-image-param", {"image": key}, False)
+        add("list-file-param", {"file": key}, False)
+        return probes
+
+    def _rule34xxx_response_post_ids(self, response):
+        """Extract post IDs from a rule34.xxx HTML/list/redirect response."""
+        ids = []
+        seen = set()
+
+        def add(pid):
+            pid = str(pid or "").strip()
+            if pid.isdigit() and pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+
+        blobs = []
+        try:
+            blobs.append(str(getattr(response, "url", "") or ""))
+        except Exception:
+            pass
+        try:
+            for h in getattr(response, "history", []) or []:
+                blobs.append(str(getattr(h, "url", "") or ""))
+                hdrs = getattr(h, "headers", {}) or {}
+                blobs.append(str(hdrs.get("Location", "") or ""))
+                blobs.append(str(hdrs.get("Refresh", "") or ""))
+        except Exception:
+            pass
+        try:
+            hdrs = getattr(response, "headers", {}) or {}
+            blobs.append(str(hdrs.get("Location", "") or ""))
+            blobs.append(str(hdrs.get("Refresh", "") or ""))
+        except Exception:
+            pass
+        try:
+            body = getattr(response, "text", "") or ""
+        except Exception:
+            body = ""
+        blobs.append(body)
+        for blob in blobs:
+            text = str(blob or "")
+            if not text:
+                continue
+            for pid in re.findall(r"(?:[?&]|&amp;)id=(\d+)", text):
+                add(pid)
+            for pid in re.findall(r"page=post[^\s\"'<>]*?s=view[^\s\"'<>]*?(?:[?&]|&amp;)id=(\d+)", text):
+                add(pid)
+            for pid in re.findall(r"sample_[0-9a-fA-F]{40}\.(?:jpg|jpeg|png|webp)\?(\d{4,})", text):
+                add(pid)
+            try:
+                parsed = urlparse(text)
+                if parsed.query and re.fullmatch(r"\d+", parsed.query.strip()):
+                    add(parsed.query.strip())
+            except Exception:
+                pass
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a.get("href") or ""
+                if "page=post" not in href or "s=view" not in href or "id=" not in href:
+                    continue
+                query = parse_qs(urlparse(urljoin("https://rule34.xxx/", href.replace("&amp;", "&"))).query)
+                add((query.get("id") or [""])[0])
+            for tag in soup.find_all(["link", "meta", "script"]):
+                for attr in ("href", "content", "src"):
+                    value = tag.get(attr) or ""
+                    if "page=post" not in value or "id=" not in value:
+                        continue
+                    query = parse_qs(urlparse(urljoin("https://rule34.xxx/", value.replace("&amp;", "&"))).query)
+                    add((query.get("id") or [""])[0])
+        except Exception:
+            pass
+        return ids
+
+    def _rule34xxx_verified_variant_from_post(self, site, post, image_key, local_md5, method, headers=None, trusted_exact_param=False):
+        """Build accepted rule34.xxx variant metadata from a DAPI-verified post."""
+        site = site if isinstance(site, dict) else {}
+        label = self._site_label(site)
+        key = str(image_key or "").strip().lower()
+        if not isinstance(post, dict):
+            return [], "", empty_tag_groups()
+        if not trusted_exact_param and not self._rule34xxx_post_contains_image_key(post, key):
+            return [], "", empty_tag_groups()
+        pid = str(post.get("id") or post.get("post_id") or "").strip()
+        source_url = self._post_url_for_engine(site, post) or (f"https://rule34.xxx/index.php?page=post&s=view&id={pid}" if pid else "https://rule34.xxx/")
+        groups = self._groups_from_engine_post(site, post, source_url)
+        tags = groups_to_tags(groups) or self._configured_tags_from_post(site, post)
+        site_md5 = self._configured_post_md5(site, post)
+        if not tags:
+            self.log(f"    {label} SHA1 ASYNC LOCATOR REJECT: post={pid or '?'} verified key but no tags")
+            return [], "", empty_tag_groups()
+        classified = sum(len(groups.get(k, []) or []) for k in ("artist", "character", "copyright", "meta")) if isinstance(groups, dict) else 0
+        self.log(
+            f"    {label} TAG SOURCE: {method} post={pid or '?'} "
+            f"key={key} site_md5={site_md5 or 'missing'} local_md5={local_md5 or 'missing'} "
+            f"trusted_exact_param={int(bool(trusted_exact_param))} tags={len(tags)} classified={classified}"
+        )
+        site_md5s = list(getattr(self, "_last_rule34_image_key_site_md5s", []) or [])
+        if site_md5 and site_md5 not in site_md5s:
+            site_md5s.append(site_md5)
+        self._last_rule34_image_key_site_md5s = site_md5s
+        self._last_lookup_match_method = method.replace("_locator", "_variant") if method.endswith("_locator") else method
+        return tags, source_url, groups
+
+    def _rule34xxx_sha1_async_locator_lookup(self, site, md5, headers=None):
+        """Asynchronously locate rule34.xxx posts by 40-hex/SHA1-like keys.
+
+        This is deliberately a separate locator path from exact MD5.  It is used
+        after the real local MD5 misses, for files named like
+        ``<40hex>__<local-md5-prefix>.png`` where the 40-hex value is remembered
+        from rule34.xxx/SHA1/image-key search.  The async workers only produce
+        candidate post IDs or DAPI posts; tags are accepted only after DAPI media
+        fields contain the same 40-hex key.
+        """
+        site = site if isinstance(site, dict) else {}
+        label = self._site_label(site)
+        local_md5 = (md5 or "").strip().lower()
+        image_keys = self._rule34xxx_current_image_key_candidates()
+        if not image_keys:
+            return [], "", empty_tag_groups()
+        if getattr(self, "_last_lookup_status", "") == "auth_required":
+            return [], "", empty_tag_groups()
+        if not bool(self.settings.get("rule34_sha1_async_locator_enabled", True)):
+            return [], "", empty_tag_groups()
+
+        request_headers = dict(headers or {})
+        request_headers.setdefault("Accept", "text/html,application/xhtml+xml,application/json,application/xml,text/xml,*/*")
+        request_headers.setdefault("User-Agent", self._rule34xxx_api_headers(site).get("User-Agent", "LocalBooru/3.5 (local archive manager)"))
+        request_headers.setdefault("Referer", "https://rule34.xxx/")
+        workers = max(1, min(8, int(self.settings.get("rule34_sha1_async_locator_workers", 4) or 4)))
+        request_timeout = max(3.0, min(float(self.timeout or 10.0), float(self.settings.get("rule34_sha1_async_locator_request_timeout", 6.0) or 6.0)))
+        total_timeout = max(12.0, float(self.settings.get("rule34_sha1_async_locator_total_timeout", 55.0) or 55.0))
+        deadline = time.monotonic() + total_timeout
+
+        def _time_left():
+            return max(0.0, deadline - time.monotonic())
+
+        def _is_trusted_exact_tag_query(query, image_key):
+            q = str(query or "").strip().lower()
+            key = str(image_key or "").strip().lower()
+            return bool(key) and any(q == f"{prefix}:{key}" for prefix in ("sha1", "hash", "image", "filename", "file"))
+
+        def _task_dapi_search(image_key, query, api_url, use_json):
+            params = self._rule34xxx_api_params(site, tags=query, limit=20)
+            session = self.session_for_host("rule34.xxx")
+            r = self._http_get_cached(session, api_url, params=params, timeout=request_timeout, headers=request_headers)
+            return {"kind": "dapi", "key": image_key, "query": query, "probe": "tags", "exact_single": False, "trusted_exact_query": _is_trusted_exact_tag_query(query, image_key), "url": api_url, "response": r}
+
+        def _task_dapi_param_search(image_key, probe, api_url, use_json):
+            probe = dict(probe or {})
+            params = self._rule34xxx_api_params(site, limit=20)
+            params.update(probe.get("params") or {})
+            session = self.session_for_host("rule34.xxx")
+            r = self._http_get_cached(session, api_url, params=params, timeout=request_timeout, headers=request_headers)
+            return {
+                "kind": "dapi", "key": image_key, "query": probe.get("name") or "param",
+                "probe": probe.get("name") or "param", "exact_single": bool(probe.get("exact_single")),
+                "url": api_url, "response": r,
+            }
+
+        def _task_html_search(image_key, query):
+            params = {"page": "post", "s": "list", "tags": query}
+            session = self.session_for_host("rule34.xxx")
+            r = self._http_get_cached(session, "https://rule34.xxx/index.php", params=params, timeout=request_timeout, headers=request_headers)
+            return {"kind": "ids", "key": image_key, "query": query, "source": "html-tags", "trusted_exact_query": _is_trusted_exact_tag_query(query, image_key), "ids": self._rule34xxx_response_post_ids(r)}
+
+        def _task_html_param_search(image_key, probe):
+            probe = dict(probe or {})
+            params = {"page": "post", "s": "list"}
+            params.update(probe.get("params") or {})
+            session = self.session_for_host("rule34.xxx")
+            r = self._http_get_cached(session, "https://rule34.xxx/index.php", params=params, timeout=request_timeout, headers=request_headers)
+            return {"kind": "ids", "key": image_key, "query": probe.get("name") or "html-param", "source": "html-param", "ids": self._rule34xxx_response_post_ids(r)}
+
+        self.log(f"    {label} SHA1 ASYNC LOCATOR START: keys={','.join(image_keys[:3])} workers={workers} request_timeout={request_timeout:.1f}s total_timeout={total_timeout:.1f}s")
+        candidate_ids = []
+        candidate_posts = []
+        errors = []
+
+        # Run the locator in small async stages: one 40hex key + one query
+        # family at a time.  This avoids blasting rule34.xxx with every possible
+        # permutation while still letting JSON/XML/API/main/HTML probes overlap.
+        for image_key in image_keys[:3]:
+            if _time_left() <= 0:
+                self.log(f"    {label} SHA1 ASYNC LOCATOR TIME BUDGET EXHAUSTED before key={image_key}")
+                break
+            if self.cancelled() or candidate_posts or candidate_ids:
+                break
+            # First try structured parameter probes.  These are the only probes
+            # that can represent a real SHA1 lookup if rule34 supports one.
+            # Keep structured param probing short.  Real logs showed that a long
+            # sequence of unsupported param variants can keep the rule34 worker
+            # busy for >120s before the useful tag-query path is even reached.
+            param_probe_names = {"sha1-param", "hash-param", "image-param", "file-param", "filename-param"}
+            param_probes = [p for p in self._rule34xxx_sha1_async_param_probes(image_key) if p.get("name") in param_probe_names]
+            for probe in param_probes:
+                if _time_left() <= 0:
+                    self.log(f"    {label} SHA1 ASYNC LOCATOR TIME BUDGET EXHAUSTED before structured probe={probe.get('name')}")
+                    break
+                if self.cancelled() or candidate_posts or candidate_ids:
+                    break
+                # Structured SHA1/40hex params must be tested through DAPI only.
+                # The browser list page ignores unknown params like sha1/hash/image
+                # and returns unrelated recent posts; treating those ids as
+                # candidates can stop the real tag-query probes too early.
+                stage_jobs = [
+                    ("dapi-param", image_key, probe, "https://api.rule34.xxx/index.php", True),
+                ]
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = []
+                try:
+                    for kind, k, probe_obj, api_url, use_json in stage_jobs:
+                        if kind == "dapi-param":
+                            futures.append(executor.submit(_task_dapi_param_search, k, probe_obj, api_url, use_json))
+                        else:
+                            futures.append(executor.submit(_task_html_param_search, k, probe_obj))
+                    for fut in as_completed(futures):
+                        if self.cancelled():
+                            break
+                        try:
+                            item = fut.result()
+                        except Exception as e:
+                            errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+                            continue
+                        key = item.get("key") or ""
+                        query_used = item.get("query") or ""
+                        if item.get("kind") == "dapi":
+                            r = item.get("response")
+                            self._rule34xxx_log_response_problem(r, "sha1-async-locator")
+                            if self._rule34xxx_auth_missing_response(r):
+                                self._rule34xxx_mark_auth_required(label)
+                                self.log(f"    {label} SHA1 ASYNC LOCATOR DAPI SKIP: API authentication required")
+                                return [], "", empty_tag_groups()
+                            posts = self._configured_response_posts(r, site, None, label) or []
+                            verified = [(p, False) for p in posts if self._rule34xxx_post_contains_image_key(p, key)]
+                            if not verified and item.get("exact_single") and len(posts) == 1:
+                                verified = [(posts[0], True)]
+                            if verified:
+                                trusted_n = sum(1 for _, trusted in verified if trusted)
+                                self.log(
+                                    f"    {label} SHA1 ASYNC DAPI CANDIDATES: key={key} "
+                                    f"query={query_used} posts={len(verified)} trusted_exact={trusted_n}"
+                                )
+                                candidate_posts.extend((key, p, trusted) for p, trusted in verified)
+                                break
+                        else:
+                            ids = [str(x) for x in (item.get("ids") or []) if str(x).isdigit()]
+                            if ids:
+                                trusted_html = bool(item.get("trusted_exact_query") and len(ids) == 1)
+                                self.log(f"    {label} SHA1 ASYNC HTML CANDIDATES: key={key} query={query_used} ids={','.join(ids[:5])} trusted_exact={int(trusted_html)}")
+                                for pid in ids:
+                                    pair = (key, pid, trusted_html)
+                                    if pair not in candidate_ids:
+                                        candidate_ids.append(pair)
+                                break
+                finally:
+                    for fut in futures:
+                        if not fut.done():
+                            fut.cancel()
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        executor.shutdown(wait=False)
+
+            # Then fall back to tag-query probes.
+            for query in self._rule34xxx_sha1_async_search_queries(image_key):
+                if _time_left() <= 0:
+                    self.log(f"    {label} SHA1 ASYNC LOCATOR TIME BUDGET EXHAUSTED before tag query={query}")
+                    break
+                if self.cancelled() or candidate_posts or candidate_ids:
+                    break
+                stage_jobs = [
+                    ("dapi", image_key, query, "https://api.rule34.xxx/index.php", True),
+                    ("html", image_key, query, "", False),
+                ]
+                executor = ThreadPoolExecutor(max_workers=workers)
+                futures = []
+                try:
+                    for kind, k, q, api_url, use_json in stage_jobs:
+                        if kind == "dapi":
+                            futures.append(executor.submit(_task_dapi_search, k, q, api_url, use_json))
+                        else:
+                            futures.append(executor.submit(_task_html_search, k, q))
+                    for fut in as_completed(futures):
+                        if self.cancelled():
+                            break
+                        try:
+                            item = fut.result()
+                        except Exception as e:
+                            errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+                            continue
+                        key = item.get("key") or ""
+                        query_used = item.get("query") or ""
+                        if item.get("kind") == "dapi":
+                            r = item.get("response")
+                            self._rule34xxx_log_response_problem(r, "sha1-async-locator")
+                            if self._rule34xxx_auth_missing_response(r):
+                                self._rule34xxx_mark_auth_required(label)
+                                self.log(f"    {label} SHA1 ASYNC LOCATOR DAPI SKIP: API authentication required")
+                                return [], "", empty_tag_groups()
+                            posts = self._configured_response_posts(r, site, None, label) or []
+                            verified = [(p, False) for p in posts if self._rule34xxx_post_contains_image_key(p, key)]
+                            if verified:
+                                trusted_n = sum(1 for _, trusted in verified if trusted)
+                                self.log(f"    {label} SHA1 ASYNC DAPI CANDIDATES: key={key} query={query_used} posts={len(verified)} trusted_exact={trusted_n}")
+                                candidate_posts.extend((key, p, trusted) for p, trusted in verified)
+                                break
+                        else:
+                            ids = [str(x) for x in (item.get("ids") or []) if str(x).isdigit()]
+                            if ids:
+                                trusted_html = bool(item.get("trusted_exact_query") and len(ids) == 1)
+                                self.log(f"    {label} SHA1 ASYNC HTML CANDIDATES: key={key} query={query_used} ids={','.join(ids[:5])} trusted_exact={int(trusted_html)}")
+                                for pid in ids:
+                                    pair = (key, pid, trusted_html)
+                                    if pair not in candidate_ids:
+                                        candidate_ids.append(pair)
+                                break
+                finally:
+                    # If we already found a candidate, cancel queued probes from
+                    # this stage. Running requests are allowed to finish quickly;
+                    # no SQLite/output writes happen in these workers.
+                    for fut in futures:
+                        if not fut.done():
+                            fut.cancel()
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        executor.shutdown(wait=False)
+
+        for item in candidate_posts[:10]:
+            if len(item) == 3:
+                key, post, trusted_exact = item
+            else:
+                key, post = item
+                trusted_exact = False
+            method = "rule34_sha1_exact_param_locator" if trusted_exact else "rule34_sha1_async_locator"
+            tags, source_url, groups = self._rule34xxx_verified_variant_from_post(
+                site, post, key, local_md5, method, headers=headers, trusted_exact_param=trusted_exact
+            )
+            if tags:
+                return tags, source_url, groups
+
+        for item in candidate_ids[:10]:
+            if len(item) == 3:
+                key, pid, trusted_exact = item
+            else:
+                key, pid = item
+                trusted_exact = False
+            posts = self._rule34xxx_dapi_posts_by_id(site, pid, headers=headers)
+            if getattr(self, "_last_lookup_status", "") == "auth_required":
+                return [], "", empty_tag_groups()
+            for post in posts or []:
+                if not trusted_exact and not self._rule34xxx_post_contains_image_key(post, key):
+                    self.log(f"    {label} SHA1 ASYNC LOCATOR REJECT: post={pid} key not present in DAPI media fields")
+                    continue
+                method = "rule34_sha1_exact_query_locator" if trusted_exact else "rule34_sha1_async_locator"
+                tags, source_url, groups = self._rule34xxx_verified_variant_from_post(
+                    site, post, key, local_md5, method, headers=headers, trusted_exact_param=trusted_exact
+                )
+                if tags:
+                    return tags, source_url, groups
+
+        if errors:
+            self.log(f"    {label} SHA1 ASYNC LOCATOR ERRORS: {len(errors)} first={errors[0]}")
+        self.log(f"    {label} SHA1 ASYNC LOCATOR: no DAPI-verified post for keys={','.join(image_keys[:3])}")
+        return [], "", empty_tag_groups()
+
+    def _rule34xxx_html_md5_locator_lookup(self, site, md5, headers=None):
+        """Find a rule34.xxx post through its browser md5 page, then verify via DAPI.
+
+        The browser ``page=post&s=list&md5=<hash>`` endpoint is used only as a
+        locator for post IDs.  It is never trusted for tags or MD5.  Every
+        located id is refetched from the DAPI JSON endpoint and accepted only if
+        JSON exposes the exact requested MD5.
+        """
+        wanted_md5 = (md5 or "").strip().lower()
+        if not is_md5(wanted_md5):
+            return [], "", empty_tag_groups()
+        site = site if isinstance(site, dict) else {}
+        label = self._site_label(site)
+        if not self._rule34xxx_has_required_api_auth(site):
+            self._rule34xxx_mark_auth_required(label)
+            self.log(f"    {label} HTML MD5 LOCATOR SKIP: DAPI verification requires API key + User ID")
+            return [], "", empty_tag_groups()
+        html_host = "rule34.xxx"
+        session = self.session_for_host(html_host)
+        request_headers = dict(headers or {})
+        request_headers.setdefault("Accept", "text/html,application/xhtml+xml,*/*")
+        request_headers.setdefault("User-Agent", "LocalBooru/3.2 (local archive manager)")
+
+        list_url = "https://rule34.xxx/index.php"
+        # Do not use page=post&s=list&md5=<hash>. Real rule34.xxx logs show
+        # that endpoint may ignore the parameter and return recent unrelated
+        # posts, causing a burst of DAPI reject checks for every file.  The HTML
+        # locator is only allowed to use a tag search form; DAPI still verifies
+        # the concrete post md5 before accepting anything.
+        list_attempts = [
+            {"page": "post", "s": "list", "tags": f"md5:{wanted_md5}"},
+            {"page": "post", "s": "list", "tags": wanted_md5},
+        ]
+        post_ids = []
+        seen = set()
+        for params in list_attempts:
+            try:
+                r = self._http_get_cached(session, list_url, params=params, timeout=self.timeout, headers=request_headers)
+                text = getattr(r, "text", "") or ""
+            except Exception as e:
+                self.log(f"    {label} HTML MD5 LOCATOR ERROR: {e}")
+                continue
+            candidates = []
+            try:
+                soup = BeautifulSoup(text, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a.get("href") or ""
+                    if "page=post" not in href or "s=view" not in href or "id=" not in href:
+                        continue
+                    query = parse_qs(urlparse(urljoin("https://rule34.xxx/", href)).query)
+                    pid = (query.get("id") or [""])[0]
+                    if str(pid).isdigit():
+                        candidates.append(str(pid))
+            except Exception:
+                pass
+            for pid in re.findall(r"[?&]id=(\d+)", text):
+                candidates.append(str(pid))
+            for pid in candidates:
+                if pid not in seen:
+                    seen.add(pid)
+                    post_ids.append(pid)
+            if post_ids:
+                break
+
+        if not post_ids:
+            self.log(f"    {label} HTML MD5 LOCATOR: no post link for md5={wanted_md5}")
+            return [], "", empty_tag_groups()
+
+        dapi_headers = self._rule34xxx_api_headers(site)
+        api_attempts = []
+        for pid in post_ids[:5]:
+            p1 = self._rule34xxx_api_params(site, id=pid, limit=1)
+            p2 = self._rule34xxx_api_params(site, tags=f"id:{pid}", limit=1)
+            api_attempts.append((pid, "https://api.rule34.xxx/index.php", p1))
+            api_attempts.append((pid, "https://api.rule34.xxx/index.php", p2))
+        for pid, api_url, params in api_attempts:
+            try:
+                r = self._http_get_cached(session, api_url, params=params, timeout=self.timeout, headers=dapi_headers)
+                self._rule34xxx_log_response_problem(r, "html-md5-locator")
+                if self._rule34xxx_auth_missing_response(r):
+                    self._rule34xxx_mark_auth_required(label)
+                    self.log(f"    {label} HTML MD5 LOCATOR DAPI SKIP: API authentication required")
+                    return [], "", empty_tag_groups()
+                posts = self._configured_response_posts(r, site, None, label)
+            except Exception as e:
+                self.log(f"    {label} HTML MD5 LOCATOR DAPI ERROR: post={pid} {e}")
+                continue
+            for post in posts or []:
+                if not isinstance(post, dict):
+                    continue
+                post_md5 = self._configured_post_md5(site, post)
+                if post_md5 != wanted_md5:
+                    self.log(f"    {label} HTML MD5 LOCATOR REJECT: post={pid} remote={post_md5 or 'missing'}")
+                    continue
+                source_url = self._post_url_for_engine(site, post) or f"https://rule34.xxx/index.php?page=post&s=view&id={pid}"
+                groups = self._groups_from_engine_post(site, post, source_url)
+                tags = groups_to_tags(groups) or self._configured_tags_from_post(site, post)
+                if tags:
+                    classified = sum(len(groups.get(k, []) or []) for k in ("artist", "character", "copyright", "meta")) if isinstance(groups, dict) else 0
+                    self.log(f"    {label} TAG SOURCE: html_md5_locator_dapi_verified post={pid} tags={len(tags)} classified={classified}")
+                    return tags, source_url, groups
+        self.log(f"    {label} HTML MD5 LOCATOR: ids={','.join(post_ids[:5])} but no DAPI-verified exact MD5")
+        return [], "", empty_tag_groups()
+
     def engine_by_md5(self, site, md5):
         _html_rejected = False  # track if HTML MD5 already rejected for this site
 
@@ -2743,38 +5955,91 @@ class Tagger:
         host = urlparse(root).netloc.lower().replace("www.", "")
         session = self.session_for_host(host)
         engine = self._normalize_engine_type(site)
-        official_danbooru = host in {"danbooru.donmai.us", "donmai.us"}
-        is_atf = host == "booru.allthefallen.moe" or "allthefallen" in (label or "").lower()
-        is_documented_dapi_exact = host in {"gelbooru.com", "xbooru.com", "hypnohub.net"}
-        # rule34.xxx also has a reliable JSON DAPI endpoint, but unlike Gelbooru
-        # its tag-category endpoint is too expensive for an inline conveyor lane.
-        # Treat MD5 lookup as strict JSON-only and keep returned tags flat/fast.
-        is_rule34xxx_dapi_exact = host in {"rule34.xxx", "api.rule34.xxx"}
-        is_rule34us_html_only = host == "rule34.us"
+        driver = self._site_driver_for(site)
+        driver_cfg = getattr(driver, "cfg", {}) if driver else {}
+        self._last_lookup_status = ""
+        official_danbooru = bool(driver_cfg.get("accept_missing_md5_on_exact_query", False))
+        is_atf = self._is_atf_site(site, host)
+        is_documented_dapi_exact = bool(driver_cfg.get("strict_json_only", False)) and not bool(driver_cfg.get("fast_flat_tags", False)) and engine not in {"e621"}
+        is_rule34xxx_dapi_exact = bool(driver_cfg.get("fast_flat_tags", False))
+        is_rule34us_html_only = str(driver_cfg.get("html_fallback") or "") == "rule34us_strict"
+        if is_rule34xxx_dapi_exact and not self._rule34xxx_has_required_api_auth(site):
+            self._rule34xxx_mark_auth_required(label)
+            return [], "", empty_tag_groups()
         headers = {
             "Accept": "application/json, application/xml, text/xml, */*",
             "User-Agent": "LocalBooru/3.2 (local archive manager)",
         }
-        if official_danbooru:
-            headers.update(self._danbooru_api_headers())
+        if official_danbooru or is_atf:
+            headers.update(self._danbooru_api_headers(host))
         if engine == "e621":
             headers.update(self._e621_api_headers(host))
+        if is_rule34xxx_dapi_exact:
+            headers.update(self._rule34xxx_api_headers(site))
 
         _rejected_post_ids_this_md5 = set()  # skip post IDs already rejected in this engine_by_md5 call
 
         for api, params, fmt in self._engine_api_attempts(site, md5):
             try:
-                r = self._atf_get_cached(session, api, host, params=params, timeout=self.timeout, headers=headers)
-                posts = self._posts_from_dapi_response(r, label)
+                request_kwargs = {"params": params, "timeout": self.timeout, "headers": headers}
+                if official_danbooru or is_atf:
+                    request_kwargs["auth"] = self._danbooru_auth_tuple(host)
+                if engine == "e621":
+                    request_kwargs["auth"] = self._e621_auth_tuple(host)
+                r = self._atf_get_cached(session, api, host, **request_kwargs)
+                if official_danbooru or is_atf:
+                    self._danbooru_log_response_problem(r, "exact-md5", host)
+                if engine == "e621":
+                    self._e621_log_response_problem(r, "exact-md5")
+                if is_rule34xxx_dapi_exact:
+                    self._rule34xxx_log_response_problem(r, "exact-md5")
+                if is_rule34xxx_dapi_exact and self._rule34xxx_auth_missing_response(r):
+                    self._rule34xxx_mark_auth_required(label)
+                    return [], "", empty_tag_groups()
+                posts = self._configured_response_posts(r, site, driver, label)
+                if is_rule34xxx_dapi_exact and getattr(self, "_last_lookup_status", "") == "auth_required":
+                    return [], "", empty_tag_groups()
                 if not posts:
                     continue
+
+                # rule34.xxx DAPI is treated as an exact-MD5 authority only when
+                # a returned post explicitly exposes the requested md5. Real
+                # rule34.xxx responses can sometimes ignore tags=md5:<hash>
+                # (especially around deleted=show/tag_info) and return a large
+                # unrelated page of posts. Do not spam one reject per unrelated
+                # post and do not let HTML rescue it; keep only exposed exact
+                # matches, otherwise skip this endpoint as unsafe.
+                if is_rule34xxx_dapi_exact:
+                    wanted_for_filter = (md5 or "").strip().lower()
+                    exact_rule34_posts = []
+                    first_remote_md5 = ""
+                    first_post_id = ""
+                    for _candidate in posts:
+                        if not isinstance(_candidate, dict):
+                            continue
+                        _candidate_md5 = self._configured_post_md5(site, _candidate)
+                        if not first_remote_md5:
+                            first_remote_md5 = _candidate_md5 or "missing"
+                            first_post_id = str(_candidate.get("id", "") or "?")
+                        if _candidate_md5 == wanted_for_filter:
+                            exact_rule34_posts.append(_candidate)
+                    if exact_rule34_posts:
+                        posts = exact_rule34_posts[:1]
+                    else:
+                        returned_count = len(posts) if isinstance(posts, list) else 0
+                        self.log(
+                            f"    {label} DAPI exact lookup ignored MD5: "
+                            f"local={md5} first_post={first_post_id or '?'} "
+                            f"first_remote={first_remote_md5 or 'missing'} returned={returned_count}; endpoint skipped"
+                        )
+                        continue
 
                 for post in posts:
                     if not isinstance(post, dict):
                         continue
 
                     # First try API-level explicit MD5.
-                    post_md5 = self._post_md5_value(post)
+                    post_md5 = self._configured_post_md5(site, post)
                     wanted_md5 = (md5 or "").lower()
 
                     # Skip post IDs already rejected by a previous attempt in this call.
@@ -2813,21 +6078,20 @@ class Tagger:
                                 _rejected_post_ids_this_md5.add(_pid_str)
                             continue
 
-                        # ATF with DIFFERENT md5 echoed back → definitely wrong post, hard reject.
-                        # (ATF/Danbooru are the same codebase; for ATF we blacklist the post id
-                        #  so it won't be reused for other files in the same session.)
-                        if is_atf and self.settings.get("strict_atf_md5", True) and post_md5:
-                            self.log(f"    {label} MD5 REJECT: local={md5} remote={post_md5}")
+                        # ATF with a wrong OR missing md5 in JSON is rejected here.
+                        # Do not "rescue" ATF by fetching/parsing HTML: ATF is Danbooru-like
+                        # and automatic metadata must be API-first/API-only for exact MD5.
+                        if is_atf and self.settings.get("strict_atf_md5", True):
+                            self.log(f"    {label} JSON MD5 REJECT: local={md5} remote={post_md5 or 'missing'}; HTML rescue disabled")
                             if not hasattr(self, "_atf_rejected_posts"):
                                 self._atf_rejected_posts = set()
-                            self._atf_rejected_posts.add(str(post.get("id", "")))
                             if _pid_str:
+                                self._atf_rejected_posts.add(_pid_str)
                                 _rejected_post_ids_this_md5.add(_pid_str)
                             continue
 
-                        # For all sites (ATF/Danbooru/etc.) when md5 is absent or different:
+                        # For non-ATF compatible sites when md5 is absent or different:
                         # fetch the concrete post page HTML and verify the md5 there.
-                        # ATF uses _atf_get to handle PoW challenges automatically.
                         # Deleted posts have no file_url in HTML → no md5 → safe reject.
                         _src_for_verify = self._post_url_for_engine(site, post)
                         if not _src_for_verify:
@@ -2873,7 +6137,7 @@ class Tagger:
                             continue
 
                     groups = self._groups_from_engine_post(site, post, source_url)
-                    tags = groups_to_tags(groups) or self._tags_from_post_dict(post)
+                    tags = groups_to_tags(groups) or self._configured_tags_from_post(site, post)
                     if official_danbooru and tags:
                         self.log(f"    {label} TAG SOURCE: json_api post={_pid_str or '?'} tags={len(tags)}")
                     elif is_atf and tags:
@@ -2881,7 +6145,11 @@ class Tagger:
                     elif is_documented_dapi_exact and tags:
                         self.log(f"    {label} TAG SOURCE: dapi_json_exact_md5 post={_pid_str or '?'} tags={len(tags)}")
                     elif is_rule34xxx_dapi_exact and tags:
-                        self.log(f"    {label} TAG SOURCE: dapi_json_exact_md5_flat_fast post={_pid_str or '?'} tags={len(tags)}")
+                        _classified = sum(len(groups.get(k, []) or []) for k in ("artist", "character", "copyright", "meta")) if isinstance(groups, dict) else 0
+                        if _classified:
+                            self.log(f"    {label} TAG SOURCE: dapi_json_exact_md5_categorized post={_pid_str or '?'} tags={len(tags)} classified={_classified}")
+                        else:
+                            self.log(f"    {label} TAG SOURCE: dapi_json_exact_md5_flat_fast post={_pid_str or '?'} tags={len(tags)}")
 
                     # Restricted official Danbooru fallback: only after a concrete
                     # post came from the exact MD5 JSON result and JSON contained no
@@ -2890,6 +6158,16 @@ class Tagger:
                     if official_danbooru and not tags and restricted_danbooru_candidate:
                         groups = self._danbooru_confirmed_html_fallback(session, _pid_str)
                         tags = groups_to_tags(groups)
+
+                    if is_rule34xxx_dapi_exact and not tags:
+                        # rule34.xxx deleted/show XML may expose only md5/deleted
+                        # stubs.  They prove that a hash once existed on the
+                        # site, but they do not contain tags/source metadata.
+                        # Do not mark the file as found and do not scrape HTML
+                        # for new tags; keep waiting for another exact source or
+                        # reverse-search fallback.
+                        self.log(f"    {label} DAPI exact MD5 tagless/deleted stub skipped: post={_pid_str or '?'} md5={post_md5 or 'missing'}")
+                        continue
 
                     if not tags and source_url and not official_danbooru and not is_atf and not is_documented_dapi_exact and not is_rule34xxx_dapi_exact and engine != "e621":
                         try:
@@ -2913,14 +6191,50 @@ class Tagger:
             self.log(f"    {label} no exact JSON candidate; restricted HTML fallback not allowed")
             return [], "", empty_tag_groups()
         if is_atf:
+            tags, src, groups = self._atf_pixel_hash_locator_lookup(site, md5)
+            if tags:
+                return tags, src, groups
             self.log(f"    {label} JSON only: no exact API MD5 match; HTML fallback disabled")
             return [], "", empty_tag_groups()
         if is_documented_dapi_exact:
-            self._report_dapi_health_once(site, host, session, headers)
+            if bool(driver_cfg.get("health_probe_on_miss", False)):
+                self._report_dapi_health_once(site, host, session, headers)
             self.log(f"    {label} DAPI JSON only: no exact API MD5 match; HTML fallback disabled")
             return [], "", empty_tag_groups()
         if is_rule34xxx_dapi_exact:
-            self.log(f"    {label} DAPI JSON fast lane: no exact API MD5 match; HTML/category fallback disabled")
+            if getattr(self, "_last_lookup_status", "") == "auth_required":
+                return [], "", empty_tag_groups()
+            side_queue_variant_locators = bool(self.settings.get("_rule34_variant_locators_run_in_side_queue", False))
+            if side_queue_variant_locators:
+                # v283: in the site conveyor, expensive rule34 image-key/SHA1
+                # locator branches are run by a separate opportunistic queue.
+                # The exact-MD5 rule34 lane must not be held for 30-90 seconds
+                # by a locator miss; otherwise all later rule34 MD5 checks are
+                # serialized behind it.  This flag is internal to conveyor
+                # lane workers; the ordinary one-file path can still run the
+                # locators inline.
+                self.log(f"    {label} VARIANT LOCATORS SIDE-QUEUED: foreground MD5 lane skips image-key/SHA1")
+            else:
+                if bool(driver_cfg.get("image_key_locator", True)):
+                    tags, src, groups = self._rule34xxx_image_key_locator_lookup(site, md5, headers=headers)
+                    if tags:
+                        return tags, src, groups
+                    if getattr(self, "_last_lookup_status", "") == "auth_required":
+                        return [], "", empty_tag_groups()
+                if bool(self.settings.get("rule34_sha1_async_locator_enabled", True)):
+                    tags, src, groups = self._rule34xxx_sha1_async_locator_lookup(site, md5, headers=headers)
+                    if tags:
+                        return tags, src, groups
+                    if getattr(self, "_last_lookup_status", "") == "auth_required":
+                        return [], "", empty_tag_groups()
+            if bool(driver_cfg.get("html_md5_locator", True)):
+                tags, src, groups = self._rule34xxx_html_md5_locator_lookup(site, md5, headers=headers)
+                if tags:
+                    return tags, src, groups
+                if getattr(self, "_last_lookup_status", "") == "auth_required":
+                    return [], "", empty_tag_groups()
+            suffix = "html locator found no DAPI-verified post; image-key/SHA1 are side-queued" if side_queue_variant_locators else "image-key/sha1/html locators found no DAPI-verified post"
+            self.log(f"    {label} DAPI exact lookup: no exact API MD5 match; {suffix}")
             return [], "", empty_tag_groups()
         if is_rule34us_html_only:
             tags, src, groups = self._engine_html_fallback_by_md5(site, md5)
@@ -2949,11 +6263,15 @@ class Tagger:
         all_tags = []
         all_groups = []
         sources = []
+        source_tag_groups = []
 
         old_cache_enabled = getattr(self, "_lookup_cache_enabled", False)
         old_request_cache = getattr(self, "_request_cache", {})
         self._lookup_cache_enabled = True
         self._request_cache = {}
+        self._last_rule34_image_key_site_md5s = []
+        self._last_atf_pixel_hash_site_md5s = []
+        self._last_variant_site_md5s = []
         try:
             sites = self._all_enabled_site_configs()
 
@@ -2982,19 +6300,24 @@ class Tagger:
                 try:
                     self.log(f"  MD5 CHECK: {label}")
 
+                    self._last_lookup_match_method = "md5"
                     tags, source, groups = self.engine_by_md5(site, md5)
+                    method = str(getattr(self, "_last_lookup_match_method", "md5") or "md5")
                     if tags:
-                        self.log(f"  MD5 MATCH: {label} {redact_sensitive_url(source)}")
+                        self.log(f"  MD5 MATCH: {label} {redact_sensitive_url(source)}" if method == "md5" else f"  VARIANT MATCH: {label} {method} {redact_sensitive_url(source)}")
                         all_tags += tags
-                        sources.append(f"md5 {label} {source}")
+                        sources.append(f"{method} {label} {source}")
                         if groups:
                             all_groups.append(groups)
+                        if source:
+                            source_tag_groups.append({"url": source, "groups": groups or {"general": list(tags)}, "method": method})
                 except Exception as e:
                     self.log(f"  MD5 ERROR: {label}: {e}")
         finally:
             self._lookup_cache_enabled = old_cache_enabled
             self._request_cache = old_request_cache
 
+        self._last_md5_source_tag_groups = source_tag_groups
         return unique_keep_order(all_tags), sources, all_groups
 
     def _custom_site_root(self, site):
@@ -3088,7 +6411,7 @@ class Tagger:
                 if posts:
                     self.log(f"  CUSTOM API MATCH [{label}]: {redact_sensitive_url(r.url)}")
                     try:
-                        debug_dir = Path.cwd() / "Local_Booru_Output" / "debug" if debug_enabled(self.settings) else None
+                        debug_dir = Path(SERVICE_OUTPUT_DIR) / "debug" if debug_enabled(self.settings) else None
                         debug_dir.mkdir(parents=True, exist_ok=True) if debug_dir else None
                         safe_md5 = ""
                         try:
@@ -3311,6 +6634,27 @@ class Tagger:
             if got:
                 return got
 
+        # e621 v2 groups related fields under files.meta/original/sample/preview.
+        files_obj = post.get("files")
+        if isinstance(files_obj, dict):
+            meta_obj = files_obj.get("meta")
+            if isinstance(meta_obj, dict):
+                for key in ("md5", "hash", "file_md5", "image_md5", "checksum"):
+                    got = norm(meta_obj.get(key))
+                    if got:
+                        return got
+            for obj_key in ("original", "sample", "preview"):
+                obj = files_obj.get(obj_key)
+                if isinstance(obj, dict):
+                    for key in ("md5", "hash", "file_md5", "image_md5", "checksum"):
+                        got = norm(obj.get(key))
+                        if got:
+                            return got
+                    for key in ("url", "file_url", "download_url", "original_url", "sample_url", "preview_url", "jpg", "webp"):
+                        got = self._md5_from_urlish(obj.get(key))
+                        if got:
+                            return got
+
         # Nested common file/media objects.
         for obj_key in ("file", "media", "image", "sample", "preview", "asset", "original"):
             obj = post.get(obj_key)
@@ -3398,7 +6742,14 @@ class Tagger:
 
         try:
             s = self.session_for_host(host)
-            auth = self.custom_auth_params(site)
+            if atf_site:
+                auth = self._danbooru_api_params(host)
+                request_headers = self._danbooru_api_headers(host)
+                request_auth = self._danbooru_auth_tuple(host)
+            else:
+                auth = self.custom_auth_params(site)
+                request_headers = {"Accept": "application/json, */*"}
+                request_auth = None
             urls = [
                 (f"{base}/posts/{post_id}.json", auth),
                 (f"{base}/posts.json", {"search[id]": post_id, "limit": 1, **auth}),
@@ -3411,7 +6762,8 @@ class Tagger:
                     host,
                     params=params,
                     timeout=self.timeout,
-                    headers={"Accept": "application/json, */*"},
+                    headers=request_headers,
+                    auth=request_auth,
                 )
                 posts = self._custom_response_posts(r, site.get("name") or host)
                 for p in posts:
@@ -3495,7 +6847,7 @@ class Tagger:
             if self.log and ("allthefallen" in str(site.get("base_url") or site.get("url") or "") or "ATF" in str(site.get("name") or "").upper()):
                 self.log("  ATF VIEW NOT FOUND IN SEARCH HTML")
                 try:
-                    dump_dir = Path.cwd() / "Local_Booru_Output" / "debug"
+                    dump_dir = Path(SERVICE_OUTPUT_DIR) / "debug"
                     dump_dir.mkdir(parents=True, exist_ok=True)
                     dump_file = (dump_dir / f"atf_search_dump_{md5}.html") if dump_dir else None
                     dump_file.write_text(r.text or "", encoding="utf-8", errors="ignore") if dump_file else None
@@ -3594,6 +6946,36 @@ class Tagger:
         walk(data)
         return [p for p in out if isinstance(p, dict)]
 
+    def _posts_from_xml_text(self, text):
+        """Return DAPI <post .../> dictionaries from XML-like response text.
+
+        Some Gelbooru-compatible endpoints, especially rule34.xxx deleted/show
+        lookups, ignore ``json=1`` and answer with ``text/xml``.  That is still a
+        valid DAPI response and should be filtered by the same exact-MD5 guard as
+        JSON.  This helper is intentionally conservative: it only returns
+        attribute dictionaries from real ``<post>`` elements and never scrapes
+        visible HTML tags.
+        """
+        raw = (text or "").strip()
+        if not raw:
+            return []
+        # Avoid parsing arbitrary HTML pages as XML just because they contain a
+        # word named post somewhere.  DAPI XML normally starts with an XML header
+        # or a <posts> root.
+        low = raw[:256].lower()
+        if not (low.startswith("<?xml") or low.startswith("<posts") or "<posts" in low):
+            return []
+        try:
+            soup = BeautifulSoup(raw, "xml")
+            posts = []
+            for node in soup.find_all("post"):
+                attrs = dict(getattr(node, "attrs", {}) or {})
+                if attrs:
+                    posts.append(attrs)
+            return [p for p in posts if isinstance(p, dict)]
+        except Exception:
+            return []
+
     def _posts_from_dapi_response(self, r, site_name="site"):
         """Parse Danbooru/Gelbooru/e621/DAPI JSON or XML into post dicts.
 
@@ -3601,6 +6983,24 @@ class Tagger:
         or _post_dicts_from_data(). It intentionally never returns strings or
         mixed values.
         """
+        r_text = getattr(r, "text", "") or ""
+        r_status = getattr(r, "status_code", 0)
+        try:
+            r_ct = str(getattr(r, "headers", {}).get("content-type", "")).lower()
+        except Exception:
+            r_ct = ""
+
+        # DAPI XML is a first-class response, not a JSON parse error.  Parse it
+        # before safe_json_response() so logs do not get spammed with
+        # "non-json" for legitimate XML bodies.
+        xml_first = "xml" in r_ct or (r_text.lstrip().lower().startswith(("<?xml", "<posts")))
+        if xml_first:
+            posts = self._posts_from_xml_text(r_text)
+            if posts:
+                return posts
+            if 'count="0"' in r_text[:300] or "count='0'" in r_text[:300]:
+                return []
+
         try:
             data = safe_json_response(r, site_name)
             posts = self._post_dicts_from_data(data)
@@ -3611,17 +7011,17 @@ class Tagger:
             # crash MD5 search, just let caller try the next endpoint.
             try:
                 if self.log:
-                    err_str = str(e)
-                    r_text = getattr(r, "text", "") or ""
-                    r_status = getattr(r, "status_code", 0)
-                    r_ct = str(getattr(r, "headers", {}).get("content-type", "")).lower()
+                    # If the body was XML but had no usable <post>, keep it
+                    # silent: exact-MD5 filtering will not be able to use it,
+                    # and logging it as "JSON skipped" is misleading.
+                    is_xml_body = "xml" in r_ct or r_text.lstrip().lower().startswith(("<?xml", "<posts"))
                     # Silent: these are all "not found" or known broken APIs
                     is_empty_json = "json" in r_ct and not r_text.strip()
-                    is_zero_xml = "xml" in r_ct and 'count="0"' in r_text[:200]
+                    is_zero_xml = is_xml_body and ('count="0"' in r_text[:300] or "count='0'" in r_text[:300])
                     is_404 = r_status == 404
                     is_html_not_found = "html" in r_ct and r_status == 200
-                    if is_empty_json or is_zero_xml or is_404:
-                        pass  # silent: not found on this site
+                    if is_empty_json or is_zero_xml or is_404 or is_xml_body:
+                        pass  # silent: no usable DAPI posts from this endpoint
                     elif is_html_not_found and site_name in ("hypnohub.net", "rule34.us"):
                         pass  # silent: these sites return HTML index when no results
                     else:
@@ -3629,16 +7029,8 @@ class Tagger:
             except Exception:
                 pass
 
-        try:
-            soup = BeautifulSoup(getattr(r, "text", "") or "", "xml")
-            posts = []
-            for p in soup.find_all("post"):
-                attrs = dict(getattr(p, "attrs", {}) or {})
-                if attrs:
-                    posts.append(attrs)
-            return [p for p in posts if isinstance(p, dict)]
-        except Exception:
-            return []
+        # Last chance: some servers send XML with a misleading content type.
+        return self._posts_from_xml_text(r_text)
 
     def _tags_from_post_dict(self, post):
         """Extract a flat tag list from common booru/custom post dictionaries."""
@@ -4038,52 +7430,35 @@ class Tagger:
 
     def rule34xxx_by_md5(self, md5):
         cfg = self.site_cfg("rule34.xxx")
+        if not self._rule34xxx_has_required_api_auth(cfg):
+            self._rule34xxx_mark_auth_required("rule34.xxx")
+            return [], "", empty_tag_groups()
         session = self.session_for_host("rule34.xxx")
-
-        attempts = [
-            ("api.rule34.xxx json", "https://api.rule34.xxx/index.php", True),
-            ("rule34.xxx json", "https://rule34.xxx/index.php", True),
-            ("api.rule34.xxx xml", "https://api.rule34.xxx/index.php", False),
-            ("rule34.xxx xml", "https://rule34.xxx/index.php", False),
-        ]
-
-        for label, api, use_json in attempts:
-            params = {
-                "page": "dapi",
-                "s": "post",
-                "q": "index",
-                "tags": f"md5:{md5}",
-                "limit": 1,
-            }
-            if use_json:
-                params["json"] = "1"
-            params.update(self.auth_params(cfg))
-
-            try:
-                r = session.get(api, params=params, timeout=self.timeout)
-                if r.status_code != 200:
-                    self.log(f"    rule34.xxx {label} status {r.status_code}")
+        params = self._rule34xxx_api_params(cfg, tags=f"md5:{md5}", limit=1)
+        try:
+            r = session.get(
+                "https://api.rule34.xxx/index.php",
+                params=params,
+                timeout=self.timeout,
+                headers=self._rule34xxx_api_headers(cfg),
+            )
+            self._rule34xxx_log_response_problem(r, "compat-md5")
+            posts = self._posts_from_dapi_response(r, "rule34.xxx")
+            for p in posts or []:
+                if not isinstance(p, dict):
                     continue
-
-                posts = self._posts_from_dapi_response(r, "rule34.xxx")
-                if posts:
-                    p = posts[0]
-                    if not self._verify_builtin_post_md5("rule34.xxx", p, md5):
-                        continue
-                    tags = self._tags_from_post_dict(p)
-                    post_id = p.get("id")
-                    if tags:
-                        url = f"https://rule34.xxx/index.php?page=post&s=view&id={post_id}"
-                        groups = self.grouped_tags_from_url(url)
-                        return tags, url, groups
-            except Exception as e:
-                self.log(f"    rule34.xxx {label} error: {e}")
-
-        tags, src, groups = self._html_search_strict_by_md5("rule34.xxx", "https://rule34.xxx/index.php", md5)
-        if tags:
-            return tags, src, groups
-        self.log("    rule34.xxx HTML fallback skipped: no exact API MD5 confirmation")
-        return [], ""
+                if not self._verify_builtin_post_md5("rule34.xxx", p, md5):
+                    continue
+                tags = self._tags_from_post_dict(p)
+                post_id = p.get("id")
+                if tags:
+                    url = f"https://rule34.xxx/index.php?page=post&s=view&id={post_id}"
+                    groups = self.grouped_tags_from_url(url)
+                    return tags, url, groups
+        except Exception as e:
+            self.log(f"    rule34.xxx official DAPI error: {e}")
+        self.log("    rule34.xxx official DAPI skipped: no exact API MD5 confirmation")
+        return [], "", empty_tag_groups()
 
     def rule34us_by_md5(self, md5):
         """Compatibility entry point routed through strict verified HTML search."""
@@ -4114,9 +7489,10 @@ class Tagger:
 
     def e621_by_md5(self, md5):
         """Exact e621 MD5 lookup through the same normalized post parser as all sites."""
-        base_params = self.auth_params(self.site_cfg("e621.net"))
+        base_params = self._e621_api_params("e621.net", include_v2=True)
         session = self.session_for_host("e621.net")
         headers = self._e621_api_headers("e621.net")
+        auth = self._e621_auth_tuple("e621.net")
 
         attempts = [
             {"tags": f"md5:{md5}", "limit": 1, **base_params},
@@ -4125,12 +7501,19 @@ class Tagger:
 
         for params in attempts:
             try:
+                api_url = "https://e621.net/posts.json"
                 r = session.get(
-                    "https://e621.net/posts.json",
+                    api_url,
                     params=params,
                     timeout=self.timeout,
                     headers=headers,
+                    auth=auth,
                 )
+                self._e621_log_response_problem(r, "compat-md5")
+                if self._e621_is_cloudflare_html_response(r):
+                    br = self._e621_browser_get_json_response(api_url, params=params, auth=auth, host="e621.net", context="compat-md5")
+                    if br is not None:
+                        r = br
                 posts = self._posts_from_dapi_response(r, "e621")
                 if not posts:
                     self.log("    e621 MD5: no posts in JSON response")
@@ -4198,6 +7581,44 @@ class Tagger:
         self._save_saucenao_state({"cooldown_until": until, "reason": reason, "set_at": time.time()})
         self.log(f"  SAUCENAO COOLDOWN: {int(max(60, seconds)/60)} min ({reason})")
 
+    def _reverse_candidates_log_path(self):
+        try:
+            base = ensure_output_base(self.settings)
+            logs_dir = Path(base) / "logs"
+        except Exception:
+            try:
+                logs_dir = Path(SERVICE_OUTPUT_DIR) / "logs"
+            except Exception:
+                logs_dir = Path(".")
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return logs_dir / "reverse_candidates.log"
+
+    def _write_reverse_candidate_log(self, service, *, img_path=None, similarity=0.0, index_name="", title="", urls=None, supported=False, decision="", extra=None):
+        """Durable reverse candidate diagnostics for unsupported/source-only relay."""
+        try:
+            rec = {
+                "ts": int(time.time()),
+                "service": str(service or ""),
+                "file": str(Path(img_path).name) if img_path else "",
+                "path": str(img_path or ""),
+                "similarity": float(similarity or 0),
+                "index_name": str(index_name or ""),
+                "title": sanitize_text(str(title or "")),
+                "urls": [sanitize_text(str(u)) for u in (urls or []) if str(u or "").strip()],
+                "supported_parser": bool(supported),
+                "decision": str(decision or ""),
+            }
+            if isinstance(extra, dict):
+                rec.update({str(k): sanitize_text(str(v)) for k, v in extra.items()})
+            path = self._reverse_candidates_log_path()
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception:
+            pass
+
     def saucenao_search(self, img_path):
         if not self.settings.get("saucenao_api_key"):
             return []
@@ -4241,6 +7662,11 @@ class Tagger:
         if header:
             short_rem = header.get('short_remaining')
             long_rem = header.get('long_remaining')
+            try:
+                from core.services.service_state import set_quota_snapshot
+                set_quota_snapshot(self.settings, "saucenao", short_remaining=short_rem, long_remaining=long_rem)
+            except Exception as e:
+                self.log(f"  SAUCENAO QUOTA STATE WARNING: {e}")
             self.log(
                 "  SAUCENAO LIMITS: "
                 f"short={short_rem} "
@@ -4252,24 +7678,123 @@ class Tagger:
                     # Results from this final allowed request are still usable.
                     # If none produce tags, process_image defers this file instead of writing NO_MATCH.
                     self._defer_saucenao_retry("api_limit")
+                else:
+                    from core.services.service_state import clear_cooldown
+                    clear_cooldown(self.settings, "saucenao")
             except Exception:
                 pass
 
         return data.get("results", [])
 
+    def _e621_md5_candidate_from_saucenao_result(self, result):
+        """Extract e621 MD5 candidate from SauceNAO's e621 filename text.
+
+        SauceNAO often returns labels like ``e621.net - <md5>_6.jpg`` even when
+        e621 API itself is blocked by Cloudflare.  Treat this only as a candidate
+        and still verify it through the normal MD5 pipeline before accepting tags.
+        """
+        try:
+            header = result.get("header", {}) if isinstance(result, dict) else {}
+            data = result.get("data", {}) if isinstance(result, dict) else {}
+            hay = " ".join([
+                str(header.get("index_name") or ""),
+                str(data.get("source") or ""),
+                str(data.get("title") or ""),
+                str(data.get("material") or ""),
+                " ".join(str(u or "") for u in (data.get("ext_urls") or [])),
+            ])
+        except Exception:
+            hay = str(result or "")
+        if "e621" not in hay.lower() and "e926" not in hay.lower():
+            return ""
+        # Prefer the characteristic e621 filename form: <md5>_6.jpg / _0.png.
+        for m in re.finditer(r"(?i)\b([0-9a-f]{32})_[0-9]+\.(?:jpe?g|png|gif|webm|mp4)\b", hay):
+            got = (m.group(1) or "").lower()
+            if is_md5(got):
+                return got
+        # Fallback only if the same text clearly names e621/e926.
+        for m in re.finditer(r"(?i)\b([0-9a-f]{32})\b", hay):
+            got = (m.group(1) or "").lower()
+            if is_md5(got):
+                return got
+        return ""
+
     def saucenao_urls(self, img_path):
         urls = []
+        self._last_saucenao_source_only = []
+        self._last_saucenao_md5_candidates = {}
         domains = self.enabled_domains()
+        min_similarity = float(self.settings.get("min_similarity", 85.0) or 85.0)
+        relay_min = float(self.settings.get("unsupported_relay_min_similarity", min_similarity) or min_similarity)
         for result in self.saucenao_search(img_path):
             sim = float(result.get("header", {}).get("similarity", 0))
             index_name = result.get("header", {}).get("index_name", "unknown")
-            self.log(f"  SauceNAO {sim:.2f}% {index_name}")
-            if sim < float(self.settings["min_similarity"]):
-                continue
-            for u in result.get("data", {}).get("ext_urls", []) or []:
-                host = urlparse(u).netloc.lower().replace("www.", "")
+            data = result.get("data", {}) or {}
+            source_title = str(data.get("source") or data.get("title") or data.get("material") or "").strip()
+            label = f"{index_name}" + (f" - {source_title}" if source_title else "")
+            self.log(f"  SauceNAO {sim:.2f}% {label}")
+
+            result_urls = list(data.get("ext_urls", []) or [])
+            e621_md5_candidate = self._e621_md5_candidate_from_saucenao_result(result)
+            supported_urls = []
+            unsupported_urls = []
+            for u in result_urls:
+                try:
+                    host = urlparse(u).netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
                 if host in domains:
+                    supported_urls.append(u)
+                else:
+                    unsupported_urls.append(u)
+
+            decision = "below_threshold"
+            if sim >= min_similarity and supported_urls:
+                decision = "supported_url"
+            elif sim >= relay_min and unsupported_urls:
+                decision = "unsupported_relay_probe"
+            elif sim >= min_similarity:
+                decision = "source_only_no_url"
+            self._write_reverse_candidate_log(
+                "SauceNAO",
+                img_path=img_path,
+                similarity=sim,
+                index_name=index_name,
+                title=source_title,
+                urls=result_urls,
+                supported=bool(supported_urls),
+                decision=decision,
+            )
+
+            if sim < min_similarity:
+                continue
+
+            for u in supported_urls:
+                if e621_md5_candidate:
+                    self._last_saucenao_md5_candidates[str(u)] = e621_md5_candidate
+                urls.append((u, sim))
+
+            # Unsupported 85%+ candidates are not tag sources, but they are now
+            # passed back to process_image so MD5/source relay can try to find a
+            # trusted booru post before falling back to SOURCE-ONLY.
+            for u in unsupported_urls:
+                if sim >= relay_min:
+                    if e621_md5_candidate:
+                        self._last_saucenao_md5_candidates[str(u)] = e621_md5_candidate
                     urls.append((u, sim))
+
+            # Preserve unsupported pages as source-only hints when relay does not
+            # yield a trusted MD5/tag match.
+            if unsupported_urls or (not supported_urls and not result_urls):
+                best_url = unsupported_urls[0] if unsupported_urls else ""
+                best_host = urlparse(best_url).netloc.lower().replace("www.", "") if best_url else ""
+                self._last_saucenao_source_only.append({
+                    "url": best_url,
+                    "host": best_host,
+                    "label": label,
+                    "similarity": sim,
+                    "index_name": str(index_name or ""),
+                })
         return urls
 
 
@@ -4308,8 +7833,17 @@ class Tagger:
             if href.rstrip("/") == "https://gelbooru.com":
                 continue
 
-            if "gelbooru.com" in href and "page=post" not in href:
-                continue
+            # IQDB may include Gelbooru's general/list page next to the real
+            # candidate (for example ``page=post&s=list&tags=all``).  A list
+            # page is not evidence for one image and must never be shown as a
+            # saved source link.
+            if host == "gelbooru.com":
+                gel_q = parse_qs(urlparse(href).query)
+                if gel_q.get("page", [""])[0].lower() == "post" and gel_q.get("s", [""])[0].lower() == "list":
+                    self.log(f"  IQDB REJECT NON-POST SOURCE [gelbooru.com]: {href}")
+                    continue
+                if "page=post" not in href:
+                    continue
 
             if href.rstrip("/") == "https://danbooru.donmai.us":
                 continue
@@ -4352,6 +7886,1171 @@ class Tagger:
             self.log(f"  IQDB {sim:.2f}% {u}")
 
         return out
+
+
+    def danbooru_iqdb_urls(self, img_path):
+        """Optional Danbooru-specific IQDB fallback.
+
+        This is kept separate from the main IQDB pass because the user may want
+        it enabled explicitly.  It uploads the image to danbooru.iqdb.org and
+        only returns URLs that can be handled by the existing site parsers, so it
+        cannot create tags by itself.
+        """
+        urls = []
+        domains = self.enabled_domains()
+        min_sim = float(self.settings.get("iqdb_min_similarity", 75.0))
+
+        try:
+            r = _post_with_file(self.session, "https://danbooru.iqdb.org/", img_path,
+                               file_field="file", extra_data={"forcegray": "on"},
+                               timeout=max(self.timeout, 60))
+            r.raise_for_status()
+        except Exception as e:
+            self.log(f"  DANBOORU IQDB SEARCH ERROR: {e}")
+            return []
+
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        for a in soup.select("a[href]"):
+            href = a.get("href", "").strip()
+            if not href:
+                continue
+            if href.startswith("//"):
+                href = "https:" + href
+            elif href.startswith("/"):
+                href = "https://danbooru.iqdb.org" + href
+
+            parsed = urlparse(href)
+            host = parsed.netloc.lower().replace("www.", "")
+
+            if host in {"danbooru.iqdb.org", "iqdb.org"}:
+                continue
+            if href.rstrip("/") == "https://danbooru.donmai.us":
+                continue
+            if "danbooru.donmai.us" in host and "/posts/" not in parsed.path and "/post/show/" not in parsed.path:
+                continue
+            if host == "gelbooru.com":
+                gel_q = parse_qs(parsed.query)
+                if gel_q.get("page", [""])[0].lower() == "post" and gel_q.get("s", [""])[0].lower() == "list":
+                    self.log(f"  DANBOORU IQDB REJECT NON-POST SOURCE [gelbooru.com]: {href}")
+                    continue
+                if "page=post" not in href:
+                    continue
+            if host not in domains:
+                continue
+
+            row_text = ""
+            parent = a
+            for _ in range(5):
+                parent = parent.parent
+                if parent is None:
+                    break
+                row_text = parent.get_text(" ", strip=True)
+                if "%" in row_text:
+                    break
+
+            sim = 100.0
+            m = re.search(r"(\d+(?:\.\d+)?)\s*%", row_text)
+            if m:
+                try:
+                    sim = float(m.group(1))
+                except Exception:
+                    sim = 100.0
+            if sim >= min_sim:
+                urls.append((href, sim))
+
+        seen = set()
+        out = []
+        for u, sim in urls:
+            if u not in seen:
+                seen.add(u)
+                out.append((u, sim))
+
+        for u, sim in out[:10]:
+            self.log(f"  DANBOORU IQDB {sim:.2f}% {u}")
+
+        return out
+
+    def e621_iqdb_urls(self, img_path):
+        """Reverse-image fallback through e621's IQDB endpoint.
+
+        This runs after public IQDB and before Ascii2D/SauceNAO.  It uploads the
+        local image to ``/iqdb_queries.json`` and converts returned post ids into
+        ordinary e621 post URLs, so the normal JSON tag parser remains the only
+        metadata writer.  The endpoint needs an e621 login + API key; without
+        credentials it is skipped, not treated as a failed match.
+        """
+        host = "e621.net"
+        cfg = self.site_cfg(host)
+        if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+            return []
+        login = str(cfg.get("login") or "").strip()
+        api_key = str(cfg.get("api_key") or "").strip()
+        if not login or not api_key:
+            if not self._e621_iqdb_missing_auth_logged:
+                self.log("  E621 IQDB SKIP: нужен login + api_key в настройках сайта e621.net")
+                self._e621_iqdb_missing_auth_logged = True
+            return []
+
+        now = time.time()
+        if self._e621_iqdb_cooldown_until and now < self._e621_iqdb_cooldown_until:
+            left = int(self._e621_iqdb_cooldown_until - now)
+            self.log(f"  E621 IQDB COOLDOWN: {left//60}m {left%60}s left")
+            return []
+
+        try:
+            import importlib
+            std_req = importlib.import_module("requests")
+            auth = std_req.auth.HTTPBasicAuth(login, api_key)
+        except Exception:
+            auth = (login, api_key)
+
+        driver = self._site_driver_for({"domain": host, "engine": "e621"})
+        reverse_cfg = {}
+        try:
+            reverse_cfg = dict((driver.cfg or {}).get("reverse_image_search") or {}) if driver else {}
+        except Exception:
+            reverse_cfg = {}
+
+        root = "https://e621.net"
+        raw_url = str(reverse_cfg.get("url") or "").strip()
+        path = str(reverse_cfg.get("path") or "/iqdb_queries.json").strip()
+        if raw_url:
+            url = raw_url.replace("{root}", root)
+        else:
+            if path and not path.startswith("/"):
+                path = "/" + path
+            url = root + path
+        file_field = str(reverse_cfg.get("file_field") or "file")
+        headers = self._e621_api_headers(host)
+        headers["Accept"] = "application/json"
+        default_max = int(reverse_cfg.get("max_results", 5) or 5)
+        max_results = max(1, min(20, int(self.settings.get("e621_iqdb_max_results", default_max) or default_max)))
+        extra_params = reverse_cfg.get("params") or {}
+        if not isinstance(extra_params, dict):
+            extra_params = {}
+        try:
+            r = _post_with_file(
+                self.session,
+                url,
+                img_path,
+                file_field=file_field,
+                extra_params=extra_params,
+                timeout=max(self.timeout, 60),
+                headers=headers,
+                auth=auth,
+            )
+        except Exception as e:
+            self.log(f"  E621 IQDB SEARCH ERROR: {e}")
+            return []
+
+        ct = ""
+        try:
+            ct = r.headers.get("content-type", "")
+        except Exception:
+            pass
+        self.log(f"  E621 IQDB STATUS: {getattr(r, 'status_code', '?')} {ct}")
+
+        if getattr(r, "status_code", 0) in (401, 403):
+            if self._e621_is_cloudflare_html_response(r):
+                self.log("  E621 IQDB CLOUDFLARE/403: HTML security verification instead of JSON; pass browser check/save cookies and verify User-Agent + Basic Auth")
+            elif getattr(r, "status_code", 0) == 401:
+                self.log("  E621 IQDB AUTH ERROR: login/api_key invalid or API access disabled")
+            else:
+                self.log("  E621 IQDB 403: forbidden; check official User-Agent, login/api_key, and API access")
+            return []
+        if getattr(r, "status_code", 0) == 429:
+            self._e621_iqdb_cooldown_until = time.time() + 90
+            self.log("  E621 IQDB 429: временная пауза 90с")
+            return []
+        if getattr(r, "status_code", 0) >= 500:
+            self.log(f"  E621 IQDB SERVER ERROR {getattr(r, 'status_code', '?')}")
+            return []
+        try:
+            r.raise_for_status()
+        except Exception as e:
+            self.log(f"  E621 IQDB HTTP ERROR: {e}")
+            return []
+
+        try:
+            data = r.json()
+        except Exception:
+            snippet = getattr(r, "text", "")[:160].replace("\n", " ").replace("\r", " ")
+            self.log(f"  E621 IQDB NON-JSON: {snippet}")
+            return []
+
+        def _resolve(value, field_path):
+            if field_path is None:
+                return value
+            cur = value
+            for part in str(field_path).split("."):
+                if part == "":
+                    continue
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+                elif isinstance(cur, list):
+                    try:
+                        cur = cur[int(part)]
+                    except Exception:
+                        return None
+                else:
+                    return None
+            return cur
+
+        result_paths = reverse_cfg.get("result_list_path") or [None, "results", "posts", "iqdb_queries", "matches"]
+        if isinstance(result_paths, (str, type(None))):
+            result_paths = [result_paths]
+        raw_results = []
+        for path_candidate in result_paths:
+            candidate = _resolve(data, path_candidate)
+            if isinstance(candidate, list):
+                raw_results = candidate
+                break
+            if isinstance(candidate, dict):
+                raw_results = [candidate]
+                break
+        post_id_fields = reverse_cfg.get("post_id_fields") or ["post_id", "post.id", "id"]
+        score_fields = reverse_cfg.get("score_fields") or ["similarity", "score", "distance", "rank"]
+
+        out = []
+        seen = set()
+        for idx, item in enumerate(raw_results or []):
+            post_id = None
+            score = None
+            if isinstance(item, dict):
+                for field in post_id_fields:
+                    post_id = _resolve(item, field)
+                    if post_id not in (None, "", [], {}):
+                        break
+                for field in score_fields:
+                    score = _resolve(item, field)
+                    if score not in (None, "", [], {}):
+                        break
+            elif isinstance(item, (int, str)):
+                post_id = item
+            try:
+                post_id = int(post_id)
+            except Exception:
+                continue
+            if post_id <= 0 or post_id in seen:
+                continue
+            seen.add(post_id)
+            # e621 does not document this as a normal percent in the old public
+            # examples. Keep the score only for logs/order; metadata validation
+            # still happens by fetching the post JSON via tags_from_url().
+            sim = 100.0
+            if score is not None:
+                try:
+                    sim = float(score)
+                except Exception:
+                    sim = 100.0
+            template = str(reverse_cfg.get("post_url") or "{root}/posts/{post_id}")
+            hit_url = template.replace("{root}", root).replace("{post_id}", str(post_id)).replace("{id}", str(post_id))
+            out.append((hit_url, sim))
+            self.log(f"  E621 IQDB HIT[{idx}]: {hit_url}")
+            if len(out) >= max_results:
+                break
+
+        if not out:
+            self.log("  E621 IQDB: no results")
+        return out
+
+    def _extract_urls_from_json(self, value, *, max_results=10):
+        """Conservative URL extractor for optional reverse-search JSON APIs.
+
+        Fuzzy/Fluffle style APIs change response field names over time.  This
+        routine does not trust a specific schema; it walks JSON and keeps HTTP
+        links.  Metadata verification still happens later via tags_from_url(),
+        so a loose extractor cannot write tags by itself.
+        """
+        found = []
+        seen = set()
+
+        def score_from_context(obj):
+            if not isinstance(obj, dict):
+                return 100.0
+            for key in ("similarity", "score", "match", "distance", "certainty", "confidence"):
+                if key in obj:
+                    try:
+                        raw = float(obj.get(key) or 0)
+                        if key == "distance":
+                            return max(0.0, 100.0 - raw)
+                        if raw <= 1.0:
+                            return raw * 100.0
+                        return raw
+                    except Exception:
+                        pass
+            return 100.0
+
+        def add_url(url, ctx=None):
+            url = str(url or "").strip()
+            if not url.startswith(("http://", "https://")):
+                return
+            if url in seen:
+                return
+            seen.add(url)
+            found.append((url, score_from_context(ctx)))
+
+        def walk(node, ctx=None):
+            if len(found) >= max_results:
+                return
+            if isinstance(node, dict):
+                local_ctx = node
+                for key in ("url", "source", "source_url", "sourceUrl", "post_url", "postUrl", "location", "href"):
+                    v = node.get(key)
+                    if isinstance(v, str):
+                        add_url(v, local_ctx)
+                    elif isinstance(v, list):
+                        for item in v:
+                            if isinstance(item, str):
+                                add_url(item, local_ctx)
+                # Common nested shapes: {post:{url}}, {sources:[{url}]}, etc.
+                for v in node.values():
+                    walk(v, local_ctx)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item, ctx)
+            elif isinstance(node, str):
+                add_url(node, ctx)
+
+        walk(value)
+        return found[:max_results]
+
+    def _record_reverse_source_only(self, label, url, similarity=0.0):
+        """Store a reverse-search URL as a source-only candidate for No Match."""
+        url = str(url or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return False
+        normalized_label = str(label or "Reverse").strip() or "Reverse"
+        upper_label = normalized_label.upper()
+        try:
+            host = urlparse(url).netloc.lower().replace("www.", "")
+        except Exception:
+            host = ""
+        # Internal helper/thumbnail/proxy URLs are not user-facing sources.
+        if host in {"content.fluffle.xyz", "fluffle.xyz", "api.fluffle.xyz", "api-next.fuzzysearch.net", "fuzzysearch.net"} or host.endswith(".fluffle.xyz"):
+            self.log(f"  {upper_label} INTERNAL URL IGNORED AS SOURCE: {url}")
+            return False
+        try:
+            sim = float(similarity or 0)
+        except Exception:
+            sim = 0.0
+        if not hasattr(self, "_last_reverse_source_only") or self._last_reverse_source_only is None:
+            self._last_reverse_source_only = []
+        for item in list(self._last_reverse_source_only or []):
+            if str(item.get("url") or "") == url:
+                return True
+        self._last_reverse_source_only.append({"label": normalized_label, "url": url, "similarity": sim})
+        self.log(f"  {upper_label} SOURCE-ONLY CANDIDATE: {sim:.2f}% {url}")
+        return True
+
+
+    def _tineye_block_text_info(self, text: str):
+        """Return (blocked, code, reason) for TinEye/Cloudflare block pages."""
+        raw = str(text or "")
+        low = raw.lower()
+        code = ""
+        m = re.search(r"error\s*code\s*[:#]?\s*(\d{4,})", raw, re.I)
+        if m:
+            code = m.group(1)
+        blocked_markers = (
+            "performance and security by cloudflare",
+            "sorry, you have been blocked",
+            "this verification can fail",
+            "cloudflare's troubleshooting documentation",
+            "cf-error-details",
+            "ray id:",
+            "turnstile",
+            "verify you are human",
+            "checking your browser",
+            "are you human",
+            "captcha",
+        )
+        if code == "600010" or any(x in low for x in blocked_markers):
+            reason = f"cloudflare_{code}" if code else "cloudflare_or_challenge"
+            return True, code, reason
+        return False, code, ""
+
+    def _tineye_parser_cooldown_seconds(self):
+        try:
+            value = float(self.settings.get("tineye_parser_block_cooldown_seconds", 86400) or 86400)
+        except Exception:
+            value = 86400.0
+        return max(300.0, min(7 * 24 * 3600.0, value))
+
+    def _tineye_set_parser_cooldown(self, reason="cloudflare_or_challenge", code=""):
+        """Disable only parser TinEye fallback for a cooldown window."""
+        until = time.time() + self._tineye_parser_cooldown_seconds()
+        self._tineye_parser_disabled_until = until
+        label = str(reason or "cloudflare_or_challenge")
+        if code:
+            label = f"{label}:{code}"
+        self._tineye_parser_block_reason = label
+        try:
+            self.settings["_tineye_parser_disabled_until"] = until
+            self.settings["_tineye_parser_block_reason"] = label
+        except Exception:
+            pass
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until))
+        except Exception:
+            stamp = str(int(until))
+        self.log(f"  TINEYE PARSER FALLBACK BLOCKED: reason={label}; disabled_until={stamp}")
+
+    def _tineye_parser_cooldown_active(self):
+        try:
+            until = float(getattr(self, "_tineye_parser_disabled_until", 0) or 0)
+        except Exception:
+            until = 0.0
+        now = time.time()
+        if until <= now:
+            return False
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until))
+        except Exception:
+            stamp = str(int(until))
+        reason = getattr(self, "_tineye_parser_block_reason", "") or self.settings.get("_tineye_parser_block_reason", "") or "blocked"
+        self.log(f"  TINEYE SKIP: parser fallback cooldown until {stamp} ({reason})")
+        return True
+
+    def _tineye_normalize_source_url(self, value):
+        """Normalize one TinEye URL candidate and drop non-source/tracker URLs.
+
+        TinEye result pages contain many ordinary page assets/analytics links in
+        the DOM.  Treat TinEye as source-only: keep user-facing source pages,
+        convert known image-CDN URLs to canonical post pages when possible, and
+        drop trackers, script endpoints, tag-list pages and duplicates.
+        """
+        u = str(value or "").strip().strip('"\'')
+        if not u:
+            return ""
+        try:
+            u = html.unescape(u).replace("\\/", "/")
+        except Exception:
+            u = u.replace("\\/", "/")
+        if u.startswith("//"):
+            u = "https:" + u
+        if not u.startswith(("http://", "https://")):
+            return ""
+        try:
+            parsed = urlparse(u)
+            host = (parsed.netloc or "").lower().replace("www.", "")
+            path = parsed.path or "/"
+        except Exception:
+            return ""
+        if not host:
+            return ""
+
+        noise_hosts = {
+            "tineye.com", "www.tineye.com",
+            "googletagmanager.com", "google-analytics.com", "analytics.google.com",
+            "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+            "cloudflareinsights.com", "sentry.io", "newrelic.com", "hotjar.com",
+            "w3.org", "schema.org",
+        }
+        if host in noise_hosts or host.endswith(".tineye.com") or host.endswith(".googletagmanager.com"):
+            return ""
+        if host.endswith(".google-analytics.com") or host.endswith(".doubleclick.net"):
+            return ""
+        if host.endswith(".w3.org"):
+            return ""
+
+        # TinEye often returns Paheal CDN image URLs.  These are better saved as
+        # stable post pages because the image host itself contains no metadata UI.
+        try:
+            if host.endswith("paheal.net") and "/_images/" in path:
+                decoded_path = unquote(path)
+                m = re.search(r"/_images/[^/]+/(\d{3,})(?:\s|%20|-|_)", decoded_path, re.I)
+                if m:
+                    return f"https://rule34.paheal.net/post/view/{m.group(1)}"
+        except Exception:
+            pass
+
+        # rule34.paheal list pages are tag/search pages, not a specific source.
+        if host == "rule34.paheal.net" and path.startswith("/post/list/"):
+            return ""
+
+        # Remove fragments and common tracking params to make duplicate matching
+        # deterministic, but keep real query strings such as ?id=.
+        query = parsed.query or ""
+        if query:
+            kept = []
+            for part in query.split("&"):
+                k = part.split("=", 1)[0].lower()
+                if k.startswith("utm_") or k in {"fbclid", "gclid", "yclid", "mc_cid", "mc_eid"}:
+                    continue
+                kept.append(part)
+            query = "&".join(kept)
+        scheme = parsed.scheme or "https"
+        normalized = f"{scheme}://{host}{path}"
+        if query:
+            normalized += "?" + query
+        return normalized
+
+    def _tineye_filter_source_urls(self, raw_urls, max_results):
+        """Filter, normalize and rank TinEye source-only candidates."""
+        out = []
+        seen = set()
+        for item in raw_urls or []:
+            value = item[0] if isinstance(item, (tuple, list)) and item else item
+            u = self._tineye_normalize_source_url(value)
+            if not u:
+                continue
+            try:
+                p = urlparse(u)
+                key = (p.netloc.lower().replace("www.", ""), unquote(p.path).rstrip("/").lower(), p.query)
+            except Exception:
+                key = (u.lower(), "", "")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(u)
+
+        # If TinEye gave a proper page on thatpervert, drop duplicated CDN/image
+        # URLs from the same site; the page is the useful source-only record.
+        has_thatpervert_post = False
+        for u in out:
+            try:
+                p = urlparse(u)
+                host = p.netloc.lower().replace("www.", "")
+                if host == "thatpervert.com" and p.path.startswith("/post/"):
+                    has_thatpervert_post = True
+                    break
+            except Exception:
+                pass
+        if has_thatpervert_post:
+            filtered = []
+            for u in out:
+                try:
+                    p = urlparse(u)
+                    host = p.netloc.lower().replace("www.", "")
+                    if host.endswith("thatpervert.com") and host != "thatpervert.com":
+                        continue
+                except Exception:
+                    pass
+                filtered.append(u)
+            out = filtered
+
+        return out[:max(1, int(max_results or 1))]
+
+
+    def _tineye_try_playwright(self, img_path_obj, max_results):
+        """Upload to TinEye through a normal visible Playwright browser profile.
+
+        This is deliberately a plain browser fallback, not an anti-bot bypass:
+        no stealth flags, no webdriver masking and no captcha solving.  It stays
+        in the normal mass reverse queue as the last automatic fallback after
+        MD5/IQDB/SauceNAO, but it uses a persistent visible browser profile so
+        saved cookies/session state can be reused.
+        """
+        import re as _re
+        import time as _time
+        from html import unescape as _html_unescape
+
+        try:
+            from playwright.sync_api import sync_playwright as _sync_playwright
+        except Exception as _e:
+            self.log(f"  TINEYE BROWSER: Playwright не установлен: {_e}")
+            self.log("  TINEYE BROWSER: установка: pip install playwright && playwright install chromium")
+            return None
+
+        def _collect_playwright_cookies(host: str):
+            cookies_out = []
+            sources = []
+
+            def _add_cookie_record(name, value, domain=None, path="/", expires=None, secure=None, http_only=None, same_site=None):
+                try:
+                    if not name or value is None:
+                        return False
+                    name = str(name)
+                    value = str(value)
+                    # Playwright/Chromium cookie names and values must be plain strings.
+                    name.encode("utf-8")
+                    value.encode("utf-8")
+                    c = {"name": name, "value": value, "path": path or "/"}
+                    dom = str(domain or "").strip()
+                    if dom:
+                        c["domain"] = dom
+                    else:
+                        c["url"] = f"https://{host}/"
+                    try:
+                        if expires not in (None, "", 0, -1):
+                            exp = int(float(expires))
+                            # Skip obviously expired cookies.
+                            if exp > int(_time.time()) - 60:
+                                c["expires"] = exp
+                    except Exception:
+                        pass
+                    if secure is not None:
+                        c["secure"] = bool(secure)
+                    if http_only is not None:
+                        c["httpOnly"] = bool(http_only)
+                    if same_site:
+                        ss = str(same_site).strip().lower()
+                        if ss in ("strict", "lax", "none"):
+                            c["sameSite"] = {"strict": "Strict", "lax": "Lax", "none": "None"}[ss]
+                    cookies_out.append(c)
+                    return True
+                except Exception:
+                    return False
+
+            try:
+                app_cookies, _ua = load_cookie_bundle_for_host(host)
+                added = 0
+                for c in _normalize_cookie_records(app_cookies):
+                    if _add_cookie_record(
+                        c.get("name"),
+                        c.get("value"),
+                        c.get("domain") or f".{host}",
+                        c.get("path") or "/",
+                        c.get("expires") or c.get("expirationDate"),
+                        c.get("secure"),
+                        c.get("httpOnly"),
+                        c.get("sameSite"),
+                    ):
+                        added += 1
+                if added:
+                    sources.append(f"app-json:{added}")
+            except Exception:
+                pass
+
+            try:
+                txt_jar, txt_info = load_txt_cookiejar_for_host(host)
+                added = 0
+                if txt_jar:
+                    for c in txt_jar:
+                        if _add_cookie_record(
+                            getattr(c, "name", None),
+                            getattr(c, "value", None),
+                            getattr(c, "domain", None),
+                            getattr(c, "path", "/"),
+                            getattr(c, "expires", None),
+                            getattr(c, "secure", None),
+                            False,
+                            None,
+                        ):
+                            added += 1
+                if added:
+                    sources.append(f"{txt_info}:{added}")
+            except Exception:
+                pass
+
+            return cookies_out, sources
+
+        try:
+            img_path_obj = Path(img_path_obj)
+            if not img_path_obj.exists():
+                self.log("  TINEYE BROWSER SKIP: файл не найден")
+                return None
+
+            profile_dir = Path(BROWSER_PROFILE_DIR) / "tineye"
+            profile_dir.mkdir(parents=True, exist_ok=True)
+
+            # TinEye browser fallback is deliberately visible/headful.  Older
+            # configs from v210/v211 may still contain tineye_browser_headless=true;
+            # ignore that stale value because it makes the user unable to pass
+            # normal TinEye prompts and caused headless timeouts in real logs.
+            stale_headless = bool(self.settings.get("tineye_browser_headless", False))
+            headless = False
+            timeout_ms = int(float(self.settings.get("tineye_browser_timeout_seconds", 60) or 60) * 1000)
+            timeout_ms = max(15000, min(180000, timeout_ms))
+            manual_wait_ms = int(float(self.settings.get("tineye_browser_manual_wait_seconds", 120) or 120) * 1000)
+            manual_wait_ms = max(0, min(600000, manual_wait_ms))
+
+            self.log(
+                "  TINEYE BROWSER: Playwright persistent profile "
+                f"({'headless' if headless else 'visible'})"
+            )
+            if stale_headless:
+                self.log("  TINEYE BROWSER: старый tineye_browser_headless=true проигнорирован; нужен видимый браузер")
+
+            with _sync_playwright() as _pw:
+                context = None
+                try:
+                    context = _pw.chromium.launch_persistent_context(
+                        user_data_dir=str(profile_dir),
+                        headless=headless,
+                        viewport={"width": 1365, "height": 900},
+                        accept_downloads=False,
+                    )
+
+                    try:
+                        profile_cookie_count = len(context.cookies(["https://tineye.com/"]))
+                        if profile_cookie_count:
+                            self.log(f"  TINEYE BROWSER PROFILE COOKIES: {profile_cookie_count} из persistent profile")
+                    except Exception:
+                        pass
+
+                    saved_cookies, cookie_sources = _collect_playwright_cookies("tineye.com")
+                    if saved_cookies:
+                        try:
+                            context.add_cookies(saved_cookies)
+                            self.log(f"  TINEYE BROWSER COOKIES: loaded: {len(saved_cookies)} ({'; '.join(cookie_sources)})")
+                        except Exception as _ce:
+                            self.log(f"  TINEYE BROWSER COOKIES: не удалось добавить cookies: {type(_ce).__name__}: {str(_ce)[:120]}")
+                    else:
+                        self.log("  TINEYE BROWSER COOKIES: 0 (no sources)")
+
+                    page = context.pages[0] if context.pages else context.new_page()
+                    try:
+                        page.goto("https://tineye.com/", wait_until="domcontentloaded", timeout=timeout_ms)
+                    except Exception as _ge:
+                        # A visible browser can still finish loading shortly after
+                        # Playwright's navigation timeout.  Continue and inspect DOM.
+                        self.log(f"  TINEYE BROWSER: стартовая страница не дождалась DOM полностью: {type(_ge).__name__}; продолжаю")
+                    try:
+                        page.wait_for_load_state("load", timeout=min(timeout_ms, 30000))
+                    except Exception:
+                        self._external_log("  TINEYE BROWSER: load/networkidle не дождался; продолжаю по DOM")
+                    try:
+                        page.wait_for_timeout(1500)
+                    except Exception:
+                        pass
+
+                    def _challenge_status():
+                        try:
+                            txt = (page.inner_text("body", timeout=3000) or "")
+                        except Exception:
+                            txt = ""
+                        blocked, code, reason = self._tineye_block_text_info(txt)
+                        if blocked:
+                            return "blocked", code, reason
+                        return "ok", "", ""
+
+                    status, code, reason = _challenge_status()
+                    # v212 kept a manual path where the "видимый браузер ждёт ручное прохождение";
+                    # v272 treats Cloudflare/Troubleshoot block pages as parser-only cooldown instead.
+                    if status == "blocked":
+                        self.log(f"  TINEYE BROWSER: Cloudflare/verification block detected{f' code={code}' if code else ''}")
+                        self._tineye_set_parser_cooldown(reason or "cloudflare_or_challenge", code)
+                        return None
+
+                    selector = "input[type='file']"
+                    file_input = None
+                    try:
+                        page.wait_for_selector(selector, state="attached", timeout=min(timeout_ms, 45000))
+                        handles = page.query_selector_all(selector)
+                        if handles:
+                            file_input = handles[0]
+                    except Exception:
+                        file_input = None
+                    if file_input is None:
+                        self.log("  TINEYE BROWSER: input[type=file] не найден")
+                        return None
+
+                    self.log(f"  TINEYE BROWSER: загружаю {img_path_obj.name} через страницу TinEye...")
+                    file_input.set_input_files(str(img_path_obj))
+
+                    try:
+                        page.click("button[type='submit'], input[type='submit'], button:has-text('Search'), button:has-text('Upload')", timeout=3000)
+                    except Exception:
+                        pass
+
+                    html_text = ""
+                    final_url = ""
+                    external_hint = _re.compile(r"https?://(?![^/]*tineye\.com)[^\"'<>\\]{8,}", _re.I)
+                    wait_until = _time.monotonic() + timeout_ms / 1000.0
+                    while _time.monotonic() < wait_until:
+                        try:
+                            page.wait_for_timeout(3000)
+                        except Exception:
+                            pass
+                        try:
+                            html_text = page.content()
+                            final_url = page.url
+                        except Exception:
+                            html_text = ""
+                            final_url = ""
+                        blocked, code, reason = self._tineye_block_text_info(html_text)
+                        if blocked:
+                            self.log(f"  TINEYE BROWSER: Cloudflare/verification block detected during upload{f' code={code}' if code else ''}")
+                            self._tineye_set_parser_cooldown(reason or "cloudflare_or_challenge", code)
+                            return None
+                        if external_hint.search(html_text):
+                            break
+                        # If TinEye moved to a results/search page, give it a bit
+                        # more time but do not require networkidle, which is flaky.
+                        if "/search" in (final_url or ""):
+                            try:
+                                page.wait_for_timeout(4000)
+                                html_text = page.content()
+                            except Exception:
+                                pass
+                            break
+                    if not html_text:
+                        try:
+                            html_text = page.content()
+                            final_url = page.url
+                        except Exception:
+                            html_text = ""
+                            final_url = ""
+                    blocked, code, reason = self._tineye_block_text_info(html_text)
+                    if blocked:
+                        self.log(f"  TINEYE BROWSER: Cloudflare/verification block detected in final page{f' code={code}' if code else ''}")
+                        self._tineye_set_parser_cooldown(reason or "cloudflare_or_challenge", code)
+                        return None
+                finally:
+                    if context is not None:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
+
+            urls = []
+
+            def _add_url(value):
+                u = self._tineye_normalize_source_url(value)
+                if not u:
+                    return
+                if u not in urls:
+                    urls.append(u)
+
+            for pattern in [
+                r'"(?:backlink|backlink_url|page_url|source_url|url)"\s*:\s*"(https?://[^"\\]{10,}(?:\\.[^"\\]*)*)"',
+                r"(?:href|data-url|data-backlink)=[\"'](https?://[^\"']{10,})[\"']",
+            ]:
+                for m in _re.finditer(pattern, html_text):
+                    _add_url(m.group(1))
+                if urls:
+                    break
+
+            before_filter_count = len(urls)
+            urls = self._tineye_filter_source_urls(urls, max_results)
+            dropped = max(0, before_filter_count - len(urls))
+            if dropped:
+                self.log(f"  TINEYE BROWSER FILTER: отброшено мусорных/дублирующих URL: {dropped}")
+            self.log(f"  TINEYE BROWSER: {len(urls)} результатов")
+            for u in urls[:3]:
+                self.log(f"    -> {u[:80]}")
+            return [(u, 0.0) for u in urls]
+        except Exception as _e:
+            # TinEye is optional and source-only.  Its browser fallback must not
+            # poison the whole file as a transient network failure, otherwise a
+            # good SauceNAO source-only result gets deferred instead of saved.
+            msg = str(_e).splitlines()[0][:180]
+            self._external_log(f"  TINEYE BROWSER ERROR: {type(_e).__name__}: {msg}")
+            return None
+
+
+    def tineye_urls(self, img_path):
+        """TinEye fallback for the final broken/no-tag tail.
+
+        Fast path tries the public HTTP upload once.  If TinEye returns 405/403,
+        the session remembers that the HTTP endpoint is blocked and falls back to
+        a normal Playwright browser profile for later TinEye attempts.  Captcha
+        or challenge pages are not bypassed; TinEye is disabled for the current
+        run in that case.
+        """
+        if not self.settings.get("enable_tineye"):
+            return []
+        if self._tineye_parser_cooldown_active():
+            return []
+        if self.settings.get("_tineye_disabled_this_session"):
+            self.log("  TINEYE SKIP: отключён до конца текущего запуска")
+            return []
+        import time
+        import random
+        import re as _re
+        from html import unescape as _html_unescape
+
+        try:
+            delay_min = float(self.settings.get("tineye_delay_min", 30) or 0)
+            delay_max = float(self.settings.get("tineye_delay_max", 90) or 0)
+        except Exception:
+            delay_min, delay_max = 30.0, 90.0
+        delay_min = max(0.0, min(3600.0, delay_min))
+        delay_max = max(0.0, min(3600.0, delay_max))
+        if delay_max < delay_min:
+            delay_min, delay_max = delay_max, delay_min
+        delay = random.uniform(delay_min, delay_max) if delay_max > 0 else 0.0
+        if delay > 0:
+            self.log(f"  TINEYE: ожидание {delay:.0f}с перед отправкой...")
+            # Parser-only TinEye wait: keep it cancellable and re-check cooldown
+            # so a Cloudflare block from another file stops the queue quickly.
+            end_wait = time.monotonic() + delay
+            while time.monotonic() < end_wait:
+                if self.cancelled() or self._tineye_parser_cooldown_active():
+                    return []
+                time.sleep(min(5.0, max(0.0, end_wait - time.monotonic())))
+        else:
+            self.log("  TINEYE: задержка отключена")
+
+        max_results = max(1, min(100, int(self.settings.get("tineye_max_results", 10) or 10)))
+        try:
+            img_path_obj = Path(img_path)
+            if not img_path_obj.exists():
+                self.log("  TINEYE SKIP: файл не найден")
+                return []
+
+            if self.settings.get("_tineye_http_upload_blocked"):
+                if self.settings.get("tineye_browser_fallback", True):
+                    self.log("  TINEYE: HTTP upload ранее вернул 405/403; сразу использую браузер")
+                    _pw_result = self._tineye_try_playwright(img_path_obj, max_results)
+                    if _pw_result is not None:
+                        return _pw_result
+                self.log("  TINEYE: браузерный режим недоступен/не помог; отключаю TinEye на сессию")
+                try:
+                    self.settings["_tineye_disabled_this_session"] = True
+                except Exception:
+                    pass
+                return []
+
+            # Use curl_cffi when available; its requests-like API does not
+            # support files=, so the upload branch below uses CurlMime/multipart.
+            using_cffi = False
+            try:
+                import curl_cffi as _curl_cffi
+                from curl_cffi import requests as _cffi_requests
+                s = _cffi_requests.Session(impersonate="chrome136")
+                using_cffi = True
+                self.log("  TINEYE: curl_cffi Chrome136 multipart")
+            except ImportError:
+                _curl_cffi = None
+                s = self.session
+                self.log("  TINEYE: curl_cffi недоступен, используется обычный requests")
+
+            # Full browser headers including sec-ch-ua and sec-fetch-*
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/136.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": random.choice([
+                    "en-US,en;q=0.9",
+                    "en-GB,en;q=0.9",
+                    "en-US,en;q=0.8,de;q=0.6",
+                ]),
+                "Accept-Encoding": "gzip, deflate, br",
+                "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "sec-fetch-user": "?1",
+                "upgrade-insecure-requests": "1",
+                "Cache-Control": "max-age=0",
+            }
+
+            # Step 1: load homepage for cookies + CSRF
+            csrf = ""
+            try:
+                home_r = s.get(
+                    "https://tineye.com/",
+                    headers=headers,
+                    timeout=20,
+                )
+                blocked, code, reason = self._tineye_block_text_info(getattr(home_r, "text", ""))
+                if blocked:
+                    self.log(f"  TINEYE: Cloudflare/verification block on homepage{f' code={code}' if code else ''}")
+                    self._tineye_set_parser_cooldown(reason or "cloudflare_or_challenge", code)
+                    return []
+                for pattern in [
+                    r"csrfmiddlewaretoken[^>]+value=[\"']([^\"']+)",
+                    r'"csrfToken"\s*:\s*"([^"]{8,})"',
+                    r"csrf-token[^>]+content=[\"']([^\"']+)",
+                ]:
+                    m = _re.search(pattern, home_r.text)
+                    if m:
+                        csrf = m.group(1)
+                        break
+                # Small jitter after homepage load
+                time.sleep(random.uniform(1.5, 4.0))
+            except Exception as exc:
+                self.log(f"  TINEYE: главная не загрузилась: {exc}")
+
+            # Step 2: upload image
+            self.log(f"  TINEYE: загружаю {img_path_obj.name} через /search/upload...")
+            suf = img_path_obj.suffix.lower().lstrip(".")
+            mime_map = {"png": "image/png", "gif": "image/gif",
+                        "webp": "image/webp", "jpeg": "image/jpeg"}
+            mime = mime_map.get(suf, "image/jpeg")
+
+            up_headers = dict(headers)
+            up_headers["Accept"] = "application/json, */*; q=0.01"
+            up_headers["Referer"] = "https://tineye.com/"
+            up_headers["Origin"] = "https://tineye.com"
+            up_headers["sec-fetch-site"] = "same-origin"
+            up_headers["sec-fetch-mode"] = "cors"
+            up_headers["sec-fetch-dest"] = "empty"
+            up_headers["X-Requested-With"] = "XMLHttpRequest"
+
+            form_data = {}
+            if csrf:
+                form_data["csrfmiddlewaretoken"] = csrf
+
+            if using_cffi:
+                multipart = _curl_cffi.CurlMime()
+                try:
+                    if csrf:
+                        multipart.addpart(name="csrfmiddlewaretoken", data=str(csrf).encode("utf-8"))
+                    multipart.addpart(
+                        name="image",
+                        content_type=mime,
+                        filename=img_path_obj.name,
+                        local_path=str(img_path_obj),
+                    )
+                    resp = s.post(
+                        "https://tineye.com/search/upload",
+                        headers=up_headers,
+                        multipart=multipart,
+                        timeout=60,
+                        allow_redirects=True,
+                    )
+                finally:
+                    close_multipart = getattr(multipart, "close", None)
+                    if callable(close_multipart):
+                        try:
+                            close_multipart()
+                        except Exception:
+                            pass
+            else:
+                with open(img_path_obj, "rb") as fh:
+                    resp = s.post(
+                        "https://tineye.com/search/upload",
+                        headers=up_headers,
+                        files={"image": (img_path_obj.name, fh, mime)},
+                        data=form_data,
+                        timeout=60,
+                        allow_redirects=True,
+                    )
+
+            blocked, code, reason = self._tineye_block_text_info(getattr(resp, "text", ""))
+            if blocked:
+                self.log(f"  TINEYE: Cloudflare/verification block on upload response{f' code={code}' if code else ''}")
+                self._tineye_set_parser_cooldown(reason or "cloudflare_or_challenge", code)
+                return []
+
+            if resp.status_code not in (200, 301, 302):
+                self.log(f"  TINEYE: HTTP {resp.status_code}")
+                if resp.status_code in (405, 403):
+                    self.log("  TINEYE: HTTP endpoint не принимает автоматическую загрузку; запоминаю на сессию")
+                    try:
+                        self.settings["_tineye_http_upload_blocked"] = True
+                    except Exception:
+                        pass
+                    if self.settings.get("tineye_browser_fallback", True):
+                        self.log("  TINEYE: пробую через браузерный профиль Playwright...")
+                        _pw_result = self._tineye_try_playwright(img_path_obj, max_results)
+                        if _pw_result is not None:
+                            return _pw_result
+                    self.log("  TINEYE: браузерный режим не дал результата; TinEye отключён на сессию")
+                    try:
+                        self.settings["_tineye_disabled_this_session"] = True
+                    except Exception:
+                        pass
+                return []
+
+            body = resp.text
+            self.log(f"  TINEYE: ответ {len(body)} байт")
+
+            urls: list = []
+
+            def _add_tineye_result_url(value):
+                u = self._tineye_normalize_source_url(value)
+                if not u:
+                    return
+                if u not in urls:
+                    urls.append(u)
+
+            # Try JSON response
+            try:
+                import json as _json
+                j = _json.loads(body)
+                matches = j.get("matches") or (j.get("results") or {}).get("matches") or []
+                for match in (matches or [])[:max_results * 5]:
+                    if not isinstance(match, dict):
+                        continue
+                    for bl in match.get("backlinks") or []:
+                        if isinstance(bl, dict):
+                            _add_tineye_result_url(bl.get("backlink") or bl.get("url") or bl.get("source_url"))
+                        else:
+                            _add_tineye_result_url(bl)
+                    # Some response variants place the best page/image URL at the match level.
+                    _add_tineye_result_url(match.get("backlink") or match.get("url") or match.get("page_url"))
+            except Exception:
+                pass
+
+            # HTML / embedded-JSON fallback
+            if not urls:
+                for pattern in [
+                    r'"(?:backlink|backlink_url|page_url|url)"\s*:\s*"(https?://[^"\\]{10,}(?:\\.[^"\\]*)*)"',
+                    r"(?:href|data-url|data-backlink)=[\"'](https?://[^\"']{10,})[\"']",
+                ]:
+                    for m in _re.finditer(pattern, body):
+                        _add_tineye_result_url(m.group(1))
+                    if urls:
+                        break
+
+            before_filter_count = len(urls)
+            urls = self._tineye_filter_source_urls(urls, max_results)
+            dropped = max(0, before_filter_count - len(urls))
+            if dropped:
+                self.log(f"  TINEYE FILTER: отброшено мусорных/дублирующих URL: {dropped}")
+            self.log(f"  TINEYE: {len(urls)} результатов")
+            for u in urls[:3]:
+                self.log(f"    -> {u[:80]}")
+            return [(u, 0.0) for u in urls]
+
+        except Exception as exc:
+            self.log(f"  TINEYE ERROR: {type(exc).__name__}: {exc}")
+            return []
+
+
+    def _iqdb_url_md5_tokens(self, url):
+        """Extract explicit MD5 tokens from IQDB result URLs.
+
+        IQDB often returns Gelbooru list URLs like ?md5=<hash>.  The selector
+        uses these tokens only for ranking inside the same site; it does not
+        turn list pages into accepted post URLs by itself.
+        """
+        text = unquote(str(url or "")).lower()
+        return set(re.findall(r"(?<![a-f0-9])([a-f0-9]{32})(?![a-f0-9])", text))
+
+
+    def select_iqdb_best_per_site(self, candidates, expected_md5s=None):
+        """Choose one IQDB post per host, then metadata may be merged across hosts.
+
+        IQDB may return several visually similar posts from one booru.  Merging
+        those posts contaminates tags.  Different booru sites are useful
+        complementary metadata sources, so one selected post from each enabled
+        host is retained.  An explicit URL MD5 match outranks similarity inside
+        the same host; otherwise the highest similarity wins.
+        """
+        expected = {str(md5).strip().lower() for md5 in (expected_md5s or []) if is_md5(str(md5).strip().lower())}
+        selected = {}
+        host_order = []
+        counts = {}
+
+        for index, pair in enumerate(candidates or []):
+            try:
+                url, sim = pair
+                similarity = float(sim)
+            except Exception:
+                continue
+            host = urlparse(str(url)).netloc.lower().replace("www.", "") or "unknown"
+            counts[host] = counts.get(host, 0) + 1
+            if host not in host_order:
+                host_order.append(host)
+            url_md5s = self._iqdb_url_md5_tokens(url)
+            exact_md5 = bool(expected.intersection(url_md5s))
+            item = {
+                "url": str(url),
+                "similarity": similarity,
+                "host": host,
+                "exact_md5": exact_md5,
+                "order": index,
+            }
+            current = selected.get(host)
+            if current is None or (int(exact_md5), similarity, -index) > (int(current["exact_md5"]), current["similarity"], -current["order"]):
+                selected[host] = item
+
+        if counts:
+            summary = ", ".join(f"{host}={counts[host]}" for host in host_order)
+            self.log(f"  IQDB RESULTS BY SITE: {summary}")
+        return [selected[host] for host in host_order if host in selected]
 
     def _ascii2d_parse_results(self, html: str, domains: set) -> list:
         """Parse ascii2d result page and return (url, similarity) pairs.
@@ -4778,7 +9477,7 @@ class Tagger:
         except Exception:
             return False
 
-    def merge_conveyor_match_into_existing(self, archived_media_path, original_img, all_tags, sources, all_groups):
+    def merge_conveyor_match_into_existing(self, archived_media_path, original_img, all_tags, sources, all_groups, source_tag_groups=None):
         """Merge newly found source metadata into an existing FOUND archive row.
 
         A newly enabled site must enrich an already archived file without copying
@@ -4798,18 +9497,20 @@ class Tagger:
             _merge_result = register_media_import(
                 self.settings, archived_media_path, tags=all_tags, groups=tag_groups,
                 sources=source_list, status="found", original_path=str(original_img),
+                source_tag_groups=source_tag_groups,
                 origin="tagger", merge_existing=True, generate_thumbnail=False,
             )
             _added = int((_merge_result or {}).get("source_added", 0) or 0)
             if _added:
                 self.log(f"  EXACT MD5 MERGE: existing_media={archived_media_path} source_added={_added} no_physical_copy_created=1")
+            _log_nomatch_promote_cleanup(self.log, _merge_result)
         except Exception as e:
             self.log(f"  EXISTING METADATA MERGE ERROR: {e}")
             return "error"
-        self.log(f"  TAGS MERGED INTO EXISTING FOUND: {len(all_tags)}")
+        self.log(f"  TAGS MERGED INTO EXISTING FOUND [{Path(original_img).name}]: {len(all_tags)}")
         return "tagged"
 
-    def save_conveyor_match(self, img, all_tags, sources, all_groups):
+    def save_conveyor_match(self, img, all_tags, sources, all_groups, source_tag_groups=None):
         """Commit an aggregate exact-MD5 match collected by site workers.
 
         The asynchronous site conveyor keeps network calls parallel per host,
@@ -4826,12 +9527,16 @@ class Tagger:
             tag_groups["general"] = all_tags
         source_text = "\n".join(str(x) for x in (sources or []) if str(x).strip())
         archived_media = copy_result_files(self.settings, img, "tagged")
-        _import_result = save_found_metadata(self.settings, img, all_tags, source_text, tag_groups, status="tagged", archived_media_path=archived_media)
+        if not _valid_archived_media_path(archived_media):
+            self.log(f"  FOUND SAVE ERROR: managed copy missing for {img.name}; metadata not written")
+            return "retry_network"
+        _import_result = save_found_metadata(self.settings, img, all_tags, source_text, tag_groups, status="tagged", archived_media_path=archived_media, source_tag_groups=source_tag_groups)
         if isinstance(_import_result, dict) and int(_import_result.get("source_added", 0) or 0):
             self.log(f"  EXACT MD5 MERGE: existing_media={_import_result.get('canonical_path','')} source_added={int(_import_result.get('source_added',0))} no_physical_copy_created=1")
+        _log_nomatch_promote_cleanup(self.log, _import_result)
         remove_nomatch(img, settings=self.settings)
         cleanup_archived_result(self.settings, img, ("nomatch", "partial"))
-        self.log(f"  TAGS: {len(all_tags)}")
+        self.log(f"  TAGS [{img.name}]: {len(all_tags)}")
         return "tagged"
 
     def process_image(self, img, persist_lock=None):
@@ -4847,6 +9552,8 @@ class Tagger:
         self._saucenao_deferred = False
         self._saucenao_defer_reason = ""
         self._saucenao_retry_after = 0
+        self._last_saucenao_source_only = []
+        self._last_reverse_source_only = []
 
         if self.settings.get("skip_existing") and not self.settings.get("retry_nomatch"):
             already = output_processed_status(self.settings, img)
@@ -4862,103 +9569,408 @@ class Tagger:
         if search_img != img:
             self.log(f"  VIDEO FRAME: {search_img.name}")
 
-        img_phash = file_phash(search_img)
+        try:
+            from core.file_hash_cache import get_or_compute_phash as _cached_phash
+            img_phash, _phash_hit = _cached_phash(self.settings, search_img, file_phash)
+        except Exception:
+            img_phash = file_phash(search_img)
+            _phash_hit = False
         if img_phash:
-            self.log(f"  PHASH: {img_phash}")
+            self.log(f"  PHASH: {img_phash}" + (" (cache)" if _phash_hit else ""))
 
         all_tags = []
         all_groups = []
         sources = []
+        source_tag_groups = []
+        known_md5s = set()
 
-        if self.cancelled():
-            self.log("  CANCELLED")
-            return "skip"
+        def _reverse_md5_relay(label, url, similarity=0.0):
+            """Try URL -> verified MD5 -> normal MD5 pipeline before URL tags.
 
-        if self.settings.get("enable_md5_lookup") and is_md5(img.stem):
-            self.log(f"  TRY MD5 FROM FILENAME: {img.stem}")
-            tags, srcs, groups = self.md5_lookup_all(img.stem)
-            all_tags += tags
-            sources += srcs
-            all_groups += groups
-
-        if self.cancelled():
-            self.log("  CANCELLED")
-            return "skip"
-
-        if self.settings.get("enable_md5_lookup") and not all_tags:
-            real = file_md5(search_img)
-            self.log(f"  TRY REAL FILE MD5: {real}")
-            tags, srcs, groups = self.md5_lookup_all(real)
-            all_tags += tags
-            sources += srcs
-            all_groups += groups
-
-        if self.cancelled():
-            self.log("  CANCELLED")
-            return "skip"
-
-        if self.settings.get("enable_saucenao") and not all_tags:
-            _fallback_started = time.monotonic()
-            self.report_activity("SauceNAO", img, "Обратный поиск")
+            Reverse search often returns a post page on one site.  If that page
+            exposes an authoritative MD5, checking that MD5 across every enabled
+            site is safer and richer than using only tags from the original
+            reverse result URL.
+            """
+            url = str(url or "").strip()
+            if not url:
+                return {"kind": "none"}
+            md5v = ""
+            relay_origin = ""
             try:
-                sauce_urls = self.saucenao_urls(search_img)
+                if str(label).lower().startswith("saucenao"):
+                    md5v = str((getattr(self, "_last_saucenao_md5_candidates", {}) or {}).get(url) or "").strip().lower()
+                    if md5v and is_md5(md5v):
+                        relay_origin = "embedded-md5"
+                        self.log(f"  {label} E621 TITLE MD5 CANDIDATE: {md5v}")
+                if not md5v:
+                    md5v = self.extract_md5_from_post_url(url)
+                    if md5v:
+                        relay_origin = "post-url"
+                if not md5v:
+                    md5v = self.extract_md5_from_source_url_relay(url)
+                    if md5v:
+                        relay_origin = "source-search"
             except Exception as e:
-                self.log(f"  SAUCENAO SEARCH ERROR: {e}")
-                sauce_urls = []
+                self.log(f"  {label} MD5 RELAY EXTRACT ERROR: {type(e).__name__}: {e}")
+                md5v = ""
+                relay_origin = ""
+            md5v = str(md5v or "").strip().lower()
+            if md5v and str(label).lower().startswith("tineye"):
+                self.log(f"  TINEYE SOURCE URL RELAY: origin={relay_origin or 'unknown'} md5={md5v} url={url}")
+            if not is_md5(md5v):
+                return {"kind": "none"}
+            if md5v in known_md5s:
+                self.log(f"  {label} MD5 RELAY SKIP: already checked md5={md5v}")
+                return {"kind": "seen", "md5": md5v}
+            known_md5s.add(md5v)
+            relay_lookup_allowed = bool(
+                self.settings.get("enable_md5_lookup")
+                or self.settings.get("_allow_reverse_md5_relay_lookup")
+            )
+            if not relay_lookup_allowed:
+                self.log(f"  {label} MD5 RELAY FOUND BUT MD5 LOOKUP DISABLED: md5={md5v} url={url}")
+                self._record_reverse_source_only(f"{label} MD5 relay", url, similarity)
+                return {"kind": "source_only", "md5": md5v}
+            self.log(f"  {label} MD5 RELAY: url={url} md5={md5v}")
+            old_lookup_path = getattr(self, "_current_md5_lookup_path", "")
+            self._current_md5_lookup_path = str(img)
+            try:
+                tags_r, srcs_r, groups_r = self.md5_lookup_all(md5v)
+                stg_r = list(getattr(self, "_last_md5_source_tag_groups", []) or [])
+            finally:
+                self._current_md5_lookup_path = old_lookup_path
+            tags_r = unique_keep_order(filter_numeric_tags(list(tags_r or []), self.settings.get("ignore_numeric_tags")))
+            if tags_r:
+                self.log(f"  {label} MD5 RELAY TAGS: md5={md5v} tags={len(tags_r)} sources={len(srcs_r or [])}")
+                return {"kind": "tags", "md5": md5v, "tags": tags_r, "sources": list(srcs_r or []), "groups": list(groups_r or []), "source_tag_groups": stg_r}
+            self.log(f"  {label} MD5 RELAY SOURCE-ONLY: md5={md5v} no tags from enabled MD5 sites; url={url}")
+            self._record_reverse_source_only(f"{label} MD5 relay", url, similarity)
+            return {"kind": "source_only", "md5": md5v}
 
-            for url, sim in sauce_urls:
-                try:
-                    self.log(f"  SAUCE MATCH: {sim:.2f}% {url}")
-                    tags = self.tags_from_url(url)
-                    groups = self.groups_or_defer_background(url, tags)
+        def _accept_reverse_md5_relay(label, relay):
+            before_count = len(set(all_tags))
+            all_tags.extend(list(relay.get("tags") or []))
+            for src in list(relay.get("sources") or []):
+                sources.append(f"{label} relay-md5 {relay.get('md5','')} {src}")
+            for grp in list(relay.get("groups") or []):
+                if grp and groups_to_tags(grp):
+                    all_groups.append(grp)
+            source_tag_groups.extend(list(relay.get("source_tag_groups") or []))
+            merged_added = len(set(all_tags)) - before_count
+            self.log(f"  {label} MD5 RELAY ACCEPTED: md5={relay.get('md5','')} added_unique={max(merged_added, 0)}")
 
-                    if tags:
-                        all_tags += tags
-                        if groups and groups_to_tags(groups):
-                            all_groups.append(groups)
-                        sources.append(f"{sim:.2f}% {url}")
-                        break
-
-                except Exception as e:
-                    self.log(f"  SAUCE URL ERROR: {url} {e}")
-            _fallback_elapsed = time.monotonic() - _fallback_started
-            if _fallback_elapsed >= 5.0:
-                self.log(f"  SLOW FALLBACK: SauceNAO path took {_fallback_elapsed:.1f}s for {img.name}")
+        # v238: exact MD5 lookup must use the real byte hash of the input file,
+        # not a 32-hex filename.  Users can rename Telegram/booru files, or a
+        # stale MD5 can be copied from another image.  The real hash is cached
+        # by path+size+mtime so repeated parser passes do not reread the file.
+        filename_md5 = img.stem.lower() if is_md5(img.stem) else ""
+        real_md5 = ""
+        real_md5_cache_hit = False
+        try:
+            from core.file_hash_cache import get_or_compute_md5 as _cached_md5
+            # Exact booru MD5 for videos belongs to the media file, not to the
+            # extracted video frame used for pHash/reverse image search.
+            real_md5, real_md5_cache_hit = _cached_md5(self.settings, img)
+        except Exception:
+            try:
+                real_md5 = file_md5(img).lower()
+            except Exception:
+                real_md5 = ""
+        if real_md5:
+            known_md5s.add(real_md5.lower())
+            self.log(f"  REAL FILE MD5: {real_md5}" + (" (cache)" if real_md5_cache_hit else ""))
+        if filename_md5 and real_md5 and filename_md5 != real_md5:
+            self.log(f"  FILENAME MD5 MISMATCH: name={filename_md5} real={real_md5}; filename ignored")
+        elif filename_md5 and not real_md5:
+            known_md5s.add(filename_md5)
 
         if self.cancelled():
             self.log("  CANCELLED")
             return "skip"
 
+        if self.settings.get("enable_md5_lookup") and real_md5:
+            self.log(f"  TRY REAL FILE MD5: {real_md5}")
+            old_lookup_path = getattr(self, "_current_md5_lookup_path", "")
+            self._current_md5_lookup_path = str(img)
+            try:
+                tags, srcs, groups = self.md5_lookup_all(real_md5)
+            finally:
+                self._current_md5_lookup_path = old_lookup_path
+            all_tags += tags
+            sources += srcs
+            all_groups += groups
+            source_tag_groups += list(getattr(self, "_last_md5_source_tag_groups", []) or [])
+
+            # Variant locators can expose an authoritative original/site MD5
+            # after the local byte-MD5 missed: rule34 image-key/hotlink and ATF
+            # pixel_hash -> media_asset are the current producers.  Run every new
+            # variant MD5 through all enabled exact-MD5 sites immediately to merge
+            # e621/Gelbooru/Danbooru/etc. before expensive reverse searches.
+            variant_site_md5s = []
+            for _attr in ("_last_variant_site_md5s", "_last_rule34_image_key_site_md5s", "_last_atf_pixel_hash_site_md5s"):
+                for m in list(getattr(self, _attr, []) or []):
+                    m = str(m or "").strip().lower()
+                    if is_md5(m) and m not in variant_site_md5s:
+                        variant_site_md5s.append(m)
+            for site_md5 in unique_keep_order(variant_site_md5s):
+                if site_md5 in known_md5s:
+                    continue
+                known_md5s.add(site_md5)
+                self.log(f"  TRY VARIANT SITE MD5 RELAY: {site_md5}")
+                old_lookup_path = getattr(self, "_current_md5_lookup_path", "")
+                self._current_md5_lookup_path = str(img)
+                try:
+                    tags2, srcs2, groups2 = self.md5_lookup_all(site_md5)
+                finally:
+                    self._current_md5_lookup_path = old_lookup_path
+                all_tags += tags2
+                sources += srcs2
+                all_groups += groups2
+                source_tag_groups += list(getattr(self, "_last_md5_source_tag_groups", []) or [])
+
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        # Safe legacy fallback: only use a 32-hex filename when it is the same as
+        # the real byte hash, or when the byte hash could not be computed at all.
+        # A mismatched filename is never trusted for tags/sources.
+        if self.settings.get("enable_md5_lookup") and not all_tags and filename_md5 and (not real_md5 or filename_md5 == real_md5):
+            self.log(f"  TRY MD5 FROM FILENAME: {filename_md5}")
+            tags, srcs, groups = self.md5_lookup_all(filename_md5)
+            all_tags += tags
+            sources += srcs
+            all_groups += groups
+            source_tag_groups += list(getattr(self, "_last_md5_source_tag_groups", []) or [])
+
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        try:
+            from core.grabber_md5_cache import enabled as _grabber_md5_enabled
+            _grabber_disk_cache_enabled = _grabber_md5_enabled(self.settings)
+        except Exception:
+            _grabber_disk_cache_enabled = bool(self.settings.get("grabber_disk_metadata_cache_enabled", self.settings.get("developer_grabber_md5_cache_enabled", True)))
+
+        if not all_tags and _grabber_disk_cache_enabled:
+            try:
+                from core.grabber_md5_cache import lookup as _grabber_md5_lookup
+                for _md5 in list(known_md5s):
+                    cached = _grabber_md5_lookup(self.settings, _md5)
+                    if not cached:
+                        continue
+                    cached_tags = list(cached.get("tags") or [])
+                    cached_groups = cached.get("groups") or {}
+                    if not cached_tags:
+                        continue
+                    cached_urls = list(cached.get("post_urls") or []) or list(cached.get("file_urls") or [])
+                    self.log(f"  GRABBER MD5 CACHE HIT: md5={_md5} tags={len(cached_tags)} sources={len(cached_urls)}")
+                    all_tags += cached_tags
+                    if cached_groups and groups_to_tags(cached_groups):
+                        all_groups.append(cached_groups)
+                    else:
+                        all_groups.append({"general": cached_tags})
+                    for url in cached_urls:
+                        sources.append(f"Grabber cache exact MD5 {url}")
+                    stg_list = list(cached.get("source_tag_groups") or [])
+                    if stg_list:
+                        source_tag_groups += stg_list
+                    elif cached_urls:
+                        source_tag_groups += [{"url": u, "groups": cached_groups or {"general": cached_tags}, "method": "grabber_md5_cache"} for u in cached_urls]
+                    break
+            except Exception as e:
+                self.log(f"  GRABBER MD5 CACHE ERROR: {type(e).__name__}: {e}")
+
+        # Preserve paid SauceNAO quota: normal files try free reverse sources first.
+        # A durable SauceNAO retry sets _saucenao_retry_only and skips this stage.
         if self.settings.get("enable_iqdb") and not all_tags and not self.settings.get("_saucenao_retry_only", False):
             _fallback_started = time.monotonic()
             self.report_activity("IQDB", img, "Обратный поиск")
             self.log("  IQDB START")
-            for url, sim in self.iqdb_urls(search_img):
+
+            # If MD5-site lookup was disabled, still allow an exact hash exposed
+            # by IQDB result URLs to win inside its own site.
+            if not known_md5s and real_md5:
+                known_md5s.add(real_md5.lower())
+
+            candidates = self.iqdb_urls(search_img)
+            selected_candidates = self.select_iqdb_best_per_site(candidates, known_md5s)
+            selected_with_tags = 0
+            for selected in selected_candidates:
+                url = selected["url"]
+                sim = selected["similarity"]
+                host = selected["host"]
+                exact_note = " exact_md5=1" if selected["exact_md5"] else ""
+                # A similarity candidate is not yet a confirmed metadata source.
+                # Some Gelbooru result URLs look like posts but redirect to a
+                # gallery/deleted page and return no API metadata.  Save the
+                # source only after this exact URL yields tags for the file.
                 try:
-                    self.log(f"  IQDB MATCH: {sim:.2f}% {url}")
+                    self.log(f"  IQDB SELECTED [{host}]: {sim:.2f}% {url}{exact_note}")
+                    relay = _reverse_md5_relay("IQDB", url, sim)
+                    if relay.get("kind") == "tags":
+                        _accept_reverse_md5_relay("IQDB", relay)
+                        sources.append(f"IQDB {sim:.2f}% relay-source {url}")
+                        selected_with_tags += 1
+                        break
+                    if relay.get("kind") == "source_only":
+                        continue
                     tags = self.tags_from_url(url)
                     groups = self.groups_or_defer_background(url, tags)
 
                     if tags:
+                        sources.append(f"IQDB {sim:.2f}% {url}")
+                        selected_with_tags += 1
+                        before_count = len(set(all_tags))
                         all_tags += tags
                         if groups and groups_to_tags(groups):
                             all_groups.append(groups)
                         else:
                             try:
-                                host = urlparse(url).netloc.lower().replace("www.", "")
                                 guessed = self._categorize_flat_tags(host, tags)
                                 if guessed and groups_to_tags(guessed):
                                     all_groups.append(guessed)
                             except Exception:
                                 pass
-                        sources.append(f"IQDB {sim:.2f}% {url}")
-                        break
+                        source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "iqdb"})
+                        merged_added = len(set(all_tags)) - before_count
+                        self.log(f"  IQDB TAGS [{host}]: received={len(tags)} added_unique={max(merged_added, 0)}")
+                    else:
+                        self.log(f"  IQDB DISCARD UNVERIFIED SOURCE [{host}]: no metadata returned; {url}")
 
                 except Exception as e:
-                    self.log(f"  IQDB URL ERROR: {url} {e}")
+                    self.log(f"  IQDB DISCARD UNVERIFIED SOURCE [{host}]: metadata error; {url} {e}")
+            if all_tags and selected_candidates:
+                self.log(
+                    f"  IQDB MERGED SITES: selected_sources={len(selected_candidates)} "
+                    f"tag_sources={selected_with_tags} unique_tags={len(set(all_tags))}"
+                )
             _fallback_elapsed = time.monotonic() - _fallback_started
             if _fallback_elapsed >= 5.0:
                 self.log(f"  SLOW FALLBACK: IQDB path took {_fallback_elapsed:.1f}s for {img.name}")
+
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        if self.settings.get("enable_danbooru_iqdb") and not all_tags and not self.settings.get("_saucenao_retry_only", False):
+            _fallback_started = time.monotonic()
+            self.report_activity("Danbooru IQDB", img, "Обратный поиск")
+            self.log("  DANBOORU IQDB START")
+
+            if not known_md5s and real_md5:
+                known_md5s.add(real_md5.lower())
+
+            candidates = self.danbooru_iqdb_urls(search_img)
+            selected_candidates = self.select_iqdb_best_per_site(candidates, known_md5s)
+            selected_with_tags = 0
+            for selected in selected_candidates:
+                url = selected["url"]
+                sim = selected["similarity"]
+                host = selected["host"]
+                exact_note = " exact_md5=1" if selected["exact_md5"] else ""
+                try:
+                    self.log(f"  DANBOORU IQDB SELECTED [{host}]: {sim:.2f}% {url}{exact_note}")
+                    relay = _reverse_md5_relay("Danbooru IQDB", url, sim)
+                    if relay.get("kind") == "tags":
+                        _accept_reverse_md5_relay("Danbooru IQDB", relay)
+                        sources.append(f"Danbooru IQDB {sim:.2f}% relay-source {url}")
+                        selected_with_tags += 1
+                        break
+                    if relay.get("kind") == "source_only":
+                        continue
+                    tags = self.tags_from_url(url)
+                    groups = self.groups_or_defer_background(url, tags)
+
+                    if tags:
+                        sources.append(f"Danbooru IQDB {sim:.2f}% {url}")
+                        selected_with_tags += 1
+                        before_count = len(set(all_tags))
+                        all_tags += tags
+                        if groups and groups_to_tags(groups):
+                            all_groups.append(groups)
+                        else:
+                            try:
+                                guessed = self._categorize_flat_tags(host, tags)
+                                if guessed and groups_to_tags(guessed):
+                                    all_groups.append(guessed)
+                            except Exception:
+                                pass
+                        source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "danbooru_iqdb"})
+                        merged_added = len(set(all_tags)) - before_count
+                        self.log(f"  DANBOORU IQDB TAGS [{host}]: received={len(tags)} added_unique={max(merged_added, 0)}")
+                    else:
+                        self.log(f"  DANBOORU IQDB DISCARD UNVERIFIED SOURCE [{host}]: no metadata returned; {url}")
+                except Exception as e:
+                    self.log(f"  DANBOORU IQDB DISCARD UNVERIFIED SOURCE [{host}]: metadata error; {url} {e}")
+            if all_tags and selected_candidates:
+                self.log(
+                    f"  DANBOORU IQDB MERGED SITES: selected_sources={len(selected_candidates)} "
+                    f"tag_sources={selected_with_tags} unique_tags={len(set(all_tags))}"
+                )
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: Danbooru IQDB path took {_fallback_elapsed:.1f}s for {img.name}")
+
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        if self.settings.get("enable_e621_iqdb") and not all_tags and not self.settings.get("_saucenao_retry_only", False):
+            _fallback_started = time.monotonic()
+            self.report_activity("e621 IQDB", img, "Обратный поиск")
+            self.log("  E621 IQDB START")
+
+            e621_with_tags = 0
+            for url, sim in self.e621_iqdb_urls(search_img):
+                try:
+                    self.log(f"  E621 IQDB MATCH: {url}")
+                    relay = _reverse_md5_relay("E621 IQDB", url, sim)
+                    if relay.get("kind") == "tags":
+                        _accept_reverse_md5_relay("E621 IQDB", relay)
+                        sources.append(f"E621 IQDB relay-source {url}")
+                        e621_with_tags += 1
+                        break
+                    if relay.get("kind") == "source_only":
+                        continue
+                    tags = self.tags_from_url(url)
+                    groups = self.groups_or_defer_background(url, tags)
+                    if tags:
+                        before_count = len(set(all_tags))
+                        all_tags += tags
+                        if groups and groups_to_tags(groups):
+                            all_groups.append(groups)
+                        else:
+                            try:
+                                guessed = self._categorize_flat_tags("e621.net", tags)
+                                if guessed and groups_to_tags(guessed):
+                                    all_groups.append(guessed)
+                            except Exception:
+                                pass
+                        sources.append(f"E621 IQDB {url}")
+                        source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "e621_iqdb"})
+                        e621_with_tags += 1
+                        merged_added = len(set(all_tags)) - before_count
+                        self.log(f"  E621 IQDB TAGS: received={len(tags)} added_unique={max(merged_added, 0)}")
+                        break
+                    else:
+                        self.log(f"  E621 IQDB DISCARD: no metadata returned; {url}")
+                except Exception as e:
+                    self.log(f"  E621 IQDB URL ERROR: {url} {e}")
+            if all_tags and e621_with_tags:
+                self.log(f"  E621 IQDB ACCEPTED: tag_sources={e621_with_tags} unique_tags={len(set(all_tags))}")
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: e621 IQDB path took {_fallback_elapsed:.1f}s for {img.name}")
+
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        # v204: FuzzySearch and Fluffle were removed from the active reverse
+        # chain. They caused low-score false positives and tag pollution.
 
         if self.cancelled():
             self.log("  CANCELLED")
@@ -4972,6 +9984,13 @@ class Tagger:
             for url, sim in self.ascii2d_urls(search_img):
                 try:
                     self.log(f"  ASCII2D MATCH: {url}")
+                    relay = _reverse_md5_relay("ASCII2D", url, sim)
+                    if relay.get("kind") == "tags":
+                        _accept_reverse_md5_relay("ASCII2D", relay)
+                        sources.append(f"ASCII2D relay-source {url}")
+                        break
+                    if relay.get("kind") == "source_only":
+                        continue
 
                     tags = self.tags_from_url(url)
                     groups = self.groups_or_defer_background(url, tags)
@@ -4983,6 +10002,7 @@ class Tagger:
                             all_groups.append(groups)
 
                         sources.append(f"ASCII2D {url}")
+                        source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "ascii2d"})
 
                         break
 
@@ -4992,10 +10012,121 @@ class Tagger:
             if _fallback_elapsed >= 5.0:
                 self.log(f"  SLOW FALLBACK: Ascii2D path took {_fallback_elapsed:.1f}s for {img.name}")
 
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        if self.settings.get("enable_saucenao") and not all_tags:
+            _fallback_started = time.monotonic()
+            if self.settings.get("_saucenao_retry_only", False):
+                self.log(f"  SAUCENAO RETRY ONLY START: {img.name}")
+            else:
+                self.log(f"  SAUCENAO START AFTER IQDB/ASCII2D MISS: {img.name}")
+            self.report_activity("SauceNAO", img, "Обратный поиск")
+            try:
+                sauce_urls = self.saucenao_urls(search_img)
+            except Exception as e:
+                self.log(f"  SAUCENAO SEARCH ERROR: {e}")
+                sauce_urls = []
+
+            for url, sim in sauce_urls:
+                try:
+                    self.log(f"  SAUCE MATCH: {sim:.2f}% {url}")
+                    relay = _reverse_md5_relay("SauceNAO", url, sim)
+                    if relay.get("kind") == "tags":
+                        _accept_reverse_md5_relay("SauceNAO", relay)
+                        sources.append(f"SauceNAO {sim:.2f}% relay-source {url}")
+                        break
+                    if relay.get("kind") == "source_only":
+                        continue
+                    tags = self.tags_from_url(url)
+                    groups = self.groups_or_defer_background(url, tags)
+
+                    if tags:
+                        all_tags += tags
+                        if groups and groups_to_tags(groups):
+                            all_groups.append(groups)
+                        sources.append(f"{sim:.2f}% {url}")
+                        source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "saucenao"})
+                        break
+
+                except Exception as e:
+                    self.log(f"  SAUCE URL ERROR: {url} {e}")
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: SauceNAO path took {_fallback_elapsed:.1f}s for {img.name}")
+
+
         all_tags = unique_keep_order(filter_numeric_tags(all_tags, self.settings.get("ignore_numeric_tags")))
 
         # STOP is a hard boundary for persistence: an in-flight HTTP response may
         # return after cancellation, but it must not write TAGGED/NO_MATCH state.
+        if self.cancelled():
+            self.log("  CANCELLED")
+            return "skip"
+
+        if self.settings.get("enable_tineye") and not all_tags\
+                and not self.settings.get("_saucenao_retry_only", False)\
+                and not self.settings.get("_skip_tineye_this_pass", False):
+            _fallback_started = time.monotonic()
+            # TinEye is a weak optional source-only fallback for the broken tail.
+            # Its HTTP/browser failures must not turn the whole file into
+            # retry_network, especially when SauceNAO has already provided a
+            # usable source-only candidate.
+            _network_events_before_tineye = list(getattr(self, "_transient_network_events", []) or [])
+            _network_hosts_before_tineye = set(getattr(self, "_transient_network_hosts", set()) or set())
+            self.report_activity("TinEye", img, "Обратный поиск")
+            self.log("  TINEYE START")
+            accepted = 0
+            source_only_saved = 0
+            try:
+                for url, sim in self.tineye_urls(search_img):
+                    try:
+                        self.log(f"  TINEYE MATCH: {sim:.2f}% {url}")
+                        relay = _reverse_md5_relay("TinEye", url, sim)
+                        if relay.get("kind") == "tags":
+                            _accept_reverse_md5_relay("TinEye", relay)
+                            sources.append(f"TinEye {sim:.2f}% relay-source {url}")
+                            accepted += 1
+                            break
+                        if relay.get("kind") == "source_only":
+                            source_only_saved += 1
+                            continue
+                        tags, groups = self.reverse_url_tags_and_groups(url, method="tineye")
+                        if tags:
+                            before_count = len(set(all_tags))
+                            all_tags += tags
+                            if groups and groups_to_tags(groups):
+                                all_groups.append(groups)
+                            sources.append(f"TinEye {sim:.2f}% {url}")
+                            source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "tineye"})
+                            accepted += 1
+                            merged_added = len(set(all_tags)) - before_count
+                            self.log(f"  TINEYE TAGS: received={len(tags)} added_unique={max(merged_added, 0)}")
+                            break
+                        else:
+                            if self._record_reverse_source_only("TinEye", url, sim):
+                                source_only_saved += 1
+                            else:
+                                self.log(f"  TINEYE NO USABLE SOURCE: no metadata returned; {url}")
+                    except Exception as e:
+                        self.log(f"  TINEYE URL ERROR: {url} {e}")
+                if all_tags and accepted:
+                    self._tineye_tagged_total += 1
+                    self.log(f"  TINEYE ACCEPTED: tag_sources={accepted} unique_tags={len(set(all_tags))}")
+                if source_only_saved and not accepted:
+                    self._tineye_source_only_total += 1
+                    self.log(f"  TINEYE SOURCE-ONLY: candidates={source_only_saved}")
+            finally:
+                # Do not let TinEye timeout/HTTP/browser errors block saving the
+                # existing SauceNAO source-only/no-match result.
+                self._transient_network_events = _network_events_before_tineye
+                self._transient_network_hosts = _network_hosts_before_tineye
+            _fallback_elapsed = time.monotonic() - _fallback_started
+            if _fallback_elapsed >= 5.0:
+                self.log(f"  SLOW FALLBACK: TinEye path took {_fallback_elapsed:.1f}s for {img.name}")
+
+
         if self.cancelled():
             self.log("  CANCELLED BEFORE SAVE")
             return "skip"
@@ -5013,12 +10144,16 @@ class Tagger:
             # Network lookups above intentionally run without the conveyor persist
             # lock.  Only the SQLite/output mutation below is serialized.
             with _persist_guard():
-                # Write tags/source/json directly into Local_Booru_Output. Do not create
+                # Write metadata directly into the managed archive output. Do not create
                 # .tags.txt/.sources.txt beside originals anymore.
                 archived_media = copy_result_files(self.settings, img, result_status)
-                _import_result = save_found_metadata(self.settings, img, all_tags, source_text, tag_groups, status=result_status, archived_media_path=archived_media)
+                if not _valid_archived_media_path(archived_media):
+                    self.log(f"  FOUND SAVE ERROR: managed copy missing for {img.name}; metadata not written")
+                    return "retry_network"
+                _import_result = save_found_metadata(self.settings, img, all_tags, source_text, tag_groups, status=result_status, archived_media_path=archived_media, hash_md5=real_md5 or None, source_tag_groups=source_tag_groups)
                 if isinstance(_import_result, dict) and int(_import_result.get("source_added", 0) or 0):
                     self.log(f"  EXACT MD5 MERGE: existing_media={_import_result.get('canonical_path','')} source_added={int(_import_result.get('source_added',0))} no_physical_copy_created=1")
+                _log_nomatch_promote_cleanup(self.log, _import_result)
 
                 remove_nomatch(img, settings=self.settings)
 
@@ -5043,12 +10178,86 @@ class Tagger:
                     f"({self.network_failure_summary()}); file deferred, NOT sent to NO_MATCH"
                 )
                 return "retry_network"
+            source_only = None
+            try:
+                candidates = []
+                candidates.extend(list(getattr(self, "_last_reverse_source_only", []) or []))
+                candidates.extend(list(getattr(self, "_last_saucenao_source_only", []) or []))
+                # Prefer the best real source-only hint across TinEye/SauceNAO.
+                # Internal helper/proxy URLs are filtered before they enter this list.
+                candidates.sort(key=lambda x: float(x.get("similarity", 0) or 0), reverse=True)
+                source_only = candidates[0] if candidates else None
+            except Exception:
+                source_only = None
+            visual_info = None
             with _persist_guard():
+                # A side queue (rule34 image-key/Playwright, TinEye relay, etc.) can
+                # promote the same original file while this slower reverse fallback is
+                # still running.  Never let a late NO_MATCH write overwrite a FOUND row.
+                try:
+                    current_status = str(output_processed_status(self.settings, img) or "").lower()
+                except Exception:
+                    current_status = ""
+                if current_status in ("found", "tagged", "partial"):
+                    self.log(f"  NO_MATCH SKIP: already promoted to {current_status} by another queue")
+                    return "skip"
+
                 # NO_MATCH is durable SQLite state plus a disposable managed output copy.
-                cleanup_archived_result(self.settings, img, ("tagged", "partial"))
+                # Never delete FOUND/PARTIAL media here. A duplicate/replayed
+                # no-match pass for the same basename used to remove a file that
+                # had just been promoted from NO_MATCH to the gallery, leaving a
+                # tagged DB row pointing at a missing file.
                 archived_nomatch = copy_result_files(self.settings, img, "nomatch")
-                upsert_nomatch(img, settings=self.settings, media_path=archived_nomatch)
-            self.log("  NO MATCH SAVED TO SQLITE")
+                try:
+                    from core.visual_status import classify_nomatch_if_enabled
+                    visual_info = classify_nomatch_if_enabled(archived_nomatch or img, self.settings)
+                except Exception as _visual_exc:
+                    visual_info = None
+                    try:
+                        self.log(f"  VISUAL STATUS ERROR: {type(_visual_exc).__name__}: {_visual_exc}")
+                    except Exception:
+                        pass
+                visual_kwargs = {}
+                if visual_info and not visual_info.get("error"):
+                    visual_kwargs = {
+                        "visual_status": str(visual_info.get("visual_status") or ""),
+                        "visual_confidence": float(visual_info.get("visual_confidence") or 0.0),
+                        "visual_model": str(visual_info.get("visual_model") or ""),
+                        "visual_checked_at": int(visual_info.get("visual_checked_at") or 0),
+                    }
+                if source_only:
+                    upsert_nomatch(
+                        img,
+                        reason="source_only",
+                        settings=self.settings,
+                        media_path=archived_nomatch,
+                        source_url=str(source_only.get("url") or ""),
+                        source_label=str(source_only.get("label") or "unsupported source"),
+                        source_similarity=float(source_only.get("similarity", 0) or 0),
+                        **visual_kwargs,
+                    )
+                else:
+                    upsert_nomatch(img, settings=self.settings, media_path=archived_nomatch, **visual_kwargs)
+            if visual_info:
+                try:
+                    if visual_info.get("error"):
+                        self.log(f"  VISUAL STATUS ERROR: {visual_info.get('error')}")
+                    else:
+                        self.log(
+                            "  VISUAL STATUS: "
+                            f"{visual_info.get('visual_status','')} "
+                            f"{float(visual_info.get('visual_confidence', 0) or 0) * 100:.0f}%"
+                        )
+                except Exception:
+                    pass
+            if source_only:
+                self.log(
+                    "  SOURCE-ONLY SAVED TO SQLITE: "
+                    f"{float(source_only.get('similarity', 0) or 0):.2f}% "
+                    f"{source_only.get('label','')} {source_only.get('url','')}"
+                )
+            else:
+                self.log("  NO MATCH SAVED TO SQLITE")
             return "nomatch"
 
 

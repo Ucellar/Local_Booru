@@ -29,7 +29,7 @@ def setup_logging(log_dir: Path | None = None) -> logging.Logger:
         from core.paths import LOGS_DIR
         _log_dir = log_dir or LOGS_DIR
     except Exception:
-        _log_dir = Path.home() / "Documents" / "Local_Booru" / "logs"
+        _log_dir = Path.cwd() / "Local_Booru_Archive" / "settings" / "output" / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
     # Privacy repair for historical logs created by older versions. No raw
     # secret-bearing backup is kept; this affects logs only, not media or DB.
@@ -47,16 +47,17 @@ def setup_logging(log_dir: Path | None = None) -> logging.Logger:
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
 
-    # App log: INFO+
-    fh = logging.handlers.TimedRotatingFileHandler(
-        log_file, when="midnight", interval=1, backupCount=5, encoding="utf-8"
+    # App log: INFO+. Size-based rotation prevents month-long parser runs from
+    # turning the logs directory into another archive.
+    fh = logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     fh.setLevel(logging.INFO)
     fh.setFormatter(fmt)
 
     # Error log: ERROR+
-    eh = logging.handlers.TimedRotatingFileHandler(
-        error_file, when="midnight", interval=1, backupCount=5, encoding="utf-8"
+    eh = logging.handlers.RotatingFileHandler(
+        error_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
     )
     eh.setLevel(logging.ERROR)
     eh.setFormatter(fmt)
@@ -185,8 +186,34 @@ def check_db_integrity(settings: dict) -> tuple[bool, str]:
 
 
 def check_db_quick(settings: dict) -> bool:
-    """Fast read-only startup check.  Missing DB is valid for a rebuildable library."""
+    """Read-only PRAGMA quick_check. Can still be slow on large DBs."""
     return _check_existing_database(settings, "PRAGMA quick_check(5)")[0]
+
+
+def check_db_smoke(settings: dict) -> tuple[bool, str]:
+    """Very cheap startup check: open DB read-only and read schema metadata only.
+
+    This is intentionally NOT PRAGMA quick_check. quick_check can take minutes on
+    a 400+ MB WAL/SQLite library after a crash, and doing it before the main
+    window makes startup look frozen. Corruption detection is moved to a
+    background health check after the window is visible.
+    """
+    import sqlite3
+    from core.database.connection import db_path
+    path = db_path(settings)
+    if not path.exists():
+        return True, "NEW_DATABASE"
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+        try:
+            con.execute("PRAGMA query_only=ON")
+            con.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            con.execute("PRAGMA user_version").fetchone()
+        finally:
+            con.close()
+        return True, "SMOKE_OK"
+    except Exception as exc:
+        return False, str(exc)
 
 
 # ── DB auto-backup ────────────────────────────────────────────────────────────
@@ -195,12 +222,12 @@ def maybe_backup_db(settings: dict, max_backups: int = 5) -> str | None:
     """Backup DB if last backup is >24h old. Returns backup path or None."""
     try:
         from core.database.connection import db_path
-        from core.paths import DATA_DIR
+        from core.paths import BACKUPS_DIR
         db_file = db_path(settings)
         if not db_file.exists():
             return None
 
-        backup_dir = DATA_DIR / "db_backups"
+        backup_dir = Path(BACKUPS_DIR) / "db"
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         # Check last backup time
@@ -347,6 +374,49 @@ def check_recent_media_after_crash(settings: dict, log: Callable | None = None, 
     return result
 
 
+def sample_live_media_paths(settings: dict, log: Callable | None = None, limit: int = 1000) -> dict:
+    """Sample live DB paths at startup without walking the whole archive.
+
+    This detects path/root mistakes and orphan rows cheaply. Missing rows are
+    logged and recorded as integrity issues, but not automatically deleted.
+    """
+    log = log or _log.info
+    result = {"checked": 0, "missing": 0, "errors": 0}
+    try:
+        from core.database.connection import db, writes_blocked
+        with db(settings, readonly=True) as con:
+            rows = con.execute(
+                "SELECT id,path FROM images WHERE deleted=0 ORDER BY RANDOM() LIMIT ?",
+                (max(1, int(limit or 1000)),),
+            ).fetchall()
+        issues = []
+        for row in rows:
+            result["checked"] += 1
+            try:
+                path = Path(str(row["path"] or ""))
+                if not path.exists():
+                    result["missing"] += 1
+                    issues.append((int(row["id"]), str(path)))
+            except Exception:
+                result["errors"] += 1
+        if issues and not writes_blocked():
+            now = int(time.time())
+            with db(settings, write=True) as con:
+                for image_id, path in issues[:1000]:
+                    con.execute(
+                        "INSERT INTO integrity_issues(issue_type,severity,image_id,path,details,status,created_at) VALUES(?,?,?,?,?,'open',?)",
+                        ("sample_missing_file", "warning", image_id, path, "startup sampled path missing", now),
+                    )
+        if result["missing"]:
+            log(f"[Stability] Sample path check: missing={result['missing']} / checked={result['checked']}")
+        else:
+            log(f"[Stability] Sample path check: {result['checked']} sampled file path(s) OK")
+    except Exception as exc:
+        result["errors"] += 1
+        _log.error("Sample path check failed: %s", exc)
+    return result
+
+
 # ── Network retry ─────────────────────────────────────────────────────────────
 
 T = TypeVar("T")
@@ -421,49 +491,124 @@ def was_last_shutdown_bad(settings: dict) -> bool:
 
 
 def run_startup_checks(settings: dict, log: Callable | None = None) -> dict:
-    """Run all startup stability checks. Returns status dict."""
+    """Run startup checks without making the UI wait for a full DB scan.
+
+    v163 change: startup uses a cheap read-only smoke check by default.
+    PRAGMA quick_check/integrity_check is allowed to run after the window is
+    visible via run_deferred_db_health_check(). If the user explicitly wants the
+    old blocking behavior, set startup_db_check_mode to "quick" or "full".
+    """
     log = log or print
     results = {}
 
-    # 0. Check last shutdown (Hydrus pattern)
     bad_shutdown = was_last_shutdown_bad(settings)
     if bad_shutdown:
-        log("[Stability] WARNING: Last shutdown was bad (crash). Running full DB check...")
+        log("[Stability] WARNING: Last shutdown was bad (crash). Heavy DB check will run after the window is visible.")
         results["bad_shutdown"] = True
     write_shutdown_flag(settings, bad=True)  # assume bad until clean exit
 
-    # 1. DB quick check (full if last shutdown was bad)
-    log("[Stability] Quick DB check...")
-    ok = check_db_quick(settings)
-    results["db_ok"] = ok
-    if not ok or bad_shutdown:
-        log("[Stability] Running full integrity check...")
-        ok2, msg = check_db_integrity(settings)
-        results["db_integrity"] = msg
-        if not ok2:
-            from core.database.connection import set_writes_blocked
-            set_writes_blocked(msg)
-            results["write_blocked"] = True
-            log(f"[Stability] DB INTEGRITY ERROR: {msg}")
-            log("[Stability] SAFE MODE: SQLite writes are blocked until the working DB is rebuilt or restored manually.")
+    mode = str(settings.get("startup_db_check_mode", "fast") or "fast").strip().lower()
+    if mode in {"quick", "full", "blocking"}:
+        log("[Stability] Blocking DB quick_check requested by settings...")
+        ok = check_db_quick(settings)
+        results["db_ok"] = ok
+        if not ok or mode == "full" or bad_shutdown:
+            log("[Stability] Running blocking integrity check...")
+            ok2, msg = check_db_integrity(settings)
+            results["db_integrity"] = msg
+            if not ok2:
+                from core.database.connection import set_writes_blocked
+                set_writes_blocked(msg)
+                results["write_blocked"] = True
+                log(f"[Stability] DB INTEGRITY ERROR: {msg}")
+                log("[Stability] SAFE MODE: SQLite writes are blocked until the working DB is rebuilt or restored manually.")
+            else:
+                from core.database.connection import set_writes_blocked
+                set_writes_blocked("")
         else:
             from core.database.connection import set_writes_blocked
             set_writes_blocked("")
-        if bad_shutdown and ok2:
-            results["recent_media"] = check_recent_media_after_crash(settings, log=log)
+            log("[Stability] DB OK")
     else:
-        from core.database.connection import set_writes_blocked
-        set_writes_blocked("")
-        log("[Stability] DB OK")
+        log("[Stability] Fast DB smoke check...")
+        ok, msg = check_db_smoke(settings)
+        results["db_ok"] = ok
+        results["db_integrity"] = msg
+        results["deferred_health_check"] = True
+        if ok:
+            from core.database.connection import set_writes_blocked
+            if bad_shutdown and not bool(settings.get("startup_allow_writes_before_health", False)):
+                # The DB can be opened and the UI may be shown, but after an
+                # unclean shutdown we should not run migrations/cleanup writes
+                # until the background quick_check/integrity_check has passed.
+                set_writes_blocked("ожидание фоновой проверки SQLite после аварийного завершения")
+                results["write_deferred_until_health"] = True
+                log("[Stability] DB smoke check OK; SQLite writes are temporarily paused until the background health check finishes.")
+            else:
+                set_writes_blocked("")
+                log("[Stability] DB smoke check OK; quick_check deferred to background.")
+        else:
+            from core.database.connection import set_writes_blocked
+            set_writes_blocked(msg)
+            results["write_blocked"] = True
+            log(f"[Stability] DB OPEN ERROR: {msg}")
+            log("[Stability] SAFE MODE: SQLite writes are blocked because the DB cannot be opened read-only.")
 
-    # 2. Auto-backup
-    log("[Stability] Checking DB backup...")
-    backup = maybe_backup_db(settings)
-    if backup:
-        log(f"[Stability] DB backed up: {Path(backup).name}")
-    results["backup"] = backup
+    # Cheap live-path sample only if DB opened. Keep it small so startup remains fast.
+    if results.get("db_ok"):
+        try:
+            limit = int(settings.get("startup_sample_paths", 100) or 100)
+            limit = max(0, min(250, limit))
+            if limit:
+                results["sample_paths"] = sample_live_media_paths(settings, log=log, limit=limit)
+        except Exception as exc:
+            results["sample_paths"] = {"errors": 1, "error": str(exc)}
+
+    # Backup may still take time on huge DBs, so it is not forced during early
+    # startup. It remains available from normal backup/diagnostic paths.
+    if bool(settings.get("startup_auto_backup", False)):
+        log("[Stability] Checking DB backup...")
+        backup = maybe_backup_db(settings)
+        if backup:
+            log(f"[Stability] DB backed up: {Path(backup).name}")
+        results["backup"] = backup
+    else:
+        results["backup"] = None
 
     return results
+
+
+def run_deferred_db_health_check(settings: dict, log: Callable | None = None) -> dict:
+    """Run slow DB checks after the UI is already visible."""
+    log = log or print
+    results = {}
+    bad_shutdown = was_last_shutdown_bad(settings)
+    try:
+        log("[Stability] Background DB quick_check started...")
+        ok = check_db_quick(settings)
+        results["db_ok"] = ok
+        if not ok or bad_shutdown:
+            log("[Stability] Background integrity_check started...")
+            ok2, msg = check_db_integrity(settings)
+            results["db_integrity"] = msg
+            if not ok2:
+                from core.database.connection import set_writes_blocked
+                set_writes_blocked(msg)
+                results["write_blocked"] = True
+                log(f"[Stability] DB INTEGRITY ERROR: {msg}")
+                return results
+        from core.database.connection import set_writes_blocked
+        set_writes_blocked("")
+        try:
+            record_health_event(settings, "ok", "background quick_check ok", check_type="deferred_quick_check")
+        except Exception:
+            pass
+        log("[Stability] Background DB health check OK")
+        return results
+    except Exception as exc:
+        results["error"] = str(exc)
+        log(f"[Stability] Background DB health check failed: {exc}")
+        return results
 
 
 def record_health_event(settings: dict, status: str, details: str = "", check_type: str = "startup_quick_check") -> None:

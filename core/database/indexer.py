@@ -165,9 +165,13 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
             md5 = None
             if compute_md5:
                 try:
-                    md5 = file_md5(path)
+                    from core.file_hash_cache import get_or_compute_md5
+                    md5 = get_or_compute_md5(settings, path)[0]
                 except Exception:
-                    pass
+                    try:
+                        md5 = file_md5(path)
+                    except Exception:
+                        pass
             phash = None
             if bool(settings.get("sqlite_compute_phash_on_index", True)) and path.suffix.lower() not in VIDEO_EXTS:
                 try:

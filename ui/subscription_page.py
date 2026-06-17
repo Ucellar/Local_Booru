@@ -132,14 +132,17 @@ class SubEditDialog(QDialog):
         site_hint = QLabel("Приоритет 5 = источник скачивания выбирается первым. Теги собираются со всех найденных сайтов.")
         site_hint.setStyleSheet("color:#888;font-size:10px;")
 
-        # ── Blacklist tags ────────────────────────────────────────────────────
+        # ── Shared Grabber/Subscriptions blocklist ───────────────────────────
         self.blacklist = QPlainTextEdit()
-        self.blacklist.setPlaceholderText(
-            "Теги-исключения — через запятую или по одному на строку\n"
-            "Например: censored, ai-generated, gore")
+        self.blacklist.setPlaceholderText("Общий блоклист задаётся в Настройки → Граббер / Подписки")
         self.blacklist.setFixedHeight(80)
-        existing_bl = sub.get("blacklist_tags", []) if sub else []
-        self.blacklist.setPlainText("\n".join(existing_bl))
+        self.blacklist.setReadOnly(True)
+        _settings_bl = ""
+        try:
+            _settings_bl = str((getattr(self, "_main", None).settings or {}).get("grabber_subscriptions_blocklist") or (getattr(self, "_main", None).settings or {}).get("downloader_blocklist") or "")
+        except Exception:
+            _settings_bl = ""
+        self.blacklist.setPlainText(_settings_bl)
 
         # ── Download mode ─────────────────────────────────────────────────
         self.run_mode = QComboBox()
@@ -171,7 +174,7 @@ class SubEditDialog(QDialog):
         lay.addRow("Режим:", self.run_mode)
         lay.addRow("Порядок:", self.run_direction)
         lay.addRow("", self.enabled)
-        lay.addRow("Исключить теги:", self.blacklist)
+        lay.addRow("Общий блоклист:", self.blacklist)
 
         btns = QHBoxLayout()
         ok_btn  = QPushButton("Сохранить"); ok_btn.clicked.connect(self.accept)
@@ -230,8 +233,7 @@ class SubEditDialog(QDialog):
                         entry["query_override"] = qe.text().strip()
                     sites.append(entry)
 
-        import re
-        bl_tags = [t.strip() for t in re.split(r"[,;\s]+", self.blacklist.toPlainText()) if t.strip()]
+        bl_tags = []
         return {
             "name":                 self.query.text().strip(),
             "sites":                sites,

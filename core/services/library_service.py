@@ -14,7 +14,7 @@ from core.database import journal
 def page(settings, query="", source="all", bucket="all", limit=120, offset=0, order="path", enrich=True, extra_where=None, extra_params=None):
     rows = repository.search_items(settings, query=query, source=source, bucket=bucket, limit=limit, offset=offset, order=order, extra_where=extra_where, extra_params=extra_params)
     if enrich:
-        rows = repository.enrich_items(settings, rows)
+        rows = repository.enrich_items(settings, rows, tag_source=source)
     return rows
 
 
@@ -48,10 +48,24 @@ def delete_by_buckets(settings, buckets, delete_files=True):
     bucket_list = [str(b) for b in (buckets or []) if str(b)]
     with journal.operation(settings, "delete_by_buckets", target_type="bucket", target_id=",".join(bucket_list), payload={"delete_files": bool(delete_files)}):
         rows = repository.find_images_by_buckets(settings, bucket_list, limit=None)
+        result = None
         if delete_files:
             from core.library_lifecycle import move_to_trash
-            return move_to_trash(settings, rows, reason="delete_by_buckets", tag_or_source=",".join(bucket_list), make_backup=True)
-        return repository.delete_images(settings, rows, delete_files=False, reason="delete_by_buckets", tag_or_source=",".join(bucket_list))
+            result = move_to_trash(settings, rows, reason="delete_by_buckets", tag_or_source=",".join(bucket_list), make_backup=True)
+        else:
+            result = repository.delete_images(settings, rows, delete_files=False, reason="delete_by_buckets", tag_or_source=",".join(bucket_list))
+        # If NO_MATCH results are removed, their triage records must stop being
+        # active. Otherwise the Брак page resurrects stale rows from SQLite even
+        # though the user deliberately deleted that result bucket.
+        if any(str(b) in ("no_match", "downloaded_no_match") for b in bucket_list):
+            try:
+                from core.nomatch_db import deactivate_for_paths
+                paths = [str(r.get("path") or "") for r in rows]
+                deactivated = deactivate_for_paths(paths, settings=settings)
+                result["no_match_deactivated"] = int(deactivated or 0)
+            except Exception as exc:
+                result["no_match_deactivate_error"] = str(exc)
+        return result
 
 
 def check_integrity(settings, *, sample_limit=None):
@@ -88,6 +102,10 @@ def trash_duplicate_paths(settings, deleted_paths, kept_path="", keep_path=""):
                 source_id = int(row["id"])
                 con.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id) SELECT ?,tag_id FROM image_tags WHERE image_id=?", (keep_id, source_id))
                 con.execute("INSERT OR IGNORE INTO image_sources(image_id,source_id) SELECT ?,source_id FROM image_sources WHERE image_id=?", (keep_id, source_id))
+                con.execute("""
+                    INSERT OR REPLACE INTO image_source_tags(image_id,source_id,tag_id,category,acquisition,updated_at)
+                    SELECT ?,source_id,tag_id,category,acquisition,updated_at FROM image_source_tags WHERE image_id=?
+                """, (keep_id, source_id))
                 score = con.execute("SELECT rating,favorite FROM images WHERE id=?", (source_id,)).fetchone()
                 if score:
                     con.execute("UPDATE images SET rating=MAX(COALESCE(rating,0),?), favorite=MAX(COALESCE(favorite,0),?) WHERE id=?", (int(score["rating"] or 0), int(score["favorite"] or 0), keep_id))
@@ -124,8 +142,8 @@ def search_items(settings, **kwargs):
 def count_search_items(settings, **kwargs):
     return repository.count_search_items(settings, **kwargs)
 
-def enrich_items(settings, items):
-    return repository.enrich_items(settings, items)
+def enrich_items(settings, items, tag_source="all"):
+    return repository.enrich_items(settings, items, tag_source=tag_source)
 
 def candidate_tags(settings, scope="all"):
     return repository.candidate_tags(settings, scope)
@@ -139,8 +157,8 @@ def counts(settings):
 def source_unique_image_count(settings):
     return repository.source_unique_image_count(settings)
 
-def tag_group_counts(settings):
-    return repository.tag_group_counts(settings)
+def tag_group_counts(settings, source="all"):
+    return repository.tag_group_counts(settings, source=source)
 
 def find_images_by_tag(settings, tag, scope="all", limit=None):
     return repository.find_images_by_tag(settings, tag, scope=scope, limit=limit)

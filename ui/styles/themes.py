@@ -53,7 +53,7 @@ QGroupBox{{border:1px solid #1e2235;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#a0accc;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #2a2f4a;border-radius:5px;background:#12151f;}}
-QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;image:none;}}
+QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;image:url(assets/check_dark.png);}}
 QProgressBar{{background:#12151f;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #5040a0,stop:1 #8060e0);border-radius:3px;}}
 QToolTip{{background:#1c2035;color:#c0c8e0;border:1px solid #2a2f4a;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -71,12 +71,12 @@ QMenu::separator{{height:1px;background:#2a2f4a;margin:3px 8px;}}
 # ── EMBER ─────────────────────────────────────────────────────────────────────
 EMBER = f"""
 QMainWindow,QWidget{{background:#100e08;color:#d8c8a0;font-family:{_FONT};font-size:13px;}}
-QSplitter{{background:#14141e;}}
-QSplitter > QWidget{{background:#14141e;}}
+QSplitter{{background:#120f09;}}
+QSplitter > QWidget{{background:#120f09;}}
 QSplitter::handle{{background:#1e1a10;width:1px;height:1px;}}
-QStackedWidget{{background:#14141e;}}
-#SettingsInner{{background:#14141e;}}
-QScrollArea>QWidget#qt_scrollarea_viewport{{background:#14141e;}}
+QStackedWidget{{background:#120f09;}}
+#SettingsInner{{background:#120f09;}}
+QScrollArea>QWidget#qt_scrollarea_viewport{{background:#120f09;}}
 QScrollArea{{border:none;background:transparent;}}
 QAbstractScrollArea>QWidget{{background:transparent;}}
 QScrollBar:vertical{{background:#100e08;width:7px;border:none;border-radius:4px;}}
@@ -119,7 +119,7 @@ QGroupBox{{border:1px solid #2a2410;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#b09870;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #3a3018;border-radius:5px;background:#181408;}}
-QCheckBox::indicator:checked{{background:#c07820;border-color:#c07820;image:none;}}
+QCheckBox::indicator:checked{{background:#c07820;border-color:#c07820;image:url(assets/check_dark.png);}}
 QProgressBar{{background:#181408;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #8a5808,stop:1 #e09030);border-radius:3px;}}
 QToolTip{{background:#1c1810;color:#d8c8a0;border:1px solid #3a3018;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -184,7 +184,7 @@ QGroupBox{{border:1px solid #2a2e3a;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#9098b0;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #3a3e50;border-radius:5px;background:#262a36;}}
-QCheckBox::indicator:checked{{background:#4a80b8;border-color:#4a80b8;image:none;}}
+QCheckBox::indicator:checked{{background:#4a80b8;border-color:#4a80b8;image:url(assets/check_dark.png);}}
 QProgressBar{{background:#262a36;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #3a6090,stop:1 #60a0d8);border-radius:3px;}}
 QToolTip{{background:#262a36;color:#c8ccd8;border:1px solid #3a3e50;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -200,19 +200,19 @@ QMenu::item:selected{{background:#284870;color:#80b0e0;}}
 
 # ── SAKURA ────────────────────────────────────────────────────────────────────
 SAKURA = f"""
-QMainWindow,QWidget{{background:#110a12;color:#e0c8d8;font-family:{_FONT};font-size:13px;}}
-QSplitter{{background:#140820;}}
-QSplitter > QWidget{{background:#140820;}}
+QMainWindow,QWidget{{background:#120b0f;color:#e0c8d8;font-family:{_FONT};font-size:13px;}}
+QSplitter{{background:#150d12;}}
+QSplitter > QWidget{{background:#150d12;}}
 QSplitter::handle{{background:#1e1020;width:1px;height:1px;}}
-QStackedWidget{{background:#140820;}}
-#SettingsInner{{background:#140820;}}
-QScrollArea>QWidget#qt_scrollarea_viewport{{background:#140820;}}
+QStackedWidget{{background:#150d12;}}
+#SettingsInner{{background:#150d12;}}
+QScrollArea>QWidget#qt_scrollarea_viewport{{background:#150d12;}}
 QScrollArea{{border:none;background:transparent;}}
 QAbstractScrollArea>QWidget{{background:transparent;}}
-QScrollBar:vertical{{background:#110a12;width:7px;border:none;border-radius:4px;}}
+QScrollBar:vertical{{background:#120b0f;width:7px;border:none;border-radius:4px;}}
 QScrollBar::handle:vertical{{background:#38202e;border-radius:4px;min-height:20px;}}
 QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;border:none;}}
-QScrollBar:horizontal{{background:#110a12;height:7px;border:none;border-radius:4px;}}
+QScrollBar:horizontal{{background:#120b0f;height:7px;border:none;border-radius:4px;}}
 QScrollBar::handle:horizontal{{background:#38202e;border-radius:4px;min-width:20px;}}
 QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{{width:0;border:none;}}
 QLineEdit,QTextEdit,QPlainTextEdit{{background:#180f1a;border:1px solid #281828;border-radius:8px;padding:6px 10px;color:#e0c8d8;selection-background-color:#802050;}}
@@ -244,19 +244,19 @@ QListWidget::item{{padding:3px 6px;border-radius:4px;}}
 QListWidget::item:hover{{background:rgba(192,64,128,0.1);}}
 QListWidget::item:selected{{background:#601840;color:#ffb0d0;}}
 QTableWidget,QTableView{{background:#130a14;gridline-color:#241428;border:1px solid #241428;border-radius:8px;color:#e0c8d8;selection-background-color:#601840;}}
-QHeaderView::section{{background:#110a12;color:#604858;border:none;border-bottom:1px solid #241428;padding:6px 10px;font-weight:700;}}
+QHeaderView::section{{background:#120b0f;color:#604858;border:none;border-bottom:1px solid #241428;padding:6px 10px;font-weight:700;}}
 QGroupBox{{border:1px solid #241428;border-radius:10px;margin-top:14px;padding:12px 10px 8px 10px;font-weight:700;color:#604858;}}
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#c090a8;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #38202e;border-radius:5px;background:#180f1a;}}
-QCheckBox::indicator:checked{{background:#c04080;border-color:#c04080;image:none;}}
+QCheckBox::indicator:checked{{background:#c04080;border-color:#c04080;image:url(assets/check_dark.png);}}
 QProgressBar{{background:#180f1a;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #902040,stop:1 #e060a0);border-radius:3px;}}
 QToolTip{{background:#1c1020;color:#e0c8d8;border:1px solid #38202e;padding:5px 9px;border-radius:6px;font-size:12px;}}
 QLabel#Title{{font-size:16px;font-weight:700;color:#e0c8d8;background:transparent;border:none;padding:0;}}
 QLabel#Logo{{font-size:14px;font-weight:800;color:#ff90c0;background:transparent;border:none;}}
 #Sidebar{{background:#0d0810;border-right:1px solid #1e1020;}}
-#TopBar{{background:#110a12;border-bottom:1px solid #1e1020;}}
+#TopBar{{background:#120b0f;border-bottom:1px solid #1e1020;}}
 #PostCtrlBar{{background:#0d0810;border-top:1px solid #1e1020;}}
 QMenu{{background:#180f1a;border:1px solid #38202e;color:#e0c8d8;border-radius:8px;padding:4px;}}
 QMenu::item{{padding:7px 22px;border-radius:5px;}}
@@ -313,7 +313,7 @@ QCheckBox,QLabel{{color:#111111;background:transparent;}}
 QCheckBox{{spacing:4px;}}
 QCheckBox::indicator{{width:13px;height:13px;background:#b7e2af;border:1px solid #4f7f49;border-radius:0px;margin:1px;}}
 QCheckBox::indicator:unchecked{{image:none;}}
-QCheckBox::indicator:checked{{image:none;background:#b7e2af;border:1px solid #4f7f49;}}
+QCheckBox::indicator:checked{{image:url(assets/check_r34.png);background:#b7e2af;border:1px solid #4f7f49;}}
 QMenu{{background:#b7e2af;color:#111111;border:1px solid #6da36b;padding:2px;}}
 QMenu::item:selected{{background:#8cc57d;color:#111111;}}
 QToolTip{{background:#ffffe1;color:#000000;border:1px solid #000000;}}
@@ -385,7 +385,7 @@ QGroupBox{{border:1px solid #222222;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#c0c0c0;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #303030;border-radius:5px;background:#1a1a1a;}}
-QCheckBox::indicator:checked{{background:#ff9000;border-color:#ff9000;image:none;}}
+QCheckBox::indicator:checked{{background:#ff9000;border-color:#ff9000;image:url(assets/check_dark.png);}}
 QProgressBar{{background:#1a1a1a;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #c07000,stop:1 #ff9000);border-radius:3px;}}
 QToolTip{{background:#1a1a1a;color:#f0f0f0;border:1px solid #303030;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -450,7 +450,7 @@ QGroupBox{{border:1px solid #c8cce0;border-radius:10px;margin-top:14px;padding:1
 QGroupBox::title{{subcontrol-origin:margin;left:12px;padding:0 6px;}}
 QCheckBox{{spacing:8px;font-weight:600;color:#3a3c60;}}
 QCheckBox::indicator{{width:17px;height:17px;border:2px solid #b8bcd4;border-radius:5px;background:#ffffff;}}
-QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;image:none;}}
+QCheckBox::indicator:checked{{background:#6050c0;border-color:#6050c0;image:url(assets/check_dark.png);}}
 QProgressBar{{background:#e0e2f0;border:none;border-radius:3px;height:5px;color:transparent;}}
 QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #6050c0,stop:1 #9080e0);border-radius:3px;}}
 QToolTip{{background:#ffffff;color:#1a1c2a;border:1px solid #c8cce0;padding:5px 9px;border-radius:6px;font-size:12px;}}
@@ -505,7 +505,7 @@ QScrollBar::handle:horizontal{{background:#c0c0c0;min-width:20px;border-top:1px 
 QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{{width:16px;background:#c0c0c0;border-top:1px solid #ffffff;border-left:1px solid #ffffff;border-bottom:1px solid #808080;border-right:1px solid #808080;}}
 QCheckBox,QLabel{{color:#000000;background:transparent;}}
 QCheckBox::indicator{{width:13px;height:13px;background:#ffffff;border-top:2px solid #808080;border-left:2px solid #808080;border-bottom:2px solid #ffffff;border-right:2px solid #ffffff;border-radius:0px;margin:1px;}}
-QCheckBox::indicator:checked{{background:#ffffff;image:none;}}
+QCheckBox::indicator:checked{{background:#ffffff;image:url(assets/check_r34.png);}}
 QGroupBox{{background:#c0c0c0;color:#000000;border:2px groove #808080;border-radius:0px;margin-top:12px;padding:8px 6px 6px 6px;font-weight:700;}}
 QGroupBox::title{{subcontrol-origin:margin;left:8px;padding:0 3px;background:#c0c0c0;}}
 QProgressBar{{background:#ffffff;border:1px solid #808080;border-radius:0px;color:#000000;text-align:center;}}
@@ -542,5 +542,344 @@ QCheckBox::indicator { margin: 0px; }
 #StatusStrip QLabel { font-size: 11px; opacity: 0.85; }
 """
 
+# ── v149 shared visual polish ────────────────────────────────────────────────
+# This layer intentionally avoids site/parser logic.  It only normalises spacing,
+# touch targets and visual hierarchy for modern themes.  Win95 keeps its strict
+# classic look and therefore does not receive this overlay.
+_MODERN_UX_POLISH = """
+/* v149 visual hierarchy / spacing pass */
+QWidget[uxPanel="true"], QFrame[uxPanel="true"], QWidget#VisualCard, QFrame#VisualCard {
+    border: 1px solid rgba(130,140,170,0.22);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.025);
+}
+QGroupBox {
+    margin-top: 18px;
+    padding: 16px 12px 12px 12px;
+}
+QGroupBox::title {
+    top: 1px;
+}
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    min-height: 28px;
+}
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    padding-left: 10px;
+    padding-right: 10px;
+}
+QPushButton {
+    min-height: 30px;
+}
+QPushButton#NavBtn {
+    min-height: 36px;
+    border-radius: 9px;
+    margin: 1px 2px;
+}
+QPushButton#NavBtn:checked {
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 rgba(115,100,220,0.28), stop:1 rgba(115,100,220,0.10));
+}
+QPushButton#ModeBtn {
+    min-height: 30px;
+}
+QPushButton#PostCtrl {
+    min-height: 30px;
+}
+QPushButton[role="primary"], QPushButton#PrimarySettingsAction {
+    color: #ffffff;
+    border-color: rgba(125,145,255,0.72);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #4f63d8, stop:1 #7b56e8);
+    font-weight: 800;
+}
+QPushButton[role="primary"]:hover, QPushButton#PrimarySettingsAction:hover {
+    border-color: rgba(160,175,255,0.95);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #5d72ea, stop:1 #8b66f4);
+}
+QPushButton[role="primary"]:disabled, QPushButton#PrimarySettingsAction:disabled {
+    color: rgba(255,255,255,0.24);
+    border-color: rgba(130,130,130,0.16);
+    background: rgba(255,255,255,0.025);
+    font-weight: 600;
+}
+QPushButton[role="danger"] {
+    color: #ffecec;
+    border-color: rgba(255,90,90,0.72);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7f1d1d, stop:1 #b91c1c);
+    font-weight: 800;
+}
+QPushButton[role="danger"]:hover {
+    border-color: rgba(255,140,140,0.95);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #991b1b, stop:1 #dc2626);
+}
+QPushButton[role="danger"]:disabled {
+    color: rgba(255,220,220,0.22);
+    border-color: rgba(140,80,80,0.14);
+    background: rgba(255,255,255,0.020);
+    font-weight: 600;
+}
+QPushButton[role="subtle"] {
+    background: rgba(255,255,255,0.035);
+    border-color: rgba(130,140,170,0.22);
+}
+QTabBar::tab {
+    min-height: 28px;
+    padding: 7px 14px;
+    margin-right: 6px;
+    border-radius: 9px;
+    border: 1px solid rgba(130,140,170,0.18);
+    background: rgba(255,255,255,0.025);
+}
+QTabBar::tab:hover {
+    background: rgba(130,120,240,0.12);
+    border-color: rgba(130,140,255,0.42);
+}
+QTabBar::tab:selected {
+    color: #ffffff;
+    border-color: rgba(130,140,255,0.65);
+    background: rgba(105,95,220,0.30);
+    font-weight: 800;
+}
+QTabWidget::pane {
+    border: 1px solid rgba(130,140,170,0.18);
+    border-radius: 12px;
+    top: -1px;
+}
+QTableWidget, QTableView, QTreeWidget, QTreeView {
+    selection-color: #ffffff;
+}
+QListWidget {
+    selection-color: #ffffff;
+}
+QTableWidget::item, QTableView::item {
+    padding: 4px 8px;
+}
+QListWidget::item {
+    min-height: 22px;
+    padding: 4px 8px;
+}
+QHeaderView::section {
+    min-height: 28px;
+}
+QSplitter::handle:hover {
+    background: rgba(130,140,255,0.42);
+}
+QProgressBar {
+    min-height: 7px;
+    max-height: 7px;
+}
+#TopBar {
+    min-height: 54px;
+}
+QLabel#Title {
+    font-size: 17px;
+    letter-spacing: 0.2px;
+}
+#StatusStrip {
+    min-height: 30px;
+    background: rgba(255,255,255,0.018);
+}
+#StatusStrip QLabel {
+    padding: 2px 6px;
+}
+#SettingsFooter {
+    border-top: 1px solid rgba(130,140,170,0.20);
+    background: rgba(255,255,255,0.020);
+}
+QLabel#DiagnosticsNotice, QLabel#SettingsSectionTitle {
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(130,140,170,0.18);
+    background: rgba(255,255,255,0.028);
+}
+QToolTip {
+    padding: 7px 10px;
+}
+"""
+
+_WIN95_UX_FIX = """
+/* Keep classic theme readable while avoiding giant controls. */
+QPushButton#NavBtn { min-height: 26px; }
+#StatusStrip { min-height: 24px; }
+"""
+
+_CLASSIC_WEB_UX_FIX = """
+/* R34/R34 Dark are intentionally old-web themes: keep them compact, not card-like. */
+QPushButton { min-height: 24px; padding: 4px 8px; }
+QPushButton#NavBtn { min-height: 28px; border-radius: 0px; margin: 0px; padding: 7px 10px; }
+QPushButton#ModeBtn, QPushButton#PostCtrl { min-height: 24px; border-radius: 0px; }
+QTabBar::tab { min-height: 22px; padding: 5px 10px; margin-right: 2px; border-radius: 4px; }
+QTabWidget::pane { border-radius: 0px; }
+#TopBar { min-height: 36px; }
+#StatusStrip { min-height: 24px; }
+QListWidget::item { min-height: 20px; padding: 3px 6px; }
+QTableWidget::item, QTableView::item { padding: 3px 6px; }
+QHeaderView::section { min-height: 22px; padding: 4px 8px; }
+"""
+
+_THEME_UX_ACCENTS = {
+    "dark":      ("#5040a0", "#8060e0", "#3a2880", "#c0b0ff", "rgba(110,90,200,0.18)", "rgba(130,110,230,0.52)", "#11131c"),
+    "abyss":     ("#5040a0", "#8060e0", "#3a2880", "#c0b0ff", "rgba(110,90,200,0.18)", "rgba(130,110,230,0.52)", "#11131c"),
+    "ember":     ("#8a5808", "#e09030", "#6a4808", "#ffd060", "rgba(180,120,20,0.16)", "rgba(210,140,40,0.56)", "#171307"),
+    "slate":     ("#284870", "#5080b0", "#284870", "#80b0e0", "rgba(80,128,180,0.15)", "rgba(80,128,180,0.48)", "#222630"),
+    "gray":      ("#284870", "#5080b0", "#284870", "#80b0e0", "rgba(80,128,180,0.15)", "rgba(80,128,180,0.48)", "#222630"),
+    "sakura":    ("#802050", "#c05088", "#601840", "#ffc0e0", "rgba(190,70,130,0.15)", "rgba(210,90,150,0.50)", "#170a11"),
+    "r34":       ("#5f9f4f", "#8cc57d", "#8cc57d", "#111111", "rgba(80,150,70,0.18)", "rgba(70,130,60,0.55)", "#aedca7"),
+    "r34dark":   ("#345c30", "#7fb06f", "#345c30", "#d6e4d3", "rgba(90,160,80,0.16)", "rgba(120,190,105,0.46)", "#121a10"),
+    "ph":        ("#9a5a00", "#ff9000", "#7a4800", "#ffd090", "rgba(255,144,0,0.16)", "rgba(255,160,32,0.50)", "#19130b"),
+    "pornhub":   ("#9a5a00", "#ff9000", "#7a4800", "#ffd090", "rgba(255,144,0,0.16)", "rgba(255,160,32,0.50)", "#19130b"),
+    "light":     ("#6050c0", "#9080e0", "#d8d4f8", "#4030a0", "rgba(96,80,192,0.12)", "rgba(96,80,192,0.42)", "#f7f5ff"),
+}
+
+
+def _theme_ux_polish(key: str) -> str:
+    a1, a2, selected_bg, selected_fg, soft, border, table_alt = _THEME_UX_ACCENTS.get(key, _THEME_UX_ACCENTS["abyss"])
+    return f"""
+/* v151 theme-aware polish: no global blue/purple leaking into amber/green themes. */
+QPushButton[role="primary"], QPushButton#PrimarySettingsAction {{
+    color: #ffffff;
+    border-color: {border};
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {a1}, stop:1 {a2});
+    font-weight: 800;
+}}
+QPushButton[role="primary"]:hover, QPushButton#PrimarySettingsAction:hover {{
+    border-color: {a2};
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 {a2}, stop:1 {a1});
+}}
+QPushButton[role="primary"]:disabled, QPushButton#PrimarySettingsAction:disabled {{
+    color: rgba(255,255,255,0.24);
+    border-color: rgba(130,130,130,0.16);
+    background: rgba(255,255,255,0.025);
+    font-weight: 600;
+}}
+QPushButton[role="danger"] {{
+    color: #ffecec;
+    border-color: rgba(255,90,90,0.72);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #7f1d1d, stop:1 #b91c1c);
+    font-weight: 800;
+}}
+QPushButton[role="danger"]:hover {{
+    border-color: rgba(255,140,140,0.95);
+    background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #991b1b, stop:1 #dc2626);
+}}
+QPushButton[role="danger"]:disabled {{
+    color: rgba(255,220,220,0.22);
+    border-color: rgba(140,80,80,0.14);
+    background: rgba(255,255,255,0.020);
+    font-weight: 600;
+}}
+QPushButton#NavBtn:checked {{
+    background: {soft};
+    color: {selected_fg};
+    border-left-color: {a2};
+}}
+QTabBar::tab:hover {{
+    background: {soft};
+    border-color: {border};
+}}
+QTabBar::tab:selected {{
+    color: {selected_fg};
+    border-color: {border};
+    background: {selected_bg};
+    font-weight: 800;
+}}
+QListWidget::item:selected, QTreeWidget::item:selected {{
+    background: {selected_bg};
+    color: {selected_fg};
+}}
+QTableWidget::item:selected, QTableView::item:selected {{
+    background: {selected_bg};
+    color: {selected_fg};
+}}
+
+QTableWidget, QTableView, QTreeWidget, QTreeView {{
+    alternate-background-color: {table_alt};
+    selection-background-color: {selected_bg};
+    selection-color: {selected_fg};
+}}
+QTableWidget::item:alternate, QTableView::item:alternate, QTreeWidget::item:alternate, QTreeView::item:alternate {{
+    background: {table_alt};
+}}
+QSplitter::handle:hover {{
+    background: {border};
+}}
+"""
+
+
+def _checkbox_visibility_patch(key: str) -> str:
+    check = "assets/check_r34.png" if key in ("r34", "win95", "windows95", "light") else "assets/check_dark.png"
+    return f"""
+/* v155: visible ticks for item-view checkboxes too.  QTableWidgetItem checks
+   are not QCheckBox widgets, so they need QAbstractItemView::indicator. */
+QAbstractItemView::indicator {{
+    width: 13px;
+    height: 13px;
+}}
+QAbstractItemView::indicator:unchecked {{
+    image: none;
+}}
+QAbstractItemView::indicator:checked {{
+    image: url({check});
+}}
+QAbstractItemView::indicator:disabled {{
+    image: none;
+}}
+"""
+
+
+def _progress_bar_readability_patch(key: str) -> str:
+    # v156: the parser progress bar is a real status control, not a 5px decoration.
+    # Keep percentages readable on both dark and light/R34 themes.
+    text = "#111111" if key in ("r34", "win95", "windows95", "light") else "#ffffff"
+    return f"""
+/* v156: readable progress bars.  Previous visual polish made the bar too thin
+   and hid the percentage text; users could not see the value. */
+QProgressBar {{
+    min-height: 18px;
+    max-height: 18px;
+    border-radius: 8px;
+    padding: 0px;
+    text-align: center;
+    font-weight: 800;
+    color: {text};
+}}
+QProgressBar::chunk {{
+    border-radius: 8px;
+}}
+"""
+
+
+def _nested_nav_patch(key: str) -> str:
+    text = "#111111" if key in ("r34", "win95", "windows95", "light") else "#c0c8e0"
+    border = "#6da36b" if key == "r34" else ("#808080" if key in ("win95", "windows95") else "#2a3048")
+    bg = "#b7e2af" if key == "r34" else ("#c0c0c0" if key in ("win95", "windows95") else "rgba(100,90,180,0.08)")
+    return f"""
+/* v320: nested/collapsible sidebar pages. */
+QWidget#NavTreeRow {{
+    background: transparent;
+}}
+QWidget#NavTreeChildren {{
+    background: transparent;
+}}
+QPushButton#NavTreeToggle {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: {text};
+    font-weight: 900;
+    text-align: center;
+    padding: 0px;
+}}
+QPushButton#NavTreeToggle:hover {{
+    background: {bg};
+    border-color: {border};
+}}
+"""
+
+
 def stylesheet_for(name: str) -> str:
-    return THEMES.get(name, ABYSS) + _WIDGET_CLEANUP
+    key = (name or "abyss").lower()
+    base = THEMES.get(key, ABYSS) + _WIDGET_CLEANUP
+    if key in ("win95", "windows95"):
+        return base + _checkbox_visibility_patch(key) + _progress_bar_readability_patch(key) + _nested_nav_patch(key) + _WIN95_UX_FIX
+    if key in ("r34", "r34dark"):
+        return base + _MODERN_UX_POLISH + _theme_ux_polish(key) + _checkbox_visibility_patch(key) + _progress_bar_readability_patch(key) + _nested_nav_patch(key) + _CLASSIC_WEB_UX_FIX
+    return base + _MODERN_UX_POLISH + _theme_ux_polish(key) + _checkbox_visibility_patch(key) + _progress_bar_readability_patch(key) + _nested_nav_patch(key)

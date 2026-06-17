@@ -161,6 +161,14 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
     except Exception:
         report["storage"]["database_disk"] = {}
     try:
+        wal = Path(str(db_file) + "-wal")
+        shm = Path(str(db_file) + "-shm")
+        report["database"]["wal_bytes"] = int(wal.stat().st_size) if wal.exists() else 0
+        report["database"]["shm_bytes"] = int(shm.stat().st_size) if shm.exists() else 0
+    except Exception:
+        report["database"]["wal_bytes"] = 0
+        report["database"]["shm_bytes"] = 0
+    try:
         thumbs = Path(CACHE_DIR) / "thumbs"
         files = list(thumbs.rglob("*")) if thumbs.exists() else []
         report["storage"]["thumbnail_cache"] = {
@@ -257,6 +265,18 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
             "source_count": scalar("SELECT COUNT(*) FROM sources"),
             "multi_source_files": scalar("SELECT COUNT(*) FROM (SELECT image_id FROM image_sources GROUP BY image_id HAVING COUNT(*)>1)"),
         }
+        try:
+            report["filename_collisions"] = {
+                "duplicate_live_paths": scalar("SELECT COUNT(*) FROM (SELECT path FROM images WHERE deleted=0 GROUP BY path HAVING COUNT(*)>1)"),
+                "same_filename_different_md5": scalar("""SELECT COUNT(*) FROM (
+                    SELECT file_name FROM images WHERE deleted=0 AND COALESCE(file_name,'')<>''
+                    GROUP BY file_name HAVING COUNT(DISTINCT lower(COALESCE(hash_md5,'')))>1
+                )"""),
+                "unsafe_content_names": scalar("""SELECT COUNT(*) FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>''
+                    AND file_name NOT LIKE '%' || substr(lower(hash_md5),1,12) || '%'"""),
+            }
+        except Exception:
+            report["filename_collisions"] = {"duplicate_live_paths": 0, "same_filename_different_md5": 0, "unsafe_content_names": 0}
         report["md5"] = {
             "live_with_md5": scalar("SELECT COUNT(*) FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>''"),
             "live_without_md5": scalar("SELECT COUNT(*) FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')=''"),
@@ -302,7 +322,7 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
             for r in reverse
         ]
         report["queues"]["service_state"] = [dict(r) for r in con.execute(
-            "SELECT service,cooldown_until,reason,updated_at FROM service_state ORDER BY service"
+            "SELECT service,cooldown_until,reason,updated_at,short_remaining,long_remaining,quota_checked_at FROM service_state ORDER BY service"
         ).fetchall()]
         report["queues"]["saucenao_retry_events"] = [dict(r) for r in con.execute(
             "SELECT status,message,created_at,updated_at FROM task_log WHERE task_type='saucenao_retry' ORDER BY id DESC LIMIT 20"
@@ -311,6 +331,12 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
             "SELECT job_key,status,COUNT(*) AS files,MIN(retry_after) AS next_retry,MAX(attempts) AS max_attempts FROM tag_enrichment_queue GROUP BY job_key,status ORDER BY status,job_key"
         ).fetchall()
         report["queues"]["tag_enrichment"] = [dict(r) for r in enrich]
+        try:
+            report["queues"]["tag_category_cache"] = [dict(r) for r in con.execute(
+                "SELECT site_key, category, COUNT(*) AS tags FROM tag_category_cache GROUP BY site_key, category ORDER BY site_key, category"
+            ).fetchall()]
+        except Exception:
+            report["queues"]["tag_category_cache"] = []
         report["queues"]["unfinished_operations"] = [dict(r) for r in con.execute(
             "SELECT op_type,status,target_type,target_id,error,created_at,updated_at FROM operation_journal WHERE status NOT IN ('done','completed','success','repaired') ORDER BY updated_at DESC LIMIT 30"
         ).fetchall()]
@@ -389,7 +415,7 @@ def format_report_text(report: dict[str, Any]) -> str:
         "ДИАГНОСТИКА БИБЛИОТЕКИ — ТОЛЬКО ЧТЕНИЕ",
         f"Создано: {report.get('created_at','')}",
         f"SQLite: {report.get('database',{}).get('path','')}",
-        f"Размер SQLite: {_fmt_bytes(report.get('database',{}).get('size_bytes',0))}    quick_check: {report.get('database',{}).get('quick_check','?')}",
+        f"Размер SQLite: {_fmt_bytes(report.get('database',{}).get('size_bytes',0))}    WAL: {_fmt_bytes(report.get('database',{}).get('wal_bytes',0))}    quick_check: {report.get('database',{}).get('quick_check','?')}",
         f"Схема SQLite: v{report.get('database',{}).get('schema_version','?')}    Можно освободить VACUUM: {_fmt_bytes(report.get('database',{}).get('reclaimable_bytes',0))}",
         ("Режим записи: ЗАБЛОКИРОВАН — " + report.get('database',{}).get('write_blocked_reason','')) if report.get('database',{}).get('write_blocked_reason','') else "Режим записи: обычный",
         "",
@@ -402,6 +428,11 @@ def format_report_text(report: dict[str, Any]) -> str:
         f"  Живых файлов: {lib.get('live_files',0)}    Размер: {_fmt_bytes(lib.get('live_bytes',0))}",
         f"  В корзине: {lib.get('trash_files',0)}    Размер: {_fmt_bytes(lib.get('trash_bytes',0))}",
         f"  Без source: {lib.get('without_source',0)}    Без тегов: {lib.get('without_tags',0)}    С несколькими source: {lib.get('multi_source_files',0)}",
+        "",
+        "Имена файлов / защита от коллизий",
+        f"  Одинаковых path в SQLite: {report.get('filename_collisions',{}).get('duplicate_live_paths',0)}",
+        f"  Одинаковых имён с разным MD5: {report.get('filename_collisions',{}).get('same_filename_different_md5',0)}",
+        f"  Старых имён без MD5-суффикса: {report.get('filename_collisions',{}).get('unsafe_content_names',0)}",
         "",
         "Exact MD5 Single Media Invariant",
         f"  Живых с MD5: {md5.get('live_with_md5',0)}    Без MD5: {md5.get('live_without_md5',0)}",
@@ -434,6 +465,10 @@ def format_report_text(report: dict[str, Any]) -> str:
             lines.append(f"  Категории [{row.get('status')}]: {row.get('job_key')} — {row.get('files')} файлов")
     else:
         lines.append("  Фоновая раскладка тегов: пусто")
+    cache_rows = queues.get("tag_category_cache", [])
+    if cache_rows:
+        cache_total = sum(int(r.get("tags", 0) or 0) for r in cache_rows)
+        lines.append(f"  Кэш категорий тегов: {cache_total} уникальных site-tag записей")
     lines.append(f"  Незавершённых операций: {len(queues.get('unfinished_operations', []))}")
     perf_rows = report.get("performance", {}).get("slow_operations", [])
     lines.append("")

@@ -161,9 +161,18 @@ def _get_or_create_session(host: str, settings: dict, log=None):
     elif clean_host in {"danbooru.donmai.us", "donmai.us"}:
         cfg = ((settings or {}).get("sites") or {}).get("danbooru.donmai.us", {})
         login = str((cfg or {}).get("login") or "").strip()
-        identity = login if login else "local-user"
+        identity = f"by {login} on Danbooru" if login else "local archive manager"
         s.headers.update({
-            "User-Agent": f"LocalBooru/3.2 ({identity})",
+            "User-Agent": f"LocalBooru/3.6 ({identity})",
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",
+        })
+    elif "allthefallen" in clean_host:
+        cfg = ((settings or {}).get("sites") or {}).get("booru.allthefallen.moe", {})
+        login = str((cfg or {}).get("login") or "").strip()
+        identity = f"by {login} on ATF" if login else "local archive manager"
+        s.headers.update({
+            "User-Agent": f"LocalBooru/3.6 ({identity})",
             "Accept": "application/json",
             "Accept-Encoding": "gzip, deflate",
         })
@@ -262,9 +271,9 @@ def _rate_limited_post(session, url, settings=None, **kwargs):
         apply_retry_after(r, settings or {})
     return r
 
-def _smart_get(session, url, host, log, params=None, timeout=30, settings=None):
+def _smart_get(session, url, host, log, params=None, timeout=30, settings=None, headers=None, auth=None):
     """GET with ATF PoW handling. Returns response object."""
-    r = _rate_limited_get(session, url, settings=settings, params=params, timeout=timeout)
+    r = _rate_limited_get(session, url, settings=settings, params=params, timeout=timeout, headers=headers, auth=auth)
 
     if "allthefallen" in host:
         # Empty body = likely PoW or auth wall
@@ -272,7 +281,7 @@ def _smart_get(session, url, host, log, params=None, timeout=30, settings=None):
         if not body.strip() or _atf_is_pow_page(body):
             log("  ATF PoW page detected")
             if _atf_solve_challenge(session, url, host, body, log):
-                r = _rate_limited_get(session, url, settings=settings, params=params, timeout=timeout)
+                r = _rate_limited_get(session, url, settings=settings, params=params, timeout=timeout, headers=headers, auth=auth)
             else:
                 log("  ATF PoW: could not solve, proceeding anyway")
 
@@ -301,6 +310,11 @@ def _session(host: str, settings: dict | None = None, log=None):
         s = __import__("requests").Session()
     s.headers["User-Agent"] = _UA
     s.headers["Accept"] = "application/json, */*"
+    try:
+        from core.network import install_safe_session
+        install_safe_session(s, settings=settings or {}, log_func=log)
+    except Exception:
+        pass
     return s
 
 
@@ -374,6 +388,39 @@ def _auth_params(host: str, settings: dict | None = None) -> dict:
 def _auth_status(params: dict) -> str:
     """Safe auth summary for logs: never prints secrets."""
     return " ".join(f"{k}={'yes' if params.get(k) else 'no'}" for k in ("login", "api_key", "user_id"))
+
+
+def _basic_auth_for_host(host: str, settings: dict | None = None):
+    params = _auth_params(host, settings)
+    login = str(params.get("login") or "").strip()
+    api_key = str(params.get("api_key") or "").strip()
+    if login and api_key and (_host(host) in {"e621.net", "e926.net", "danbooru.donmai.us", "donmai.us"} or "allthefallen" in _host(host)):
+        return (login, api_key)
+    return None
+
+
+def _api_headers_for_host(host: str, settings: dict | None = None):
+    clean = _host(host)
+    params = _auth_params(clean, settings)
+    login = str(params.get("login") or "").strip()
+    if clean in {"e621.net", "e926.net"}:
+        identity = f"by {login} on e621" if login else "local archive manager"
+        return {"User-Agent": f"LocalBooru/3.6 ({identity})", "Accept": "application/json"}
+    if clean in {"danbooru.donmai.us", "donmai.us"}:
+        identity = f"by {login} on Danbooru" if login else "local archive manager"
+        return {"User-Agent": f"LocalBooru/3.6 ({identity})", "Accept": "application/json"}
+    if "allthefallen" in clean:
+        identity = f"by {login} on ATF" if login else "local archive manager"
+        return {"User-Agent": f"LocalBooru/3.6 ({identity})", "Accept": "application/json"}
+    return None
+
+
+def _query_auth_params_for_host(host: str, settings: dict | None = None):
+    clean = _host(host)
+    params = _auth_params(clean, settings)
+    if _basic_auth_for_host(clean, settings) is not None:
+        return {k: v for k, v in params.items() if k not in {"login", "api_key"}}
+    return params
 
 
 def _host(site: str) -> str:
@@ -627,9 +674,12 @@ def fetch_posts_for_query(
     log = log or (lambda m: None)
     host = _host(site)
     s = _get_or_create_session(host, settings, log=log)
-    auth = _auth_params(host, settings)
+    auth = _query_auth_params_for_host(host, settings)
     api_host_for_auth = "api.rule34.xxx" if host == "rule34.xxx" else host
-    auth.update(_auth_params(api_host_for_auth, settings))
+    if api_host_for_auth not in {host}:
+        auth.update(_query_auth_params_for_host(api_host_for_auth, settings))
+    request_auth = _basic_auth_for_host(host, settings)
+    request_headers = _api_headers_for_host(host, settings)
     if host in {"rule34.xxx", "api.rule34.xxx", "gelbooru.com", "e621.net", "e926.net", "danbooru.donmai.us", "booru.allthefallen.moe"}:
         log(f"  AUTH [{site}]: {_auth_status(auth)}")
     if host in {"rule34.xxx", "api.rule34.xxx"} and not (auth.get("api_key") and auth.get("user_id")):
@@ -660,7 +710,7 @@ def fetch_posts_for_query(
             break
         params = {**base_params, **auth}
         try:
-            r = _smart_get(s, api_url, host, log, params=params, timeout=45, settings=settings)
+            r = _smart_get(s, api_url, host, log, params=params, timeout=45, settings=settings, headers=request_headers, auth=request_auth)
             if r.status_code in (401, 403):
                 log(f"  FETCH [{site}]: {r.status_code} — нужны cookies/API из парсера")
                 break

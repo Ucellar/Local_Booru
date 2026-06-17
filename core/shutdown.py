@@ -16,9 +16,18 @@ def register(name: str, callback: Callable[[], None]) -> None:
 def is_shutting_down() -> bool:
     return _shutting_down
 
-def request_shutdown(timeout_hint: float = 5.0) -> None:
+def begin_shutdown() -> None:
+    """Mark shutdown immediately without running callbacks.
+
+    UI close handlers use this to tell workers to stop accepting new work, while
+    keeping the visible close operation non-blocking.  request_shutdown() still
+    runs registered cleanup callbacks after the Qt event loop has exited.
+    """
     global _shutting_down
     _shutting_down = True
+
+def request_shutdown(timeout_hint: float = 5.0) -> None:
+    begin_shutdown()
     with _lock:
         callbacks = list(reversed(_callbacks))
         _callbacks.clear()

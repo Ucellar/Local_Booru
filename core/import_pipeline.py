@@ -125,6 +125,122 @@ def _is_already_live_library_path(settings: dict, path: Path) -> bool:
         return False
 
 
+
+
+def _restore_stale_exact_row_to_path(settings: dict, md5: str, incoming: Path, status: str, lifecycle_kwargs: dict | None = None) -> dict:
+    """Revive/re-home an old deleted or missing-file row for this exact MD5.
+
+    This covers the common retry path where a file was previously moved to
+    Local Booru's Deleted/Trash state, or a live row was left pointing at a
+    missing managed file, then the user re-parses a surviving no_match copy.
+    The re-parse must promote the existing logical object to the new real
+    managed file path instead of leaving the gallery row pointing at the old
+    missing path.
+    """
+    result = {"restored": 0, "image_id": 0, "old_path": "", "new_path": ""}
+    value = str(md5 or "").strip().lower()
+    if not value:
+        return result
+    try:
+        incoming = Path(incoming)
+        if not incoming.exists() or not incoming.is_file():
+            return result
+    except Exception:
+        return result
+    try:
+        from core.database.connection import db
+        from core.media_utils import safe_stat, image_size, bucket_for_path, VIDEO_EXTS
+        import time
+        with db(settings, write=True) as con:
+            target = str(incoming)
+            target_row = con.execute("SELECT * FROM images WHERE path=?", (target,)).fetchone()
+            # Prefer restoring the row already attached to the target path; then
+            # any deleted/missing row with the same exact MD5.
+            candidates = []
+            if target_row is not None:
+                candidates.append(target_row)
+            rows = con.execute(
+                """SELECT * FROM images
+                   WHERE lower(COALESCE(hash_md5,''))=? AND path<>?
+                   ORDER BY CASE
+                       WHEN bucket IN ('found','downloaded_found') THEN 0
+                       WHEN bucket IN ('partial_match','downloaded_partial_match') THEN 1
+                       WHEN bucket IN ('no_match','downloaded_no_match') THEN 2
+                       ELSE 3 END,
+                       deleted DESC, indexed_at DESC, id DESC""",
+                (value, target),
+            ).fetchall()
+            candidates.extend(rows)
+
+            picked = None
+            for row in candidates:
+                try:
+                    old_path = str(row["path"] or "")
+                    old_exists = bool(old_path and Path(old_path).exists())
+                    is_deleted = int(row["deleted"] or 0) != 0
+                    if is_deleted or not old_exists:
+                        picked = row
+                        break
+                except Exception:
+                    picked = row
+                    break
+            if picked is None:
+                return result
+            picked_id = int(picked["id"])
+            # If another different row already owns target, let the normal
+            # upsert path handle that row rather than violating UNIQUE(path).
+            if target_row is not None and int(target_row["id"]) != picked_id:
+                return result
+            size, mtime_ns = safe_stat(incoming)
+            width, height = image_size(incoming) if incoming.exists() else (0, 0)
+            bucket = bucket_for_path(incoming) or _desired_bucket(status)
+            life = None
+            inbox_until = 0
+            origin = ""
+            if lifecycle_kwargs:
+                life = lifecycle_kwargs.get("lifecycle")
+                inbox_until = int(lifecycle_kwargs.get("inbox_until", 0) or 0)
+                origin = str(lifecycle_kwargs.get("import_origin", "") or "")
+            if not life:
+                life = str(picked["lifecycle"] or "archive") if "lifecycle" in picked.keys() else "archive"
+            con.execute(
+                """UPDATE images SET
+                       path=?, file_name=?, bucket=?, size_bytes=?, width=?, height=?,
+                       hash_md5=COALESCE(NULLIF(?,''), hash_md5), mtime_ns=?,
+                       is_video=?, indexed_at=?, deleted=0,
+                       lifecycle=?, inbox_until=?, original_media_path='', trashed_at=0,
+                       import_origin=CASE WHEN ?<>'' THEN ? ELSE import_origin END
+                   WHERE id=?""",
+                (
+                    target, incoming.name, bucket, int(size or 0), int(width or 0), int(height or 0),
+                    value, int(mtime_ns or 0), int(incoming.suffix.lower() in VIDEO_EXTS), int(time.time()),
+                    str(life), int(inbox_until or 0), origin, origin, picked_id,
+                ),
+            )
+            try:
+                con.execute(
+                    """INSERT INTO processed_files(original_path, original_name, media_path, status, bucket, processed_at)
+                       VALUES(?,?,?,?,?,?)
+                       ON CONFLICT(media_path) DO UPDATE SET
+                         original_path=excluded.original_path,
+                         original_name=excluded.original_name,
+                         status=excluded.status,
+                         bucket=excluded.bucket,
+                         processed_at=excluded.processed_at""",
+                    ("", incoming.name, target, status or "", bucket, int(time.time())),
+                )
+            except Exception:
+                pass
+            result.update({"restored": 1, "image_id": picked_id, "old_path": str(picked["path"] or ""), "new_path": target})
+            try:
+                _LOG.info("RESTORE STALE EXACT MD5 ROW: md5=%s image_id=%s old_path=%s new_path=%s", value, picked_id, result["old_path"], target)
+            except Exception:
+                pass
+            return result
+    except Exception:
+        return result
+
+
 def _discard_transient_exact_copy(settings: dict, incoming: Path, canonical: Path) -> bool:
     """Remove a newly-created redundant output copy without polluting Trash.
 
@@ -145,6 +261,34 @@ def _discard_transient_exact_copy(settings: dict, incoming: Path, canonical: Pat
     return False
 
 
+
+def _cleanup_promoted_nomatch(settings: dict, md5: str, original_path: str, promoted_path: Path, *, origin: str = "") -> dict:
+    """Deactivate/delete stale NO_MATCH copy after FOUND/PARTIAL promotion."""
+    try:
+        from core.nomatch_db import deactivate_promoted_exact_match
+        result = deactivate_promoted_exact_match(
+            settings=settings,
+            md5=md5 or "",
+            original_path=original_path or "",
+            promoted_path=promoted_path,
+        ) or {}
+        try:
+            changed = int(result.get("rows_deactivated", 0) or 0) + int(result.get("image_rows_removed", 0) or 0) + int(result.get("files_removed", 0) or 0)
+            if changed:
+                _LOG.info(
+                    "NO_MATCH PROMOTE CLEANUP: md5=%s promoted=%s origin=%s rows_deactivated=%s image_rows_removed=%s files_removed=%s errors=%s",
+                    str(md5 or ""), str(promoted_path), str(origin or ""),
+                    int(result.get("rows_deactivated", 0) or 0),
+                    int(result.get("image_rows_removed", 0) or 0),
+                    int(result.get("files_removed", 0) or 0),
+                    int(result.get("errors", 0) or 0),
+                )
+        except Exception:
+            pass
+        return dict(result)
+    except Exception:
+        return {"rows_deactivated": 0, "image_rows_removed": 0, "files_removed": 0, "errors": 1}
+
 def register_media_import(
     settings: dict,
     media_path: str | Path,
@@ -159,6 +303,7 @@ def register_media_import(
     post_url: str = "",
     file_url: str = "",
     site: str = "",
+    source_tag_groups: list[dict] | None = None,
     origin: str = "import",
     merge_existing: bool = True,
     generate_thumbnail: bool = True,
@@ -174,15 +319,29 @@ def register_media_import(
     md5 = str(hash_md5 or "").strip().lower()
     if not md5 and p.exists() and p.is_file():
         try:
-            md5 = file_md5(p).lower()
+            from core.file_hash_cache import get_or_compute_md5
+            md5 = get_or_compute_md5(settings, p)[0]
         except Exception:
-            md5 = ""
+            try:
+                md5 = file_md5(p).lower()
+            except Exception:
+                md5 = ""
 
     source_list = [str(x).strip() for x in (sources or []) if str(x).strip()]
     if post_url and post_url not in source_list:
         source_list.append(post_url)
     if file_url and file_url not in source_list:
         source_list.append(file_url)
+
+    desired_bucket = _desired_bucket(status)
+    restore_lifecycle_kwargs = None
+    if desired_bucket in {"found", "partial_match"}:
+        try:
+            from core.library_lifecycle import import_lifecycle_kwargs as _lb_import_lifecycle_kwargs
+            restore_lifecycle_kwargs = _lb_import_lifecycle_kwargs(settings, origin)
+        except Exception:
+            restore_lifecycle_kwargs = None
+        _restore_stale_exact_row_to_path(settings, md5, p, status, restore_lifecycle_kwargs)
 
     # A live canonical exact copy wins over any obsolete deleted-MD5 marker.
     # This is the critical path for one image being found on multiple sources.
@@ -205,6 +364,7 @@ def register_media_import(
             post_url=post_url,
             file_url=file_url,
             site=site,
+            source_tag_groups=source_tag_groups,
             merge_existing=True,
             # Do not make an old archive item "new" again merely because a
             # second source was found for the same bytes.
@@ -232,6 +392,9 @@ def register_media_import(
                 safe_thumbnail_path(str(canonical), max(256, w * 2), max(256, h * 2))
             except Exception:
                 pass
+        nomatch_cleanup = {}
+        if desired_bucket in {"found", "partial_match"}:
+            nomatch_cleanup = _cleanup_promoted_nomatch(settings, md5, original_path or str(p), canonical, origin=origin)
         return {
             "action": "merged_exact_md5",
             "image_id": int(image_id or 0),
@@ -239,6 +402,7 @@ def register_media_import(
             "canonical_path": str(canonical),
             "source_added": len(added_sources),
             "discarded_transient_copy": bool(removed_copy),
+            "nomatch_cleanup": nomatch_cleanup,
         }
 
     # Updating metadata on an already-live canonical row is never a re-import.
@@ -287,6 +451,7 @@ def register_media_import(
         post_url=post_url,
         file_url=file_url,
         site=site,
+        source_tag_groups=source_tag_groups,
         merge_existing=merge_existing,
         **lifecycle_kwargs,
     )
@@ -300,6 +465,9 @@ def register_media_import(
         sources_after = _linked_source_urls(settings, p)
         added_sources = sorted(sources_after - sources_before)
         _log_exact_md5_merge(p, md5, added_sources, discarded_copy=False, origin=origin)
+    nomatch_cleanup = {}
+    if desired_bucket in {"found", "partial_match"}:
+        nomatch_cleanup = _cleanup_promoted_nomatch(settings, md5, original_path or str(p), p, origin=origin)
     if generate_thumbnail and p.exists():
         try:
             from core.image_safe import safe_thumbnail_path
@@ -308,4 +476,4 @@ def register_media_import(
             safe_thumbnail_path(str(p), max(256, w * 2), max(256, h * 2))
         except Exception:
             pass
-    return {"action": "imported", "image_id": int(image_id or 0), "md5": md5, "canonical_path": str(p), "source_added": len(added_sources)}
+    return {"action": "imported", "image_id": int(image_id or 0), "md5": md5, "canonical_path": str(p), "source_added": len(added_sources), "nomatch_cleanup": nomatch_cleanup}

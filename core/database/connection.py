@@ -39,25 +39,54 @@ def db_path(settings):
             from core.paths import DB_DIR
             root = Path(DB_DIR)
         except Exception:
-            root = Path.home() / "Documents" / "Local_Booru" / "db"
+            root = Path.cwd() / "Local_Booru_Archive" / "settings" / "db"
     root.mkdir(parents=True, exist_ok=True)
     return root / "local_booru_index.sqlite3"
 
 
 def connect(settings, *, readonly: bool = False):
     path = db_path(settings)
-    if readonly and path.exists():
+    opened_readonly = bool(readonly and path.exists())
+    if opened_readonly:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30, check_same_thread=False)
     else:
+        # Keep first-run behaviour: a missing DB is created by the normal schema
+        # initialisation path even when the caller is only going to read from it.
         con = sqlite3.connect(str(path), timeout=60, check_same_thread=False)
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
+    if opened_readonly:
+        # Do not issue PRAGMA journal_mode=WAL on a read-only connection.  If an
+        # old/pre-WAL database is opened read-only, SQLite treats that PRAGMA as
+        # a write attempt and raises "attempt to write a readonly database".
+        try:
+            con.execute("PRAGMA query_only=ON")
+        except Exception:
+            pass
+    else:
+        con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA temp_store=MEMORY")
+    # Large galleries/parsers can allocate huge temp sort tables.  MEMORY is
+    # still the default for speed, but it is now configurable for low-RAM runs.
+    temp_store = str((settings or {}).get("sqlite_temp_store", "MEMORY") or "MEMORY").upper()
+    if temp_store not in {"MEMORY", "FILE", "DEFAULT"}:
+        temp_store = "MEMORY"
+    con.execute(f"PRAGMA temp_store={temp_store}")
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA busy_timeout=60000")
-    # Bigger cache improves tag intersection queries without storing 500k items in Python.
-    con.execute("PRAGMA cache_size=-131072")  # about 128 MB
+    try:
+        wal_limit_mb = int((settings or {}).get("sqlite_wal_limit_mb", 512) or 512)
+    except Exception:
+        wal_limit_mb = 512
+    wal_limit_mb = max(32, min(4096, wal_limit_mb))
+    con.execute(f"PRAGMA journal_size_limit={wal_limit_mb * 1024 * 1024}")
+    # Cache size is per SQLite connection. Keep it configurable so 5 site lanes
+    # plus UI readers do not silently reserve hundreds of MB each.
+    try:
+        cache_mb = int((settings or {}).get("sqlite_cache_mb", 40) or 40)
+    except Exception:
+        cache_mb = 40
+    cache_mb = max(8, min(512, cache_mb))
+    con.execute(f"PRAGMA cache_size={-cache_mb * 1024}")
     return con
 
 
@@ -118,6 +147,47 @@ def get_pooled_connection(settings, *, readonly: bool = False):
     with _POOL_LOCK:
         _ALL_CONNECTIONS.append(con)
     return con
+
+
+
+def close_thread_pooled_connections(settings=None, *, readonly: bool | None = None) -> int:
+    """Close pooled SQLite connections owned by the current thread only.
+
+    Useful before an explicit UI refresh: the gallery should open a fresh
+    read-only connection/snapshot after downloader writes, without touching
+    worker-thread connections that may still be active.
+    """
+    cache = getattr(_TLS, "connections", None)
+    if not cache:
+        return 0
+    path_prefix = None
+    if settings is not None:
+        try:
+            path_prefix = str(db_path(settings)) + "|"
+        except Exception:
+            path_prefix = None
+    n = 0
+    for key, con in list(cache.items()):
+        if path_prefix and not str(key).startswith(path_prefix):
+            continue
+        if readonly is not None and f"|ro={int(bool(readonly))}" not in str(key):
+            continue
+        try:
+            con.close()
+            n += 1
+        except Exception:
+            pass
+        try:
+            cache.pop(key, None)
+        except Exception:
+            pass
+        try:
+            with _POOL_LOCK:
+                while con in _ALL_CONNECTIONS:
+                    _ALL_CONNECTIONS.remove(con)
+        except Exception:
+            pass
+    return n
 
 def close_pooled_connections() -> int:
     """Close known pooled connections during graceful shutdown."""

@@ -17,7 +17,11 @@ def pregen_thumbnails(paths: Iterable[Path], settings: dict, *, progress: Callab
     h = int((settings or {}).get("thumb_cache_h", 256) or 256)
     cw = int((settings or {}).get("thumb_cache_card_w", 240) or 240)
     ch = int((settings or {}).get("thumb_cache_card_h", 220) or 220)
-    workers = max(1, min(int((settings or {}).get("thumb_pregen_workers", 2) or 2), 4))
+    try:
+        from core.local_parallel import local_workers
+        workers = local_workers(settings, "thumb_pregen_workers", int((settings or {}).get("local_thumb_pregen_workers", 4) or 4), maximum=16)
+    except Exception:
+        workers = max(1, min(int((settings or {}).get("thumb_pregen_workers", 4) or 4), 16))
     done = errors = 0
     def one(path: Path):
         from core.image_safe import safe_thumbnail_path

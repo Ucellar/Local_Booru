@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Local Booru Companion</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Local Booru Companion</h1>
+  <label><input id="enabled" type="checkbox"> Включено</label>
+  <label><input id="showBadge" type="checkbox"> Метки на карточках</label>
+  <label>Режим:
+    <select id="hideMode">
+      <option value="hide">Скрывать</option>
+      <option value="dim">Затемнять</option>
+    </select>
+  </label>
+  <label>API:
+    <input id="apiBase" type="text" value="http://127.0.0.1:47734">
+  </label>
+  <button id="save">Сохранить</button>
+  <button id="status">Проверить связь</button>
+  <p id="out"></p>
+  <script src="popup.js"></script>
+</body>
+</html>

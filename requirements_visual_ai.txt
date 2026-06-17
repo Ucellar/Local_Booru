@@ -1,0 +1,6 @@
+# Local-only NO_MATCH AI classifier.
+# Needed for exe/source builds that should download/use CLIP locally.
+# The model weights may be bundled in models/clip or downloaded on first launch.
+torch
+transformers
+safetensors

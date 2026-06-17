@@ -178,9 +178,9 @@ class SafeModuleList(QListWidget):
 
 
 class InterfaceModulesDialog(QDialog):
-    """Настройка бокового меню: порядок drag&drop и сворачиваемая группа."""
+    """Настройка бокового меню: свободное дерево страниц без жёстких 4 режимов."""
     MODULES = [
-        ("Tagger", "Парсер", "apt"), ("NO_MATCH", "Брак", "apt"),
+        ("Tagger", "Парсер", "apt"), ("ParserBlueprint", "Blueprint", "apt"), ("NO_MATCH", "Брак", "apt"),
         ("Overview", "Обзор", "gallery"), ("Gallery", "Галерея", "gallery"),
         ("Trash", "Удалено", "gallery"), ("Diagnostics", "Диагностика", "gallery"),
         ("Tags", "Теги", "gallery"), ("Manga", "Манга", "gallery"),
@@ -189,109 +189,240 @@ class InterfaceModulesDialog(QDialog):
     ]
     WORKSPACES = [("apt", "Парсер"), ("gallery", "Галерея"), ("adp", "Граббер"), ("duplicates", "Дубли")]
 
+    ROLE_KEY = Qt.UserRole
+    ROLE_WORKSPACE = Qt.UserRole + 1
+    ROLE_VISIBLE = Qt.UserRole + 2
+    ROLE_PARENT = Qt.UserRole + 3
+
     def __init__(self, settings, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Разделы интерфейса")
-        self.resize(720, 600)
-        self._module_by_key = {key:(label, ws) for key,label,ws in self.MODULES}
-        lay=QVBoxLayout(self)
-        info=QLabel("Зажми раздел левой кнопкой мыши и перетащи в нужное место — внутри списка или между «Основные» и «Дополнительно».\nСохранение проверяет полный набор разделов: пункт нельзя потерять или продублировать. Снятая галочка скрывает раздел полностью.")
-        info.setWordWrap(True); lay.addWidget(info)
-        columns=QHBoxLayout()
-        self.primary=self._make_list("Основные разделы")
-        self.extra=self._make_list("Дополнительно (сворачивается)")
-        lbox=QVBoxLayout(); lbox.addWidget(QLabel("Основные разделы")); lbox.addWidget(self.primary,1)
-        rbox=QVBoxLayout(); rbox.addWidget(QLabel("Дополнительно — можно свернуть")); rbox.addWidget(self.extra,1)
-        columns.addLayout(lbox,1); columns.addLayout(rbox,1); lay.addLayout(columns,1)
-        controls=QHBoxLayout()
-        self.toggle_visible=QPushButton("Скрыть / показать выбранный")
+        self.resize(860, 660)
+        self._module_by_key = {key: (label, ws) for key, label, ws in self.MODULES}
+        lay = QVBoxLayout(self)
+        info = QLabel(
+            "Свободная настройка интерфейса: любая страница может быть корнем или подпунктом любой другой страницы.\n"
+            "Пример: Дубли → внутри Обзора, Граббер → внутри Манги, Blueprint → внутри Парсера. "
+            "Пока родитель свернут, его подпункты в боковом меню не показываются."
+        )
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        self.free_nav = QCheckBox("Свободная навигация без 4 жёстких режимов")
+        self.free_nav.setChecked(bool(settings.get("interface_free_navigation", True)))
+        self.free_nav.setToolTip("Если включено, боковое меню строится как одно свободное дерево страниц. Рабочие режимы Парсер/Галерея/Граббер/Дубли больше не фильтруют страницы.")
+        self.free_nav.stateChanged.connect(self._free_nav_changed)
+        lay.addWidget(self.free_nav)
+
+        columns = QHBoxLayout()
+        self.primary = self._make_list("Основные разделы")
+        self.extra = self._make_list("Дополнительно")
+        lbox = QVBoxLayout(); lbox.addWidget(QLabel("Основные разделы")); lbox.addWidget(self.primary, 1)
+        rbox = QVBoxLayout(); rbox.addWidget(QLabel("Дополнительно — можно свернуть")); rbox.addWidget(self.extra, 1)
+        columns.addLayout(lbox, 1); columns.addLayout(rbox, 1)
+        lay.addLayout(columns, 1)
+
+        controls = QHBoxLayout()
+        self.toggle_visible = QPushButton("Скрыть / показать выбранный")
         self.toggle_visible.clicked.connect(self._toggle_selected_visibility)
-        controls.addWidget(self.toggle_visible); controls.addStretch(1); lay.addLayout(controls)
-        workrow=QHBoxLayout(); workrow.addWidget(QLabel("Рабочий режим выбранного раздела:")); self.workspace=QComboBox()
-        for key,title in self.WORKSPACES: self.workspace.addItem(title,key)
+        controls.addWidget(self.toggle_visible); controls.addStretch(1)
+        lay.addLayout(controls)
+
+        workrow = QHBoxLayout()
+        self.workspace_label = QLabel("Старый режим страницы:")
+        self.workspace_label.setToolTip("Используется только если выключена свободная навигация.")
+        workrow.addWidget(self.workspace_label)
+        self.workspace = QComboBox()
+        for key, title in self.WORKSPACES:
+            self.workspace.addItem(title, key)
         self.workspace.currentIndexChanged.connect(self._workspace_changed)
-        workrow.addWidget(self.workspace); workrow.addStretch(1); lay.addLayout(workrow)
-        self.auto_hide=QCheckBox("Убирать переключатель режимов, если осталась одна используемая группа")
+        workrow.addWidget(self.workspace)
+        workrow.addSpacing(18)
+        workrow.addWidget(QLabel("Вложить в страницу:"))
+        self.parent_combo = QComboBox()
+        self.parent_combo.setMinimumWidth(210)
+        self.parent_combo.currentIndexChanged.connect(self._parent_changed)
+        workrow.addWidget(self.parent_combo)
+        workrow.addStretch(1)
+        lay.addLayout(workrow)
+
+        hint = QLabel(
+            "В свободной навигации режимов нет: видимость определяется только деревом страниц. "
+            "Циклы запрещены технически, иначе дерево станет бесконечным."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#8a91a8;")
+        lay.addWidget(hint)
+
+        self.auto_hide = QCheckBox("Убирать переключатель режимов, если осталась одна используемая группа")
         self.auto_hide.setChecked(bool(settings.get("auto_hide_single_workspace", True)))
-        self.extra_collapsed=QCheckBox("Сворачивать «Дополнительно» при запуске")
+        self.extra_collapsed = QCheckBox("Сворачивать «Дополнительно» при запуске")
         self.extra_collapsed.setChecked(bool(settings.get("interface_extra_collapsed", True)))
         lay.addWidget(self.auto_hide); lay.addWidget(self.extra_collapsed)
-        row=QHBoxLayout(); reset=QPushButton("Сбросить"); ok=QPushButton("Сохранить"); cancel=QPushButton("Отмена")
-        row.addWidget(reset); row.addStretch(1); row.addWidget(ok); row.addWidget(cancel); lay.addLayout(row)
+
+        row = QHBoxLayout()
+        reset = QPushButton("Сбросить")
+        ok = QPushButton("Сохранить")
+        cancel = QPushButton("Отмена")
+        row.addWidget(reset); row.addStretch(1); row.addWidget(ok); row.addWidget(cancel)
+        lay.addLayout(row)
         self._initial_settings = json.loads(json.dumps(settings))
         reset.clicked.connect(self._reset); ok.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
         self.primary.itemSelectionChanged.connect(lambda: self._selected_from(self.primary))
         self.extra.itemSelectionChanged.connect(lambda: self._selected_from(self.extra))
         self._populate(settings)
+        self._free_nav_changed()
+
+    def _free_nav_changed(self):
+        enabled = bool(getattr(self, "free_nav", None) and self.free_nav.isChecked())
+        try:
+            self.workspace.setEnabled(not enabled)
+            self.workspace_label.setEnabled(not enabled)
+        except Exception:
+            pass
 
     def _make_list(self, _label):
-        # Custom drop handling performs a take/insert move for both lists.
-        # Dropping on an item means insert before/after it, never overwrite it.
         return SafeModuleList(self)
 
-    def _new_item(self, key, label, workspace, visible=True):
-        item=QListWidgetItem()
-        item.setData(Qt.UserRole, key); item.setData(Qt.UserRole + 1, workspace); item.setData(Qt.UserRole + 2, bool(visible))
-        # Do not let items accept overwrite drops: only insertion lines are legal.
+    def _new_item(self, key, label, workspace, visible=True, parent_key=""):
+        item = QListWidgetItem()
+        item.setData(self.ROLE_KEY, key)
+        item.setData(self.ROLE_WORKSPACE, workspace)
+        item.setData(self.ROLE_VISIBLE, bool(visible))
+        item.setData(self.ROLE_PARENT, str(parent_key or ""))
         item.setFlags((item.flags() | Qt.ItemIsDragEnabled) & ~Qt.ItemIsDropEnabled)
         self._render_item(item)
         return item
 
     def _render_item(self, item):
-        key=str(item.data(Qt.UserRole) or "")
-        label=self._module_by_key.get(key, (key, "gallery"))[0]
-        visible=bool(item.data(Qt.UserRole + 2))
-        item.setText(label if visible else f"[скрыт]  {label}")
+        key = str(item.data(self.ROLE_KEY) or "")
+        label = self._module_by_key.get(key, (key, "gallery"))[0]
+        visible = bool(item.data(self.ROLE_VISIBLE))
+        parent = str(item.data(self.ROLE_PARENT) or "")
+        prefix = "↳ " if parent else ""
+        suffix = ""
+        if parent in self._module_by_key:
+            suffix = f"  → внутри: {self._module_by_key[parent][0]}"
+        text = f"{prefix}{label}{suffix}"
+        item.setText(text if visible else f"[скрыт]  {text}")
         item.setForeground(QColor("#8a91a8") if visible else QColor("#5a6070"))
 
     def _toggle_selected_visibility(self):
-        item=self._selected_item()
-        if not item: return
-        key=str(item.data(Qt.UserRole) or "")
-        if key == "Gallery" and bool(item.data(Qt.UserRole + 2)):
-            QMessageBox.information(self, "Разделы интерфейса", "Галерею нельзя скрыть: это основной раздел просмотра.")
+        item = self._selected_item()
+        if not item:
             return
-        item.setData(Qt.UserRole + 2, not bool(item.data(Qt.UserRole + 2)))
+        key = str(item.data(self.ROLE_KEY) or "")
+        item.setData(self.ROLE_VISIBLE, not bool(item.data(self.ROLE_VISIBLE)))
         self._render_item(item)
 
     def _populate(self, settings):
         self.primary.clear(); self.extra.clear()
-        cfg=settings.get("interface_modules") or {}; order=list(settings.get("interface_module_order") or [])
-        defaults=[key for key,_,_ in self.MODULES]
-        ordered=[key for key in order if key in defaults] + [key for key in defaults if key not in order]
+        cfg = settings.get("interface_modules") or {}
+        order = list(settings.get("interface_module_order") or [])
+        defaults = [key for key, _, _ in self.MODULES]
+        ordered = [key for key in order if key in defaults] + [key for key in defaults if key not in order]
         for key in ordered:
-            label, default_ws=self._module_by_key[key]
-            cur=cfg.get(key,{}) if isinstance(cfg,dict) else {}
-            workspace=str(cur.get("workspace", default_ws)); visible=bool(cur.get("visible", True)); extra=bool(cur.get("extra", False))
-            (self.extra if extra else self.primary).addItem(self._new_item(key,label,workspace,visible))
-        if self.primary.count(): self.primary.setCurrentRow(0)
+            label, default_ws = self._module_by_key[key]
+            cur = cfg.get(key, {}) if isinstance(cfg, dict) else {}
+            workspace = str(cur.get("workspace", default_ws))
+            visible = bool(cur.get("visible", True))
+            extra = bool(cur.get("extra", False))
+            parent_key = str(cur.get("parent", "") or "")
+            if parent_key == key or parent_key not in self._module_by_key:
+                parent_key = ""
+            (self.extra if extra else self.primary).addItem(self._new_item(key, label, workspace, visible, parent_key))
+        if self.primary.count():
+            self.primary.setCurrentRow(0)
+        self._refresh_parent_combo()
 
     def _selected_item(self):
         return self.primary.currentItem() or self.extra.currentItem()
 
     def _selected_from(self, owner):
-        item=owner.currentItem()
-        if not item: return
-        other=self.extra if owner is self.primary else self.primary
+        item = owner.currentItem()
+        if not item:
+            return
+        other = self.extra if owner is self.primary else self.primary
         other.blockSignals(True); other.clearSelection(); other.blockSignals(False)
-        idx=self.workspace.findData(str(item.data(Qt.UserRole + 1) or "gallery"))
-        self.workspace.blockSignals(True); self.workspace.setCurrentIndex(max(0,idx)); self.workspace.blockSignals(False)
+        idx = self.workspace.findData(str(item.data(self.ROLE_WORKSPACE) or "gallery"))
+        self.workspace.blockSignals(True); self.workspace.setCurrentIndex(max(0, idx)); self.workspace.blockSignals(False)
+        self._refresh_parent_combo()
 
     def _workspace_changed(self):
-        item=self._selected_item()
-        if item: item.setData(Qt.UserRole + 1, str(self.workspace.currentData() or "gallery"))
+        item = self._selected_item()
+        if item:
+            item.setData(self.ROLE_WORKSPACE, str(self.workspace.currentData() or "gallery"))
+
+    def _refresh_parent_combo(self):
+        item = self._selected_item()
+        self.parent_combo.blockSignals(True)
+        self.parent_combo.clear()
+        self.parent_combo.addItem("Нет — отдельная страница", "")
+        if item:
+            key = str(item.data(self.ROLE_KEY) or "")
+            current_parent = str(item.data(self.ROLE_PARENT) or "")
+            for other_key, label, _ws in self.MODULES:
+                if other_key == key:
+                    continue
+                self.parent_combo.addItem(label, other_key)
+            idx = self.parent_combo.findData(current_parent)
+            self.parent_combo.setCurrentIndex(max(0, idx))
+        self.parent_combo.blockSignals(False)
+
+    def _parent_changed(self):
+        item = self._selected_item()
+        if not item:
+            return
+        parent = str(self.parent_combo.currentData() or "")
+        key = str(item.data(self.ROLE_KEY) or "")
+        if parent == key:
+            parent = ""
+        item.setData(self.ROLE_PARENT, parent)
+        # Legacy 4-workspace mode needs a child to follow the parent workspace.
+        # Free navigation intentionally does not care about workspaces.
+        if parent in self._module_by_key and not bool(self.free_nav.isChecked()):
+            item.setData(self.ROLE_WORKSPACE, self._module_by_key[parent][1])
+            idx = self.workspace.findData(self._module_by_key[parent][1])
+            self.workspace.blockSignals(True); self.workspace.setCurrentIndex(max(0, idx)); self.workspace.blockSignals(False)
+        self._render_item(item)
 
     def _reset(self):
         self.primary.clear(); self.extra.clear()
-        for key,label,ws in self.MODULES: self.primary.addItem(self._new_item(key,label,ws,True))
-        self.auto_hide.setChecked(True); self.extra_collapsed.setChecked(True); self.primary.setCurrentRow(0)
+        for key, label, ws in self.MODULES:
+            self.primary.addItem(self._new_item(key, label, ws, True, ""))
+        self.free_nav.setChecked(True)
+        self.auto_hide.setChecked(True)
+        self.extra_collapsed.setChecked(True)
+        self._free_nav_changed()
+        self.primary.setCurrentRow(0)
+        self._refresh_parent_combo()
 
     def _current_keys(self):
         keys = []
         for lst in (self.primary, self.extra):
             for row in range(lst.count()):
-                keys.append(str(lst.item(row).data(Qt.UserRole) or ""))
+                keys.append(str(lst.item(row).data(self.ROLE_KEY) or ""))
         return keys
+
+    def _items_by_key(self):
+        out = {}
+        for lst in (self.primary, self.extra):
+            for row in range(lst.count()):
+                item = lst.item(row)
+                out[str(item.data(self.ROLE_KEY) or "")] = item
+        return out
+
+    def _has_parent_cycle(self, key, items):
+        seen = set()
+        parent = str(items[key].data(self.ROLE_PARENT) or "") if key in items else ""
+        while parent:
+            if parent == key or parent in seen:
+                return True
+            seen.add(parent)
+            if parent not in items:
+                return False
+            parent = str(items[parent].data(self.ROLE_PARENT) or "")
+        return False
 
     def _validate_structure(self, repair=True):
         expected = [key for key, _label, _ws in self.MODULES]
@@ -299,35 +430,53 @@ class InterfaceModulesDialog(QDialog):
         missing = [key for key in expected if key not in keys]
         duplicated = sorted({key for key in keys if keys.count(key) > 1})
         unknown = [key for key in keys if key not in expected]
-        if not missing and not duplicated and not unknown and len(keys) == len(expected):
+        items = self._items_by_key()
+        cycles = [key for key in expected if key in items and self._has_parent_cycle(key, items)]
+        bad_parent = []
+        for key, item in items.items():
+            parent = str(item.data(self.ROLE_PARENT) or "")
+            if parent and parent not in expected:
+                bad_parent.append(key)
+        if not missing and not duplicated and not unknown and not cycles and not bad_parent and len(keys) == len(expected):
             return True
         if repair:
             self._populate(self._initial_settings)
             QMessageBox.warning(
                 self, "Разделы интерфейса",
-                "Перетаскивание повредило список разделов.\n"
+                "Перетаскивание или вложение повредило список разделов.\n"
                 "Изменения НЕ сохранены, список восстановлен из последних корректных настроек.\n\n"
                 f"Пропали: {', '.join(missing) or 'нет'}\n"
-                f"Дубли: {', '.join(duplicated) or 'нет'}"
+                f"Дубли: {', '.join(duplicated) or 'нет'}\n"
+                f"Циклы вложения: {', '.join(cycles) or 'нет'}"
             )
         return False
 
     def accept(self):
-        # Never allow a corrupt drag/drop state to reach settings.json.
         if self._validate_structure(repair=True):
             super().accept()
 
     def values(self):
         if not self._validate_structure(repair=False):
             raise ValueError("Повреждён список разделов интерфейса; сохранение отменено")
-        result={}; order=[]; visible_any=False
-        for lst,is_extra in ((self.primary,False),(self.extra,True)):
+        result = {}; order = []; visible_any = False
+        for lst, is_extra in ((self.primary, False), (self.extra, True)):
             for row in range(lst.count()):
-                item=lst.item(row); key=str(item.data(Qt.UserRole)); label,default_ws=self._module_by_key[key]
-                visible=bool(item.data(Qt.UserRole + 2)); visible_any=visible_any or visible; order.append(key)
-                result[key]={"visible":visible,"workspace":str(item.data(Qt.UserRole+1) or default_ws),"extra":is_extra}
-        if not visible_any or not result.get("Gallery",{}).get("visible",False): result["Gallery"]["visible"]=True
-        return result, order, bool(self.auto_hide.isChecked()), bool(self.extra_collapsed.isChecked())
+                item = lst.item(row)
+                key = str(item.data(self.ROLE_KEY))
+                label, default_ws = self._module_by_key[key]
+                visible = bool(item.data(self.ROLE_VISIBLE)); visible_any = visible_any or visible; order.append(key)
+                parent = str(item.data(self.ROLE_PARENT) or "")
+                cfg = {"visible": visible, "workspace": str(item.data(self.ROLE_WORKSPACE) or default_ws), "extra": is_extra}
+                if parent:
+                    cfg["parent"] = parent
+                result[key] = cfg
+        if not visible_any:
+            # Do not hard-code Gallery anymore; just keep the first configured page visible.
+            first = order[0] if order else "Gallery"
+            result.setdefault(first, {})["visible"] = True
+            result[first].setdefault("workspace", self._module_by_key.get(first, ("", "gallery"))[1])
+            result[first].setdefault("extra", False)
+        return result, order, bool(self.auto_hide.isChecked()), bool(self.extra_collapsed.isChecked()), bool(self.free_nav.isChecked())
 
 
 class SettingsPage(QWidget):
@@ -351,14 +500,16 @@ class SettingsPage(QWidget):
         self.title=QLineEdit(); self.logo=QLineEdit(); self.logo_fit=QComboBox(); self.logo_fit.addItem("Crop","crop"); self.logo_fit.addItem("Contain","contain"); self.logo_choose=QPushButton(); self.logo_choose.clicked.connect(self.choose_logo); self.logo_crop=QPushButton(); self.logo_crop.clicked.connect(self.crop_logo)
         lrow=QHBoxLayout(); lrow.addWidget(self.logo,1); lrow.addWidget(self.logo_choose); lrow.addWidget(self.logo_crop)
         self.output_dir=QLineEdit(); self.choose_output=QPushButton("..."); self.choose_output.clicked.connect(self.choose_output_dir); outrow=QHBoxLayout(); outrow.addWidget(self.output_dir,1); outrow.addWidget(self.choose_output)
-        self.separate_settings = QCheckBox("Хранить настройки/базу/кэш отдельно от стандартной папки")
-        self.settings_storage_dir = QLineEdit(); self.settings_storage_dir.setPlaceholderText("пусто = Local_Booru_Archive/settings рядом с output")
-        self.choose_settings_storage = QPushButton("..."); self.choose_settings_storage.clicked.connect(self.choose_settings_storage_dir)
-        storage_row = QHBoxLayout(); storage_row.addWidget(self.separate_settings); storage_row.addWidget(self.settings_storage_dir,1); storage_row.addWidget(self.choose_settings_storage)
+        self.separate_settings = QCheckBox("Хранить служебные данные в Local_Booru_Archive/settings")
+        self.settings_storage_dir = QLineEdit(); self.settings_storage_dir.setPlaceholderText("будет создано внутри выбранного Local_Booru_Archive")
+        self.settings_storage_dir.setReadOnly(True)
+        self.connect_archive_btn = QPushButton("Подключить существующий архив...")
+        self.connect_archive_btn.clicked.connect(self.connect_existing_archive)
+        storage_row = QHBoxLayout(); storage_row.addWidget(self.separate_settings); storage_row.addWidget(self.settings_storage_dir,1); storage_row.addWidget(self.connect_archive_btn)
         self.debug_logging=QCheckBox()
         self.debug_logging.setChecked(False)
 
-        self.cols=QSpinBox(); self.cols.setRange(1,12); self.rows=QSpinBox(); self.rows.setRange(1,20); self.card=QSpinBox(); self.card.setRange(100,700); self.ignore_numeric=QCheckBox(); self.show_preview=QCheckBox(); self.error_console=QCheckBox(); self.max_console_lines=QSpinBox(); self.max_console_lines.setRange(200,20000); self.max_console_lines.setSingleStep(100); self.manga_root=QLineEdit(); self.choose_manga=QPushButton("..."); self.choose_manga.clicked.connect(self.choose_manga_root); mrow=QHBoxLayout(); mrow.addWidget(self.manga_root,1); mrow.addWidget(self.choose_manga)
+        self.cols=QSpinBox(); self.cols.setRange(1,24); self.rows=QSpinBox(); self.rows.setRange(1,20); self.card=QSpinBox(); self.card.setRange(100,700); self.ignore_numeric=QCheckBox(); self.show_preview=QCheckBox(); self.error_console=QCheckBox(); self.max_console_lines=QSpinBox(); self.max_console_lines.setRange(200,20000); self.max_console_lines.setSingleStep(100); self.manga_root=QLineEdit(); self.choose_manga=QPushButton("..."); self.choose_manga.clicked.connect(self.choose_manga_root); mrow=QHBoxLayout(); mrow.addWidget(self.manga_root,1); mrow.addWidget(self.choose_manga)
         self.games_root=QLineEdit(); self.choose_games=QPushButton("..."); self.choose_games.clicked.connect(self.choose_games_root); grow=QHBoxLayout(); grow.addWidget(self.games_root,1); grow.addWidget(self.choose_games)
         # Bare checkbox fields: show only the indicator, never a painted tail.
         for _cb in (self.debug_logging, self.ignore_numeric, self.show_preview, self.error_console):
@@ -480,6 +631,11 @@ class SettingsPage(QWidget):
         self.relocate_root_btn.clicked.connect(self.relocate_library_root)
         _mrow4.addWidget(self.repair_thumbs_btn, 1); _mrow4.addWidget(self.relocate_root_btn, 1)
         _maintenance.addLayout(_mrow4)
+        _mrow4b = QHBoxLayout()
+        self.sqlite_cache_mb = QSpinBox(); self.sqlite_cache_mb.setRange(8, 512); self.sqlite_cache_mb.setSuffix(" МБ SQLite-кэша")
+        self.sqlite_checkpoint_exit = QCheckBox("WAL checkpoint при закрытии")
+        _mrow4b.addWidget(QLabel("SQLite cache:")); _mrow4b.addWidget(self.sqlite_cache_mb); _mrow4b.addWidget(self.sqlite_checkpoint_exit); _mrow4b.addStretch(1)
+        _maintenance.addLayout(_mrow4b)
         _mrow5 = QHBoxLayout()
         self.repair_e621_btn = QPushButton("Исправить загрязнённые e621-теги")
         self.repair_e621_btn.clicked.connect(self.repair_e621_tags)
@@ -536,6 +692,28 @@ class SettingsPage(QWidget):
         self.settings_import_btn.clicked.connect(self.import_settings_profile)
         _wrow_profile.addWidget(self.settings_export_btn); _wrow_profile.addWidget(self.settings_import_btn); _wrow_profile.addWidget(self.settings_include_secrets); _wrow_profile.addStretch(1)
         _library_transfer.addLayout(_wrow_profile)
+
+        _light_backup_hint = QLabel("Лёгкая резервная копия сохраняет SQLite, настройки и ручные метаданные. Медиа и кэш не копируются.")
+        _light_backup_hint.setWordWrap(True)
+        _library_transfer.addWidget(_light_backup_hint)
+        _backup_row1 = QHBoxLayout()
+        self.light_backup_enabled = QCheckBox("Включить лёгкие резервные копии")
+        self.light_backup_on_exit = QCheckBox("При закрытии")
+        self.light_backup_interval = QSpinBox(); self.light_backup_interval.setRange(1, 168); self.light_backup_interval.setSuffix(" ч")
+        self.light_backup_keep = QSpinBox(); self.light_backup_keep.setRange(1, 100); self.light_backup_keep.setSuffix(" копий")
+        _backup_row1.addWidget(self.light_backup_enabled); _backup_row1.addWidget(self.light_backup_on_exit)
+        _backup_row1.addWidget(QLabel("Интервал:")); _backup_row1.addWidget(self.light_backup_interval)
+        _backup_row1.addWidget(QLabel("Хранить:")); _backup_row1.addWidget(self.light_backup_keep); _backup_row1.addStretch(1)
+        _library_transfer.addLayout(_backup_row1)
+        _backup_row2 = QHBoxLayout()
+        self.light_backup_dir = QLineEdit(); self.light_backup_dir.setPlaceholderText("Папка на внешнем SSD / другом диске")
+        self.light_backup_choose_btn = QPushButton("Выбрать папку")
+        self.light_backup_now_btn = QPushButton("Создать копию сейчас")
+        self.light_backup_include_cookies = QCheckBox("Включать cookies")
+        self.light_backup_choose_btn.clicked.connect(self.choose_light_backup_dir)
+        self.light_backup_now_btn.clicked.connect(self.create_light_backup_now)
+        _backup_row2.addWidget(self.light_backup_dir, 1); _backup_row2.addWidget(self.light_backup_choose_btn); _backup_row2.addWidget(self.light_backup_now_btn); _backup_row2.addWidget(self.light_backup_include_cookies)
+        _library_transfer.addLayout(_backup_row2)
         _ilay.addWidget(self.library_transfer_box)
 
         self.preview_cache_box = QGroupBox("Превью и кэш")
@@ -586,6 +764,63 @@ class SettingsPage(QWidget):
         _gallery_display.addLayout(_wrow6)
         _ilay.addWidget(self.gallery_display_box)
 
+        self.grabber_subs_box = QGroupBox("Граббер и подписки")
+        _grabber_subs = QVBoxLayout(self.grabber_subs_box)
+        _grabber_subs.setContentsMargins(10, 10, 10, 10); _grabber_subs.setSpacing(8)
+        self.grabber_hide_existing = QCheckBox("Скрывать уже скачанные в граббере")
+        self.grabber_prefetch_originals = QCheckBox("Граббер: заранее скачивать оригиналы в временный кэш")
+        self.grabber_prefetch_originals.setToolTip("Если включено, карточки граббера качают не только миниатюру, но и оригинал в временный кэш. При сохранении файл берётся из кэша и быстро переносится/копируется в архив с тегами и источниками. Может резко увеличить расход места и трафика.")
+        self.grabber_include_protected_sites = QCheckBox("Граббер: включать защищённые сайты с PoW/проверками")
+        self.grabber_include_protected_sites.setToolTip("Совместимость со старыми настройками. ATF API-карточки теперь включены по умолчанию через /posts.json; тяжёлое фоновое скачивание оригиналов с защищённых сайтов всё ещё отключается отдельной настройкой.")
+        self.grabber_stream_cards = QCheckBox("Граббер: показывать карточки по одной сразу во время запроса")
+        self.grabber_stream_cards.setToolTip("Экспериментально. По умолчанию выключено: интерфейс получает один готовый пакет на запрос, чтобы не пересобирать Qt-сетку сотни раз.")
+        _cache_row = QHBoxLayout()
+        _cache_row.addWidget(QLabel("Лимит кэша превью граббера (МБ):"))
+        self.grabber_cache_limit = QSpinBox()
+        self.grabber_cache_limit.setRange(0, 10000)
+        self.grabber_cache_limit.setSuffix(" МБ")
+        self.grabber_cache_limit.setToolTip("Кэш граббера временный: очищается при запуске/закрытии. Лимит ограничивает размер текущей сессии; 0 = без лимита.")
+        _cache_row.addWidget(self.grabber_cache_limit)
+        _cache_row.addStretch(1)
+        _quality_row = QHBoxLayout()
+        _quality_row.addWidget(QLabel("Открытие карточки в граббере:"))
+        self.grabber_open_quality = QComboBox()
+        self.grabber_open_quality.addItem("Маленький файл / ~25%", "small_25")
+        self.grabber_open_quality.addItem("Средний файл / ~50%", "medium_50")
+        self.grabber_open_quality.addItem("Оригинал / 100%", "original_100")
+        self.grabber_open_quality.setToolTip("Влияет только на просмотр по клику в граббере. Кнопка «Скачать» всегда сохраняет оригинал 100% в архив.")
+        _quality_row.addWidget(self.grabber_open_quality)
+        _quality_row.addStretch(1)
+        _ram_row = QHBoxLayout()
+        _ram_row.addWidget(QLabel("RAM-кэш граббера:"))
+        self.grabber_metadata_ram_cache = QSpinBox()
+        self.grabber_metadata_ram_cache.setRange(0, 4096)
+        self.grabber_metadata_ram_cache.setSuffix(" МБ метаданные")
+        self.grabber_metadata_ram_cache.setToolTip("Временный ОЗУ-кэш для тегов/MD5/source/post JSON граббера. Парсерный кэш хранится отдельно на диске.")
+        self.grabber_image_ram_cache = QSpinBox()
+        self.grabber_image_ram_cache.setRange(0, 8192)
+        self.grabber_image_ram_cache.setSuffix(" МБ картинки")
+        self.grabber_image_ram_cache.setToolTip("Временный ОЗУ-кэш уже декодированных миниатюр граббера для быстрых перерисовок. 0 = выключить.")
+        _ram_row.addWidget(self.grabber_metadata_ram_cache)
+        _ram_row.addWidget(self.grabber_image_ram_cache)
+        _ram_row.addStretch(1)
+        self.grabber_blocklist = QTextEdit()
+        self.grabber_blocklist.setPlaceholderText("Блоклист тегов для граббера и подписок. Через пробел, запятую или новую строку. Не влияет на локальную галерею и уже сохранённые файлы.")
+        self.grabber_blocklist.setFixedHeight(120)
+        _grabber_hint = QLabel("Этот блоклист используется только при онлайн-просмотре, подписках и скачивании из граббера. Локальная галерея и поиск по архиву не фильтруются.")
+        _grabber_hint.setWordWrap(True)
+        _grabber_subs.addWidget(self.grabber_hide_existing)
+        _grabber_subs.addWidget(self.grabber_prefetch_originals)
+        _grabber_subs.addWidget(self.grabber_include_protected_sites)
+        _grabber_subs.addWidget(self.grabber_stream_cards)
+        _grabber_subs.addLayout(_cache_row)
+        _grabber_subs.addLayout(_quality_row)
+        _grabber_subs.addLayout(_ram_row)
+        _grabber_subs.addWidget(QLabel("Блоклист тегов:"))
+        _grabber_subs.addWidget(self.grabber_blocklist)
+        _grabber_subs.addWidget(_grabber_hint)
+        _ilay.addWidget(self.grabber_subs_box)
+
         self.developer_tools_box = QGroupBox("Логи и служебные инструменты")
         _developer_tools = QVBoxLayout(self.developer_tools_box)
         _developer_tools.setContentsMargins(10, 10, 10, 10); _developer_tools.setSpacing(8)
@@ -593,6 +828,26 @@ class SettingsPage(QWidget):
         self.performance_slow_ms = QSpinBox(); self.performance_slow_ms.setRange(25, 10000); self.performance_slow_ms.setSingleStep(25); self.performance_slow_ms.setSuffix(" мс")
         _wrow_perf.addWidget(QLabel("Записывать медленные операции дольше:")); _wrow_perf.addWidget(self.performance_slow_ms); _wrow_perf.addStretch(1)
         _developer_tools.addLayout(_wrow_perf)
+        self.developer_preload_md5_index = QCheckBox("Держать MD5-индекс в ОЗУ для граббера")
+        self.developer_preload_md5_index.setToolTip("Ускоряет проверку дублей при скачивании из граббера. Загружает из SQLite только MD5→путь, а не весь кэш/метаданные. Если ОЗУ мало — можно выключить.")
+        _developer_tools.addWidget(self.developer_preload_md5_index)
+        self.developer_grabber_md5_cache_enabled = QCheckBox("Local Reverse Index: сохранять посты граббера в отдельную SQLite")
+        self.developer_grabber_md5_cache_enabled.setToolTip("Опциональный локальный индекс в settings/db/grabber_local_reverse_index.sqlite: граббер сохраняет source, теги и категории. Превью сюда не пишутся: они остаются только в ограниченном кэше UI. Эта SQLite нужна для офлайн-повторного использования парсером по exact MD5. pHash/визуальные совпадения автоматически не записываются как source-proof.")
+        _developer_tools.addWidget(self.developer_grabber_md5_cache_enabled)
+        self.grabber_exact_md5_fanout = QCheckBox("Перед скачиванием искать exact MD5 на всех включённых сайтах")
+        self.grabber_exact_md5_fanout.setToolTip("Если файл найден на нескольких booru с тем же MD5, скачивается один оригинал, а источники и теги собираются со всех exact-MD5 постов.")
+        _developer_tools.addWidget(self.grabber_exact_md5_fanout)
+        self.grabber_visual_hash_merge = QCheckBox("Схлопывать визуально одинаковые карточки граббера")
+        self.grabber_visual_hash_merge.setToolTip("Второй уровень после MD5: если разные сайты показывают визуально одинаковую картинку, граббер оставляет одну карточку. При разных MD5 это только UI-скрытие дубля; источники/теги в базу не склеиваются автоматически.")
+        _developer_tools.addWidget(self.grabber_visual_hash_merge)
+        _wrow_visual = QHBoxLayout()
+        self.grabber_visual_hash_distance = QSpinBox(); self.grabber_visual_hash_distance.setRange(0, 16); self.grabber_visual_hash_distance.setSingleStep(1)
+        self.grabber_visual_hash_distance.setToolTip("Максимальная pHash-дистанция для визуального схлопывания в граббере. 0 = только полностью одинаковый pHash; 4 = строгий режим для ATF/e621/rule34 зеркал.")
+        _wrow_visual.addWidget(QLabel("Порог visual merge pHash:")); _wrow_visual.addWidget(self.grabber_visual_hash_distance); _wrow_visual.addStretch(1)
+        _developer_tools.addLayout(_wrow_visual)
+        self.developer_filesystem_duplicate_fallback = QCheckBox("Legacy-проверка дублей через обход файлов")
+        self.developer_filesystem_duplicate_fallback.setToolTip("Медленный запасной режим: после скачивания обходит файлы архива и сравнивает точные дубли. На больших архивах лучше держать выключенным и полагаться на SQLite/MD5-индекс.")
+        _developer_tools.addWidget(self.developer_filesystem_duplicate_fallback)
         _wrow4 = QHBoxLayout()
         self.logs_btn = QPushButton("Открыть папку логов")
         self.logs_btn.clicked.connect(self.open_logs_folder)
@@ -601,6 +856,87 @@ class SettingsPage(QWidget):
         _wrow4.addWidget(self.logs_btn); _wrow4.addWidget(self.diagnostics_btn); _wrow4.addStretch(1)
         _developer_tools.addLayout(_wrow4)
         _ilay.addWidget(self.developer_tools_box)
+
+        self.threading_box = QGroupBox("Потоки и локальные очереди")
+        _threading = QVBoxLayout(self.threading_box)
+        _threading.setContentsMargins(10, 10, 10, 10); _threading.setSpacing(8)
+        _thread_hint = QLabel(
+            "Эти настройки относятся только к локальной работе без интернета: сканирование, MD5/SHA1, pHash, превью, видео-кадры, локальные индексы и фоновые задачи. "
+            "Сетевые сайты всё равно живут в отдельных rate-limited очередях, чтобы не словить бан/429."
+        )
+        _thread_hint.setWordWrap(True)
+        _threading.addWidget(_thread_hint)
+
+        def _thread_spin(maximum=64, suffix=" потоков"):
+            sp = QSpinBox(); sp.setRange(1, int(maximum)); sp.setSuffix(suffix); sp.setMaximumWidth(190); return sp
+
+        self.local_total_workers = _thread_spin(64)
+        self.local_scan_workers = _thread_spin(16)
+        self.local_hash_workers = _thread_spin(32)
+        self.local_image_workers = _thread_spin(32)
+        self.local_video_workers = _thread_spin(8)
+        self.local_db_read_workers = _thread_spin(16)
+        self.local_tagger_workers = _thread_spin(16)
+        self.local_thumb_workers = _thread_spin(16)
+        self.local_thumb_pregen_workers = _thread_spin(16)
+        self.local_background_workers = _thread_spin(16)
+        self.local_preflight_enabled = QCheckBox("Греть локальный hash/pHash-кэш параллельно с парсером")
+        self.local_preflight_phash = QCheckBox("В preflight считать pHash/видео-кадр, а не только MD5")
+        self.visual_nomatch_classify_enabled = QCheckBox("Во время парсинга присваивать NO_MATCH статус real/booru")
+        self.visual_nomatch_classify_enabled.setToolTip("Строго локальная сортировка без API: real = фото/камера, booru = рисунок/3D/рендер. Основной режим — встроенная локальная CLIP-модель из папки программы.")
+        self.visual_nomatch_backend = QComboBox()
+        self.visual_nomatch_backend.addItem("Локальный AI CLIP (без интернета)", "clip_local")
+        self.visual_nomatch_backend.addItem("Старая эвристика v1", "heuristic")
+        self.visual_nomatch_backend.setToolTip("CLIP ничего не отправляет в интернет. В нормальной сборке модель идёт вместе с программой в models/clip. Поле папки ниже — только ручное переопределение для отладки.")
+        self.visual_nomatch_clip_model_dir = QLineEdit(); self.visual_nomatch_clip_model_dir.setPlaceholderText("Пусто = встроенная модель программы: models/clip")
+        self.visual_nomatch_clip_model_btn = QPushButton("Переопределить")
+        self.visual_nomatch_clip_model_btn.clicked.connect(self.choose_visual_clip_model_dir)
+        _clip_row = QHBoxLayout(); _clip_row.addWidget(self.visual_nomatch_clip_model_dir, 1); _clip_row.addWidget(self.visual_nomatch_clip_model_btn)
+        self.visual_nomatch_device = QComboBox()
+        self.visual_nomatch_device.addItem("Авто GPU/CPU", "auto")
+        self.visual_nomatch_device.addItem("Только CPU", "cpu")
+        self.visual_nomatch_device.addItem("CUDA если есть", "cuda")
+        self.visual_nomatch_ai_min_confidence = QDoubleSpinBox(); self.visual_nomatch_ai_min_confidence.setRange(0.50, 0.95); self.visual_nomatch_ai_min_confidence.setSingleStep(0.01); self.visual_nomatch_ai_min_confidence.setDecimals(2); self.visual_nomatch_ai_min_confidence.setMaximumWidth(190)
+        self.visual_nomatch_ai_min_margin = QDoubleSpinBox(); self.visual_nomatch_ai_min_margin.setRange(0.00, 0.50); self.visual_nomatch_ai_min_margin.setSingleStep(0.01); self.visual_nomatch_ai_min_margin.setDecimals(2); self.visual_nomatch_ai_min_margin.setMaximumWidth(190)
+        self.visual_nomatch_ai_fallback_heuristic = QCheckBox("Если AI-модель не найдена, использовать старую эвристику")
+        self.visual_nomatch_ai_fallback_heuristic.setToolTip("По умолчанию выключено, чтобы не засорять real/booru плохой эвристикой. Если выключено и модели нет — файл остаётся [вид ?] только во Все.")
+        self.visual_nomatch_auto_download_model = QCheckBox("Если CLIP-модели нет, скачать её автоматически при запуске")
+        self.visual_nomatch_auto_download_model.setToolTip("Скачивает openai/clip-vit-base-patch32 один раз в settings/models/clip. Это только загрузка модели; ваши картинки не отправляются.")
+        self.visual_nomatch_workers = _thread_spin(8)
+        self.visual_nomatch_real_threshold = QDoubleSpinBox(); self.visual_nomatch_real_threshold.setRange(0.10, 0.90); self.visual_nomatch_real_threshold.setSingleStep(0.01); self.visual_nomatch_real_threshold.setDecimals(2); self.visual_nomatch_real_threshold.setMaximumWidth(190)
+
+        _thread_form = QFormLayout()
+        _thread_form.setContentsMargins(0, 0, 0, 0); _thread_form.setSpacing(6)
+        _thread_form.addRow("Общий максимум локальных потоков:", self.local_total_workers)
+        _thread_form.addRow("Сканирование файлов:", self.local_scan_workers)
+        _thread_form.addRow("MD5/SHA1/размеры:", self.local_hash_workers)
+        _thread_form.addRow("pHash/изображения/превью:", self.local_image_workers)
+        _thread_form.addRow("Видео/GIF кадры:", self.local_video_workers)
+        _thread_form.addRow("SQLite чтение/локальные индексы:", self.local_db_read_workers)
+        _thread_form.addRow("Legacy-парсер: файлов одновременно:", self.local_tagger_workers)
+        _thread_form.addRow("Превью UI:", self.local_thumb_workers)
+        _thread_form.addRow("Предсоздание превью:", self.local_thumb_pregen_workers)
+        _thread_form.addRow("Фоновые задачи:", self.local_background_workers)
+        _thread_form.addRow("NO_MATCH real/booru:", self.visual_nomatch_workers)
+        _thread_form.addRow("Классификатор NO_MATCH:", self.visual_nomatch_backend)
+        _thread_form.addRow("Папка CLIP-модели (необязательно):", _clip_row)
+        _thread_form.addRow("Устройство AI:", self.visual_nomatch_device)
+        _thread_form.addRow("AI min confidence:", self.visual_nomatch_ai_min_confidence)
+        _thread_form.addRow("AI min margin:", self.visual_nomatch_ai_min_margin)
+        _thread_form.addRow("Порог старой эвристики:", self.visual_nomatch_real_threshold)
+        _threading.addLayout(_thread_form)
+        _threading.addWidget(self.local_preflight_enabled)
+        _threading.addWidget(self.local_preflight_phash)
+        _threading.addWidget(self.visual_nomatch_classify_enabled)
+        _threading.addWidget(self.visual_nomatch_auto_download_model)
+        _threading.addWidget(self.visual_nomatch_ai_fallback_heuristic)
+        _thread_note = QLabel(
+            "Важно: общий максимум — это потолок для одной локальной службы, а не сумма всех потоков процесса. "
+            "SQLite-запись всё равно остаётся сериализованной, чтобы не ломать БД."
+        )
+        _thread_note.setWordWrap(True)
+        _threading.addWidget(_thread_note)
+        _ilay.addWidget(self.threading_box)
 
         # This is a global action displayed in the fixed footer, not a setting.
         self.changelog_btn = QPushButton("Что нового")
@@ -772,7 +1108,9 @@ class SettingsPage(QWidget):
             ("Основные", "Внешний вид, язык и подпись приложения."),
             ("Библиотека", "Исходный архив только читается; рабочую галерею можно пересобирать."),
             ("Галерея и превью", "Сетка, кэш, фильтры тегов и экспорт метаданных."),
+            ("Граббер / Подписки", "Онлайн-галерея сайтов, подписки и общий блоклист скачивания."),
             ("Обслуживание", "Проверки, индексы и безопасный ремонт рабочей библиотеки."),
+            ("Потоки", "Локальные worker-pool'ы: хэширование, pHash, превью, видео и фоновые задачи."),
             ("Удаление и сброс", "Опасные действия только над рабочей библиотекой."),
             ("Для разработчика", "Логи, консоль, совместимость и внутренние параметры."),
         ]
@@ -836,7 +1174,9 @@ class SettingsPage(QWidget):
         self.library_transfer_box.setVisible(title == "Библиотека")
         self.preview_cache_box.setVisible(title == "Галерея и превью")
         self.gallery_display_box.setVisible(title == "Галерея и превью")
+        self.grabber_subs_box.setVisible(title == "Граббер / Подписки")
         self.maintenance_box.setVisible(title == "Обслуживание")
+        self.threading_box.setVisible(title == "Потоки")
         self.danger_box.setVisible(title == "Удаление и сброс")
         self.developer_tools_box.setVisible(title == "Для разработчика")
         is_developer = title == "Для разработчика"
@@ -871,7 +1211,7 @@ class SettingsPage(QWidget):
         lab.setToolTip(self.main.t(tip_key))
         _tc = self.main.settings.get("appearance","abyss")
         _label_colors = {"light": ("#1a1c2a","#5060d0"), "dark": ("#c0c8e0","#6c85e0"), "abyss": ("#c0c8e0","#6c85e0"),
-                         "r34": ("#111111","#3a7a35"), "r34dark": ("#d6e4d3","#6aa5ff"), "win95": ("#000000","#000080"), "windows95": ("#000000","#000080"),
+                         "r34": ("#111111","#3a7a35"), "r34dark": ("#d6e4d3","#7fb06f"), "win95": ("#000000","#000080"), "windows95": ("#000000","#000080"),
                          "ph": ("#f5f5f5","#ff9000"), "pornhub": ("#f5f5f5","#ff9000"),
                          "ember": ("#c8b090","#c87040"), "slate": ("#b0c8d0","#5a8a9f"),
                          "sakura": ("#e0b0d0","#d060a0")}
@@ -912,14 +1252,14 @@ class SettingsPage(QWidget):
             "dark": ("#0d0f16", "#c0c8e0", "#6c85e0"),
             "abyss": ("#0d0f16", "#c0c8e0", "#6c85e0"),
             "r34": ("#a8d99f", "#111111", "#3a7a35"),
-            "r34dark": ("#10150f", "#d6e4d3", "#6aa5ff"),
+            "r34dark": ("#10150f", "#d6e4d3", "#7fb06f"),
             "win95": ("#c0c0c0", "#000000", "#000080"),
             "windows95": ("#c0c0c0", "#000000", "#000080"),
             "ph": ("#0f0f0f", "#f5f5f5", "#ff9000"),
             "pornhub": ("#0f0f0f", "#f5f5f5", "#ff9000"),
-            "ember": ("#14141e", "#c8b090", "#c87040"),
+            "ember": ("#120f09", "#c8b090", "#c87040"),
             "slate": ("#16181e", "#b0c8d0", "#5a8a9f"),
-            "sakura": ("#140820", "#e0b0d0", "#d060a0"),
+            "sakura": ("#10070d", "#e0b0d0", "#d060a0"),
         }
         bg, fg, hover = colors.get(theme_name, colors["abyss"])
         try:
@@ -930,6 +1270,7 @@ class SettingsPage(QWidget):
                 pal = w.palette()
                 pal.setColor(QPalette.ColorRole.Window, QColor(bg))
                 pal.setColor(QPalette.ColorRole.Base, QColor(bg))
+                pal.setColor(QPalette.ColorRole.AlternateBase, QColor(bg))
                 pal.setColor(QPalette.ColorRole.Text, QColor(fg))
                 pal.setColor(QPalette.ColorRole.WindowText, QColor(fg))
                 pal.setColor(QPalette.ColorRole.ButtonText, QColor(fg))
@@ -958,6 +1299,36 @@ class SettingsPage(QWidget):
         except Exception:
             pass
 
+    def _release_open_media_before_delete(self):
+        try:
+            if hasattr(self.main, "release_open_media_handles"):
+                self.main.release_open_media_handles()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _remove_tree_after_preview_release(self, target, attempts=6):
+        """Remove generated data after Qt/Windows has released preview handles.
+
+        A GIF shown by QMovie can keep its file handle alive for a short moment
+        even after it is removed from the label.  Destructive UI actions should
+        wait and retry transient Windows sharing violations rather than leaving
+        a half-cleared generated library behind.
+        """
+        import time
+        target = Path(target)
+        for attempt in range(max(1, int(attempts))):
+            try:
+                shutil.rmtree(target)
+                return
+            except OSError as exc:
+                transient = getattr(exc, "winerror", None) in (32, 33) or getattr(exc, "errno", None) in (13,)
+                if not transient or attempt >= attempts - 1:
+                    raise
+                self._release_open_media_before_delete()
+                QApplication.processEvents()
+                time.sleep(0.08 * (attempt + 1))
+
     def _nuke_everything(self):
         include_subs = self.nuke_subs_check.isChecked()
         extra = " и папку подписок" if include_subs else ""
@@ -971,6 +1342,7 @@ class SettingsPage(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        self._release_open_media_before_delete()
         import shutil
         from pathlib import Path
         from core.paths import result_output_base
@@ -992,7 +1364,7 @@ class SettingsPage(QWidget):
                     if not require_managed_media_mutation(settings, target, "reset_generated_library"):
                         errors.append(str(target) + ": заблокировано защитой исходного архива")
                         continue
-                    shutil.rmtree(target)
+                    self._remove_tree_after_preview_release(target)
                     deleted.append(str(target))
                 except Exception as e:
                     errors.append(str(target) + ": " + str(e))
@@ -1001,7 +1373,7 @@ class SettingsPage(QWidget):
             subs_dir = out / "subscriptions"
             if subs_dir.exists():
                 try:
-                    shutil.rmtree(subs_dir)
+                    self._remove_tree_after_preview_release(subs_dir)
                     deleted.append(str(subs_dir))
                 except Exception as e:
                     errors.append(str(e))
@@ -1034,7 +1406,7 @@ class SettingsPage(QWidget):
         try:
             from core.paths import CACHE_DIR
             if Path(CACHE_DIR).exists():
-                shutil.rmtree(CACHE_DIR)
+                self._remove_tree_after_preview_release(CACHE_DIR)
                 Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
                 deleted.append(str(CACHE_DIR))
         except Exception as e:
@@ -1054,15 +1426,40 @@ class SettingsPage(QWidget):
 
 
     def load_values(self):
-        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.title.setText(s.get("theme_title","Local Booru")); self.logo.setText(s.get("logo_path","")); self.cols.setValue(int(s.get("columns",4))); self.rows.setValue(int(s.get("rows_per_page",4))); self.card.setValue(int(s.get("card_height",220))); self.ignore_numeric.setChecked(bool(s.get("ignore_numeric_tags",False))); self.show_preview.setChecked(bool(s.get("show_search_preview", True))); self.error_console.setChecked(bool(s.get("enable_error_console", True))); self.max_console_lines.setValue(int(s.get("max_console_lines",2500))); self.manga_root.setText(s.get("manga_root",""))
+        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.title.setText(s.get("theme_title","Local Booru")); self.logo.setText(s.get("logo_path","")); self.cols.setValue(int(s.get("columns",8))); self.rows.setValue(int(s.get("rows_per_page",4))); self.card.setValue(int(s.get("card_height",220))); self.ignore_numeric.setChecked(bool(s.get("ignore_numeric_tags",False))); self.show_preview.setChecked(bool(s.get("show_search_preview", True))); self.error_console.setChecked(bool(s.get("enable_error_console", True))); self.max_console_lines.setValue(int(s.get("max_console_lines",2500))); self.manga_root.setText(s.get("manga_root",""))
         self.flaresolverr_url.setText(s.get("flaresolverr_url","")); self.games_root.setText(s.get("games_root","")); self.output_dir.setText(s.get("output_dir",""))
         self.separate_settings.setChecked(bool(s.get("separate_settings_storage", False))); self.settings_storage_dir.setText(str(s.get("settings_storage_dir", "") or ""))
+        try:
+            from core.paths import USING_SEPARATE_STORAGE
+            if USING_SEPARATE_STORAGE:
+                self.separate_settings.setChecked(True)
+                self.separate_settings.setEnabled(False)
+                self.separate_settings.setToolTip("Архив уже подключён. Чтобы сменить его, используй кнопку «Подключить существующий архив...».")
+            else:
+                self.separate_settings.setEnabled(True)
+                self.separate_settings.setToolTip("")
+        except Exception:
+            pass
         self.large_download_count.setValue(int(s.get("large_download_warning_count", 1000) or 1000)); self.disk_reserve_gb.setValue(float(s.get("disk_free_reserve_gb", 2.0) or 2.0))
         self.lang.setCurrentIndex(max(0,self.lang.findData(s.get("language","ru")))); self.appearance.setCurrentIndex(max(0,self.appearance.findData(s.get("appearance","dark")))); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData(s.get("logo_fit","crop"))))
         self.imports_to_inbox.setChecked(bool(s.get("imports_to_inbox", True))); self.inbox_hours.setValue(int(s.get("inbox_auto_archive_hours", 24) or 24)); self.thumb_cleanup_exit.setChecked(bool(s.get("thumb_cleanup_on_exit", True))); self.thumb_keep_recent.setValue(int(s.get("thumb_keep_recent", 500) or 500))
         self.thumb_quality.setCurrentIndex(max(0, self.thumb_quality.findData(int(s.get("thumb_quality_scale", 2) or 2))))
-        self.thumb_memory_items.setValue(int(s.get("thumb_memory_items", 400) or 400)); self.thumb_threads.setValue(int(s.get("thumb_threads", 3) or 3)); self.thumb_prefetch.setChecked(bool(s.get("thumb_prefetch_pages", True))); self.performance_slow_ms.setValue(int(s.get("performance_slow_ms", 100) or 100))
+        self.thumb_memory_items.setValue(int(s.get("thumb_memory_items", 400) or 400)); self.thumb_threads.setValue(int(s.get("thumb_threads", s.get("local_thumb_workers", 4)) or 4)); self.thumb_prefetch.setChecked(bool(s.get("thumb_prefetch_pages", True))); self.performance_slow_ms.setValue(int(s.get("performance_slow_ms", 100) or 100)); self.developer_preload_md5_index.setChecked(bool(s.get("developer_preload_md5_index", True))); self.developer_grabber_md5_cache_enabled.setChecked(bool(s.get("grabber_disk_metadata_cache_enabled", s.get("developer_grabber_md5_cache_enabled", True)))); self.grabber_exact_md5_fanout.setChecked(bool(s.get("grabber_exact_md5_fanout", True))); self.grabber_visual_hash_merge.setChecked(bool(s.get("grabber_visual_hash_merge", False))); self.grabber_visual_hash_distance.setValue(int(s.get("grabber_visual_hash_distance", 3) or 3)); self.developer_filesystem_duplicate_fallback.setChecked(bool(s.get("developer_filesystem_duplicate_fallback", False)))
+        self.local_total_workers.setValue(int(s.get("local_total_workers", 8) or 8)); self.local_scan_workers.setValue(int(s.get("local_scan_workers", 2) or 2)); self.local_hash_workers.setValue(int(s.get("local_hash_workers", 4) or 4)); self.local_image_workers.setValue(int(s.get("local_image_workers", 4) or 4)); self.local_video_workers.setValue(int(s.get("local_video_workers", 2) or 2)); self.local_db_read_workers.setValue(int(s.get("local_db_read_workers", 2) or 2)); self.local_tagger_workers.setValue(int(s.get("local_tagger_workers", s.get("tagger_parallel_workers", 4)) or 4)); self.local_thumb_workers.setValue(int(s.get("local_thumb_workers", s.get("thumb_threads", 4)) or 4)); self.local_thumb_pregen_workers.setValue(int(s.get("local_thumb_pregen_workers", s.get("thumb_pregen_workers", 4)) or 4)); self.local_background_workers.setValue(int(s.get("local_background_workers", s.get("task_max_workers", 4)) or 4)); self.visual_nomatch_workers.setValue(int(s.get("visual_nomatch_workers", 2) or 2)); self.visual_nomatch_real_threshold.setValue(float(s.get("visual_nomatch_real_threshold", 0.34) or 0.34)); self.visual_nomatch_classify_enabled.setChecked(bool(s.get("visual_nomatch_classify_enabled", True))); self.visual_nomatch_backend.setCurrentIndex(max(0, self.visual_nomatch_backend.findData(str(s.get("visual_nomatch_backend", "clip_local") or "clip_local")))); self.visual_nomatch_clip_model_dir.setText(str(s.get("visual_nomatch_clip_model_dir", "") or "")); self.visual_nomatch_auto_download_model.setChecked(bool(s.get("visual_nomatch_auto_download_model", True))); self.visual_nomatch_device.setCurrentIndex(max(0, self.visual_nomatch_device.findData(str(s.get("visual_nomatch_device", "auto") or "auto")))); self.visual_nomatch_ai_min_confidence.setValue(float(s.get("visual_nomatch_ai_min_confidence", 0.62) or 0.62)); self.visual_nomatch_ai_min_margin.setValue(float(s.get("visual_nomatch_ai_min_margin", 0.12) or 0.12)); self.visual_nomatch_ai_fallback_heuristic.setChecked(bool(s.get("visual_nomatch_ai_fallback_heuristic", False))); self.local_preflight_enabled.setChecked(bool(s.get("local_preflight_enabled", True))); self.local_preflight_phash.setChecked(bool(s.get("local_preflight_phash", True)))
+        self.sqlite_cache_mb.setValue(int(s.get("sqlite_cache_mb", 40) or 40)); self.sqlite_checkpoint_exit.setChecked(bool(s.get("sqlite_checkpoint_on_exit", True)))
+        self.light_backup_enabled.setChecked(bool(s.get("light_backup_enabled", False))); self.light_backup_on_exit.setChecked(bool(s.get("light_backup_on_exit", True)))
+        self.light_backup_interval.setValue(int(s.get("light_backup_interval_hours", 24) or 24)); self.light_backup_keep.setValue(int(s.get("light_backup_keep_last", 10) or 10))
+        self.light_backup_dir.setText(str(s.get("light_backup_dir", "") or "")); self.light_backup_include_cookies.setChecked(bool(s.get("light_backup_include_cookies", False)))
         self.hide_single_char_tags.setChecked(bool(s.get("hide_single_char_tags", True))); self.hide_technical_tags.setChecked(bool(s.get("hide_technical_tags", True))); self.hide_meta_tags.setChecked(bool(s.get("hide_meta_tags", False))); self.hide_rating_tags.setChecked(bool(s.get("hide_rating_tags", False)))
+        self.grabber_hide_existing.setChecked(bool(s.get("grabber_preview_hide_existing", True)))
+        self.grabber_prefetch_originals.setChecked(bool(s.get("grabber_preview_prefetch_originals", False)))
+        self.grabber_include_protected_sites.setChecked(bool(s.get("grabber_include_protected_sites", False)))
+        self.grabber_stream_cards.setChecked(bool(s.get("grabber_preview_stream_cards", False)))
+        self.grabber_cache_limit.setValue(int(s.get("grabber_cache_limit_mb", 200) or 200))
+        self.grabber_open_quality.setCurrentIndex(max(0, self.grabber_open_quality.findData(s.get("grabber_open_quality", "medium_50"))))
+        self.grabber_metadata_ram_cache.setValue(int(s.get("grabber_metadata_ram_cache_mb", 128) or 128))
+        self.grabber_image_ram_cache.setValue(int(s.get("grabber_image_ram_cache_mb", 256) or 256))
+        self.grabber_blocklist.setPlainText(str(s.get("grabber_subscriptions_blocklist") or s.get("downloader_blocklist") or ""))
         self.deleted_reimport.setCurrentIndex(max(0, self.deleted_reimport.findData(s.get("deleted_reimport_policy", "skip"))))
         self.trash_days.setCurrentIndex(max(0, self.trash_days.findData(int(s.get("trash_auto_purge_days", 0) or 0))))
     def choose_root(self):
@@ -1072,12 +1469,69 @@ class SettingsPage(QWidget):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.manga_root.text() or self.root.text())
         if f: self.manga_root.setText(f)
 
+    def _connect_detected_archive(self, archive_root):
+        from core.paths import connect_existing_archive
+        target = connect_existing_archive(archive_root)
+        if target is None:
+            return False
+        self.separate_settings.setChecked(True)
+        self.settings_storage_dir.setText(str(target))
+        self.output_dir.setText(str(target.parent / "output"))
+        QMessageBox.information(
+            self,
+            "Архив подключён",
+            "Найдены существующие настройки Local Booru:\n"
+            f"{target / 'config' / 'app_settings.json'}\n\n"
+            "Они не перезаписаны. Перезапусти программу — после запуска "
+            "будут загружены настройки, база и кэш этого архива.",
+        )
+        return True
+
+    def connect_existing_archive(self):
+        start = self.output_dir.text().strip() or self.root.text()
+        f = QFileDialog.getExistingDirectory(self, "Выбери Local_Booru_Archive", start)
+        if not f:
+            return
+        if not self._connect_detected_archive(Path(f)):
+            QMessageBox.warning(
+                self,
+                "Архив не найден",
+                "В выбранной папке не найден файл\n"
+                "settings/config/app_settings.json\n\n"
+                "Выбери саму папку Local_Booru_Archive, её output или settings.",
+            )
+
     def choose_output_dir(self):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.output_dir.text() or self.root.text())
         if f:
-            from core.paths import ensure_output_base
+            from core.paths import ensure_output_base, suggested_settings_storage_dir, SETTINGS_FILE
             safe = ensure_output_base(f, self.root.text())
+            existing = safe.parent / "settings" / "config" / "app_settings.json"
+            try:
+                is_current = existing.resolve() == Path(SETTINGS_FILE).resolve()
+            except Exception:
+                is_current = False
+            if existing.is_file() and not is_current:
+                answer = QMessageBox.question(
+                    self,
+                    "Найден существующий архив",
+                    "В выбранной папке уже есть настройки Local Booru.\n\n"
+                    "Подключить этот архив вместо создания/перезаписи настроек?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+                )
+                if answer == QMessageBox.Yes:
+                    self._connect_detected_archive(safe.parent)
+                    return
             self.output_dir.setText(str(safe))
+            # Any new Local_Booru_Archive selection is a unified archive by
+            # definition: output and settings are two fixed branches of one root.
+            if safe.name.lower() == "output" and safe.parent.name.lower() == "local_booru_archive":
+                self.separate_settings.setChecked(True)
+                preview = dict(self.main.settings); preview["output_dir"] = str(safe)
+                self.settings_storage_dir.setText(str(suggested_settings_storage_dir(preview)))
+            elif self.separate_settings.isChecked():
+                preview = dict(self.main.settings); preview["output_dir"] = str(safe)
+                self.settings_storage_dir.setText(str(suggested_settings_storage_dir(preview)))
             QMessageBox.information(self, "Output", f"Файлы будут складываться в:\n{safe}")
 
     def choose_settings_storage_dir(self):
@@ -1086,6 +1540,12 @@ class SettingsPage(QWidget):
         if f:
             self.settings_storage_dir.setText(str(Path(f) / "settings" if Path(f).name.lower() == "local_booru_archive" else Path(f)))
             self.separate_settings.setChecked(True)
+
+    def choose_visual_clip_model_dir(self):
+        start = self.visual_nomatch_clip_model_dir.text().strip() or self.settings_storage_dir.text().strip() or self.output_dir.text().strip() or self.root.text()
+        f = QFileDialog.getExistingDirectory(self, "Папка локальной CLIP-модели", start)
+        if f:
+            self.visual_nomatch_clip_model_dir.setText(str(Path(f)))
 
     def choose_games_root(self):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.games_root.text() or self.root.text())
@@ -1104,11 +1564,22 @@ class SettingsPage(QWidget):
         s=self.main.settings; old_separate = bool(s.get("separate_settings_storage", False)); old_dir = str(s.get("settings_storage_dir", "") or "")
         s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["imports_to_inbox"]=self.imports_to_inbox.isChecked(); s["inbox_auto_archive_hours"]=self.inbox_hours.value(); s["thumb_cleanup_on_exit"]=self.thumb_cleanup_exit.isChecked(); s["thumb_keep_recent"]=self.thumb_keep_recent.value(); s["deleted_reimport_policy"]=self.deleted_reimport.currentData(); s["trash_auto_purge_days"]=int(self.trash_days.currentData() or 0); s["hide_single_char_tags"]=self.hide_single_char_tags.isChecked(); s["hide_technical_tags"]=self.hide_technical_tags.isChecked(); s["hide_meta_tags"]=self.hide_meta_tags.isChecked(); s["hide_rating_tags"]=self.hide_rating_tags.isChecked()
         s["separate_settings_storage"] = self.separate_settings.isChecked(); s["settings_storage_dir"] = self.settings_storage_dir.text().strip(); s["large_download_warning_count"] = self.large_download_count.value(); s["disk_free_reserve_gb"] = self.disk_reserve_gb.value()
-        s["thumb_quality_scale"] = int(self.thumb_quality.currentData() or 2); s["thumb_memory_items"] = self.thumb_memory_items.value(); s["thumb_threads"] = self.thumb_threads.value(); s["thumb_prefetch_pages"] = self.thumb_prefetch.isChecked(); s["performance_slow_ms"] = self.performance_slow_ms.value()
-        if s["separate_settings_storage"] and not s["settings_storage_dir"]:
+        s["grabber_preview_hide_existing"] = self.grabber_hide_existing.isChecked(); s["grabber_preview_prefetch_originals"] = self.grabber_prefetch_originals.isChecked(); s["grabber_include_protected_sites"] = self.grabber_include_protected_sites.isChecked(); s["grabber_preview_stream_cards"] = self.grabber_stream_cards.isChecked(); s["grabber_cache_limit_mb"] = self.grabber_cache_limit.value(); s["grabber_open_quality"] = self.grabber_open_quality.currentData() or "medium_50"; s["grabber_metadata_ram_cache_mb"] = self.grabber_metadata_ram_cache.value(); s["grabber_image_ram_cache_mb"] = self.grabber_image_ram_cache.value(); s["grabber_subscriptions_blocklist"] = self.grabber_blocklist.toPlainText().strip(); s["downloader_blocklist"] = s["grabber_subscriptions_blocklist"]
+        s["thumb_quality_scale"] = int(self.thumb_quality.currentData() or 2); s["thumb_memory_items"] = self.thumb_memory_items.value(); s["thumb_threads"] = self.thumb_threads.value(); s["thumb_prefetch_pages"] = self.thumb_prefetch.isChecked(); s["performance_slow_ms"] = self.performance_slow_ms.value(); s["developer_preload_md5_index"] = self.developer_preload_md5_index.isChecked(); s["developer_grabber_md5_cache_enabled"] = self.developer_grabber_md5_cache_enabled.isChecked(); s["grabber_disk_metadata_cache_enabled"] = self.developer_grabber_md5_cache_enabled.isChecked(); s["grabber_exact_md5_fanout"] = self.grabber_exact_md5_fanout.isChecked(); s["grabber_visual_hash_merge"] = self.grabber_visual_hash_merge.isChecked(); s["grabber_visual_hash_distance"] = self.grabber_visual_hash_distance.value(); s["developer_filesystem_duplicate_fallback"] = self.developer_filesystem_duplicate_fallback.isChecked()
+        s["local_total_workers"] = self.local_total_workers.value(); s["local_scan_workers"] = self.local_scan_workers.value(); s["local_hash_workers"] = self.local_hash_workers.value(); s["local_image_workers"] = self.local_image_workers.value(); s["local_video_workers"] = self.local_video_workers.value(); s["local_db_read_workers"] = self.local_db_read_workers.value(); s["local_tagger_workers"] = self.local_tagger_workers.value(); s["local_thumb_workers"] = self.local_thumb_workers.value(); s["local_thumb_pregen_workers"] = self.local_thumb_pregen_workers.value(); s["local_background_workers"] = self.local_background_workers.value(); s["visual_nomatch_workers"] = self.visual_nomatch_workers.value(); s["visual_nomatch_backend"] = self.visual_nomatch_backend.currentData() or "clip_local"; s["visual_nomatch_clip_model_dir"] = self.visual_nomatch_clip_model_dir.text().strip(); s["visual_nomatch_auto_download_model"] = self.visual_nomatch_auto_download_model.isChecked(); s["visual_nomatch_device"] = self.visual_nomatch_device.currentData() or "auto"; s["visual_nomatch_ai_min_confidence"] = float(self.visual_nomatch_ai_min_confidence.value()); s["visual_nomatch_ai_min_margin"] = float(self.visual_nomatch_ai_min_margin.value()); s["visual_nomatch_ai_fallback_heuristic"] = self.visual_nomatch_ai_fallback_heuristic.isChecked(); s["visual_nomatch_real_threshold"] = float(self.visual_nomatch_real_threshold.value()); s["visual_nomatch_classify_enabled"] = self.visual_nomatch_classify_enabled.isChecked(); s["local_preflight_enabled"] = self.local_preflight_enabled.isChecked(); s["local_preflight_phash"] = self.local_preflight_phash.isChecked(); s["tagger_parallel_workers"] = self.local_tagger_workers.value(); s["thumb_threads"] = self.local_thumb_workers.value(); s["thumb_pregen_workers"] = self.local_thumb_pregen_workers.value(); s["task_max_workers"] = self.local_background_workers.value()
+        s["sqlite_cache_mb"] = self.sqlite_cache_mb.value(); s.setdefault("sqlite_wal_limit_mb", 512); s.setdefault("sqlite_temp_store", "MEMORY"); s["sqlite_checkpoint_on_exit"] = self.sqlite_checkpoint_exit.isChecked()
+        s["light_backup_enabled"] = self.light_backup_enabled.isChecked(); s["light_backup_dir"] = self.light_backup_dir.text().strip(); s["light_backup_on_exit"] = self.light_backup_on_exit.isChecked(); s["light_backup_interval_hours"] = self.light_backup_interval.value(); s["light_backup_keep_last"] = self.light_backup_keep.value(); s["light_backup_include_cookies"] = self.light_backup_include_cookies.isChecked()
+        if s["separate_settings_storage"]:
             from core.paths import suggested_settings_storage_dir
+            # A portable Local_Booru_Archive has one fixed private branch next
+            # to output; do not let UI settings split it across drives again.
             s["settings_storage_dir"] = str(suggested_settings_storage_dir(s)); self.settings_storage_dir.setText(s["settings_storage_dir"])
         save_settings(s)
+        # save_settings canonicalizes both paths when a portable archive is
+        # active or has just been selected. Reflect that immediately in the UI.
+        self.separate_settings.setChecked(bool(s.get("separate_settings_storage", False)))
+        self.settings_storage_dir.setText(str(s.get("settings_storage_dir", "") or ""))
+        self.output_dir.setText(str(s.get("output_dir", "") or ""))
         try:
             from core.thumb_service import ThumbnailService
             ThumbnailService.instance().configure(max_threads=s["thumb_threads"], memory_items=s["thumb_memory_items"])
@@ -1117,7 +1588,7 @@ class SettingsPage(QWidget):
         self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate()
         msg = self.main.t("Settings saved")
         if old_separate != s["separate_settings_storage"] or old_dir != s["settings_storage_dir"]:
-            msg += "\n\nПапка настроек/базы/кэша изменится после перезапуска программы. Старые данные скопированы, а не удалены."
+            msg += "\n\nПосле перезапуска будут использоваться Local_Booru_Archive/output и Local_Booru_Archive/settings. Старые данные скопированы безопасно; полная конфигурация в Documents больше не создаётся."
         QMessageBox.information(self,self.main.t("Saved"),msg)
 
     def _fmt_bytes(self, value):
@@ -1222,6 +1693,32 @@ class SettingsPage(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Логи", str(e))
 
+    def choose_light_backup_dir(self):
+        start = self.light_backup_dir.text().strip() or self.output_dir.text().strip() or self.root.text()
+        folder = QFileDialog.getExistingDirectory(self, "Папка для лёгких резервных копий", start)
+        if folder:
+            self.light_backup_dir.setText(folder)
+            self.light_backup_enabled.setChecked(True)
+
+    def create_light_backup_now(self):
+        # Pull values from widgets without forcing a full settings save dialog.
+        s = self.main.settings
+        s["light_backup_enabled"] = self.light_backup_enabled.isChecked()
+        s["light_backup_dir"] = self.light_backup_dir.text().strip()
+        s["light_backup_on_exit"] = self.light_backup_on_exit.isChecked()
+        s["light_backup_interval_hours"] = self.light_backup_interval.value()
+        s["light_backup_keep_last"] = self.light_backup_keep.value()
+        s["light_backup_include_cookies"] = self.light_backup_include_cookies.isChecked()
+        try:
+            from core.light_backup import create_light_backup
+            result = create_light_backup(s, reason="manual", force=True)
+            if not result.get("created"):
+                raise RuntimeError(result.get("error") or result.get("reason") or "копия не создана")
+            save_settings(s)
+            QMessageBox.information(self, "Резервная копия", f"Копия создана:\n{result.get('path')}\n\nРазмер: {int(result.get('bytes', 0)) // 1024} КБ")
+        except Exception as exc:
+            QMessageBox.warning(self, "Резервная копия", str(exc))
+
     def show_changelog(self):
         QMessageBox.information(self, "Что нового", "v30 Danbooru JSON-only и корректные API-запросы\n\n- официальный Danbooru берёт теги только из posts.json / posts/<id>.json, без HTML-fallback\n- для Danbooru используется User-Agent LocalBooru вместо имитации браузера в API-запросах\n- если API заблокирован Cloudflare/403, источник честно пропускается без попытки разобрать страницу как теги\n- граббер и подписки используют ту же безопасную логику для официального Danbooru\n\nv29 e621 JSON-only и очистка загрязнённых тегов\n\n- e621/e926 берут теги только из posts.json, без HTML-панели со счётчиками и Uploaded by the artist\n- восстановлены официальные категории contributor / species / lore / invalid\n- обслуживание чистит *_Uploaded_by_the_artist вместе со *_3.0k / *_4.2m\n- e926 получил те же API-ограничения, что e621\n\nv28 просмотрщик, e621 и интерфейс\n\n- открытый пост декодируется с исходным соотношением сторон, без кропа карточного превью\n- исправлен e621 species и очистка тегов со счётчиками\n- «Удалено» получило предпросмотр, теги и источники\n- ПКМ по тегу позволяет выбрать свой цвет\n- клик по тегу всегда открывает Галерею\n- из дубликатора убран шум по одному только разрешению\n- настройка разделов находится только в Настройках\n\nv27 навигация и темы\n\n- переход между страницами через открытый пост больше не пересобирает скрытую галерею\n- для «Удалено» используется нормальная иконка корзины\n- галочки в тёмных темах стали контрастными\n\nv26 исправления просмотрщика и модульного интерфейса\n\n- ПКМ в галерее: удаление в корзину с подтверждением\n- переход назад между страницами в просмотрщике\n- безопасное вписывание медиа целиком по умолчанию\n- species и очистка e621-счётчиков в тегах\n- настройка видимости и групп модулей интерфейса\n\nv25 завершение большого прохода\n\n- очистка загрузчика и подписок теперь идёт через «Удалено»\n- защита от возврата окончательно удалённого MD5 в граббере\n- Новые автоматически уходят в Архив во время работы программы\n- экспорт текущей выдачи и скрытие технических тегов\n- точечная очистка превью вместо сброса всего кэша\n\nv24: хранилище, диагностика, категории и горячие клавиши\nv23: Корзина / Новые / дубликатор / поиск")
 
@@ -1295,7 +1792,12 @@ class SettingsPage(QWidget):
         dlg = InterfaceModulesDialog(self.main.settings, self)
         if dlg.exec():
             try:
-                modules, order, auto_hide, extra_collapsed = dlg.values()
+                values = dlg.values()
+                if len(values) == 5:
+                    modules, order, auto_hide, extra_collapsed, free_navigation = values
+                else:
+                    modules, order, auto_hide, extra_collapsed = values
+                    free_navigation = True
             except ValueError as exc:
                 QMessageBox.warning(self, "Разделы интерфейса", str(exc))
                 return
@@ -1303,12 +1805,13 @@ class SettingsPage(QWidget):
             self.main.settings["interface_module_order"] = order
             self.main.settings["auto_hide_single_workspace"] = auto_hide
             self.main.settings["interface_extra_collapsed"] = extra_collapsed
+            self.main.settings["interface_free_navigation"] = free_navigation
             save_settings(self.main.settings)
             try:
                 self.main.apply_interface_modules()
             except Exception as exc:
                 QMessageBox.warning(self, "Модули интерфейса", str(exc)); return
-            QMessageBox.information(self, "Разделы интерфейса", "Порядок, видимость и группа «Дополнительно» применены.")
+            QMessageBox.information(self, "Разделы интерфейса", "Свободная структура страниц применена.")
 
     def configure_tag_categories(self):
         dlg = TagCategoryDialog(self.main.settings, self)
@@ -1362,7 +1865,7 @@ class SettingsPage(QWidget):
                 f"Бэкап создан:\n{Path(backup).name}\n{Path(backup).stat().st_size//1024} KB")
         else:
             QMessageBox.information(self, "Резервная копия",
-                "Бэкап уже создавался в последние 24 часа.\nДля принудительного — удали файлы в data/db_backups/")
+                "Бэкап уже создавался в последние 24 часа.\nДля принудительного — удали файлы в Local_Booru_Archive/settings/output/backups/db/")
 
     def _rebuild_vptree(self):
         from core.database.connection import get_connection
@@ -1684,6 +2187,7 @@ class SettingsPage(QWidget):
             QMessageBox.Yes | QMessageBox.No
         ) != QMessageBox.Yes:
             return
+        self._release_open_media_before_delete()
         try:
             if self.tag_cleanup_kind.currentData() == "source":
                 from core.services.library_service import delete_by_source
@@ -1753,6 +2257,7 @@ class SettingsPage(QWidget):
         )
         if QMessageBox.warning(self, self.main.t("Confirm"), msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
+        self._release_open_media_before_delete()
         try:
             from core.services.library_service import delete_by_buckets
             result = delete_by_buckets(self.main.settings, db_buckets, delete_files=True)
@@ -1780,6 +2285,7 @@ class SettingsPage(QWidget):
         )
         if QMessageBox.warning(self, self.main.t("Confirm"), msg, QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
+        self._release_open_media_before_delete()
         try:
             from core.services.library_service import delete_by_buckets
             result = delete_by_buckets(self.main.settings, buckets, delete_files=True)
@@ -1960,9 +2466,10 @@ IQDB и SauceNAO находят по содержимому — работают
         "Парсер / Сайты": """Система поиска тегов:
   1. MD5 по filename (мгновенно)
   2. MD5 реального файла (быстро)
-  3. IQDB (поиск по изображению)
-  4. SauceNAO (нужен API ключ)
-  5. ascii2d (японский поиск по контенту)
+  3. IQDB (поиск по изображению, бесплатно)
+  4. ascii2d (если включён)
+  5. SauceNAO (нужен API ключ)
+  6. TinEye (если включён, запускается после SauceNAO)
 
 Авторизация сайтов:
   rule34.xxx использует login / API key / User ID из таблицы сайтов
@@ -1995,9 +2502,16 @@ Danbooru:
   Enter / Обновить — применить фильтр
   Рандом           — случайный пост""",
 
-        "Папки и данные": """Настройки, cookies, БД:  Documents/Local_Booru/
-Output-папка:            выбираешь сам (Local_Booru_Archive/output внутри)
-Куки для сайтов:         Local_Booru/runtime/browser_cookies/
+        "Папки и данные": """Общий корень:            Local_Booru_Archive/
+Медиа/архив:             Local_Booru_Archive/output/
+Настройки:               Local_Booru_Archive/settings/config/
+SQLite:                  Local_Booru_Archive/settings/db/
+Кэш:                     Local_Booru_Archive/settings/cache/
+Куки для сайтов:         Local_Booru_Archive/settings/output/runtime/browser_cookies/
+
+Рабочие данные не копируются в Documents. Для поиска архива новой версией
+хранится только указатель пути: %LOCALAPPDATA%/Local_Booru/workspace_pointer.json.
+Если архив не подхватился: Настройки → Подключить существующий архив...
 
 Программу можно обновить заменой файлов — данные не потеряются.""",
 
@@ -2009,7 +2523,7 @@ Output-папка:            выбираешь сам (Local_Booru_Archive/out
   IQDB ERROR: временно недоступен
   Python traceback — реальный баг, можно скопировать и сообщить
 
-Лог ошибок: Documents/Local_Booru/logs/errors.log""",
+Лог ошибок: Local_Booru_Archive/settings/output/logs/errors.log""",
     }
     def __init__(self, main, parent=None):
         super().__init__(parent); self.main=main; self.setWindowTitle('Инструкция'); self.resize(900,650)

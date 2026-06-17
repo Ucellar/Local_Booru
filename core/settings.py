@@ -1,19 +1,24 @@
 import json
-from core.paths import SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE, prepare_separate_storage
+from pathlib import Path
+from core.paths import (
+    SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE, DATA_DIR, USING_SEPARATE_STORAGE,
+    prepare_separate_storage, write_workspace_pointer, remove_workspace_pointer,
+    activate_portable_workspace,
+)
 
 
 # All known sites grouped by engine type
 # Each site: {enabled, type, login, api_key, user_id, login_url, notes}
 SITES_BY_ENGINE = {
     "Danbooru": {
-        "danbooru.donmai.us":       {"enabled": False, "type": "danbooru",      "login": "", "api_key": "", "user_id": "", "login_url": "https://danbooru.donmai.us",       "notes": "Лучшие теги. Cloudflare — нужен curl_cffi"},
-        "booru.allthefallen.moe":   {"enabled": True,  "type": "danbooru",      "login": "", "api_key": "", "user_id": "", "login_url": "https://booru.allthefallen.moe",   "notes": "ATF — Danbooru движок"},
+        "danbooru.donmai.us":       {"enabled": False, "type": "danbooru",      "login": "", "api_key": "", "user_id": "", "login_url": "https://danbooru.donmai.us",       "notes": "Лучшие теги. API: Basic Auth + честный User-Agent; cookies только для Cloudflare/browser"},
+        "booru.allthefallen.moe":   {"enabled": True,  "type": "danbooru",      "login": "", "api_key": "", "user_id": "", "login_url": "https://booru.allthefallen.moe",   "notes": "ATF — Danbooru-compatible API: /posts.json, Basic Auth + честный User-Agent, PoW/cookies только для проверки"},
         "lolibooru.moe":            {"enabled": False,  "type": "danbooru",     "login": "", "api_key": "", "user_id": "", "login_url": "https://lolibooru.moe",             "notes": "Danbooru движок"},
         "aibooru.online":           {"enabled": False,  "type": "danbooru",     "login": "", "api_key": "", "user_id": "", "login_url": "https://aibooru.online",            "notes": "AI-арт, Danbooru движок"},
     },
     "Gelbooru": {
         "gelbooru.com":             {"enabled": True,   "type": "gelbooru_html","login": "", "api_key": "", "user_id": "", "login_url": "https://gelbooru.com",              "notes": "Официальный DAPI JSON, MD5 через tags=md5:"},
-        "rule34.xxx":               {"enabled": True,   "type": "rule34xxx",    "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.xxx",               "notes": "Gelbooru движок"},
+        "rule34.xxx":               {"enabled": True,   "type": "rule34xxx",    "login": "", "api_key": "", "user_id": "", "login_url": "https://rule34.xxx/index.php?page=account&s=options", "notes": "Официальный DAPI: api.rule34.xxx, user_id + api_key, json=1, лимит до 1000"},
         "realbooru.com":            {"enabled": False,  "type": "gelbooru_html","login": "", "api_key": "", "user_id": "", "login_url": "https://realbooru.com",             "notes": "Реальные фото, Gelbooru движок"},
         "xbooru.com":               {"enabled": False,  "type": "gelbooru_html","login": "", "api_key": "", "user_id": "", "login_url": "https://xbooru.com",               "notes": "Gelbooru движок"},
         "hypnohub.net":             {"enabled": False,  "type": "gelbooru_html","login": "", "api_key": "", "user_id": "", "login_url": "https://hypnohub.net",              "notes": "Gelbooru/DAPI API"},
@@ -53,6 +58,78 @@ DEFAULT_SETTINGS = {
     "show_search_preview": True,
     "max_console_lines": 2500,
     "enable_error_console": True,
+    "developer_preload_md5_index": True,
+    "grabber_exact_md5_fanout": True,
+    "grabber_visual_hash_merge": True,
+    "grabber_visual_hash_distance": 4,
+    "grabber_preview_prefetch_originals": False,
+    "grabber_preview_prefetch_protected_originals": False,
+    "grabber_preview_stream_cards": False,
+    "grabber_include_protected_sites": False,
+    "grabber_preview_threads": 2,
+    # Persistent disk metadata cache for parser/tagger exact-MD5 shortcut.
+    # Legacy key kept because existing code/settings already use it.
+    "developer_grabber_md5_cache_enabled": True,
+    "grabber_disk_metadata_cache_enabled": True,
+    # Parser/tagger exact lookup must trust real file bytes, not filenames.
+    # The byte MD5 is cached by path+size+mtime under settings/cache.
+    "parser_real_file_hash_cache_enabled": True,
+    "parser_blueprint_enabled": True,
+    "parser_blueprint_full_access": True,
+    "parser_blueprint_auto_add_sites": True,
+    "parser_blueprint_respect_site_enabled": True,
+    "parser_blueprint_warn_invalid": True,
+    "parser_blueprint_v321_default_attached": True,
+    "parser_trust_filename_md5_only_if_matches_real": True,
+    # Developer thread menu: global ceiling and per-service local/offline queues.
+    # Network site lanes still use their own rate limits and are not counted here.
+    "local_total_workers": 8,
+    "local_scan_workers": 2,
+    "local_hash_workers": 4,
+    "local_image_workers": 4,
+    "local_video_workers": 2,
+    "local_db_read_workers": 2,
+    "local_preflight_enabled": True,
+    "local_preflight_phash": True,
+    "local_tagger_workers": 4,
+    "local_thumb_workers": 4,
+    "local_thumb_pregen_workers": 4,
+    "local_background_workers": 4,
+    "visual_nomatch_classify_enabled": True,
+    "visual_nomatch_backend": "clip_local",
+    "visual_nomatch_clip_model_dir": "",
+    "visual_nomatch_auto_download_model": True,
+    "visual_nomatch_device": "auto",
+    "visual_nomatch_ai_min_confidence": 0.56,
+    "visual_nomatch_ai_min_margin": 0.08,
+    "visual_nomatch_ai_fallback_heuristic": False,
+    "visual_nomatch_real_threshold": 0.34,
+    "visual_nomatch_workers": 2,
+    "rule34_sha1_async_locator_enabled": True,
+    "rule34_sha1_async_locator_workers": 4,
+    "rule34_variant_locator_side_queue_enabled": True,
+    "rule34_image_key_locator_mode": "hotlink_only",
+    "rule34_image_key_hotlink_redirect_enabled": True,
+    "rule34_image_key_hotlink_extensions": "png",
+    "rule34_image_key_hotlink_request_timeout": 4.0,
+    "rule34_image_key_hotlink_playwright_fallback": True,
+    "rule34_image_key_hotlink_playwright_headless": False,
+    "rule34_image_key_hotlink_playwright_timeout": 25.0,
+    "rule34_image_key_bucket_probe_enabled": False,
+    "rule34_image_key_bucket_probe_sequence": "",
+    "rule34_image_key_bucket_probe_max": 9999,
+    "rule34_image_key_bucket_probe_step": 100,
+    "rule34_image_key_bucket_request_timeout": 3.0,
+    "rule34_image_key_bucket_total_timeout": 90.0,
+    "atf_pixel_hash_locator_enabled": True,
+    "atf_pixel_hash_workers": 2,
+    "atf_pixel_hash_delay_ms": 1100,
+    "atf_pixel_hash_max_assets": 5,
+    # RAM-only working cache for the online grabber UI. Does not affect parser.
+    "grabber_metadata_ram_cache_mb": 128,
+    "grabber_image_ram_cache_mb": 256,
+    "grabber_open_quality": "medium_50",
+    "developer_filesystem_duplicate_fallback": False,
     "workspace": "tagger",
     "gallery_filter": "all",
     "gallery_source": "output",
@@ -61,10 +138,31 @@ DEFAULT_SETTINGS = {
     "google_fallback_mode": "br34_manual",
     "output_dir": "",
     "google_fallback_enabled": False,
-    "columns": 4,
+    "columns": 8,
+    "grabber_columns": 8,
+    "grabber_cache_limit_mb": 200,
+    "grabber_rows": 4,
     "rows_per_page": 4,
     "card_height": 220,
-    "items_per_page": 16,
+    "items_per_page": 32,
+    "grabber_preview_columns": 8,
+    "grabber_preview_rows": 4,
+    "grabber_preview_limit": 32,
+    "grabber_preview_prefetch_pages": 4,
+    "grabber_preview_sites": "rule34.xxx, gelbooru.com, e621.net, booru.allthefallen.moe, danbooru.donmai.us",
+    "grabber_preview_hide_existing": True,
+    "grabber_preview_merge_existing_sources": True,
+    "grabber_preview_manual_exclusions": True,
+    # Browser extension companion: localhost-only API used by the Chrome/Chromium
+    # extension to hide already-downloaded booru cards visually. Parser/tagger are
+    # not affected by this API or its manual hide list.
+    "browser_companion_api_enabled": True,
+    "browser_companion_api_host": "127.0.0.1",
+    "browser_companion_api_port": 47734,
+    "browser_companion_use_grabber_hides": True,
+    "browser_companion_max_batch": 250,
+    "grabber_subscriptions_blocklist": "",
+    "grabber_tag_download_limit": 500,
     "skip_existing": True,
     "tag_only_untagged": True,
     "retry_nomatch": False,
@@ -78,14 +176,38 @@ DEFAULT_SETTINGS = {
     "tagger_low_power_mode": False,
     "tagger_site_interval_seconds": 1.10,
     "tagger_conveyor_window": 32,
-    "request_timeout_seconds": 20,
-    "network_retry_attempts": 2,
+    "request_timeout_seconds": 30,
+    "request_connect_timeout_seconds": 10,
+    "request_read_timeout_seconds": 30,
+    "network_retry_attempts": 3,
+    "network_retry_base_delay_seconds": 1.0,
+    "network_retry_max_delay_seconds": 4.0,
     "network_retry_delay_seconds": 10,
+    "sqlite_passive_checkpoint_every": 500,
     "saucenao_cooldown_seconds": 3600,
     "limit_files": 0,
     "enable_md5_lookup": True,
     "enable_saucenao": True,
     "enable_iqdb": True,
+    "enable_danbooru_iqdb": False,
+    "enable_e621_iqdb": True,
+    "e621_browser_api_fallback": True,
+    "e621_browser_api_headless": False,
+    "e621_browser_api_verify_timeout_seconds": 120,
+    "e621_browser_api_backend": "companion_extension",
+    "e621_browser_api_companion_timeout_seconds": 120,
+    "e621_browser_api_allow_external_chrome_cdp": False,
+    "e621_browser_api_cdp_port": 9222,
+    "e621_browser_api_launch_external_chrome": False,
+    "e621_iqdb_max_results": 5,
+    "enable_tineye": False,
+    "tineye_delay_min": 30,
+    "tineye_delay_max": 90,
+    "tineye_browser_fallback": True,
+    "tineye_browser_headless": False,
+    "tineye_browser_timeout_seconds": 60,
+    "tineye_api_docs_url": "https://api.tineye.com/",
+    "tineye_max_results": 10,
     "iqdb_min_similarity": 75.0,
     "saucenao_api_key": "",
     "min_similarity": 85.0,
@@ -107,25 +229,34 @@ DEFAULT_SETTINGS = {
     "manga_separate_tags": True,
     "sites": DEFAULT_SITES,
     "custom_sites": [],
+    # Parser site-manager UI state (v131): presets can be removed and rows keep a manual scan order.
+    "deleted_builtin_sites": [],
+    "site_manual_order": [],
     "use_sqlite_index": True,
     "sqlite_auto_index_on_gallery_open": False,
     "sqlite_compute_md5_on_index": False,
     "sqlite_compute_phash_on_index": True,
     "sqlite_db_folder": "",
-    "task_max_workers": 2,
+    "task_max_workers": 4,
     "gallery_sql_page_size": 200,
     "thumbnail_worker_enabled": True,
     "thumbs_pregen_on_index": True,
-    "thumb_pregen_workers": 2,
+    "thumb_pregen_workers": 4,
     "thumb_cache_w": 256,
     "thumb_cache_h": 256,
     "thumb_cache_card_w": 240,
     "thumb_cache_card_h": 220,
     "sqlite_connection_pool": True,
+    # SQLite cache is per connection. Keep the default conservative because the
+    # parser, gallery and background workers may each own a connection.
+    "sqlite_cache_mb": 40,
+    "sqlite_temp_store": "MEMORY",
+    "sqlite_wal_limit_mb": 512,
+    "sqlite_checkpoint_on_exit": True,
     "db_batch_commit_size": 100,
     "watch_filesystem": False,
     "watch_poll_seconds": 15,
-    "tagger_parallel_workers": 1,
+    "tagger_parallel_workers": 4,
     "http_min_interval_seconds": 1.0,
     "http_min_interval_by_host": {},
     # Library lifecycle / safety
@@ -138,8 +269,11 @@ DEFAULT_SETTINGS = {
     # Gallery performance controls; safe defaults match the existing v115 behaviour.
     "thumb_quality_scale": 2,
     "thumb_memory_items": 400,
-    "thumb_threads": 3,
+    "thumb_threads": 4,
     "thumb_prefetch_pages": True,
+    "gallery_defer_sidebar_counts_while_parser": True,
+    "gallery_sidebar_refresh_delay_ms": 7000,
+    "pixmap_cache_mb": 128,
     "performance_slow_ms": 100,
     "separate_settings_storage": False,
     "settings_storage_dir": "",
@@ -153,12 +287,26 @@ DEFAULT_SETTINGS = {
     "hide_meta_tags": False,
     "hide_rating_tags": False,
     "hotkeys": {"previous": "A", "next": "D", "favorite": "F", "fit": "W", "volume": "E", "back": "Q", "fullscreen": "F11", "zoom_in": "+", "zoom_out": "-", "zoom_reset": "0"},
-    # Sidebar modules: pages may be hidden or moved to another workspace.
+    # Sidebar modules: free page tree.  Legacy 4-workspace filtering can be
+    # disabled; by default v326 lets the user put any page inside any page.
+    "interface_free_navigation": True,
     "interface_modules": {},
     "interface_module_order": [],
     "interface_extra_collapsed": True,
+    # Per-page nested navigation collapsed state.  Key = parent page key,
+    # value True means its child pages are hidden until expanded.
+    "interface_page_collapsed": {},
     "auto_hide_single_workspace": True,
+    # Lightweight backup: copies SQLite/config/manual metadata only, never media/cache.
+    "light_backup_enabled": False,
+    "light_backup_dir": "",
+    "light_backup_on_exit": True,
+    "light_backup_interval_hours": 24,
+    "light_backup_keep_last": 10,
+    "light_backup_include_cookies": False,
+    "light_backup_last_at": 0,
 }
+
 
 def _dict_or_empty(value):
     return value if isinstance(value, dict) else {}
@@ -166,16 +314,28 @@ def _dict_or_empty(value):
 def _list_or_empty(value):
     return value if isinstance(value, list) else []
 
-def _normalize_sites(saved):
+def _normalize_sites(saved, deleted_builtin_sites=None):
     saved = _dict_or_empty(saved)
+    deleted = {str(x) for x in _list_or_empty(deleted_builtin_sites)}
+    # A built-in may have had its domain/base URL changed in the site editor.
+    # builtin_id keeps it tied to the original template and prevents the old
+    # default domain from silently reappearing beside the edited row.
+    replaced_builtin_ids = {
+        str(cfg.get("builtin_id")) for cfg in saved.values()
+        if isinstance(cfg, dict) and cfg.get("builtin_id")
+    }
     out = {}
     for domain, defaults in DEFAULT_SITES.items():
+        if domain in deleted or (domain in replaced_builtin_ids and domain not in saved):
+            continue
         current = saved.get(domain, {})
         out[domain] = {**defaults, **_dict_or_empty(current)}
     # Keep unknown/new built-in/custom-like site configs without crashing older settings.
     for domain, cfg in saved.items():
         if domain not in out and isinstance(cfg, dict):
-            out[domain] = cfg
+            builtin_id = str(cfg.get("builtin_id") or "")
+            if domain not in deleted and builtin_id not in deleted:
+                out[domain] = cfg
     return out
 
 def _normalize_custom_sites(saved):
@@ -197,18 +357,104 @@ def deep_merge(base, data):
     for k, v in data.items():
         if k not in ("sites", "custom_sites") and k not in _RETIRED_LIVE_SETTINGS:
             out[k] = v
-    out["sites"] = _normalize_sites(data.get("sites", {}))
+    deleted_builtin_sites = _list_or_empty(data.get("deleted_builtin_sites", DEFAULT_SETTINGS.get("deleted_builtin_sites", [])))
+    out["deleted_builtin_sites"] = deleted_builtin_sites
+    out["sites"] = _normalize_sites(data.get("sites", {}), deleted_builtin_sites)
     out["custom_sites"] = _normalize_custom_sites(data.get("custom_sites", DEFAULT_SETTINGS.get("custom_sites", [])))
+    out["site_manual_order"] = _list_or_empty(data.get("site_manual_order", DEFAULT_SETTINGS.get("site_manual_order", [])))
     return out
 
+def _lock_to_active_portable_workspace(settings):
+    """Force config fields to agree with the workspace selected at bootstrap.
+
+    v135/v136 could correctly resolve Local_Booru_Archive/settings through a
+    pointer but then load stale fields copied from the old Documents config
+    (for example output_dir=Local_Booru_Output and separate_settings_storage=
+    false).  Saving that stale object removed the pointer and sent the next
+    launch back to Documents.  Once this process is bootstrapped from a
+    portable workspace, that workspace is authoritative.
+    """
+    if not USING_SEPARATE_STORAGE:
+        return settings
+    locked = dict(settings or {})
+    archive_root = DATA_DIR.parent
+    output = archive_root / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    locked["separate_settings_storage"] = True
+    locked["settings_storage_dir"] = str(DATA_DIR)
+    locked["output_dir"] = str(output)
+    return locked
+
+def _canonicalize_new_portable_workspace(settings, target):
+    """Keep a new portable selection inside one Local_Booru_Archive root."""
+    fixed = dict(settings or {})
+    target = Path(target).expanduser().resolve()
+    archive_root = target.parent if target.name.lower() == "settings" else target
+    output = archive_root / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    fixed["separate_settings_storage"] = True
+    fixed["settings_storage_dir"] = str(target)
+    fixed["output_dir"] = str(output)
+    return fixed
+
+_REMOVED_REVERSE_SERVICES_V204 = (
+    "enable_fuzzysearch",
+    "fuzzysearch_api_key",
+    "fuzzysearch_endpoint",
+    "fuzzysearch_api_docs_url",
+    "fuzzysearch_max_results",
+    "enable_fluffle",
+    "fluffle_api_key",
+    "fluffle_endpoint",
+    "fluffle_api_docs_url",
+    "fluffle_max_results",
+)
+
+def _drop_removed_reverse_services(settings):
+    """v204: Fluffle/FuzzySearch removed after false-positive tagging."""
+    fixed = dict(settings or {})
+    for key in _REMOVED_REVERSE_SERVICES_V204:
+        fixed.pop(key, None)
+    return fixed
+
 def load_settings():
+    # SETTINGS_FILE points at Local_Booru_Archive/settings/config whenever a
+    # portable workspace is configured.  A pre-v135 Documents copy is read
+    # only as a migration fallback and is retired after the portable config is
+    # confirmed to exist.
     for candidate in (SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE):
         if candidate.exists():
             try:
-                return deep_merge(DEFAULT_SETTINGS, json.loads(candidate.read_text(encoding="utf-8")))
+                loaded = deep_merge(DEFAULT_SETTINGS, json.loads(candidate.read_text(encoding="utf-8")))
+                loaded = _drop_removed_reverse_services(_lock_to_active_portable_workspace(loaded))
+                # v160: switch the default gallery/grabber page shape from the
+                # old 4x4 test layout to a 16:9-friendly 8x4 layout.  Only
+                # touch untouched old defaults; manual user layouts remain as-is.
+                if not loaded.get("gallery_layout_v160_initialized"):
+                    try:
+                        if int(loaded.get("columns", 4) or 4) == 4 and int(loaded.get("rows_per_page", 4) or 4) == 4:
+                            loaded["columns"] = 8
+                            loaded["rows_per_page"] = 4
+                            loaded["items_per_page"] = 32
+                    except Exception:
+                        pass
+                    loaded["gallery_layout_v160_initialized"] = True
+                # v321: the parser blueprint is the normal/default parser plan.
+                # Existing settings from v319/v320 may contain False because the
+                # editor was experimental there; turn it on once, then respect
+                # later manual toggles.
+                if not loaded.get("parser_blueprint_v321_default_attached"):
+                    loaded["parser_blueprint_enabled"] = True
+                    loaded["parser_blueprint_full_access"] = True
+                    loaded["parser_blueprint_auto_add_sites"] = True
+                    loaded["parser_blueprint_respect_site_enabled"] = True
+                    loaded["parser_blueprint_v321_default_attached"] = True
+                if candidate == SETTINGS_FILE:
+                    activate_portable_workspace()
+                return loaded
             except Exception:
                 pass
-    return DEFAULT_SETTINGS.copy()
+    return _drop_removed_reverse_services(_lock_to_active_portable_workspace(DEFAULT_SETTINGS.copy()))
 
 def _atomic_write_settings(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -217,15 +463,49 @@ def _atomic_write_settings(path, data):
     tmp.replace(path)
 
 def save_settings(settings):
+    # Keep a reference to the caller-owned dict.  Some UI/tests rely on
+    # save_settings() normalizing paths back into the same object.
+    _original_settings_ref = settings if isinstance(settings, dict) else None
+    settings = _drop_removed_reverse_services(settings)
     for retired in _RETIRED_LIVE_SETTINGS:
         settings.pop(retired, None)
-    settings["items_per_page"] = int(settings.get("columns", 4)) * int(settings.get("rows_per_page", 4))
-    data = json.dumps(settings, ensure_ascii=False, indent=2)
-    _atomic_write_settings(SETTINGS_FILE, data)
-    # The bootstrap copy is intentionally retained in the legacy location.
-    # It tells the next launch where separately stored db/cache/config live.
-    _atomic_write_settings(BOOTSTRAP_SETTINGS_FILE, data)
-    if bool(settings.get("separate_settings_storage", False)):
-        target = prepare_separate_storage(settings)
-        if target is not None:
-            _atomic_write_settings(target / "config" / "app_settings.json", data)
+    settings["items_per_page"] = int(settings.get("columns", 8)) * int(settings.get("rows_per_page", 4))
+
+    # A process opened through Local_Booru_Archive/settings must never be able
+    # to detach itself merely because an old migrated config still had the
+    # legacy checkbox disabled.  Moving to another archive is performed by the
+    # explicit "Подключить существующий архив" action.
+    portable_requested = USING_SEPARATE_STORAGE or bool(settings.get("separate_settings_storage", False))
+    if portable_requested:
+        if USING_SEPARATE_STORAGE:
+            target = DATA_DIR
+            normalized = _lock_to_active_portable_workspace(settings)
+        else:
+            target = prepare_separate_storage(settings)
+            if target is None:
+                raise OSError("Не удалось определить Local_Booru_Archive/settings")
+            normalized = _canonicalize_new_portable_workspace(settings, target)
+        settings.update(normalized)
+        data = json.dumps(settings, ensure_ascii=False, indent=2)
+        canonical = target / "config" / "app_settings.json"
+        _atomic_write_settings(canonical, data)
+        # The locator contains only paths.  Never mirror API keys, cookies or
+        # user configuration into Documents when a portable archive is active.
+        write_workspace_pointer(target)
+        # Once the active process itself is portable, safely remove any obsolete
+        # full settings copy from Documents.
+        try:
+            if USING_SEPARATE_STORAGE and BOOTSTRAP_SETTINGS_FILE.exists() and BOOTSTRAP_SETTINGS_FILE.resolve() != canonical.resolve():
+                BOOTSTRAP_SETTINGS_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+    else:
+        # Legacy mode is retained only until the user selects/creates a portable
+        # Local_Booru_Archive.  A connected archive cannot fall back here.
+        data = json.dumps(settings, ensure_ascii=False, indent=2)
+        remove_workspace_pointer()
+        _atomic_write_settings(BOOTSTRAP_SETTINGS_FILE, data)
+
+    if _original_settings_ref is not None and _original_settings_ref is not settings:
+        _original_settings_ref.clear()
+        _original_settings_ref.update(settings)

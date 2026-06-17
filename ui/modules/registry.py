@@ -8,6 +8,7 @@ from ui.tags_page import TagsPage
 from ui.post_page import PostPage
 from ui.settings_page import SettingsPage
 from ui.tagger_page import TaggerPage
+from ui.parser_blueprint_page import ParserBlueprintPage
 from ui.nomatch_page import NoMatchPage
 from ui.manga import MangaPage
 from ui.downloader import DownloaderPage
@@ -35,6 +36,7 @@ class PageSpec:
 PAGE_SPECS: tuple[PageSpec, ...] = (
     # Парсер workspace (был АПТ)
     PageSpec("Tagger",     "tagger_page",     "TaggerTitle", "btn_tagger",     "Парсер",   TaggerPage,     "apt"),
+    PageSpec("ParserBlueprint", "parser_blueprint_page", "ParserBlueprint", "btn_parser_blueprint", "Blueprint", ParserBlueprintPage, "apt", True),
     PageSpec("NO_MATCH",   "nomatch_page",    "NO_MATCH",    "btn_nomatch",    "Брак",     NoMatchPage,    "apt", True),
     # Галерея workspace — overview + content pages
     PageSpec("Overview",   "overview_page",   "Overview",    "btn_overview",   "Обзор",     OverviewPage,   "gallery", True),

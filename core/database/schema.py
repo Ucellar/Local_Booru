@@ -29,7 +29,9 @@ def init_db(con, force=False):
         trashed_at INTEGER NOT NULL DEFAULT 0,
         favorite INTEGER NOT NULL DEFAULT 0,
         last_viewed_at INTEGER NOT NULL DEFAULT 0,
-        import_origin TEXT NOT NULL DEFAULT ''
+        import_origin TEXT NOT NULL DEFAULT '',
+        original_file_name TEXT NOT NULL DEFAULT '',
+        content_name_policy TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS tags (
@@ -167,7 +169,10 @@ def init_db(con, force=False):
         service TEXT PRIMARY KEY,
         cooldown_until INTEGER NOT NULL DEFAULT 0,
         reason TEXT NOT NULL DEFAULT '',
-        updated_at INTEGER NOT NULL DEFAULT 0
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        short_remaining INTEGER NOT NULL DEFAULT -1,
+        long_remaining INTEGER NOT NULL DEFAULT -1,
+        quota_checked_at INTEGER NOT NULL DEFAULT 0
     );
 
     -- NO_MATCH is library state, not a sidecar marker/cache file.
@@ -176,6 +181,15 @@ def init_db(con, force=False):
         media_path TEXT NOT NULL DEFAULT '',
         reason TEXT NOT NULL DEFAULT 'no_match',
         manual_url TEXT NOT NULL DEFAULT '',
+        source_url TEXT NOT NULL DEFAULT '',
+        source_label TEXT NOT NULL DEFAULT '',
+        source_host TEXT NOT NULL DEFAULT '',
+        source_similarity REAL NOT NULL DEFAULT 0,
+        last_error TEXT NOT NULL DEFAULT '',
+        visual_status TEXT NOT NULL DEFAULT '',
+        visual_confidence REAL NOT NULL DEFAULT 0,
+        visual_model TEXT NOT NULL DEFAULT '',
+        visual_checked_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL DEFAULT 0,
         active INTEGER NOT NULL DEFAULT 1
     );
@@ -260,6 +274,8 @@ def init_db(con, force=False):
     _ensure_column(con, "images", "favorite", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(con, "images", "last_viewed_at", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(con, "images", "import_origin", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(con, "images", "original_file_name", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(con, "images", "content_name_policy", "TEXT NOT NULL DEFAULT ''")
 
     con.executescript("""
     CREATE INDEX IF NOT EXISTS idx_images_bucket ON images(bucket);
@@ -321,6 +337,8 @@ def init_db(con, force=False):
     CREATE INDEX IF NOT EXISTS idx_deleted_rules_active ON deleted_media_rules(active, manual_delete);
     CREATE INDEX IF NOT EXISTS idx_service_state_cooldown ON service_state(cooldown_until);
     CREATE INDEX IF NOT EXISTS idx_no_match_active ON no_match_items(active, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_no_match_reason_active ON no_match_items(active, reason, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_no_match_source_host ON no_match_items(active, source_host, updated_at);
     CREATE INDEX IF NOT EXISTS idx_delete_log_path ON delete_log(path);
     CREATE INDEX IF NOT EXISTS idx_task_log_status ON task_log(status, task_type);
     CREATE INDEX IF NOT EXISTS idx_operation_journal_status ON operation_journal(status, op_type);

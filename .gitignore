@@ -3,54 +3,39 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.Python
+.pytest_cache/
 .venv/
 venv/
-env/
+
+# Runtime data
+Local_Booru_Archive/
+data/cache/
+data/runtime/
+data/logs/
+data/temp/
+data/tmp/
+data/settings/output/runtime/
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.part
 
 # Build output
 build/
 dist/
 *.spec.bak
 
-# Local data / runtime
+# Local logs / reports
 *.log
-*.tmp
-*.bak
-*.db
-*.sqlite
-*.sqlite3
-*.sqlite3-wal
-*.sqlite3-shm
-*.db-wal
-*.db-shm
+compile_results*.txt
+test_results*.txt
+full_test_results*.txt
+CHANGELOG_v*.txt
 
-# Project runtime folders, keep placeholders only
-data/cache/*
-!data/cache/.keep
-
-data/runtime/*
-!data/runtime/.keep
-
-data/settings/*
-!data/settings/.keep
-
-# OS / IDE
+# OS / editor
 .DS_Store
 Thumbs.db
-.idea/
 .vscode/
-Local_Booru_Output/
-Local_Booru_Archive/
-output/
-dist/
-build/
-*.spec.bak
-
-# Archives
-*.zip
-*.7z
-*.rar
-*.cookies
-cookies.txt
-browser_cookies/
+.idea/

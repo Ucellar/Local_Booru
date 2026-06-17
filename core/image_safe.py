@@ -26,7 +26,7 @@ def _cache_root():
         from core.paths import CACHE_DIR
         root = Path(CACHE_DIR) / "thumbs"
     except Exception:
-        root = Path.cwd() / "Local_Booru_Output" / "preview_cache" / "thumbs"
+        root = Path.cwd() / "Local_Booru_Archive" / "settings" / "cache" / "thumbs"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

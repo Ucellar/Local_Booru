@@ -28,7 +28,14 @@ class AppContext:
 
     @property
     def task_manager(self):
-        return self.get_or_create("task_manager", lambda: TaskManager(max_workers=self.settings.get("task_max_workers", 2)))
+        def _make_task_manager():
+            try:
+                from core.local_parallel import local_workers
+                workers = local_workers(self.settings, "task_max_workers", int(self.settings.get("local_background_workers", 4) or 4), maximum=16)
+            except Exception:
+                workers = self.settings.get("task_max_workers", 4)
+            return TaskManager(max_workers=workers)
+        return self.get_or_create("task_manager", _make_task_manager)
 
     def register(self, name: str, service: Any) -> Any:
         self._services[name] = service

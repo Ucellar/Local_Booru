@@ -733,7 +733,7 @@ class LoginBrowserDialog(QDialog):
         url = _normalize_url(self.url_edit.text() or self.current_url, allow_blank=False)
         if url:
             webbrowser.open(url)
-            self.log("Opened in external browser. For Danbooru/Cloudflare, export cookies.txt from Chrome/Edge and put it in data/runtime/browser_cookies/danbooru.donmai.us.txt")
+            self.log(f"Opened in external browser. For Danbooru/Cloudflare, export cookies.txt from Chrome/Edge and put it in {BROWSER_COOKIES_DIR / 'danbooru.donmai.us.txt'}")
         else:
             self.log("BR34 SKIP EMPTY/BAD EXTERNAL URL")
 

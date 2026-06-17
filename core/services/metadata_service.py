@@ -5,6 +5,7 @@ from core.database.connection import db
 from core.database.storage import (
     ensure_image,
     replace_media_tag_groups,
+    remove_media_tag_link,
     remove_media_source_link,
     found_media_path_by_md5,
 )
@@ -40,7 +41,7 @@ def raw_metadata_for_path(settings: dict, media_path: str | Path):
         ).fetchone()
 
 __all__ = [
-    "ensure_image", "replace_media_tag_groups", "remove_media_source_link",
+    "ensure_image", "replace_media_tag_groups", "remove_media_tag_link", "remove_media_source_link",
     "found_media_path_by_md5", "image_id_for_path", "set_rating", "get_rating",
     "raw_metadata_for_path",
 ]

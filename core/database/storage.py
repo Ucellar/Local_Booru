@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import time
 from typing import Iterable
+from urllib.parse import urlparse, parse_qs
 
 from .connection import db
 from core.media_utils import (
@@ -16,6 +17,23 @@ from core.media_utils import (
 )
 from core.tag_utils import normalize_tag
 
+
+_META_TAG_OVERRIDES = {"artist_request"}
+
+def _category_for_tag(name: str, category: str) -> str:
+    """Apply Local Booru presentation rules to technical booru tags."""
+    norm = normalize_tag(str(name or ""))
+    if norm in _META_TAG_OVERRIDES:
+        return "meta"
+    return str(category or "general")
+
+
+
+def _has_column(con, table: str, column: str) -> bool:
+    try:
+        return column in {str(r[1]) for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return False
 
 def _ensure_image(con, media_path, status="", original_path="", hash_md5=None, lifecycle=None, inbox_until=0, import_origin=""):
     """Ensure row; lifecycle is only changed when the caller explicitly supplies it."""
@@ -39,6 +57,15 @@ def _ensure_image(con, media_path, status="", original_path="", hash_md5=None, l
             indexed_at=excluded.indexed_at
     """, (str(p), p.name, bucket, size, width, height, hash_md5, mtime_ns, int(p.suffix.lower() in VIDEO_EXTS), int(time.time()), initial_lifecycle, int(inbox_until or 0), str(import_origin or "")))
     image_id = int(con.execute("SELECT id FROM images WHERE path=?", (str(p),)).fetchone()["id"])
+    try:
+        if _has_column(con, "images", "original_file_name"):
+            original_name = Path(original_path).name if original_path else p.name
+            con.execute(
+                "UPDATE images SET original_file_name=CASE WHEN COALESCE(original_file_name,'')='' THEN ? ELSE original_file_name END, content_name_policy=CASE WHEN COALESCE(content_name_policy,'')='' AND COALESCE(hash_md5,'')<>'' AND file_name LIKE '%__%' THEN 'md5_suffix' ELSE COALESCE(content_name_policy,'') END WHERE id=?",
+                (original_name, image_id),
+            )
+    except Exception:
+        pass
     if lifecycle is not None:
         con.execute("UPDATE images SET lifecycle=?, inbox_until=?, import_origin=CASE WHEN ?<>'' THEN ? ELSE import_origin END, deleted=0 WHERE id=?", (str(lifecycle), int(inbox_until or 0), str(import_origin or ""), str(import_origin or ""), image_id))
     if original_path or status:
@@ -62,11 +89,11 @@ def add_image_tags(con, image_id, groups):
     if isinstance(groups, list):
         groups = {"general": groups}
     for category, tags in groups.items():
-        cat = str(category or "general")
         for raw in tags or []:
             name = normalize_tag(str(raw))
             if not name:
                 continue
+            cat = _category_for_tag(name, category)
             norm = normalize_tag(name)
             con.execute("INSERT OR IGNORE INTO tags(name, normalized_name, category) VALUES(?,?,?)", (name, norm, cat))
             row = con.execute("SELECT id, category FROM tags WHERE normalized_name=?", (norm,)).fetchone()
@@ -83,8 +110,47 @@ def replace_image_tags(con, image_id, groups):
     add_image_tags(con, image_id, groups)
 
 
+def _is_navigational_source_url(url: str) -> bool:
+    """Reject gallery/search/navigation URLs that are not evidence for one post.
+
+    Reverse services occasionally emit Gelbooru list links such as
+    ``page=post&s=list&tags=all`` alongside a real result on another site.
+    They must never become image sources because opening them shows the site
+    gallery rather than the confirmed file.  This guard is deliberately narrow:
+    concrete post URLs and ordinary external/file source URLs stay valid.
+    """
+    try:
+        parsed = urlparse(str(url or ""))
+        path = str(parsed.path or "").lower()
+        query = {str(k).lower(): [str(v).lower() for v in vals] for k, vals in parse_qs(parsed.query).items()}
+        full = (path + "?" + str(parsed.query or "")).lower()
+        if "/posts/random" in full or "/post/random" in full:
+            return True
+        page = (query.get("page") or [""])[0]
+        action = (query.get("s") or [""])[0]
+        if page == "post" and action == "list":
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _ensure_source(con, url: str):
+    url = str(url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return None
+    if _is_navigational_source_url(url):
+        return None
+    host = host_from_url(url)
+    if not host:
+        return None
+    con.execute("INSERT OR IGNORE INTO sources(host, url) VALUES(?,?)", (host, url))
+    row = con.execute("SELECT id FROM sources WHERE host=? AND url=?", (host, url)).fetchone()
+    return (int(row["id"]), host, url) if row else None
+
+
 def add_image_sources(con, image_id, source_text="", extra_sources=None):
-    """Add source links without dropping existing source history."""
+    """Add source links without dropping existing source history; return linked IDs."""
     urls = []
     for line in str(source_text or "").splitlines():
         for part in line.split():
@@ -94,20 +160,103 @@ def add_image_sources(con, image_id, source_text="", extra_sources=None):
         if u:
             urls.append(str(u))
     seen = set()
+    linked = []
     for url in urls:
-        host = host_from_url(url)
+        item = _ensure_source(con, url)
+        if not item:
+            continue
+        source_id, host, url = item
         key = (host, url)
-        if not url or key in seen:
+        if key in seen:
             continue
         seen.add(key)
-        con.execute("INSERT OR IGNORE INTO sources(host, url) VALUES(?,?)", (host, url))
-        row = con.execute("SELECT id FROM sources WHERE host=? AND url=?", (host, url)).fetchone()
-        if row:
-            con.execute("INSERT OR IGNORE INTO image_sources(image_id, source_id) VALUES(?,?)", (image_id, int(row["id"])))
+        con.execute("INSERT OR IGNORE INTO image_sources(image_id, source_id) VALUES(?,?)", (image_id, source_id))
+        linked.append({"source_id": source_id, "host": host, "url": url})
+    return linked
+
+
+def _iter_source_tag_entries(source_tag_groups):
+    for entry in source_tag_groups or []:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url") or "").strip()
+        groups = entry.get("groups") or {}
+        tags = entry.get("tags") or []
+        if not groups and tags:
+            groups = {"general": list(tags)}
+        if url and groups:
+            yield url, groups, str(entry.get("method") or "")
+
+
+def _sync_merged_image_tags(con, image_id: int) -> None:
+    """Make the fast All/source-search index equal the union of stored site sets."""
+    row = con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (int(image_id),)).fetchone()
+    if not row:
+        return
+    con.execute("DELETE FROM image_tags WHERE image_id=?", (int(image_id),))
+    con.execute("""
+        INSERT OR IGNORE INTO image_tags(image_id, tag_id)
+        SELECT image_id, tag_id FROM image_source_tags WHERE image_id=?
+    """, (int(image_id),))
+
+
+def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sources=False):
+    """Store one independent confirmed tag set per site/host.
+
+    A site's newest confirmed lookup replaces that site's previous tag set for
+    this image.  Different sites remain independent and their deduplicated union
+    is mirrored in ``image_tags`` for fast ordinary search.
+    """
+    now = int(time.time())
+    stored = 0
+    touched_hosts = set()
+    for url, groups, method in _iter_source_tag_entries(source_tag_groups):
+        source = _ensure_source(con, url)
+        if not source:
+            continue
+        source_id, host, _url = source
+        con.execute("INSERT OR IGNORE INTO image_sources(image_id, source_id) VALUES(?,?)", (image_id, source_id))
+        # Tags belong to the site, not to one historical result URL. If a later
+        # exact MD5 match supersedes an earlier IQDB candidate on the same host,
+        # never combine the two posts' metadata.  If a buggy caller submits two
+        # candidates for one host in one transaction, the last confirmed set wins.
+        con.execute("""
+            DELETE FROM image_source_tags
+            WHERE image_id=? AND source_id IN (SELECT id FROM sources WHERE host=?)
+        """, (image_id, host))
+        touched_hosts.add(host)
+        for category, values in (groups or {}).items():
+            for raw in values or []:
+                name = normalize_tag(str(raw))
+                if not name:
+                    continue
+                cat = _category_for_tag(name, category)
+                norm = normalize_tag(name)
+                con.execute("INSERT OR IGNORE INTO tags(name, normalized_name, category) VALUES(?,?,?)", (name, norm, cat))
+                row = con.execute("SELECT id, category FROM tags WHERE normalized_name=?", (norm,)).fetchone()
+                if not row:
+                    continue
+                tag_id = int(row["id"])
+                old_cat = str(row["category"] or "general")
+                if cat and ((cat == "species" and old_cat != "species") or (cat != "general" and old_cat in ("", "general")) or norm in _META_TAG_OVERRIDES):
+                    con.execute("UPDATE tags SET category=? WHERE id=?", (cat, tag_id))
+                con.execute("""
+                    INSERT INTO image_source_tags(image_id, source_id, tag_id, category, acquisition, updated_at)
+                    VALUES(?,?,?,?,?,?)
+                    ON CONFLICT(image_id, source_id, tag_id) DO UPDATE SET
+                        category=excluded.category,
+                        acquisition=CASE WHEN excluded.acquisition<>'' THEN excluded.acquisition ELSE image_source_tags.acquisition END,
+                        updated_at=excluded.updated_at
+                """, (image_id, source_id, tag_id, cat, method, now))
+                stored += 1
+    if touched_hosts:
+        _sync_merged_image_tags(con, image_id)
+    return stored
 
 
 def replace_image_sources(con, image_id, source_text="", extra_sources=None):
     con.execute("DELETE FROM image_sources WHERE image_id=?", (image_id,))
+    con.execute("DELETE FROM image_source_tags WHERE image_id=?", (image_id,))
     add_image_sources(con, image_id, source_text, extra_sources)
 
 
@@ -124,6 +273,47 @@ def replace_media_tag_groups(settings, media_path, groups) -> bool:
     return True
 
 
+def remove_media_tag_link(settings, media_path, tag_name, source_host="all") -> bool:
+    """Remove one visible tag while respecting per-source metadata sets.
+
+    In ``all`` mode the user is removing the tag from the image, so every
+    source-specific link for that tag is removed.  In a source view only that
+    site's copy is removed; other sites remain intact.  Legacy rows without
+    provenance continue to use ``image_tags``.
+    """
+    path = str(Path(media_path))
+    norm = normalize_tag(str(tag_name or ""))
+    host = str(source_host or "all").strip().lower().replace("www.", "")
+    if not norm:
+        return False
+    with db(settings, write=True) as con:
+        image = con.execute("SELECT id FROM images WHERE path=? AND deleted=0", (path,)).fetchone()
+        tag = con.execute("SELECT id FROM tags WHERE normalized_name=?", (norm,)).fetchone()
+        if not image or not tag:
+            return False
+        image_id = int(image["id"]); tag_id = int(tag["id"])
+        has_provenance = bool(con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (image_id,)).fetchone())
+        if has_provenance:
+            if host and host != "all":
+                con.execute("""
+                    DELETE FROM image_source_tags
+                    WHERE image_id=? AND tag_id=? AND source_id IN (SELECT id FROM sources WHERE LOWER(REPLACE(host,'www.',''))=?)
+                """, (image_id, tag_id, host))
+            else:
+                con.execute("DELETE FROM image_source_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
+            if con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (image_id,)).fetchone():
+                _sync_merged_image_tags(con, image_id)
+            else:
+                con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+        else:
+            con.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
+        con.execute("""
+            DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)
+                                AND id NOT IN (SELECT DISTINCT tag_id FROM image_source_tags)
+        """)
+    return True
+
+
 def remove_media_source_link(settings, media_path, source_url="", source_host="") -> bool:
     """Remove selected source link from one live card while retaining other confirmations."""
     path = str(Path(media_path))
@@ -135,11 +325,18 @@ def remove_media_source_link(settings, media_path, source_url="", source_host=""
             return False
         image_id = int(row["id"])
         if url:
-            con.execute("DELETE FROM image_sources WHERE image_id=? AND source_id IN (SELECT id FROM sources WHERE url=?)", (image_id, url))
+            source_ids = [int(r["id"]) for r in con.execute("SELECT id FROM sources WHERE url=?", (url,)).fetchall()]
         elif host:
-            con.execute("DELETE FROM image_sources WHERE image_id=? AND source_id IN (SELECT id FROM sources WHERE host=?)", (image_id, host))
+            source_ids = [int(r["id"]) for r in con.execute("SELECT id FROM sources WHERE host=?", (host,)).fetchall()]
         else:
             return False
+        for source_id in source_ids:
+            con.execute("DELETE FROM image_source_tags WHERE image_id=? AND source_id=?", (image_id, source_id))
+            con.execute("DELETE FROM image_sources WHERE image_id=? AND source_id=?", (image_id, source_id))
+        if con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (image_id,)).fetchone():
+            _sync_merged_image_tags(con, image_id)
+        else:
+            con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
         con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
     return True
 
@@ -204,7 +401,7 @@ def ensure_image(settings, media_path, status="", original_path="", hash_md5=Non
         return _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5, lifecycle=lifecycle, inbox_until=inbox_until, import_origin=import_origin)
 
 
-def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site="", merge_existing=False, lifecycle=None, inbox_until=0, import_origin=""):
+def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site="", merge_existing=False, lifecycle=None, inbox_until=0, import_origin="", source_tag_groups=None):
     with db(settings, write=True) as con:
         image_id = _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5, lifecycle=lifecycle, inbox_until=inbox_until, import_origin=import_origin)
         if groups is None:
@@ -212,10 +409,15 @@ def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_t
         if merge_existing:
             add_image_tags(con, image_id, groups)
             add_image_sources(con, image_id, source_text, [post_url, file_url])
+            add_image_source_tag_groups(con, image_id, source_tag_groups, replace_sources=False)
         else:
             replace_image_tags(con, image_id, groups)
             replace_image_sources(con, image_id, source_text, [post_url, file_url])
-        if raw is not None or post_url or file_url or site:
+            add_image_source_tag_groups(con, image_id, source_tag_groups, replace_sources=True)
+        safe_post_url = str(post_url or "").strip()
+        if _is_navigational_source_url(safe_post_url):
+            safe_post_url = ""
+        if raw is not None or safe_post_url or file_url or site:
             try:
                 raw_json = json.dumps(raw if raw is not None else {}, ensure_ascii=False)
             except Exception:
@@ -226,8 +428,56 @@ def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_t
                 ON CONFLICT(image_id) DO UPDATE SET
                     site=excluded.site, post_url=excluded.post_url, file_url=excluded.file_url,
                     raw_json=excluded.raw_json, updated_at=excluded.updated_at
-            """, (image_id, site or host_from_url(post_url or file_url), post_url or "", file_url or "", raw_json, int(time.time())))
+            """, (image_id, site or host_from_url(safe_post_url or file_url), safe_post_url, file_url or "", raw_json, int(time.time())))
         return image_id
+
+
+def refine_source_tag_categories(settings, media_path, source_url, groups, *, method="category_refine"):
+    """Refine categories for tags already stored for one source only.
+
+    HTML/category lookups are never allowed to add new tags here.  This keeps a
+    noisy sidebar or recommendation block from polluting an image record.
+    """
+    path = str(Path(media_path))
+    url = str(source_url or "").strip()
+    candidate_count = sum(len(v or []) for v in (groups or {}).values())
+    if not path or not url:
+        return {"updated": 0, "ignored": candidate_count, "known": 0}
+    with db(settings, write=True) as con:
+        image = con.execute("SELECT id FROM images WHERE path=? AND deleted=0", (path,)).fetchone()
+        source = con.execute("SELECT id FROM sources WHERE url=?", (url,)).fetchone()
+        if not image or not source:
+            return {"updated": 0, "ignored": candidate_count, "known": 0}
+        image_id, source_id = int(image["id"]), int(source["id"])
+        existing = con.execute("""
+            SELECT ist.tag_id, t.normalized_name FROM image_source_tags ist
+            JOIN tags t ON t.id=ist.tag_id
+            WHERE ist.image_id=? AND ist.source_id=?
+        """, (image_id, source_id)).fetchall()
+        known = {str(r["normalized_name"]): int(r["tag_id"]) for r in existing}
+        updated = 0
+        seen_candidates = set()
+        now = int(time.time())
+        for category, values in (groups or {}).items():
+            cat = str(category or "general")
+            for raw in values or []:
+                norm = normalize_tag(str(raw))
+                if not norm:
+                    continue
+                seen_candidates.add(norm)
+                tag_id = known.get(norm)
+                if tag_id is None:
+                    continue
+                cat = _category_for_tag(norm, cat)
+                con.execute("UPDATE image_source_tags SET category=?, acquisition=?, updated_at=? WHERE image_id=? AND source_id=? AND tag_id=?",
+                            (cat, str(method or "category_refine"), now, image_id, source_id, tag_id))
+                old = con.execute("SELECT category FROM tags WHERE id=?", (tag_id,)).fetchone()
+                old_cat = str(old["category"] or "general") if old else "general"
+                if cat != "general" and old_cat in ("", "general"):
+                    con.execute("UPDATE tags SET category=? WHERE id=?", (cat, tag_id))
+                updated += 1
+        ignored = len(seen_candidates - set(known))
+        return {"updated": updated, "ignored": ignored, "known": len(known)}
 
 
 def mark_processed(settings, media_path, status="nomatch", original_path=""):
@@ -362,6 +612,69 @@ def pending_site_scan_paths(settings, original_paths, site_keys, *, scan_revisio
     return pending, done_map, completed
 
 
+
+# ── v158: shared category cache for flat-tag sites ───────────────────────────
+
+def cached_tag_categories(settings, host, tags):
+    """Return cached {normalized_tag: category} for a site.
+
+    Category lookup by post used to repeat the same remote tag-list calls for
+    thousands of files.  This cache is site-scoped and conservative: only
+    normalized tag names explicitly stored here are reused.
+    """
+    host = str(host or "").strip().lower().replace("www.", "")
+    names = []
+    seen = set()
+    for tag in tags or []:
+        name = normalize_tag(str(tag))
+        if name and name not in seen:
+            seen.add(name); names.append(name)
+    if not host or not names:
+        return {}
+    out = {}
+    with db(settings, readonly=True) as con:
+        for i in range(0, len(names), 500):
+            chunk = names[i:i+500]
+            ph = ",".join(["?"] * len(chunk))
+            try:
+                rows = con.execute(
+                    f"SELECT tag_name, category FROM tag_category_cache WHERE site_key=? AND tag_name IN ({ph})",
+                    [host, *chunk],
+                ).fetchall()
+            except Exception:
+                return out
+            for row in rows:
+                name = normalize_tag(row["tag_name"])
+                cat = str(row["category"] or "general").lower()
+                if name:
+                    out[name] = cat or "general"
+    return out
+
+
+def upsert_tag_category_cache(settings, host, mapping, *, method="dapi_tag_api"):
+    host = str(host or "").strip().lower().replace("www.", "")
+    if not host or not mapping:
+        return 0
+    now = int(time.time())
+    rows = []
+    for tag, category in dict(mapping or {}).items():
+        name = normalize_tag(str(tag))
+        if not name:
+            continue
+        cat = str(category or "general").strip().lower() or "general"
+        rows.append((host, name, cat, str(method or ""), now))
+    if not rows:
+        return 0
+    with db(settings, write=True) as con:
+        con.executemany("""
+            INSERT INTO tag_category_cache(site_key, tag_name, category, source_method, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(site_key, tag_name) DO UPDATE SET
+                category=excluded.category, source_method=excluded.source_method, updated_at=excluded.updated_at
+        """, rows)
+    return len(rows)
+
+
 def enqueue_tag_enrichment(settings, original_path, media_path, source_url, *, job_key="rule34.xxx::html-categories-v1"):
     """Queue a durable low-priority category pass for a matched post URL."""
     original = str(Path(original_path))
@@ -383,7 +696,7 @@ def enqueue_tag_enrichment(settings, original_path, media_path, source_url, *, j
         """, (original, key, media, source, now, now))
 
 
-def seed_background_tag_enrichment(settings, *, job_key="flat-sites::tag-groups-v2", hosts=("gelbooru.com", "rule34.xxx", "xbooru.com", "hypnohub.net")):
+def seed_background_tag_enrichment(settings, *, job_key="flat-sites::tag-groups-v4-gelbooru-live-markup-guard", hosts=("gelbooru.com", "rule34.xxx", "xbooru.com", "hypnohub.net")):
     """Backfill low-priority category jobs for sources that return flat post tags.
 
     Native grouped JSON sources (Danbooru/e621/ATF where categories exist in the
@@ -527,6 +840,26 @@ def delete_image_records(settings, media_paths):
             for original in originals:
                 con.execute("DELETE FROM site_scan_status WHERE original_path=?", (str(original),))
         _cleanup_orphan_rows(con)
+
+
+def get_nomatches_for_tineye(settings) -> list:
+    """Return paths of files with no tags that are candidates for TinEye search."""
+    from pathlib import Path as _P
+    try:
+        with db(settings) as con:
+            rows = con.execute(
+                "SELECT path FROM images WHERE "
+                "(tags IS NULL OR tags = '' OR tags = '[]') "
+                "ORDER BY indexed_at DESC"
+            ).fetchall()
+        result = []
+        for row in rows:
+            p = str(row["path"] if hasattr(row, "keys") else row[0])
+            if _P(p).exists():
+                result.append(p)
+        return result
+    except Exception:
+        return []
 
 
 def cleanup_missing(settings):

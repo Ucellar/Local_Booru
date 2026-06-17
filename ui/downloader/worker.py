@@ -48,6 +48,7 @@ from ui.downloader.helpers import *
 class DownloaderWorker(QThread):
     log = Signal(str)
     done = Signal()
+    result = Signal(object)
 
     def __init__(self, owner, mode, payload):
         super().__init__(owner)
@@ -81,12 +82,39 @@ class DownloaderWorker(QThread):
                     self.payload["tags"],
                     self.payload["limit_total"],
                 )
+            elif self.mode == "tag_many":
+                self.owner._download_tag_many_impl(
+                    self.payload.get("sites") or [],
+                    self.payload.get("tags") or "",
+                    int(self.payload.get("limit_total") or 0),
+                )
             elif self.mode == "post":
                 self.owner._download_post_impl(self.payload["post_url"])
             elif self.mode == "cleanup":
                 self.owner._cleanup_by_blocklist_impl()
             elif self.mode == "dedupe":
                 self.owner._scan_and_clean_duplicates_impl()
+            elif self.mode == "preview":
+                self.result.emit(self.owner._preview_search_impl(
+                    self.payload.get("sites") or [],
+                    self.payload.get("tags") or "",
+                    int(self.payload.get("limit_total") or 0),
+                    bool(self.payload.get("hide_existing", True)),
+                    bool(self.payload.get("append", False)),
+                    self.payload.get("start_pages") or {},
+                    progress_emit=self.result.emit,
+                    request_token=self.payload.get("request_token"),
+                ) or [])
+            elif self.mode == "preview_download":
+                candidate = self.payload.get("candidate") or {}
+                result = self.owner._download_preview_candidate_impl(candidate)
+                self.result.emit({"mode": "preview_download", "candidate": candidate, "result": str(result or "")})
+            elif self.mode == "preview_download_many":
+                for candidate in self.payload.get("candidates") or []:
+                    if self.stop_requested:
+                        break
+                    self.wait_if_paused()
+                    self.owner._download_preview_candidate_impl(candidate or {})
         except Exception as e:
             self.log.emit(f"WORKER ERROR: {type(e).__name__}: {e}")
         finally:

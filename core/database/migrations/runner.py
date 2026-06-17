@@ -3,15 +3,23 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from . import m014_database_health_maintenance
+from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames
 
 # Version 13 is the consolidated SQLite schema shipped before the numbered
 # runner existed.  v130 records that existing working state as a baseline and
 # applies only subsequent migrations.
 BASELINE_VERSION = 13
-CURRENT_SCHEMA_VERSION = 14
+CURRENT_SCHEMA_VERSION = 22
 MIGRATIONS = {
     14: m014_database_health_maintenance,
+    15: m015_saucenao_quota_snapshot,
+    16: m016_source_tag_provenance,
+    17: m017_invalid_navigation_sources,
+    18: m018_unverified_source_cleanup,
+    19: m019_performance_indexes,
+    20: m020_nomatch_reasons_source_only,
+    21: m021_v158_maintenance_indexes,
+    22: m022_v159_content_safe_filenames,
 }
 
 

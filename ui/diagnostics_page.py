@@ -230,7 +230,10 @@ class DiagnosticsPage(QWidget):
             queue_rows.append(["Категории тегов", data.get("job_key"), data.get("status"), data.get("files"), f"max попыток={data.get('max_attempts',0)}"])
         for data in report.get("queues", {}).get("service_state", []):
             eta = max(0, int(data.get("cooldown_until", 0) or 0) - now)
-            queue_rows.append(["Состояние сервиса", data.get("service"), "кулдаун" if eta else "готов", "—", f"через {eta//60}м {eta%60}с; {data.get('reason','')}"])
+            short_rem = int(data.get("short_remaining", -1) if data.get("short_remaining", -1) is not None else -1)
+            long_rem = int(data.get("long_remaining", -1) if data.get("long_remaining", -1) is not None else -1)
+            quota = f"короткий={short_rem if short_rem >= 0 else '—'}, сутки={long_rem if long_rem >= 0 else '—'}"
+            queue_rows.append(["Состояние сервиса", data.get("service"), "кулдаун" if eta else "готов", "—", f"{quota}; через {eta//60}м {eta%60}с; {data.get('reason','')}"])
         for data in report.get("queues", {}).get("saucenao_retry_events", []):
             queue_rows.append(["SauceNAO proof", data.get("message") or "файл", data.get("status"), "1", f"время={data.get('created_at','')}"])
         for data in report.get("queues", {}).get("unfinished_operations", []):

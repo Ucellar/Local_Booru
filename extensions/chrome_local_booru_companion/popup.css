@@ -1,0 +1,7 @@
+body { min-width: 270px; margin: 12px; font: 13px/1.35 Arial, sans-serif; background: #1f1f1f; color: #eee; }
+h1 { font-size: 15px; margin: 0 0 10px; }
+label { display: block; margin: 8px 0; }
+input[type="text"], select { width: 100%; box-sizing: border-box; margin-top: 4px; background: #2d2d2d; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 5px; }
+button { margin: 6px 6px 0 0; background: #3b3b3b; color: #fff; border: 1px solid #666; border-radius: 4px; padding: 6px 8px; cursor: pointer; }
+button:hover { background: #4a4a4a; }
+#out { min-height: 18px; color: #ccc; }

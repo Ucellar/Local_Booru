@@ -8,6 +8,7 @@ from PySide6.QtGui import QIcon, QPixmap, QColor, QPainter, QFont
 from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QMainWindow, QMenu, QPushButton,
     QStackedWidget, QVBoxLayout, QWidget, QFrame, QSizePolicy, QSpacerItem, QComboBox,
+    QToolButton,
 )
 
 from core.app_context import AppContext
@@ -16,10 +17,12 @@ from core.i18n import tr
 from core.paths import APP_ICON_FILE
 from ui.modules.registry import PAGE_BY_KEY, PAGE_SPECS, WORKSPACE_DEFAULT_PAGE, WORKSPACE_TITLES
 from ui.styles.themes import stylesheet_for
+from ui.visual_polish import apply_visual_polish
 
 # Icons: emoji fallback — looks fine with Segoe UI Emoji on Windows
 NAV_ICONS = {
     "Tagger":     ("🔍", "parser"),
+    "ParserBlueprint": ("🧩", "parser"),
     "Tags":       ("🏷", "tags"),
     "Trash":      ("", "action_delete"),
     "Diagnostics": ("", "diagnostics"),
@@ -98,7 +101,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.context = AppContext()
         self.settings = self.context.settings
-        self.task_manager = TaskManager(self, max_workers=int(self.settings.get("task_max_workers", 2)))
+        try:
+            from core.local_parallel import local_workers
+            _task_workers = local_workers(self.settings, "task_max_workers", int(self.settings.get("local_background_workers", 4) or 4), maximum=16)
+        except Exception:
+            _task_workers = int(self.settings.get("task_max_workers", 4) or 4)
+        self.task_manager = TaskManager(self, max_workers=_task_workers)
         self.pages: dict = {}
         self.page_buttons: dict = {}
         self.setWindowTitle("Local Booru")
@@ -131,11 +139,11 @@ class MainWindow(QMainWindow):
         # ── Sidebar ───────────────────────────────────────────────────────────
         self._sidebar = QWidget()
         self._sidebar.setObjectName("Sidebar")
-        self._sidebar.setFixedWidth(200)
+        self._sidebar.setFixedWidth(216)
         self._sidebar.setObjectName("Sidebar")
         # Background set by QSS theme via #Sidebar selector
         sidebar_lay = QVBoxLayout(self._sidebar)
-        sidebar_lay.setContentsMargins(8, 16, 8, 12)
+        sidebar_lay.setContentsMargins(10, 18, 10, 12)
         sidebar_lay.setSpacing(2)
 
         # Logo / title
@@ -209,10 +217,10 @@ class MainWindow(QMainWindow):
 
         # Top bar
         self._topbar = QWidget()
-        self._topbar.setFixedHeight(48)
+        self._topbar.setFixedHeight(54)
         self._topbar.setObjectName("TopBar")
         tb_lay = QHBoxLayout(self._topbar)
-        tb_lay.setContentsMargins(20, 0, 16, 0)
+        tb_lay.setContentsMargins(22, 0, 18, 0)
         self.title = QLabel("")
         self.title.setObjectName("Title")
         tb_lay.addWidget(self.title)
@@ -243,6 +251,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.apply_theme)
         self.retranslate()
         self.apply_interface_modules()
+        try:
+            apply_visual_polish(self)
+        except Exception:
+            pass
 
         # Keep Inbox/Trash lifecycle accurate while the app remains open for
         # long downloads; startup-only maintenance is not enough for 24h rules.
@@ -256,6 +268,85 @@ class MainWindow(QMainWindow):
         self._task_status_timer.timeout.connect(self._update_task_status_strip)
         self._task_status_timer.start()
         self._update_task_status_strip()
+        QTimer.singleShot(2500, self.ensure_local_clip_model_download)
+
+    # ── Local AI model bootstrap ──────────────────────────────────────────────
+
+    def ensure_local_clip_model_download(self, force: bool = False):
+        """Download the local CLIP model in background when the small build ships without weights."""
+        try:
+            if getattr(self, "_clip_model_download_active", False):
+                return None
+            settings = self.settings or {}
+            if not bool(settings.get("visual_nomatch_classify_enabled", True)):
+                return None
+            backend = str(settings.get("visual_nomatch_backend", "clip_local") or "clip_local").strip().lower()
+            if backend not in ("clip_local", "clip", "ai"):
+                return None
+            if not force and not bool(settings.get("visual_nomatch_auto_download_model", True)):
+                return None
+            from core.visual_status import local_clip_model_state, download_clip_model
+            state = local_clip_model_state(settings)
+            if state.get("available"):
+                return None
+
+            self._clip_model_download_active = True
+
+            def _progress(msg):
+                try:
+                    self._status_hint.setText(str(msg)[:180])
+                except Exception:
+                    pass
+                try:
+                    page = self.pages.get("NO_MATCH") or getattr(self, "nomatch_page", None)
+                    if page is not None and hasattr(page, "on_ai_model_download_progress"):
+                        page.on_ai_model_download_progress(str(msg))
+                except Exception:
+                    pass
+
+            def _done(res):
+                try:
+                    self._status_hint.setText("NO_MATCH AI-модель скачана")
+                except Exception:
+                    pass
+                try:
+                    page = self.pages.get("NO_MATCH") or getattr(self, "nomatch_page", None)
+                    if page is not None and hasattr(page, "update_ai_status"):
+                        page.update_ai_status()
+                        page.refresh()
+                except Exception:
+                    pass
+
+            def _err(err):
+                try:
+                    self._status_hint.setText("Ошибка скачивания AI-модели; откройте Брак → Что с AI?")
+                except Exception:
+                    pass
+                try:
+                    page = self.pages.get("NO_MATCH") or getattr(self, "nomatch_page", None)
+                    if page is not None and hasattr(page, "update_ai_status"):
+                        page.update_ai_status()
+                except Exception:
+                    pass
+
+            def _finished():
+                self._clip_model_download_active = False
+
+            return self.task_manager.submit(
+                download_clip_model, settings,
+                name="download-no-match-ai-model",
+                on_progress=_progress,
+                on_result=_done,
+                on_error=_err,
+                on_finished=_finished,
+            )
+        except Exception:
+            try:
+                self._clip_model_download_active = False
+            except Exception:
+                pass
+            return None
+
 
     # ── Page construction ─────────────────────────────────────────────────────
 
@@ -312,20 +403,20 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QPalette, QColor
             from PySide6.QtCore import Qt
             _accent_map = {
-                "dark": ("#6c85e0", "#c0c8e0", "#0d0f16"),
-                "abyss": ("#6c85e0", "#c0c8e0", "#0d0f16"),
-                "ember": ("#c87040", "#c8b090", "#14141e"),
-                "slate": ("#5a8a9f", "#b0c8d0", "#16181e"),
-                "sakura": ("#d060a0", "#e0b0d0", "#140820"),
-                "ph": ("#ff9000", "#f5f5f5", "#1b1b1b"),
-                "pornhub": ("#ff9000", "#f5f5f5", "#1b1b1b"),
-                "r34":   ("#3a7a35", "#111111", "#a8d99f"),
-                "r34dark": ("#6aa5ff", "#d6e4d3", "#10150f"),
-                "win95": ("#000080", "#000000", "#c0c0c0"),
-                "windows95": ("#000080", "#000000", "#c0c0c0"),
-                "light": ("#5060d0", "#1a1c2a", "#f4f5f8"),
+                "dark": ("#6c85e0", "#c0c8e0", "#0d0f16", "#11131c", "#0d0f16"),
+                "abyss": ("#6c85e0", "#c0c8e0", "#0d0f16", "#11131c", "#0d0f16"),
+                "ember": ("#c87040", "#c8b090", "#120f09", "#171307", "#120f09"),
+                "slate": ("#5a8a9f", "#b0c8d0", "#16181e", "#222630", "#16181e"),
+                "sakura": ("#d060a0", "#e0b0d0", "#10070d", "#170a11", "#10070d"),
+                "ph": ("#ff9000", "#f5f5f5", "#1b1b1b", "#19130b", "#1b1b1b"),
+                "pornhub": ("#ff9000", "#f5f5f5", "#1b1b1b", "#19130b", "#1b1b1b"),
+                "r34":   ("#3a7a35", "#111111", "#a8d99f", "#aedca7", "#a8d99f"),
+                "r34dark": ("#7fb06f", "#d6e4d3", "#10150f", "#121a10", "#10150f"),
+                "win95": ("#000080", "#000000", "#c0c0c0", "#c0c0c0", "#c0c0c0"),
+                "windows95": ("#000080", "#000000", "#c0c0c0", "#c0c0c0", "#c0c0c0"),
+                "light": ("#5060d0", "#1a1c2a", "#f4f5f8", "#f7f5ff", "#f4f5f8"),
             }
-            accent, text, bg = _accent_map.get(theme_name, ("#6c85e0", "#c0c8e0", "#0d0f16"))
+            accent, text, bg, alt, base = _accent_map.get(theme_name, ("#6c85e0", "#c0c8e0", "#0d0f16", "#11131c", "#0d0f16"))
             pal = self.palette()
             pal.setColor(QPalette.ColorRole.Highlight, QColor(accent))
             pal.setColor(QPalette.ColorRole.HighlightedText, QColor(bg))
@@ -334,7 +425,8 @@ class MainWindow(QMainWindow):
             pal.setColor(QPalette.ColorRole.ButtonText, QColor(text))
             pal.setColor(QPalette.ColorRole.PlaceholderText, QColor(text))
             pal.setColor(QPalette.ColorRole.Window, QColor(bg))
-            pal.setColor(QPalette.ColorRole.Base, QColor(bg))
+            pal.setColor(QPalette.ColorRole.Base, QColor(base))
+            pal.setColor(QPalette.ColorRole.AlternateBase, QColor(alt))
             pal.setColor(QPalette.ColorRole.Button, QColor(bg))
             self.setPalette(pal)
             from PySide6.QtWidgets import QApplication
@@ -381,6 +473,10 @@ class MainWindow(QMainWindow):
                 fn = getattr(w, "apply_theme_style", None)
                 if callable(fn):
                     fn(theme_name)
+        except Exception:
+            pass
+        try:
+            apply_visual_polish(self)
         except Exception:
             pass
         # Global QSS and palette application above already trigger repaint; avoid
@@ -430,6 +526,11 @@ class MainWindow(QMainWindow):
             return titles.get(lang) or titles.get("ru") or titles.get("en") or ws
         return str(titles)
 
+    def _free_navigation_enabled(self):
+        # v326: full interface layout freedom.  When enabled, the sidebar is a
+        # plain user-built tree instead of four hard-coded workspaces.
+        return bool(self.settings.get("interface_free_navigation", True))
+
     def _ordered_navigation_specs(self):
         available = [spec for spec in PAGE_SPECS if spec.button_attr and spec.key != "Settings"]
         keys = [spec.key for spec in available]
@@ -439,19 +540,95 @@ class MainWindow(QMainWindow):
         return [mapping[key] for key in order]
 
     def _page_is_extra(self, spec):
+        # Группа «Дополнительно» применяется только к верхнему уровню дерева.
+        # Вложенная страница всегда живёт под родителем, иначе она снова
+        # вылезет отдельной кнопкой и смысл сворачивания пропадёт.
         return bool(self._interface_module_config(spec.key).get("extra", False))
+
+    def _nav_clear_layout(self, layout):
+        # Rebuilding the tree must not delete reusable page buttons.  Pull all
+        # buttons out first; disposable row/container widgets may be deleted.
+        for btn in getattr(self, "page_buttons", {}).values():
+            try:
+                btn.setParent(None)
+            except Exception:
+                pass
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None and w not in getattr(self, "page_buttons", {}).values():
+                try:
+                    w.setParent(None)
+                    w.deleteLater()
+                except Exception:
+                    pass
+
+    def _nav_has_children(self, key, children_by_parent):
+        return bool(children_by_parent.get(key))
+
+    def _make_nav_row(self, spec, has_children):
+        row = QWidget()
+        row.setObjectName("NavTreeRow")
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        if has_children:
+            toggle = QPushButton("▸")
+            toggle.setObjectName("NavTreeToggle")
+            toggle.setFixedSize(24, 34)
+            toggle.setFocusPolicy(Qt.NoFocus)
+            toggle.clicked.connect(lambda _=False, key=spec.key: self._toggle_page_children(key))
+            self._nav_tree_toggles[spec.key] = toggle
+            lay.addWidget(toggle)
+        btn = self.page_buttons.get(spec.key)
+        if btn is not None:
+            lay.addWidget(btn, 1)
+        return row
+
+    def _add_nav_node(self, layout, spec, children_by_parent, depth=0):
+        has_children = self._nav_has_children(spec.key, children_by_parent)
+        row = self._make_nav_row(spec, has_children)
+        if depth > 0:
+            try:
+                row.layout().setContentsMargins(18, 0, 0, 0)
+            except Exception:
+                pass
+        layout.addWidget(row)
+        self._nav_rows[spec.key] = row
+        if has_children:
+            box = QWidget()
+            box.setObjectName("NavTreeChildren")
+            child_lay = QVBoxLayout(box)
+            child_lay.setContentsMargins(18, 0, 0, 0)
+            child_lay.setSpacing(2)
+            for child in children_by_parent.get(spec.key, []):
+                self._add_nav_node(child_lay, child, children_by_parent, depth + 1)
+            layout.addWidget(box)
+            self._nav_child_containers[spec.key] = box
 
     def _rebuild_navigation_layout(self):
         if not hasattr(self, "_nav_primary_layout"):
             return
+        self._nav_rows = {}
+        self._nav_child_containers = {}
+        self._nav_tree_toggles = {}
         for layout in (self._nav_primary_layout, self._nav_extra_layout):
-            while layout.count():
-                layout.takeAt(0)
-        for spec in self._ordered_navigation_specs():
-            btn = self.page_buttons.get(spec.key)
-            if btn is None:
-                continue
-            (self._nav_extra_layout if self._page_is_extra(spec) else self._nav_primary_layout).addWidget(btn)
+            self._nav_clear_layout(layout)
+
+        ordered = self._ordered_navigation_specs()
+        by_key = {spec.key: spec for spec in ordered}
+        children_by_parent = {key: [] for key in by_key}
+        roots = []
+        for spec in ordered:
+            parent = self._effective_parent_key(spec.key)
+            if parent and parent in by_key:
+                children_by_parent.setdefault(parent, []).append(spec)
+            else:
+                roots.append(spec)
+
+        for spec in roots:
+            target_layout = self._nav_extra_layout if self._page_is_extra(spec) else self._nav_primary_layout
+            self._add_nav_node(target_layout, spec, children_by_parent, 0)
         self._sync_extra_navigation_visibility()
 
     def _toggle_extra_navigation(self):
@@ -466,23 +643,115 @@ class MainWindow(QMainWindow):
     def _sync_extra_navigation_visibility(self):
         if not hasattr(self, "_nav_extra_widget"):
             return
-        ws = self.settings.get("workspace", "gallery")
-        if ws == "tagger": ws = "apt"
-        elif ws == "downloader": ws = "adp"
-        has_extra = any(self._page_visible(spec) and self._page_workspace(spec) == ws and self._page_is_extra(spec) for spec in self._ordered_navigation_specs())
+        if self._free_navigation_enabled():
+            # Free navigation: there are no fixed modes.  All visible root pages
+            # belong to one user-defined tree, and «Дополнительно» is just an
+            # optional collapsible bucket.
+            has_extra = any(
+                self._page_visible(spec)
+                and self._page_is_extra(spec)
+                and not self._effective_parent_key(spec.key)
+                for spec in self._ordered_navigation_specs()
+            )
+        else:
+            ws = self.settings.get("workspace", "gallery")
+            if ws == "tagger": ws = "apt"
+            elif ws == "downloader": ws = "adp"
+            # Only top-level extra pages make the global «Дополнительно» group appear.
+            has_extra = any(
+                self._page_visible(spec)
+                and self._page_workspace(spec) == ws
+                and self._page_is_extra(spec)
+                and not self._effective_parent_key(spec.key)
+                for spec in self._ordered_navigation_specs()
+            )
         self._nav_extra_toggle.setVisible(has_extra)
         expanded = bool(getattr(self, "_extra_navigation_expanded", False))
         self._nav_extra_widget.setVisible(has_extra and expanded)
         self._nav_extra_toggle.setText("Дополнительно  ▾" if expanded else "Дополнительно  ▸")
+        self._sync_nav_tree_visibility()
+
+    def _page_children_collapsed(self, key):
+        cfg = self.settings.get("interface_page_collapsed") or {}
+        return bool(cfg.get(key, True)) if isinstance(cfg, dict) else True
+
+    def _set_page_children_collapsed(self, key, collapsed):
+        cfg = dict(self.settings.get("interface_page_collapsed") or {})
+        cfg[key] = bool(collapsed)
+        self.settings["interface_page_collapsed"] = cfg
+
+    def _toggle_page_children(self, key):
+        self._set_page_children_collapsed(key, not self._page_children_collapsed(key))
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        self._sync_nav_tree_visibility()
+
+    def _sync_nav_tree_visibility(self):
+        if not hasattr(self, "_nav_rows"):
+            return
+        free_nav = self._free_navigation_enabled()
+        ws = self.settings.get("workspace", "gallery")
+        if ws == "tagger": ws = "apt"
+        elif ws == "downloader": ws = "adp"
+        for spec in self._ordered_navigation_specs():
+            row = self._nav_rows.get(spec.key)
+            if row is None:
+                continue
+            visible = self._page_visible(spec) and (free_nav or self._page_workspace(spec) == ws)
+            row.setVisible(visible)
+            btn = self.page_buttons.get(spec.key)
+            if btn is not None:
+                btn.setVisible(visible)
+        for key, toggle in getattr(self, "_nav_tree_toggles", {}).items():
+            spec = PAGE_BY_KEY.get(key)
+            visible = bool(spec and self._page_visible(spec) and (free_nav or self._page_workspace(spec) == ws))
+            collapsed = self._page_children_collapsed(key)
+            toggle.setVisible(visible)
+            toggle.setText("▸" if collapsed else "▾")
+            toggle.setToolTip("Развернуть вложенные страницы" if collapsed else "Свернуть вложенные страницы")
+        for key, box in getattr(self, "_nav_child_containers", {}).items():
+            spec = PAGE_BY_KEY.get(key)
+            visible = bool(spec and self._page_visible(spec) and (free_nav or self._page_workspace(spec) == ws) and not self._page_children_collapsed(key))
+            box.setVisible(visible)
 
     def _interface_module_config(self, key):
         cfg = self.settings.get("interface_modules") or {}
         value = cfg.get(key, {}) if isinstance(cfg, dict) else {}
         return value if isinstance(value, dict) else {}
 
+    def _configured_parent_key(self, key):
+        parent = str(self._interface_module_config(key).get("parent", "") or "").strip()
+        return parent if parent and parent != key else ""
+
+    def _effective_parent_key(self, key, _seen=None):
+        # A child can be assigned to any other visible module in settings.  Broken
+        # configs, cycles, hidden parents and system pages are treated as no parent.
+        _seen = set(_seen or [])
+        if key in _seen:
+            return ""
+        _seen.add(key)
+        parent = self._configured_parent_key(key)
+        if not parent:
+            return ""
+        pspec = PAGE_BY_KEY.get(parent)
+        if not pspec or pspec.workspace == "system" or not pspec.button_attr:
+            return ""
+        # Keep parent links even if the parent page is hidden: a hidden parent
+        # should hide its subtree, not leak children back to the root.
+        if self._configured_parent_key(parent) in _seen:
+            return ""
+        return parent
+
     def _page_workspace(self, spec):
         if spec.workspace == "system":
             return "system"
+        parent = self._effective_parent_key(spec.key)
+        if parent:
+            pspec = PAGE_BY_KEY.get(parent)
+            if pspec:
+                return self._page_workspace(pspec)
         return str(self._interface_module_config(spec.key).get("workspace", spec.workspace) or spec.workspace)
 
     def _page_visible(self, spec):
@@ -492,6 +761,12 @@ class MainWindow(QMainWindow):
 
     def _visible_workspace_pages(self):
         out = {}
+        if self._free_navigation_enabled():
+            for spec in PAGE_SPECS:
+                if spec.workspace == "system" or not spec.button_attr or not self._page_visible(spec):
+                    continue
+                out.setdefault("free", []).append(spec.key)
+            return out
         for spec in PAGE_SPECS:
             if spec.workspace == "system" or not spec.button_attr or not self._page_visible(spec):
                 continue
@@ -501,6 +776,9 @@ class MainWindow(QMainWindow):
     def _rebuild_workspace_menu(self):
         self.mode_menu.clear()
         visible = self._visible_workspace_pages()
+        if self._free_navigation_enabled():
+            self.mode_btn.setVisible(False)
+            return visible
         for workspace, title in WORKSPACE_TITLES.items():
             if workspace not in visible:
                 continue
@@ -518,7 +796,15 @@ class MainWindow(QMainWindow):
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Модули интерфейса", str(exc))
 
-    def _first_visible_page(self, workspace):
+    def _first_visible_page(self, workspace=None):
+        if self._free_navigation_enabled():
+            for spec in self._ordered_navigation_specs():
+                if spec.button_attr and self._page_visible(spec) and not self._effective_parent_key(spec.key):
+                    return spec.key
+            for spec in self._ordered_navigation_specs():
+                if spec.button_attr and self._page_visible(spec):
+                    return spec.key
+            return "Gallery"
         preferred = WORKSPACE_DEFAULT_PAGE.get(workspace)
         if preferred:
             spec = PAGE_BY_KEY.get(preferred)
@@ -539,6 +825,14 @@ class MainWindow(QMainWindow):
             modules["Gallery"] = {"visible": True, "workspace": "gallery"}
             self.settings["interface_modules"] = modules
             visible = self._rebuild_workspace_menu()
+        if self._free_navigation_enabled():
+            self._update_workspace_buttons()
+            current = self.stack.currentWidget() if hasattr(self, "stack") else None
+            current_key = next((k for k, page in self.pages.items() if page is current), "")
+            current_spec = PAGE_BY_KEY.get(current_key)
+            if not current_spec or (current_spec.workspace != "system" and not self._page_visible(current_spec)):
+                self.go(self._first_visible_page())
+            return
         ws = self.settings.get("workspace", "gallery")
         if ws == "tagger": ws = "apt"
         elif ws == "downloader": ws = "adp"
@@ -553,6 +847,12 @@ class MainWindow(QMainWindow):
             self.go(self._first_visible_page(ws))
 
     def set_workspace(self, name):
+        if self._free_navigation_enabled():
+            # Workspaces are disabled in free navigation.  Keep old calls from
+            # gallery/tag helpers harmless: they should just open the requested page.
+            self._rebuild_workspace_menu()
+            self._update_workspace_buttons()
+            return
         if name == "tagger":   name = "apt"
         elif name == "downloader": name = "adp"
         visible = self._rebuild_workspace_menu()
@@ -564,6 +864,14 @@ class MainWindow(QMainWindow):
         self.go(self._first_visible_page(name))
 
     def _update_workspace_buttons(self):
+        if self._free_navigation_enabled():
+            self.mode_btn.setVisible(False)
+            for spec in PAGE_SPECS:
+                btn = self.page_buttons.get(spec.key)
+                if btn:
+                    btn.setVisible(self._page_visible(spec))
+            self._sync_extra_navigation_visibility()
+            return
         ws = self.settings.get("workspace", "gallery")
         if ws == "tagger":     ws = "apt"
         elif ws == "downloader": ws = "adp"
@@ -600,10 +908,27 @@ class MainWindow(QMainWindow):
         spec = PAGE_BY_KEY.get(page)
         return self.t(spec.title_key) if spec else page
 
+    def _expand_ancestors_for_page(self, page):
+        changed = False
+        seen = set()
+        parent = self._effective_parent_key(page)
+        while parent and parent not in seen:
+            seen.add(parent)
+            if self._page_children_collapsed(parent):
+                self._set_page_children_collapsed(parent, False)
+                changed = True
+            parent = self._effective_parent_key(parent)
+        if changed:
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+            self._sync_nav_tree_visibility()
+
     def go(self, page):
         try:
             if self.stack.currentWidget() is getattr(self, "post_page", None) and page != "Post":
-                self.post_page.stop_video()
+                self.release_open_media_handles()
         except Exception:
             pass
 
@@ -611,6 +936,17 @@ class MainWindow(QMainWindow):
         target = self.pages.get(page)
         if not spec or not target:
             return
+
+        if spec.workspace != "system":
+            # Opening a nested page from code/hotkey/search should also reveal it
+            # in the sidebar.  In legacy mode it also switches workspace; in free
+            # navigation there are no hard-coded modes to switch.
+            if not self._free_navigation_enabled():
+                ws = self._page_workspace(spec)
+                if ws and ws != "system":
+                    self.settings["workspace"] = ws
+            self._expand_ancestors_for_page(page)
+            self._update_workspace_buttons()
 
         self.title.setText(self._title_for(page))
         
@@ -644,8 +980,19 @@ class MainWindow(QMainWindow):
 
     # ── Post helpers ──────────────────────────────────────────────────────────
 
-    def open_post(self, index, context=None):
-        self.post_page.set_post(index, context)
+    def release_open_media_handles(self):
+        """Detach active GIF/video readers before a file operation on Windows."""
+        try:
+            page = getattr(self, "post_page", None)
+            if page is not None and hasattr(page, "release_media_handles"):
+                page.release_media_handles()
+            elif page is not None:
+                page.stop_video()
+        except Exception:
+            pass
+
+    def open_post(self, index, context=None, tag_source=None):
+        self.post_page.set_post(index, context, tag_source=tag_source)
         self.title.setText(self.t("Post"))
         self.stack.setCurrentWidget(self.post_page)
 
@@ -769,16 +1116,62 @@ class MainWindow(QMainWindow):
         super().moveEvent(event)
         # Don't clamp during move — user is dragging the window
 
+    def _request_pages_shutdown(self):
+        """Ask long-running page workers to stop without joining them."""
+        for page in list(getattr(self, "pages", {}) .values()):
+            for method_name in ("shutdown_fast", "stop_worker", "stop", "_stop"):
+                try:
+                    method = getattr(page, method_name, None)
+                    if callable(method):
+                        method()
+                        break
+                except Exception:
+                    break
+
     def closeEvent(self, event):
+        """Close the window without running heavyweight shutdown work in Qt UI thread.
+
+        The app used to run task shutdown, thumbnail cleanup, light backup and
+        SQLite checkpoint synchronously from closeEvent().  On a large archive,
+        or when an external backup drive / SQLite lock / thumbnail worker was
+        slow, Windows reported the window as "not responding" after pressing
+        the title-bar X.
+
+        Keep this handler best-effort and non-blocking.  Heavier maintenance is
+        handled after the Qt event loop has already exited, so the visible
+        window disappears immediately instead of freezing.
+        """
+        if getattr(self, "_close_in_progress", False):
+            event.accept()
+            return
+        self._close_in_progress = True
+
         try:
-            from core.library_lifecycle import trim_thumbnail_cache
-            trim_thumbnail_cache(self.settings)
+            self.setEnabled(False)
+            self.hide()
         except Exception:
             pass
-        try: self.task_manager.shutdown()
-        except Exception: pass
+
+        # Cooperative cancellation only.  Do not wait here.
         try:
-            from core.thumb_service import ThumbnailService
-            ThumbnailService.instance().stop()
-        except Exception: pass
-        super().closeEvent(event)
+            self._request_pages_shutdown()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "task_manager"):
+                self.task_manager.cancel_all()
+        except Exception:
+            pass
+        try:
+            from core.shutdown import begin_shutdown
+            begin_shutdown()
+        except Exception:
+            pass
+
+        # Persist cheap UI state if possible, but never block close on it.
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+
+        event.accept()

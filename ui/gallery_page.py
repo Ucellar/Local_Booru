@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QListWidget, QSizePolicy, QListWidgetItem, QSpinBox, QListView, QColorDialog,
     QAbstractItemView, QStyledItemDelegate, QStyle, QMenu, QApplication, QMessageBox,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect, QMimeData, QUrl
+from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect, QMimeData, QUrl, QEvent
 from PySide6.QtGui import QPixmap, QColor, QBrush, QIcon, QPainter, QPen
 
 from core.library import sort_tag_items
@@ -32,14 +32,14 @@ GROUP_COLORS = {
 }
 
 
-def _global_tag_groups_worker(settings, progress=None, stop_check=None):
+def _global_tag_groups_worker(settings, source="all", progress=None, stop_check=None):
     """Build global sidebar tag counters without blocking the GUI thread."""
     if progress:
         progress("Галерея: загрузка общего счётчика тегов…")
     if stop_check and stop_check():
         return None
     from core.database.repository import tag_group_counts
-    return tag_group_counts(settings)
+    return tag_group_counts(settings, source=source)
 
 def _gallery_facets_worker(settings, progress=None, stop_check=None):
     """Load autocomplete/source counters outside the GUI thread."""
@@ -54,6 +54,15 @@ def _gallery_facets_worker(settings, progress=None, stop_check=None):
     return {"tags": tags, "sources": sources, "source_counts": source_counts, "source_total": source_total}
 
 _PH_CACHE: dict[tuple, QPixmap] = {}
+_TAG_GROUP_COUNT_CACHE: dict[tuple, tuple[float, object]] = {}
+
+
+def _parser_running(main) -> bool:
+    try:
+        worker = getattr(getattr(main, "tagger_page", None), "worker", None)
+        return bool(worker and worker.isRunning())
+    except Exception:
+        return False
 
 def _current_theme_name() -> str:
     try:
@@ -69,7 +78,7 @@ def _gallery_item_colors(theme: str | None = None) -> tuple[str, str]:
         "dark": ("#111420", "#e8e8e8"),
         "ember": ("#181408", "#d8c8a0"),
         "slate": ("#1e2028", "#c8ccd8"),
-        "sakura": ("#140820", "#e0c8d8"),
+        "sakura": ("#10070d", "#e0c8d8"),
         "pornhub": ("#0f0f0f", "#f0f0f0"),
         "ph": ("#0f0f0f", "#f0f0f0"),
         "r34": ("#a8d99f", "#111111"),
@@ -96,6 +105,27 @@ def _placeholder(w: int, h: int) -> QPixmap:
         painter.drawRect(0, 0, max(0, w - 1), max(0, h - 1))
         painter.setPen(QColor(fg))
         painter.drawText(p.rect(), Qt.AlignCenter, "…")
+        painter.end()
+        _PH_CACHE[key] = p
+    return _PH_CACHE[key]
+
+
+def _missing_placeholder(w: int, h: int, file_name: str = "") -> QPixmap:
+    theme = _current_theme_name()
+    key = ("missing", w, h, theme, file_name[:32])
+    if key not in _PH_CACHE:
+        p = QPixmap(w, h)
+        bg, fg = _gallery_item_colors(theme)
+        p.fill(QColor(bg))
+        painter = QPainter(p)
+        border = "#bb4040" if theme not in ("r34", "light", "win95", "windows95") else "#8a3030"
+        painter.setPen(QPen(QColor(border), 2))
+        painter.drawRect(1, 1, max(0, w - 3), max(0, h - 3))
+        painter.setPen(QColor(border))
+        text = "Файл отсутствует"
+        if file_name:
+            text += "\n" + file_name[:32]
+        painter.drawText(p.rect().adjusted(8, 8, -8, -8), Qt.AlignCenter | Qt.TextWordWrap, text)
         painter.end()
         _PH_CACHE[key] = p
     return _PH_CACHE[key]
@@ -265,12 +295,17 @@ class GalleryListModel(QAbstractListModel):
             return row
         if role == Qt.UserRole + 1:
             return item
+        file_missing = bool(path and not Path(path).exists())
         if role == Qt.ToolTipRole:
-            return path
+            return ("Файл отсутствует:\n" + path) if file_missing else path
         if role == Qt.DisplayRole:
             # Keep labels extremely short; full path is in tooltip/opened post.
+            if file_missing:
+                return "Файл отсутствует"
             return "▶" if item.get("is_video") else ""
         if role == Qt.DecorationRole:
+            if file_missing:
+                return _missing_placeholder(self.thumb_w, self.thumb_h, Path(path).name)
             pix = self._cached_pix(path)
             if pix is not None and not pix.isNull():
                 return pix
@@ -373,12 +408,26 @@ class GalleryCardDelegate(QStyledItemDelegate):
         else:
             border = "#303645"
 
+        accent_map = {
+            "r34": "#5f9f4f",
+            "r34dark": "#7fb06f",
+            "ember": "#c07820",
+            "ph": "#ff9000",
+            "pornhub": "#ff9000",
+            "sakura": "#c05088",
+            "slate": "#5080b0",
+            "gray": "#5080b0",
+            "light": "#6050c0",
+            "dark": "#7060c0",
+            "abyss": "#7060c0",
+        }
+        accent = accent_map.get(theme, "#7060c0")
         width = 1
         if video:
-            border = "#004cff" if theme in ("r34", "r34dark") else "#388cff"
+            border = accent
             width = 2
         if selected:
-            border = "#004cff" if theme in ("r34", "r34dark") else "#5c8dff"
+            border = accent
             width = 2
 
         painter.setPen(QPen(QColor(border), width))
@@ -632,6 +681,8 @@ class GalleryPage(QWidget):
 
         self.page_tags = QListWidget()
         self.page_tags.setFixedWidth(360)
+        self.page_tags.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.page_tags.setTextElideMode(Qt.ElideRight)
         self.page_tags.setContextMenuPolicy(Qt.CustomContextMenu)
         self.page_tags.customContextMenuRequested.connect(self._tag_color_context_menu)
         ll.addWidget(self.page_tags, 1, Qt.AlignLeft)
@@ -659,6 +710,7 @@ class GalleryPage(QWidget):
         self.view.setSpacing(14)
         self.view.setWordWrap(False)
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.model = GalleryListModel(self)
         self.view.setModel(self.model)
         self.view.setItemDelegate(GalleryCardDelegate(self.view))
@@ -666,6 +718,8 @@ class GalleryPage(QWidget):
         self.view.clicked.connect(lambda idx: self._open_post(idx.row()))
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._show_context_menu)
+        self.view.viewport().installEventFilter(self)
+        self._last_wheel_page_time = 0.0
         rl.addWidget(self.view, 1)
 
         # Pager
@@ -710,6 +764,26 @@ class GalleryPage(QWidget):
         self.page_tags.itemClicked.connect(self._tag_single)
         self.page_tags.itemDoubleClicked.connect(self._tag_add)
         self.sources_list.itemClicked.connect(self._source_from_list)
+
+    def eventFilter(self, obj, event):
+        try:
+            if obj is self.view.viewport() and event.type() == QEvent.Wheel:
+                import time as _time
+                now = _time.time()
+                if now - float(getattr(self, "_last_wheel_page_time", 0.0) or 0.0) < 0.18:
+                    event.accept()
+                    return True
+                self._last_wheel_page_time = now
+                delta = event.angleDelta().y()
+                if delta < 0:
+                    self._next_page()
+                elif delta > 0:
+                    self._prev_page()
+                event.accept()
+                return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def retranslate(self):
         t = getattr(self.main, "t", lambda x: x)
@@ -771,10 +845,37 @@ class GalleryPage(QWidget):
     # ── Refresh ───────────────────────────────────────────────────────────────
 
     def refresh(self):
+        # Page-open refresh used to be a no-op once the gallery had any cached
+        # batch.  Downloader imports can change the SQLite result set while the
+        # gallery tab is already alive, so a dirty gallery must force a new SQL
+        # snapshot on the next open.
+        if getattr(self, "_library_dirty", False):
+            self.refresh_force()
+            return
         if not self._batch and self._sql_total == 0:
             self.refresh_force()
 
+    def mark_library_changed(self, path: str = ""):
+        """Called after downloader/subscription imports changed SQLite.
+
+        If the gallery is visible, refresh now.  If it is hidden, keep a dirty
+        flag so switching back to the tab refreshes instead of reusing the old
+        page cache.
+        """
+        self._library_dirty = True
+        if self.isVisible():
+            QTimer.singleShot(0, self.refresh_force)
+
     def refresh_force(self):
+        self._library_dirty = False
+        # Explicit refresh must see downloader writes committed by worker
+        # threads.  Drop only this UI thread's read-only pooled connection so
+        # the next SELECT opens a fresh SQLite/WAL snapshot.
+        try:
+            from core.database.connection import close_thread_pooled_connections
+            close_thread_pooled_connections(self.main.settings, readonly=True)
+        except Exception:
+            pass
         # Render the SQL page immediately, then update expensive facets in a
         # worker.  At ~10k results these GROUP BY queries were visibly freezing
         # the UI before any cards appeared.
@@ -1040,14 +1141,18 @@ class GalleryPage(QWidget):
         if token != self._render_token:
             return
         cols = max(1, int(self.main.settings.get("columns", 4)))
+        rows = max(1, int(self.main.settings.get("rows_per_page", 4)))
         max_tile = max(64, int(self.main.settings.get("card_height", 220) or 220))
         theme = _current_theme_name()
         spacing = 7 if theme in ("r34", "r34dark") else 10
         vieww = max(240, self.view.viewport().width() - 8)
-        available_tile = max(48, int((vieww - (cols * spacing * 2)) / cols))
+        viewh = max(220, self.view.viewport().height() - 8)
+        available_tile_w = max(48, int((vieww - (cols * spacing * 2)) / cols))
+        available_tile_h = max(48, int((viewh - (rows * spacing * 2)) / rows))
         # One fixed square slot per item; the image is aspect-fit inside it.
-        # card_height now really caps preview size on wide windows.
-        tile = max(48, min(max_tile, available_tile))
+        # Count both width and height so rows_per_page fits without a vertical
+        # scrollbar nib appearing at the right edge.
+        tile = max(48, min(max_tile, available_tile_w, available_tile_h))
         self.view.setSpacing(0)  # padding is accounted for in gridSize
         self.view.setGridSize(QSize(tile + spacing * 2, tile + spacing * 2))
         self.view.setIconSize(QSize(tile, tile))
@@ -1064,19 +1169,34 @@ class GalleryPage(QWidget):
     # ── Page tags ─────────────────────────────────────────────────────────────
 
     def _request_global_tag_groups(self):
+        display_source = str(self.source.currentText() or "all").lower().replace("www.", "")
         if self._global_tag_task is not None:
+            return
+        import time as _time
+        cache_key = (display_source, "live")
+        cached = _TAG_GROUP_COUNT_CACHE.get(cache_key)
+        # During active parsing, keep the UI responsive: reuse recent sidebar
+        # counts instead of launching another heavy aggregation every few seconds.
+        ttl = 30 if _parser_running(self.main) else 300
+        if cached and (_time.time() - float(cached[0] or 0)) < ttl:
+            self._global_tag_groups_cache = (display_source, cached[1])
+            QTimer.singleShot(0, self._render_page_tags)
             return
         generation = self._global_tag_generation
         settings = dict(self.main.settings or {})
         def complete(groups):
             if generation != self._global_tag_generation or groups is None:
                 return
-            self._global_tag_groups_cache = groups
+            _TAG_GROUP_COUNT_CACHE[cache_key] = (_time.time(), groups)
+            self._global_tag_groups_cache = (display_source, groups)
             QTimer.singleShot(0, self._render_page_tags)
         def finished():
             self._global_tag_task = None
+            # A source may be selected while a previous source's aggregation
+            # is still running. Kick rendering once more so its own task starts.
+            QTimer.singleShot(0, self._render_page_tags)
         self._global_tag_task = self.main.task_manager.submit(
-            _global_tag_groups_worker, settings, name="gallery-sidebar-tag-counts",
+            _global_tag_groups_worker, settings, display_source, name="gallery-sidebar-tag-counts",
             on_result=complete, on_error=lambda _error: complete({}), on_finished=finished,
         )
 
@@ -1120,17 +1240,49 @@ class GalleryPage(QWidget):
         if not batch:
             self.page_tags.clear()
             return
+        display_source = str(self.source.currentText() or "all").lower().replace("www.", "")
         try:
-            enrich_items(self.main.settings, batch)
+            enrich_items(self.main.settings, batch, tag_source=display_source)
         except Exception:
             pass
-        # Load GLOBAL tag counts from DB (not just current page). Cache the
-        # aggregation: changing page/source must not re-run a GROUP BY across
-        # ten thousand+ indexed posts every time. Refresh clears this cache.
-        global_groups = getattr(self, "_global_tag_groups_cache", None)
+        # Load counts for the currently displayed tag provenance: in "all"
+        # mode the sidebar is the deduplicated union; with a selected site it
+        # shows only that source's tag set.
+        cached = getattr(self, "_global_tag_groups_cache", None)
+        global_groups = cached[1] if isinstance(cached, tuple) and cached[0] == display_source else None
+        if global_groups is None and _parser_running(self.main) and bool(self.main.settings.get("gallery_defer_sidebar_counts_while_parser", True)):
+            # Do not fight the parser for SQLite.  Show page-local tags without
+            # global counts and delay the expensive full-sidebar aggregation.
+            self.page_tags.clear()
+            self.page_tags.addItem("Парсер работает: полные счётчики тегов обновятся позже…")
+            local_groups = {}
+            for item in batch:
+                groups = item.get("tag_groups") or {"general": item.get("tags", [])}
+                for group, values in groups.items():
+                    bucket = local_groups.setdefault(group, Counter())
+                    for tag in values or []:
+                        nt = normalize_tag(tag)
+                        if nt:
+                            bucket[nt] += 1
+            mode = self.tag_sort.currentData() or "count_desc"
+            for group in (self.main.settings.get("tag_group_order") or GROUP_ORDER):
+                values = local_groups.get(group) or {}
+                if not values:
+                    continue
+                self._add_header(group)
+                for tag, count in sort_tag_items(values.items(), mode)[:300]:
+                    it = QListWidgetItem(f"    {tag}    {count}")
+                    it.setData(Qt.UserRole, tag)
+                    it.setToolTip(f"{group}: {tag} (только текущая страница; парсер активен)")
+                    it.setForeground(QBrush(QColor(tag_display_color(tag, group, self.main.settings, GROUP_COLORS))))
+                    self.page_tags.addItem(it)
+            if self._global_tag_task is None:
+                delay = max(3000, int(self.main.settings.get("gallery_sidebar_refresh_delay_ms", 7000) or 7000))
+                QTimer.singleShot(delay, self._request_global_tag_groups)
+            return
         if global_groups is None:
             self.page_tags.clear()
-            self.page_tags.addItem("Загрузка общего списка тегов в фоне…")
+            self.page_tags.addItem("Загрузка списка тегов источника в фоне…")
             self._request_global_tag_groups()
             return
         # Build page-local tag set to filter which tags appear on this page
@@ -1203,13 +1355,17 @@ class GalleryPage(QWidget):
 
     # ── Open post ─────────────────────────────────────────────────────────────
 
+    def _current_tag_source_scope(self) -> str:
+        return str(self.source.currentText() or "all").lower().replace("www.", "")
+
     def _open_post(self, idx: int):
+        tag_source = self._current_tag_source_scope()
         if 0 <= idx < len(self._batch):
             try:
-                enrich_items(self.main.settings, [self._batch[idx]])
+                enrich_items(self.main.settings, [self._batch[idx]], tag_source=tag_source)
             except Exception:
                 pass
-        self.main.open_post(idx, self._batch)
+        self.main.open_post(idx, self._batch, tag_source=tag_source)
 
     def open_post(self, idx: int):
         self._open_post(idx)
@@ -1258,6 +1414,11 @@ class GalleryPage(QWidget):
         open_action = menu.addAction("Открыть")
         folder_action = menu.addAction("Открыть папку файла")
         copy_file_action = menu.addAction("Копировать файл")
+        missing_file = not path.exists()
+        if missing_file:
+            open_action.setText("Открыть (файл отсутствует)")
+            open_action.setEnabled(False)
+            copy_file_action.setEnabled(False)
         menu.addSeparator()
         copy_path_action = menu.addAction("Копировать путь")
         copy_md5_action = menu.addAction("Копировать MD5")
@@ -1273,7 +1434,8 @@ class GalleryPage(QWidget):
                 self._open_post(idx.row())
             elif chosen == folder_action:
                 import os
-                os.startfile(str(path.parent)) if hasattr(os, "startfile") else __import__("subprocess").Popen(["xdg-open", str(path.parent)])
+                folder = path.parent if path.parent.exists() else Path(str(self.main.settings.get("root", "") or "."))
+                os.startfile(str(folder)) if hasattr(os, "startfile") else __import__("subprocess").Popen(["xdg-open", str(folder)])
             elif chosen == copy_file_action:
                 mime = QMimeData(); mime.setUrls([QUrl.fromLocalFile(str(path))]); QApplication.clipboard().setMimeData(mime)
             elif chosen == copy_path_action:
@@ -1292,6 +1454,8 @@ class GalleryPage(QWidget):
                 )
                 if answer == QMessageBox.Yes:
                     from core.library_lifecycle import trash_media_paths
+                    if hasattr(self.main, "release_open_media_handles"):
+                        self.main.release_open_media_handles()
                     result = trash_media_paths(self.main.settings, [path], reason="gallery_context_delete", make_backup=True)
                     if result.get("error"):
                         raise RuntimeError(result.get("error"))

@@ -1,7 +1,7 @@
 from pathlib import Path
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QSizePolicy, QMessageBox, QMenu
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QSizePolicy, QMessageBox, QMenu, QComboBox, QApplication
 from PySide6.QtCore import Qt, QSize, QUrl, QTimer
-from PySide6.QtGui import QPixmap, QDesktopServices, QMovie, QImageReader, QShortcut, QKeySequence
+from PySide6.QtGui import QPixmap, QDesktopServices, QMovie, QImageReader, QShortcut, QKeySequence, QFontMetrics
 from core.favorites import load_favorites, set_favorite
 from core.library import normalize_tag, clean_tags
 from core.tag_utils import tag_display_color
@@ -89,11 +89,29 @@ class StarRating(QWidget):
 
 
 class TagButton(QPushButton):
+    """Clickable tag row that never widens the post sidebar.
+
+    Full names remain available through the tooltip and click actions; only the
+    visible label is elided when a booru tag is longer than the fixed sidebar.
+    """
     def __init__(self, tag, single, dbl):
-        super().__init__(normalize_tag(tag))
+        super().__init__()
         self.tag = normalize_tag(tag)
         self.single = single
         self.dbl = dbl
+        self.setToolTip(self.tag)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
+        self._set_elided_text(205)
+
+    def _set_elided_text(self, available_width=None):
+        width = int(available_width if available_width is not None else self.width() - 14)
+        width = max(24, width)
+        self.setText(QFontMetrics(self.font()).elidedText(self.tag, Qt.ElideRight, width))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._set_elided_text()
 
     def mousePressEvent(self, e):
         self.single(self.tag)
@@ -119,6 +137,9 @@ class PostPage(QWidget):
         self._mpv_player = None
         self._mpv_container = None
         self._mpv_timer = None
+        self._tag_source_mode = "all"
+        self._return_workspace = "Gallery"
+        self._online_preview_context = False
         self.setFocusPolicy(Qt.StrongFocus)
 
         from PySide6.QtWidgets import QSlider, QFrame
@@ -136,8 +157,11 @@ class PostPage(QWidget):
         self.tags_lay = QVBoxLayout(self.tags_holder)
         self.tags_lay.setContentsMargins(8, 8, 8, 8)
         self.tags_scroll.setWidget(self.tags_holder)
-        self.tags_scroll.setMinimumWidth(240)
-        self.tags_scroll.setMaximumWidth(320)
+        # Keep the media viewport stable: very long tags must never resize the
+        # post sidebar. TagButton elides visible names and keeps full text in a tooltip.
+        self.tags_scroll.setFixedWidth(250)
+        self.tags_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tags_holder.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self.img_scroll = QScrollArea()
         self.img_scroll.setWidgetResizable(False)
@@ -442,7 +466,7 @@ class PostPage(QWidget):
         """
         try:
             item = item or self.item()
-            if not item:
+            if not item or item.get("_online_preview") or getattr(self, "_online_preview_context", False):
                 return None
             if item.get("id") is not None:
                 return int(item.get("id"))
@@ -564,8 +588,20 @@ class PostPage(QWidget):
             except Exception:
                 pass
         if self.gif_movie:
+            old_movie = self.gif_movie
             try:
-                self.gif_movie.stop()
+                old_movie.stop()
+            except Exception:
+                pass
+            try:
+                # QLabel retains a QMovie reference after stop(); on Windows
+                # that is enough to keep the GIF file locked.
+                self.img.setMovie(None)
+                self.img.clear()
+            except Exception:
+                pass
+            try:
+                old_movie.deleteLater()
             except Exception:
                 pass
         self.gif_movie = None
@@ -579,15 +615,31 @@ class PostPage(QWidget):
             pass
 
 
-    def back_to_gallery(self):
+    def release_media_handles(self):
+        """Release viewers before a managed media file is moved or deleted."""
         self.stop_video()
-        self.main.go("Gallery")
         try:
-            gp = self.main.gallery_page
-            if getattr(gp, "_viewer_page_dirty", False):
-                QTimer.singleShot(0, gp.render_after_viewer_navigation)
+            self.img.setMovie(None)
+            self.img.clear()
         except Exception:
             pass
+        try:
+            from PySide6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def back_to_gallery(self):
+        self.stop_video()
+        target = str(getattr(self, "_return_workspace", "Gallery") or "Gallery")
+        self.main.go(target)
+        if target == "Gallery":
+            try:
+                gp = self.main.gallery_page
+                if getattr(gp, "_viewer_page_dirty", False):
+                    QTimer.singleShot(0, gp.render_after_viewer_navigation)
+            except Exception:
+                pass
 
     def hideEvent(self, event):
         self.stop_video()
@@ -657,7 +709,7 @@ class PostPage(QWidget):
         ctx = self.context or self.main.gallery_page._batch
         return ctx[self.index]
 
-    def set_post(self, idx, context=None):
+    def set_post(self, idx, context=None, tag_source=None):
         self.stop_video()
         self.setFocus(Qt.OtherFocusReason)
         self._page_history = []
@@ -676,7 +728,36 @@ class PostPage(QWidget):
             self.context = self.main.gallery_page._batch
             self.index = idx
         self.fit = "contain"
+        self._return_workspace = "Gallery"
+        self._online_preview_context = False
+        if tag_source is not None:
+            self._tag_source_mode = str(tag_source or "all").lower().replace("www.", "")
+        # The tag source selected in the post viewer is a persistent viewing
+        # mode. Opening another post must enrich metadata in that same mode,
+        # otherwise the selector still says "gelbooru.com" while the body
+        # silently renders the union from all sites.
+        self._enrich_current()
         self.render()
+
+    def set_online_posts(self, context, idx=0, tag_source=None, return_workspace="DLER"):
+        """Open temporary online-grabber posts in the normal Post viewer.
+
+        These items are not library media yet: no rating/favorite DB writes,
+        Back returns to the grabber, and metadata comes from the online API
+        payload already attached to the context.
+        """
+        self.stop_video()
+        self.setFocus(Qt.OtherFocusReason)
+        self._page_history = []
+        self._zoom_factor = 1.0
+        self.context = list(context or [])
+        self.index = max(0, min(int(idx or 0), max(0, len(self.context) - 1)))
+        self.fit = "contain"
+        self._return_workspace = str(return_workspace or "DLER")
+        self._online_preview_context = True
+        self._tag_source_mode = str(tag_source or "all").lower().replace("www.", "")
+        self.render()
+
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -707,19 +788,57 @@ class PostPage(QWidget):
         self.fit_btn.setVisible(not is_vid)
         self.render_media(path, item)
         self.render_tags(item)
-        self.render_fav(path)
-        self._load_rating(item)
+        online = bool(item.get("_online_preview") or getattr(self, "_online_preview_context", False))
+        self.fav.setVisible(not online)
+        self.star_rating.setVisible(not online)
+        if not online:
+            self.render_fav(path)
+            self._load_rating(item)
+        else:
+            self._current_image_id = None
+            try:
+                self.star_rating.set_rating(0)
+            except Exception:
+                pass
         ctx = self.context or self.main.gallery_page._batch
-        gp = self.main.gallery_page
-        per = gp._per_page()
-        maxp = max(1, (gp._sql_total + per - 1) // per)
-        has_next_page = gp._page < maxp
-        # Button visibility must use the same navigation rules as wheel/hotkeys.
-        # When a post is opened directly on page > 1 there is no in-viewer history,
-        # but a previous SQL page still exists and must be reachable.
-        has_prev_page = bool(self._page_history) or gp._page > 1
+        if online:
+            has_prev_page = False
+            has_next_page = False
+        else:
+            gp = self.main.gallery_page
+            per = gp._per_page()
+            maxp = max(1, (gp._sql_total + per - 1) // per)
+            has_next_page = gp._page < maxp
+            # Button visibility must use the same navigation rules as wheel/hotkeys.
+            # When a post is opened directly on page > 1 there is no in-viewer history,
+            # but a previous SQL page still exists and must be reachable.
+            has_prev_page = bool(self._page_history) or gp._page > 1
         self.prev.setVisible(self.index > 0 or has_prev_page)
         self.next.setVisible(self.index < len(ctx) - 1 or has_next_page)
+        if online:
+            self._schedule_online_preview_load()
+
+    def _schedule_online_preview_load(self):
+        """Ask DownloaderPage to load the selected preview quality for online posts.
+
+        Opening from the grabber and navigating between online posts share the
+        same Post page.  Every online placeholder must start its own 25/50/100%
+        preview load; otherwise next/previous shows only the loading card.
+        """
+        try:
+            item = self.item()
+            if not isinstance(item, dict):
+                return
+            if not bool(item.get("_online_preview") or getattr(self, "_online_preview_context", False)):
+                return
+            if not item.get("_online_loading_preview"):
+                return
+            dp = getattr(self.main, "downloader_page", None)
+            if dp is None or not hasattr(dp, "request_online_post_preview"):
+                return
+            QTimer.singleShot(0, lambda it=item: dp.request_online_post_preview(it))
+        except Exception:
+            pass
 
     def ensure_image_widget(self):
         self.img_scroll.setWidgetResizable(False)
@@ -843,10 +962,53 @@ class PostPage(QWidget):
         self.video_active = True
         return True
 
+    def _render_online_loading_placeholder(self, item=None, message=None):
+        """Show a deliberate online-grabber loading state instead of a tiny thumb.
+
+        The grabber post view must not make a 180px/preview thumbnail look like
+        the final opened image.  It opens immediately with this placeholder, then
+        DownloaderPage replaces the path when the configured 25/50/100% preview
+        file finishes downloading into the temporary grabber cache.
+        """
+        self.stop_video()
+        self.ensure_image_widget()
+        self.img.clear()
+        quality = ""
+        try:
+            cand = (item or {}).get("_preview_candidate") or {}
+            quality = str(cand.get("open_quality_label") or cand.get("open_quality") or "")
+        except Exception:
+            quality = ""
+        if not quality:
+            quality = "выбранное качество"
+        text = str(message or "Загрузка предпросмотра…")
+        self.img.setText(f"{text}\n{quality}\n\nПКМ → Скачать уже доступно; скачивание сохранит оригинал.")
+        self.img.setMinimumSize(640, 360)
+        self.img.setAlignment(Qt.AlignCenter)
+        self.img.adjustSize()
+        self._seek_bar.setVisible(False)
+        self._time_label.setVisible(False)
+
     def render_media(self, path, item=None):
         # One unconditional teardown point: prevents audio/video from a previous
         # post surviving navigation, including video -> video transitions.
         self.stop_video()
+        if item and (item.get("_online_preview") or getattr(self, "_online_preview_context", False)) and item.get("_online_loading_preview"):
+            self._render_online_loading_placeholder(item)
+            return
+        if not Path(path).exists():
+            if item and (item.get("_online_preview") or getattr(self, "_online_preview_context", False)):
+                self._render_online_loading_placeholder(item, "Загрузка предпросмотра…" if item.get("_online_loading_preview") else "Предпросмотр ещё не загружен")
+                return
+            self.ensure_image_widget()
+            self.img.clear()
+            self.img.setText(f"Файл отсутствует\n{Path(path).name}\n\n{path}")
+            self.img.setMinimumSize(520, 220)
+            self.img.setAlignment(Qt.AlignCenter)
+            self.img.adjustSize()
+            self._seek_bar.setVisible(False)
+            self._time_label.setVisible(False)
+            return
         if item and item.get("is_video"):
             self.render_video(path)
         elif path.suffix.lower() == ".gif":
@@ -1075,7 +1237,30 @@ class PostPage(QWidget):
         self.main.save_settings()
         self.apply_volume()
 
+    def _online_thumb_fallback_path(self, item, current_path=""):
+        try:
+            if not (item and (item.get("_online_preview") or getattr(self, "_online_preview_context", False))):
+                return ""
+            cand = item.get("_preview_candidate") or {}
+            thumb = str(cand.get("thumb_path") or item.get("thumb_path") or "")
+            if thumb and thumb != str(current_path or "") and Path(thumb).exists():
+                return thumb
+        except Exception:
+            pass
+        return ""
+
     def render_img(self, path, item=None, zoom: float = None):
+        if not Path(path).exists():
+            fallback = self._online_thumb_fallback_path(item, path)
+            if fallback:
+                return self.render_img(Path(fallback), dict(item or {}, _preview_candidate={}), zoom=zoom)
+            self.ensure_image_widget()
+            self.img.clear()
+            self.img.setText(f"Файл отсутствует\n{Path(path).name}\n\n{path}")
+            self.img.setMinimumSize(520, 220)
+            self.img.setAlignment(Qt.AlignCenter)
+            self.img.adjustSize()
+            return
         """Render an opened image from its original aspect ratio, never from a stale card cache.
 
         Gallery thumbnails are deliberately tiny and asynchronous.  Reusing a cached card
@@ -1103,6 +1288,9 @@ class PostPage(QWidget):
             thumb = safe_thumbnail_path(path, max_w, max_h)
             raw = QPixmap(thumb) if thumb else QPixmap(str(path))
             if raw.isNull():
+                fallback = self._online_thumb_fallback_path(item, path)
+                if fallback:
+                    return self.render_img(Path(fallback), dict(item or {}, _preview_candidate={}), zoom=zoom)
                 self.img.setText(path.name); self.img.adjustSize(); return
             source_size = raw.size()
             if self.fit == "width":
@@ -1126,13 +1314,16 @@ class PostPage(QWidget):
                 thumb = safe_thumbnail_path(path, target.width(), target.height())
                 pix = QPixmap(thumb) if thumb else QPixmap(str(path)).scaled(target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if pix.isNull():
+            fallback = self._online_thumb_fallback_path(item, path)
+            if fallback:
+                return self.render_img(Path(fallback), dict(item or {}, _preview_candidate={}), zoom=zoom)
             self.img.setText(path.name); self.img.adjustSize(); return
         self.img.setPixmap(pix)
         self.img.setFixedSize(pix.size())
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        if not self.main.gallery_page._batch:
+        if not self.main.gallery_page._batch and not getattr(self, "_online_preview_context", False):
             return
         current = self.item()
         path = Path(current["path"])
@@ -1155,35 +1346,17 @@ class PostPage(QWidget):
         tag = normalize_tag(tag)
         item = self.item()
         path = Path(item["path"])
-
-        groups = item.get("tag_groups") or {"general": item.get("tags", [])}
-        new_groups = {}
-        removed = False
-        for group, tags in groups.items():
-            kept = []
-            for current in tags or []:
-                if normalize_tag(current).lower() == tag.lower():
-                    removed = True
-                    continue
-                kept.append(normalize_tag(current))
-            new_groups[group] = kept
-        if not removed:
-            return
         try:
-            from core.services.metadata_service import replace_media_tag_groups
-            if not replace_media_tag_groups(self.main.settings, path, new_groups):
-                raise RuntimeError("файл не найден в SQLite")
+            from core.services.metadata_service import remove_media_tag_link
+            if not remove_media_tag_link(self.main.settings, path, tag, self._tag_source_mode):
+                raise RuntimeError("тег или файл не найден в SQLite")
+            from core.services.library_service import enrich_items
+            enrich_items(self.main.settings, [item], tag_source=self._tag_source_mode)
         except Exception as e:
-            QMessageBox.warning(self, "Tag", f"Не смог сохранить теги в базе:\n{e}")
+            QMessageBox.warning(self, "Тег", f"Не смог удалить тег из базы:\n{e}")
             return
-        new_tags = []
-        for xs in new_groups.values():
-            for current in xs:
-                if current and current not in new_tags:
-                    new_tags.append(current)
-        item["tags"] = new_tags
-        item["tag_groups"] = new_groups
         self.render_tags(item)
+
 
     def remove_source_from_current(self, source_url, source_host=""):
         item = self.item()
@@ -1194,10 +1367,54 @@ class PostPage(QWidget):
                 return
             item["sources"] = [s for s in item.get("sources", []) if str(s.get("url", "")) != str(source_url or "") and str(s.get("host", "")) != str(source_host or "")]
             item["source_hosts"] = [s.get("host", "") for s in item.get("sources", [])]
+            from core.services.library_service import enrich_items
+            enrich_items(self.main.settings, [item], tag_source=self._tag_source_mode)
             self.render_tags(item)
         except Exception as e:
             QMessageBox.warning(self, "Source", f"Не смог удалить источник из базы:\n{e}")
 
+
+    def _select_tag_source(self, host):
+        self._tag_source_mode = str(host or "all")
+        try:
+            item = self.item()
+            # Online grabber posts already carry tag_groups_by_source in memory.
+            # Re-enriching them from SQLite can wipe/ignore temporary visual
+            # variant sources such as "booru.allthefallen.moe (похожий)".
+            if item.get("_online_preview") or getattr(self, "_online_preview_context", False):
+                self.render_tags(item)
+                return
+            from core.services.library_service import enrich_items
+            enrich_items(self.main.settings, [item], tag_source=self._tag_source_mode)
+            self.render_tags(item)
+        except Exception:
+            pass
+
+    def _search_grabber_from_post_tag(self, tag, *, add=False):
+        tag = normalize_tag(tag)
+        if not tag:
+            return
+        try:
+            dp = getattr(self.main, "downloader_page", None)
+            if dp is None:
+                return
+            if add:
+                parts = str(dp.preview_query.text() or "").split()
+                if tag not in parts:
+                    dp.preview_query.setText((str(dp.preview_query.text() or "").strip() + " " + tag).strip())
+            else:
+                dp.preview_query.setText(tag)
+            # Online-post tags must continue the search inside the Grabber,
+            # not jump to the local Gallery tag search.
+            if hasattr(self.main, "go"):
+                self.main.go("DLER")
+            try:
+                dp.preview_query.setFocus()
+            except Exception:
+                pass
+            dp.search_online_preview()
+        except Exception:
+            pass
 
     def render_tags(self, item):
         TAG_COLORS = {
@@ -1218,7 +1435,53 @@ class PostPage(QWidget):
         title = QLabel(self.main.t("Tags"))
         title.setStyleSheet("font-size:14px;font-weight:800;margin-bottom:4px")
         self.tags_lay.addWidget(title)
-        groups = item.get("tag_groups") or {"general": item.get("tags", [])}
+        per_source = item.get("tag_groups_by_source") or {}
+        hosts = sorted(str(host) for host in per_source if str(host))
+        wanted = str(self._tag_source_mode or "all")
+        # Keep the chosen provenance scope while paging. If the next post has
+        # no tags from that site, show an empty scope instead of silently
+        # returning to the union and making unrelated sites look selected.
+        if hosts or wanted != "all":
+            source_label = QLabel("Показывать теги источника:")
+            source_label.setStyleSheet("color:#888;font-size:11px;margin-top:2px;")
+            self.tags_lay.addWidget(source_label)
+            selector = QComboBox()
+            selector.addItem("Все источники", "all")
+            for host in hosts:
+                selector.addItem(host, host)
+            if wanted != "all" and wanted not in hosts:
+                selector.addItem(f"{wanted} (нет тегов у этого файла)", wanted)
+            pos = selector.findData(wanted)
+            selector.setCurrentIndex(pos if pos >= 0 else 0)
+            selector.currentIndexChanged.connect(lambda _idx, box=selector: self._select_tag_source(box.currentData()))
+            self.tags_lay.addWidget(selector)
+            if wanted != "all" and wanted not in hosts:
+                no_tags = QLabel("У этого файла нет тегов выбранного источника.")
+                no_tags.setWordWrap(True)
+                no_tags.setStyleSheet("color:#888;font-size:11px;margin:3px 2px 5px 2px;")
+                self.tags_lay.addWidget(no_tags)
+        def _norm_groups(raw):
+            out = {}
+            if isinstance(raw, dict):
+                for group, values in raw.items():
+                    gname = str(group or "general")
+                    vals = []
+                    for value in values or []:
+                        tag = normalize_tag(value)
+                        if tag and tag not in vals:
+                            vals.append(tag)
+                    if vals:
+                        out[gname] = vals
+            return out
+
+        base_groups = _norm_groups(item.get("tag_groups") or {"general": item.get("tags", [])})
+        # The selector must actually change the rendered tag set.  This is
+        # especially important for online grabber posts where exact sources and
+        # visual-only sources can legitimately carry different ATF/e621 tags.
+        if wanted != "all":
+            groups = _norm_groups(per_source.get(wanted) or {})
+        else:
+            groups = base_groups
         for g in ["artist","contributor","character","copyright","species","general","meta","lore","invalid","parody","language","category"]:
             if not groups.get(g):
                 continue
@@ -1230,7 +1493,20 @@ class PostPage(QWidget):
             self.tags_lay.addWidget(lab)
             for tag in groups[g]:
                 tag_color = tag_display_color(tag, g, self.main.settings, TAG_COLORS)
-                btn = TagButton(tag, self.main.open_tag_single, self.main.open_tag_add)
+                online_tag_mode = bool(
+                    item.get("_online_preview")
+                    or item.get("_preview_candidate")
+                    or getattr(self, "_online_preview_context", False)
+                    or str(getattr(self, "_return_workspace", "") or "") == "DLER"
+                )
+                if online_tag_mode:
+                    btn = TagButton(
+                        tag,
+                        lambda t, self=self: self._search_grabber_from_post_tag(t, add=False),
+                        lambda t, self=self: self._search_grabber_from_post_tag(t, add=True),
+                    )
+                else:
+                    btn = TagButton(tag, self.main.open_tag_single, self.main.open_tag_add)
                 btn.setStyleSheet(
                     f"QPushButton{{background:transparent;border:none;"
                     f"border-radius:4px;padding:1px 6px;color:{tag_color};font-size:12px;"
@@ -1260,16 +1536,10 @@ class PostPage(QWidget):
                     u = post_url
                     b.clicked.connect(lambda _=False, url=u: QDesktopServices.openUrl(QUrl(url)))
                     self.tags_lay.addWidget(b)
-                if file_url and file_url != post_url:
-                    shown_urls.add(file_url)
-                    b2 = QPushButton("↗ Прямая ссылка на файл")
-                    b2.setStyleSheet(
-                        "QPushButton{background:transparent;border:1px solid #333;"
-                        "border-radius:5px;padding:2px 7px;color:#7aadff;font-size:11px;}"
-                        "QPushButton:hover{border-color:#7aadff;}")
-                    u2 = file_url
-                    b2.clicked.connect(lambda _=False, url=u2: QDesktopServices.openUrl(QUrl(url)))
-                    self.tags_lay.addWidget(b2)
+                # Direct CDN/file URLs are intentionally not shown as sources.
+                # The visible source list must contain only original post pages;
+                # file_url remains stored in raw metadata for technical download
+                # history/deduplication.
         except Exception:
             pass
 
@@ -1320,13 +1590,35 @@ class PostPage(QWidget):
 
     def _show_media_context_menu(self, point):
         try:
-            path = Path(self.item()["path"])
+            item = self.item()
+            path = Path(item["path"])
         except Exception:
             return
-        menu = QMenu(self)
-        delete_action = menu.addAction("Удалить (в корзину)")
         sender = self.sender()
         global_point = sender.mapToGlobal(point) if sender is not None and hasattr(sender, "mapToGlobal") else self.mapToGlobal(point)
+
+        if bool(item.get("_online_preview") or getattr(self, "_online_preview_context", False)):
+            menu = QMenu(self)
+            download_action = menu.addAction("Скачать")
+            open_action = menu.addAction("Открыть пост в браузере")
+            copy_action = menu.addAction("Скопировать ссылку поста")
+            chosen = menu.exec(global_point)
+            cand = item.get("_preview_candidate") or {}
+            post_urls = list(cand.get("post_urls") or [s.get("url") for s in item.get("sources", []) if s.get("url")])
+            post_url = post_urls[0] if post_urls else ""
+            if chosen == download_action:
+                try:
+                    self.main.downloader_page.download_preview_candidate(cand)
+                except Exception as exc:
+                    QMessageBox.warning(self, "Скачать", str(exc))
+            elif chosen == open_action and post_url:
+                QDesktopServices.openUrl(QUrl(post_url))
+            elif chosen == copy_action and post_url:
+                QApplication.clipboard().setText(post_url)
+            return
+
+        menu = QMenu(self)
+        delete_action = menu.addAction("Удалить (в корзину)")
         chosen = menu.exec(global_point)
         if chosen != delete_action:
             return
@@ -1338,9 +1630,10 @@ class PostPage(QWidget):
             return
         try:
             from core.library_lifecycle import trash_media_paths
+            self.release_media_handles()
             result = trash_media_paths(self.main.settings, [path], reason="post_context_delete", make_backup=True)
-            if result.get("error"):
-                raise RuntimeError(result.get("error"))
+            if result.get("error") or int(result.get("errors", 0) or 0):
+                raise RuntimeError(result.get("error") or "Файл занят другим процессом и не был перемещён в корзину.")
             self.stop_video()
             self.main.gallery_page.refresh_force()
             try:
@@ -1395,6 +1688,8 @@ class PostPage(QWidget):
             self.render_img(path, self.item())
 
     def prev_post(self):
+        if getattr(self, "_online_preview_context", False) and self.index <= 0:
+            return
         if self.index > 0:
             self.index -= 1
             self.fit = "contain"
@@ -1426,15 +1721,18 @@ class PostPage(QWidget):
             self._enrich_current()
             self.render()
         else:
-            self._load_next_gallery_page()
+            if not getattr(self, "_online_preview_context", False):
+                self._load_next_gallery_page()
 
     def _enrich_current(self):
         """Load full metadata for current item (tags, sources etc.)."""
+        if getattr(self, "_online_preview_context", False):
+            return
         try:
             ctx = self.context or self.main.gallery_page._batch
             if 0 <= self.index < len(ctx):
                 from core.services.library_service import enrich_items
-                enrich_items(self.main.settings, [ctx[self.index]])
+                enrich_items(self.main.settings, [ctx[self.index]], tag_source=self._tag_source_mode)
         except Exception:
             pass
 
@@ -1461,7 +1759,7 @@ class PostPage(QWidget):
             return
         gp.adopt_viewer_page(previous_page, batch)
         try:
-            enrich_items(self.main.settings, [batch[-1]])
+            enrich_items(self.main.settings, [batch[-1]], tag_source=self._tag_source_mode)
         except Exception:
             pass
         self.context = list(batch)
@@ -1501,7 +1799,7 @@ class PostPage(QWidget):
         gp.adopt_viewer_page(next_page, batch)
         # Go to first item of new page immediately (batch is ready)
         try:
-            enrich_items(self.main.settings, [batch[0]])
+            enrich_items(self.main.settings, [batch[0]], tag_source=self._tag_source_mode)
         except Exception:
             pass
         self.context = list(batch)

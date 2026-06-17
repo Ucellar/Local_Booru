@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "Local Booru Companion",
+  "version": "0.1.2",
+  "description": "Скрывает уже скачанные booru-карточки и помогает Local Booru получать e621 JSON через обычный браузер после Cloudflare.",
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://rule34.xxx/*",
+    "*://*.rule34.xxx/*",
+    "*://gelbooru.com/*",
+    "*://*.gelbooru.com/*",
+    "*://danbooru.donmai.us/*",
+    "*://e621.net/*",
+    "*://e926.net/*",
+    "*://booru.allthefallen.moe/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://rule34.xxx/*",
+        "*://*.rule34.xxx/*",
+        "*://gelbooru.com/*",
+        "*://*.gelbooru.com/*",
+        "*://danbooru.donmai.us/*",
+        "*://e621.net/*",
+        "*://e926.net/*",
+        "*://booru.allthefallen.moe/*"
+      ],
+      "js": [
+        "content_script.js"
+      ],
+      "css": [
+        "content_styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Local Booru Companion",
+    "default_popup": "popup.html"
+  }
+}

@@ -6,17 +6,32 @@ import sys
 from pathlib import Path
 HERE = Path(SPECPATH)
 
+# Optional AI runtime collection.  The spec must still be readable on machines
+# where torch/transformers are not installed yet.
+ai_hiddenimports = []
+ai_datas = []
+ai_binaries = []
+try:
+    from PyInstaller.utils.hooks import collect_submodules, collect_data_files, collect_dynamic_libs
+    ai_hiddenimports += collect_submodules('transformers.models.clip')
+    ai_hiddenimports += collect_submodules('safetensors')
+    ai_datas += collect_data_files('transformers', include_py_files=False)
+    ai_datas += collect_data_files('tokenizers', include_py_files=False)
+    ai_binaries += collect_dynamic_libs('torch')
+except Exception:
+    pass
+
 block_cipher = None
 
 a = Analysis(
     ['app.py'],
     pathex=[str(HERE)],
-    binaries=[],
+    binaries=ai_binaries,
     datas=[
         ('assets', 'assets'),
         ('core', 'core'),
         ('ui', 'ui'),
-    ],
+    ] + ai_datas,
     hiddenimports=[
         # Core modules
         'core.tagger_engine', 'core.tagger.engine',
@@ -40,7 +55,12 @@ a = Analysis(
         'PIL', 'PIL.Image', 'PIL.ImageOps', 'PIL.ImageFilter',
         'bs4', 'requests', 'browser_cookie3',
         'imagehash', 'numpy', 'cv2',
-    ],
+        # Optional local NO_MATCH AI backend.  Needed when building an exe that
+        # downloads/uses CLIP locally after first launch.
+        'torch', 'transformers', 'transformers.models.clip',
+        'transformers.models.clip.modeling_clip', 'transformers.models.clip.processing_clip',
+        'safetensors',
+    ] + ai_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -63,7 +83,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,          # no console window
+    console=True,           # v162: visible startup console/log window
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,

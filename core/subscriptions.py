@@ -409,7 +409,9 @@ def run_subscription(sub: dict, settings: dict,
     oldest_ids = sub.get("oldest_post_ids") if isinstance(sub.get("oldest_post_ids"), dict) else {}
     query = sub.get("query", "")
     max_pages = int(sub.get("max_pages", 3))
-    blacklist = normalize_blacklist_tags(sub.get("blacklist_tags") or [])
+    global_blacklist = normalize_blacklist_tags((settings or {}).get("grabber_subscriptions_blocklist") or (settings or {}).get("downloader_blocklist") or [])
+    local_blacklist = normalize_blacklist_tags(sub.get("blacklist_tags") or [])
+    blacklist = list(dict.fromkeys(global_blacklist + local_blacklist))
     run_mode = run_mode or sub.get("run_mode", "all") or "all"
     direction = sub.get("run_direction", "newest_to_oldest") or "newest_to_oldest"
     sub_id = sub.get("id") or ""

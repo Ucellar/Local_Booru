@@ -1,6 +1,6 @@
 from collections import Counter, defaultdict
 from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QLineEdit,QPushButton,QLabel,QListWidget,QComboBox,QSplitter,QButtonGroup,QListWidgetItem,QMenu,QColorDialog
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QBrush
 from core.library import scan_library, sort_tag_items, normalize_tag
 from core.tag_utils import tag_display_color
@@ -8,24 +8,27 @@ from core.tag_utils import tag_display_color
 GROUP_ORDER=["artist","contributor","character","copyright","species","general","meta","lore","invalid","parody","language","category","pages"]
 GROUP_COLORS={"artist":"#ff3838","contributor":"#e67e22","character":"#00a000","copyright":"#ff54a7","species":"#22a6b3","general":"#004cff","meta":"#ff9900","lore":"#9b59b6","invalid":"#7f8c8d","parody":"#ff54a7","language":"#cc8800","category":"#00aaaa","pages":"#888888"}
 
-def _sqlite_tag_groups_worker(settings, progress=None, stop_check=None):
+def _sqlite_tag_groups_worker(settings, source="all", progress=None, stop_check=None):
     """Heavy GROUP BY for the Tags page; executed outside the UI thread."""
     if progress:
         progress("Загрузка списка тегов из SQLite…")
     if stop_check and stop_check():
         return None
-    from core.services.library_service import tag_group_counts
-    return tag_group_counts(settings)
+    from core.services.library_service import tag_group_counts, counters
+    groups = tag_group_counts(settings, source=source)
+    _tag_counts, source_counts, _extra = counters(settings)
+    return {"groups": groups, "sources": sorted(source_counts)}
 
 
 
 class TagsPage(QWidget):
     def __init__(self, main):
-        super().__init__(); self.main=main; self.items=[]; self.tag_counts={}; self.tag_groups=defaultdict(Counter); self.current_group="artist"; self._loaded=False; self._dirty=True; self._active_task=None
+        super().__init__(); self.main=main; self.items=[]; self.tag_counts={}; self.tag_groups=defaultdict(Counter); self.current_group="artist"; self._loaded=False; self._dirty=True; self._active_task=None; self._loaded_source=""
         lay=QVBoxLayout(self); self.split=QSplitter(Qt.Horizontal); lay.addWidget(self.split,1)
 
         left=QWidget(); ll=QVBoxLayout(left)
         left_head=QHBoxLayout(); self.all_title=QLabel(); left_head.addWidget(self.all_title,1); self.all_sort=QComboBox(); left_head.addWidget(self.all_sort,0,Qt.AlignRight); ll.addLayout(left_head)
+        source_row=QHBoxLayout(); self.tag_source_label=QLabel("Источник:"); self.tag_source=QComboBox(); self.tag_source.addItem("Все источники", "all"); source_row.addWidget(self.tag_source_label); source_row.addWidget(self.tag_source, 1); ll.addLayout(source_row)
         self.all_search=QLineEdit(); self.all_search.setClearButtonEnabled(True); ll.addWidget(self.all_search); self.all_list=QListWidget(); ll.addWidget(self.all_list,1)
 
         right=QWidget(); rl=QVBoxLayout(right)
@@ -42,6 +45,8 @@ class TagsPage(QWidget):
         self.group_search=QLineEdit(); self.group_search.setClearButtonEnabled(True); rl.addWidget(self.group_search); self.group_list=QListWidget(); rl.addWidget(self.group_list,1)
 
         for _lst in (self.all_list, self.group_list):
+            _lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            _lst.setTextElideMode(Qt.ElideRight)
             _lst.setContextMenuPolicy(Qt.CustomContextMenu)
             _lst.customContextMenuRequested.connect(lambda pos, lst=_lst: self._tag_color_context_menu(lst, pos))
         self.split.addWidget(left); self.split.addWidget(right); self.split.setSizes([520,620])
@@ -49,11 +54,11 @@ class TagsPage(QWidget):
         self.refresh_btn=QPushButton(); lay.addWidget(self.refresh_btn)
         for cb in [self.all_sort,self.group_sort]:
             for m in ["count_desc","count_asc","alpha","alpha_desc"]: cb.addItem(m,m)
-        self.all_search.textChanged.connect(self.render_all); self.group_search.textChanged.connect(self.render_group); self.all_sort.currentIndexChanged.connect(self.render_all); self.group_sort.currentIndexChanged.connect(self.render_group); self.refresh_btn.clicked.connect(self.refresh_force)
+        self.all_search.textChanged.connect(self.render_all); self.group_search.textChanged.connect(self.render_group); self.all_sort.currentIndexChanged.connect(self.render_all); self.group_sort.currentIndexChanged.connect(self.render_group); self.refresh_btn.clicked.connect(self.refresh_force); self.tag_source.currentIndexChanged.connect(self._source_changed)
         self.all_list.itemClicked.connect(lambda it:self.main.open_tag_single(it.data(Qt.UserRole) or it.text().rsplit("    ",1)[0])); self.all_list.itemDoubleClicked.connect(lambda it:self.main.open_tag_add(it.data(Qt.UserRole) or it.text().rsplit("    ",1)[0])); self.group_list.itemClicked.connect(lambda it:self.main.open_tag_single(it.data(Qt.UserRole) or it.text().rsplit("    ",1)[0])); self.group_list.itemDoubleClicked.connect(lambda it:self.main.open_tag_add(it.data(Qt.UserRole) or it.text().rsplit("    ",1)[0]))
         self.group_btns[self.current_group].setChecked(True); self.retranslate()
     def retranslate(self):
-        t=self.main.t; self.refresh_btn.setText(t("Refresh")); self.all_title.setText(t("All tags")); self.group_title.setText(t("Group") + ":"); self.all_search.setPlaceholderText(t("Search tags")); self.group_search.setPlaceholderText(t("Search tags"))
+        t=self.main.t; self.refresh_btn.setText(t("Refresh")); self.all_title.setText(t("All tags")); self.group_title.setText(t("Group") + ":"); self.all_search.setPlaceholderText(t("Search tags")); self.group_search.setPlaceholderText(t("Search tags")); self.tag_source_label.setText("Источник тегов:")
         for cb in [self.all_sort,self.group_sort]:
             cur=cb.currentData(); cb.blockSignals(True); cb.clear()
             for m in ["count_desc","count_asc","alpha","alpha_desc"]: cb.addItem(t(m),m)
@@ -78,6 +83,10 @@ class TagsPage(QWidget):
             self.group_btns[self.current_group].setChecked(True)
         self.refresh_force()
 
+    def _source_changed(self):
+        self._dirty = True
+        self.refresh_force()
+
     def refresh(self):
         # Opening the Tags tab must be instant after its first load.  In SQLite
         # mode self.items is intentionally empty, so checking `not self.items`
@@ -100,8 +109,10 @@ class TagsPage(QWidget):
             self.loading_status.setText("Загрузка тегов в фоне…")
             self.loading_status.setVisible(True)
             self.refresh_btn.setEnabled(False)
+            selected_source = str(self.tag_source.currentData() or "all")
+            self._requested_source = selected_source
             self._active_task = self.main.task_manager.submit(
-                _sqlite_tag_groups_worker, dict(self.main.settings or {}), name="tags-global-counts",
+                _sqlite_tag_groups_worker, dict(self.main.settings or {}), selected_source, name="tags-global-counts",
                 on_progress=lambda message: self.loading_status.setText(str(message)),
                 on_result=self._sqlite_groups_ready, on_error=self._sqlite_groups_error,
                 on_finished=self._sqlite_groups_finished,
@@ -109,16 +120,27 @@ class TagsPage(QWidget):
             return
         self.items,self.tag_counts,_,_=scan_library(self.main.settings); self.rebuild_groups(); self._loaded=True; self._dirty=False; self.render_all(); self.render_group()
 
-    def _sqlite_groups_ready(self, groups):
-        if groups is None:
+    def _sqlite_groups_ready(self, result):
+        if result is None:
             return
+        groups = result.get("groups", {}) if isinstance(result, dict) else result
+        hosts = result.get("sources", []) if isinstance(result, dict) else []
+        current = str(self.tag_source.currentData() or "all")
+        self.tag_source.blockSignals(True)
+        self.tag_source.clear(); self.tag_source.addItem("Все источники", "all")
+        for host in hosts:
+            self.tag_source.addItem(str(host), str(host))
+        idx = self.tag_source.findData(current)
+        self.tag_source.setCurrentIndex(idx if idx >= 0 else 0)
+        self.tag_source.blockSignals(False)
         self.tag_groups = groups
         self.tag_counts = {}
         for _counter in self.tag_groups.values():
             for _tag, _count in _counter.items():
                 self.tag_counts[_tag] = self.tag_counts.get(_tag, 0) + int(_count)
         self.items = []
-        self._loaded = True; self._dirty = False
+        self._loaded_source = str(getattr(self, "_requested_source", "all"))
+        self._loaded = True; self._dirty = (str(self.tag_source.currentData() or "all") != self._loaded_source)
         self.render_all(); self.render_group()
 
     def _sqlite_groups_error(self, error):
@@ -130,6 +152,8 @@ class TagsPage(QWidget):
         self.refresh_btn.setEnabled(True)
         if self._loaded:
             self.loading_status.setVisible(False)
+        if self._dirty:
+            QTimer.singleShot(0, self.refresh_force)
     def rebuild_groups(self):
         self.tag_groups=defaultdict(Counter)
         for item in self.items:

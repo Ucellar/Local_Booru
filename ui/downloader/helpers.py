@@ -63,6 +63,8 @@ __all__ = [
     "_clean_download_tag",
     "_dedupe_group_dict",
     "_extract_file_url_from_json",
+    "_extract_preview_url_from_json",
+    "_post_md5_from_json",
     "_posts_from_json_response",
     "_extract_file_url_from_html",
     "_candidate_api_urls",
@@ -151,6 +153,11 @@ def _session_for_url(url, log):
     if log:
         log(f"COOKIES [{host}]: loaded {added}")
 
+    try:
+        from core.network import install_safe_session
+        install_safe_session(s, settings={}, log_func=log)
+    except Exception:
+        pass
     return s
 
 
@@ -359,10 +366,33 @@ def _extract_file_url_from_json(data):
     if not isinstance(data, dict):
         return ""
 
-    for key in ("file_url", "large_file_url", "sample_url", "jpeg_url", "source"):
-        v = data.get(key)
-        if isinstance(v, str) and v.startswith(("http://", "https://")):
+    def abs_url(v):
+        if not isinstance(v, str) or not v.strip():
+            return ""
+        v = v.strip()
+        if v.startswith("//"):
+            return "https:" + v
+        if v.startswith(("http://", "https://")):
             return v
+        return ""
+
+    # Never use the metadata/source field as a direct media URL.  On e621 it is
+    # usually Pixiv/Twitter/etc., not the file to download/open.
+    for key in ("file_url", "large_file_url", "sample_url", "sample_file_url", "jpeg_url", "source_file_url", "original_url"):
+        u = abs_url(data.get(key))
+        if u:
+            return u
+
+    # e621/e926 and some Danbooru-compatible APIs keep URLs nested.  v168 only
+    # looked at flat file_url, which made e621 appear empty even when the API
+    # returned posts.
+    for bucket in ("file", "sample", "preview"):
+        item = data.get(bucket)
+        if isinstance(item, dict):
+            for key in ("url", "file_url", "ext_url"):
+                u = abs_url(item.get(key))
+                if u:
+                    return u
 
     media = data.get("media_asset")
     if isinstance(media, dict):
@@ -370,8 +400,135 @@ def _extract_file_url_from_json(data):
         if isinstance(variants, list):
             for want in ("original", "sample", "720x720", "360x360"):
                 for v in variants:
+                    if isinstance(v, dict) and v.get("type") == want:
+                        u = abs_url(v.get("url"))
+                        if u:
+                            return u
+
+    return ""
+
+
+
+
+def _extract_preview_url_from_json(data):
+    """Return the best lightweight preview URL for online grabber cards.
+
+    Different booru APIs use different shapes:
+    - Gelbooru/rule34 DAPI: preview_url / sample_url / file_url
+    - Danbooru: preview_file_url / large_file_url / file_url
+    - e621: preview.url / sample.url / file.url
+    - Danbooru-compatible forks may wrap the post in {post:{...}}.
+    """
+    if isinstance(data, dict) and isinstance(data.get("post"), dict):
+        data = data["post"]
+    if isinstance(data, dict) and isinstance(data.get("posts"), list) and data["posts"]:
+        data = data["posts"][0]
+    if isinstance(data, list) and data:
+        data = data[0]
+    if not isinstance(data, dict):
+        return ""
+
+    for key in (
+        "preview_url", "preview_file_url", "sample_url", "sample_file_url",
+        "large_file_url", "file_url", "jpeg_url",
+    ):
+        v = data.get(key)
+        if isinstance(v, str) and v.startswith(("http://", "https://")):
+            return v
+
+    for bucket in ("preview", "sample", "file"):
+        item = data.get(bucket)
+        if isinstance(item, dict):
+            v = item.get("url") or item.get("file_url")
+            if isinstance(v, str) and v.startswith(("http://", "https://")):
+                return v
+
+    media = data.get("media_asset")
+    if isinstance(media, dict):
+        variants = media.get("variants") or []
+        if isinstance(variants, list):
+            for want in ("180x180", "360x360", "720x720", "sample", "original"):
+                for v in variants:
                     if isinstance(v, dict) and v.get("type") == want and isinstance(v.get("url"), str):
                         return v["url"]
+    return _extract_file_url_from_json(data)
+
+
+def _post_md5_from_json(data):
+    """Extract an exact remote MD5 from common booru JSON shapes.
+
+    Some sites/forks do not expose an explicit ``md5`` field even though the
+    CDN/original URL contains the hash as the filename, for example
+    ``/data/original/11/24/<md5>.jpg`` or Danbooru/e621-style file URLs.
+    The grabber uses this value as the card merge key, so URL fallback is
+    required to merge the same exact file returned by multiple sites.
+    """
+    if isinstance(data, dict) and isinstance(data.get("post"), dict):
+        data = data["post"]
+    if not isinstance(data, dict):
+        return ""
+
+    def valid(v):
+        v = str(v or "").strip().lower()
+        return v if re.fullmatch(r"[0-9a-f]{32}", v) else ""
+
+    for key in ("md5", "hash", "file_md5", "file_hash"):
+        got = valid(data.get(key))
+        if got:
+            return got
+
+    for bucket in ("file", "media_asset", "image"):
+        item = data.get(bucket)
+        if isinstance(item, dict):
+            for key in ("md5", "hash", "file_md5", "file_hash"):
+                got = valid(item.get(key))
+                if got:
+                    return got
+
+    def md5_from_url(u):
+        if not isinstance(u, str) or not u.strip():
+            return ""
+        try:
+            path = unquote(urlparse(u).path or "")
+        except Exception:
+            path = str(u)
+        # Accept a 32-hex filename with any normal media extension, and also
+        # URLs where the CDN strips the extension.
+        name = Path(path).name.lower()
+        stem = Path(name).stem.lower() if "." in name else name
+        got = valid(stem)
+        if got:
+            return got
+        m = re.search(r"(?<![0-9a-f])([0-9a-f]{32})(?![0-9a-f])", path.lower())
+        return valid(m.group(1)) if m else ""
+
+    url_keys = (
+        "file_url", "large_file_url", "sample_url", "sample_file_url",
+        "jpeg_url", "source_file_url", "original_url", "preview_url",
+        "preview_file_url",
+    )
+    for key in url_keys:
+        got = md5_from_url(data.get(key))
+        if got:
+            return got
+
+    for bucket in ("file", "sample", "preview"):
+        item = data.get(bucket)
+        if isinstance(item, dict):
+            for key in ("url", "file_url", "ext_url"):
+                got = md5_from_url(item.get(key))
+                if got:
+                    return got
+
+    media = data.get("media_asset")
+    if isinstance(media, dict):
+        variants = media.get("variants") or []
+        if isinstance(variants, list):
+            for v in variants:
+                if isinstance(v, dict):
+                    got = md5_from_url(v.get("url"))
+                    if got:
+                        return got
 
     return ""
 

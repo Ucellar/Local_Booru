@@ -16,10 +16,10 @@ from pathlib import Path
 from typing import Iterable
 
 from core.database.connection import db, db_path
-from core.paths import CACHE_DIR, LOGS_DIR, result_output_base, DATA_DIR
+from core.paths import CACHE_DIR, LOGS_DIR, BACKUPS_DIR, result_output_base, DATA_DIR
 from core.media_utils import file_md5, host_from_url
 from core.source_protection import require_managed_media_mutation, is_managed_media_path
-from core.services.media_storage_service import move_managed, unlink_managed
+from core.services.media_storage_service import move_managed, unlink_managed, content_addressed_path, normalize_managed_content_name
 
 
 def _now() -> int:
@@ -53,7 +53,7 @@ def force_backup_database(settings: dict, reason: str = "operation") -> str:
     source = db_path(settings)
     if not source.exists():
         return ""
-    folder = Path(DATA_DIR) / "db_backups"
+    folder = Path(BACKUPS_DIR) / "db"
     folder.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     safe_reason = "".join(c if c.isalnum() or c in "_-" else "_" for c in str(reason))[:40]
@@ -207,6 +207,10 @@ def _merge_image_metadata(con, keep_id: int, source_id: int) -> None:
         return
     con.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id) SELECT ?,tag_id FROM image_tags WHERE image_id=?", (int(keep_id), int(source_id)))
     con.execute("INSERT OR IGNORE INTO image_sources(image_id,source_id) SELECT ?,source_id FROM image_sources WHERE image_id=?", (int(keep_id), int(source_id)))
+    con.execute("""
+        INSERT OR REPLACE INTO image_source_tags(image_id,source_id,tag_id,category,acquisition,updated_at)
+        SELECT ?,source_id,tag_id,category,acquisition,updated_at FROM image_source_tags WHERE image_id=?
+    """, (int(keep_id), int(source_id)))
     score = con.execute("SELECT rating,favorite FROM images WHERE id=?", (int(source_id),)).fetchone()
     if score:
         con.execute("UPDATE images SET rating=MAX(COALESCE(rating,0),?), favorite=MAX(COALESCE(favorite,0),?) WHERE id=?", (int(score["rating"] or 0), int(score["favorite"] or 0), int(keep_id)))
@@ -265,6 +269,8 @@ def restore_from_trash(settings: dict, image_ids: Iterable[int]) -> dict:
                     bucket = str(row["bucket"] or "found") if "bucket" in row.keys() else "found"
                     safe_bucket = "partial_match" if "partial" in bucket else ("no_match" if "no_match" in bucket else "found")
                     desired = result_output_base(settings) / safe_bucket / "media" / Path(row["file_name"] or cur.name).name
+                if md5:
+                    desired = content_addressed_path(desired, md5, original_name=Path(row["file_name"] or cur.name).name)
                 desired.parent.mkdir(parents=True, exist_ok=True)
                 dest = _unique_target(desired.parent, desired, image_id) if desired.exists() else desired
                 if cur.exists():
@@ -675,3 +681,219 @@ def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, ap
                 con.execute("UPDATE images SET path=?, file_name=? WHERE id=?", (new, Path(new).name, image_id))
                 con.execute("UPDATE processed_files SET media_path=? WHERE media_path=?", (new, old))
     return {"old_base": str(old_base), "new_base": str(new_base), "found": len(matches), "updated": len(matches) if apply else 0, "matches": matches[:50]}
+
+
+
+def repair_live_md5_by_bytes(settings: dict, *, make_backup: bool = True, progress=None, cancel_check=None) -> dict:
+    """Recompute real byte-MD5 for live media rows and update stale DB hashes.
+
+    This is the parser-side repair for old archives and renamed files.  It never
+    trusts a 32-hex filename.  If a row says ``hash_md5=A`` but the file bytes
+    are actually ``B``, the row is updated to ``B`` and the path/stat result is
+    stored in ``settings/cache/parser_file_hash_cache`` so later parser passes
+    do not reread the same file.
+
+    The function does not delete or merge files by pHash.  Exact duplicate
+    cleanup remains a separate explicit maintenance action.
+    """
+    backup = force_backup_database(settings, "repair_live_md5_by_bytes") if make_backup else ""
+    if make_backup and db_path(settings).exists() and not backup:
+        return {"checked": 0, "updated": 0, "missing": 0, "errors": 1, "backup": "", "error": "Не удалось создать резервную копию базы. Ремонт MD5 отменён."}
+    with db(settings, readonly=True) as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT id,path,file_name,hash_md5 FROM images WHERE deleted=0 ORDER BY id"
+        ).fetchall()]
+    checked = updated = missing = errors = mismatched_filename = 0
+    for idx, row in enumerate(rows, 1):
+        if cancel_check and cancel_check():
+            return {"checked": checked, "updated": updated, "missing": missing, "errors": errors, "cancelled": True, "backup": backup}
+        path = Path(str(row.get("path") or ""))
+        if not path.exists() or not path.is_file():
+            missing += 1
+            continue
+        checked += 1
+        try:
+            from core.file_hash_cache import get_or_compute_md5, filename_md5
+            real_md5, _hit = get_or_compute_md5(settings, path)
+            old_md5 = str(row.get("hash_md5") or "").strip().lower()
+            name_md5 = filename_md5(path)
+            if name_md5 and real_md5 and name_md5 != real_md5:
+                mismatched_filename += 1
+            if real_md5 and real_md5 != old_md5:
+                with db(settings, write=True) as con:
+                    con.execute("UPDATE images SET hash_md5=? WHERE id=?", (real_md5, int(row["id"])))
+                updated += 1
+        except Exception:
+            errors += 1
+        if progress and (idx % 100 == 0 or idx == len(rows)):
+            try:
+                progress(idx, len(rows))
+            except Exception:
+                pass
+    duplicates_after = 0
+    try:
+        with db(settings, readonly=True) as con:
+            duplicates_after = int(con.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT lower(hash_md5) AS md5 FROM images
+                       WHERE deleted=0 AND COALESCE(hash_md5,'')<>''
+                       GROUP BY lower(hash_md5) HAVING COUNT(*)>1
+                   )"""
+            ).fetchone()[0] or 0)
+    except Exception:
+        duplicates_after = 0
+    return {
+        "checked": checked,
+        "updated": updated,
+        "missing": missing,
+        "errors": errors,
+        "mismatched_filename": mismatched_filename,
+        "duplicate_md5_groups_after": duplicates_after,
+        "backup": backup,
+    }
+
+def filename_collision_stats(settings: dict) -> dict:
+    """Read-only report for unsafe filename/path situations."""
+    with db(settings, readonly=True) as con:
+        duplicate_paths = int(con.execute(
+            "SELECT COUNT(*) FROM (SELECT path FROM images WHERE deleted=0 GROUP BY path HAVING COUNT(*)>1)"
+        ).fetchone()[0] or 0)
+        same_name_diff_md5 = int(con.execute(
+            """SELECT COUNT(*) FROM (
+                   SELECT file_name FROM images WHERE deleted=0 AND COALESCE(file_name,'')<>''
+                   GROUP BY file_name HAVING COUNT(DISTINCT lower(COALESCE(hash_md5,'')))>1
+               )"""
+        ).fetchone()[0] or 0)
+        unsafe_content_names = int(con.execute(
+            """SELECT COUNT(*) FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>''
+               AND file_name NOT LIKE '%' || substr(lower(hash_md5),1,12) || '%'"""
+        ).fetchone()[0] or 0)
+        rows = con.execute("SELECT id,path,file_name,hash_md5 FROM images WHERE deleted=0 ORDER BY id").fetchall()
+    missing = 0
+    for row in rows:
+        try:
+            if not Path(str(row["path"] or "")).exists():
+                missing += 1
+        except Exception:
+            missing += 1
+    return {
+        "duplicate_live_paths": duplicate_paths,
+        "same_filename_different_md5": same_name_diff_md5,
+        "unsafe_content_names": unsafe_content_names,
+        "missing_live_paths": missing,
+    }
+
+
+def repair_missing_paths_by_md5(settings: dict, *, make_backup: bool = True, progress=None, cancel_check=None) -> dict:
+    """Repair live DB rows whose path is missing by searching managed output by MD5.
+
+    This never guesses by filename alone.  Only an exact byte-MD5 match may repair
+    a path.  It is intended for old builds that registered ``48.jpg`` but later
+    copied/renamed another collision variant.
+    """
+    backup = force_backup_database(settings, "repair_missing_paths_by_md5") if make_backup else ""
+    if make_backup and db_path(settings).exists() and not backup:
+        return {"checked": 0, "missing": 0, "repaired": 0, "unresolved": 0, "backup": "", "error": "Не удалось создать резервную копию базы. Ремонт отменён."}
+    with db(settings, readonly=True) as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT id,path,file_name,hash_md5 FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>'' ORDER BY id"
+        ).fetchall()]
+    missing = [r for r in rows if not Path(str(r.get("path") or "")).exists()]
+    wanted = {str(r.get("hash_md5") or "").lower(): r for r in missing if str(r.get("hash_md5") or "").strip()}
+    found: dict[str, Path] = {}
+    root = result_output_base(settings)
+    checked_files = 0
+    if wanted and root.exists():
+        for candidate in root.rglob("*"):
+            if cancel_check and cancel_check():
+                break
+            try:
+                if not candidate.is_file():
+                    continue
+                if candidate.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".webm", ".mkv", ".mov", ".avi"}:
+                    continue
+                checked_files += 1
+                value = file_md5(candidate).lower()
+                if value in wanted and value not in found:
+                    found[value] = candidate
+                    if len(found) >= len(wanted):
+                        break
+            except Exception:
+                continue
+            if progress and checked_files % 200 == 0:
+                try:
+                    progress(checked_files, len(wanted))
+                except Exception:
+                    pass
+    repaired = unresolved = 0
+    now = _now()
+    with db(settings, write=True) as con:
+        for row in missing:
+            md5 = str(row.get("hash_md5") or "").lower()
+            new_path = found.get(md5)
+            if new_path and new_path.exists():
+                con.execute("UPDATE images SET path=?, file_name=? WHERE id=?", (str(new_path), new_path.name, int(row["id"])))
+                con.execute("UPDATE processed_files SET media_path=? WHERE media_path=?", (str(new_path), str(row.get("path") or "")))
+                con.execute("UPDATE no_match_items SET media_path=? WHERE media_path=?", (str(new_path), str(row.get("path") or "")))
+                repaired += 1
+            else:
+                con.execute(
+                    "INSERT INTO filename_collision_audit(issue_type,image_id,path,file_name,hash_md5,details,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    ("missing_path_unresolved", int(row["id"]), str(row.get("path") or ""), str(row.get("file_name") or ""), md5, "No exact MD5 file found under managed output", "open", now),
+                )
+                unresolved += 1
+    return {"checked": checked_files, "missing": len(missing), "repaired": repaired, "unresolved": unresolved, "backup": backup}
+
+
+def normalize_live_content_filenames(settings: dict, *, make_backup: bool = True, progress=None, cancel_check=None) -> dict:
+    """Rename live managed files to collision-proof ``original__md5.ext`` names.
+
+    This fixes future ``Файл отсутствует`` issues caused by unrelated files with
+    identical names.  It does not merge exact MD5 duplicates; run
+    ``cleanup_live_exact_duplicates`` for that separate invariant.
+    """
+    backup = force_backup_database(settings, "normalize_content_filenames") if make_backup else ""
+    if make_backup and db_path(settings).exists() and not backup:
+        return {"checked": 0, "renamed": 0, "skipped": 0, "errors": 1, "backup": "", "error": "Не удалось создать резервную копию базы. Нормализация отменена."}
+    with db(settings, readonly=True) as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT id,path,file_name,hash_md5,COALESCE(original_file_name,file_name) AS original_file_name FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>'' ORDER BY id"
+        ).fetchall()]
+    checked = renamed = skipped = errors = db_path_collisions = 0
+    for idx, row in enumerate(rows, 1):
+        if cancel_check and cancel_check():
+            break
+        checked += 1
+        try:
+            cur = Path(str(row.get("path") or ""))
+            md5 = str(row.get("hash_md5") or "").lower()
+            if not cur.exists() or not is_managed_media_path(settings, cur):
+                skipped += 1
+                continue
+            desired = content_addressed_path(cur, md5, original_name=str(row.get("original_file_name") or row.get("file_name") or cur.name))
+            if desired.name == cur.name:
+                skipped += 1
+                continue
+            with db(settings, readonly=True) as con:
+                other = con.execute("SELECT id FROM images WHERE path=? AND id<>? LIMIT 1", (str(desired), int(row["id"]))).fetchone()
+            if other:
+                db_path_collisions += 1
+                skipped += 1
+                continue
+            new_path = normalize_managed_content_name(settings, cur, md5, operation="normalize_live_content_filenames", original_name=str(row.get("original_file_name") or row.get("file_name") or cur.name))
+            if str(new_path) != str(cur):
+                with db(settings, write=True) as con:
+                    con.execute("UPDATE images SET path=?, file_name=?, content_name_policy='md5_suffix' WHERE id=?", (str(new_path), new_path.name, int(row["id"])))
+                    con.execute("UPDATE processed_files SET media_path=? WHERE media_path=?", (str(new_path), str(cur)))
+                    con.execute("UPDATE no_match_items SET media_path=? WHERE media_path=?", (str(new_path), str(cur)))
+                renamed += 1
+            else:
+                skipped += 1
+        except Exception:
+            errors += 1
+        if progress and idx % 200 == 0:
+            try:
+                progress(idx, len(rows))
+            except Exception:
+                pass
+    return {"checked": checked, "renamed": renamed, "skipped": skipped, "db_path_collisions": db_path_collisions, "errors": errors, "backup": backup}
