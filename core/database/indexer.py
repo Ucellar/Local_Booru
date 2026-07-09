@@ -102,6 +102,11 @@ def upsert_tags(con, image_id, groups):
                 if (cat == "species" and old != "species") or (cat != "general" and old in ("", "general")):
                     con.execute("UPDATE tags SET category=? WHERE id=?", (cat, int(row["id"])))
                 con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, row["id"]))
+    try:
+        from .storage import refresh_effective_tag_categories
+        refresh_effective_tag_categories(con, int(image_id))
+    except Exception:
+        pass
 
 
 def upsert_sources(con, image_id, sources):
@@ -229,5 +234,10 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                 removed += 1
         con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
         con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
+        try:
+            from .storage import refresh_effective_tag_categories
+            refresh_effective_tag_categories(con, None)
+        except Exception:
+            pass
         db_file = str(con.execute("PRAGMA database_list").fetchone()[2])
     return {"scanned": scanned, "indexed": indexed, "skipped": skipped, "removed": removed, "db": db_file}

@@ -1,32 +1,32 @@
 # Local Booru
 
-Local Booru — локальная программа для Windows для управления большим архивом изображений и видео в стиле booru.
+Local Booru is a local Windows application for managing a large image and video archive in a booru-style workflow.
 
-Изначально это был обычный парсер: закинуть папку, найти источники, получить теги и сохранить всё в базу. Потом появилась галерея, скачивание, дубликаты, подписки, встроенный браузер, граббер, SQLite, Blueprint-парсер и куча защит от того, чтобы большой архив случайно превратился в кашу.
+It started as a simple parser: add a folder, find sources, fetch tags, and save everything into a database. Over time it grew into a gallery, downloader, duplicate cleaner, subscriptions system, built-in browser, grabber, SQLite backend, Blueprint parser, and a set of safeguards to keep a large archive from accidentally turning into a mess.
 
-Цель программы простая: меньше ручной рутины. Если файл можно найти по MD5, по источнику, по похожести или через booru API — программа должна попытаться сделать это сама.
+The goal is simple: less manual routine. If a file can be found by MD5, by source, by visual similarity, or through a booru API, the program should try to do it automatically.
 
 ---
 
-## Скачать
+## Download
 
-[Скачать Local Booru v1.4](https://github.com/Ucellar/Local_Booru/releases/tag/v1.4)
+[Download Local Booru v1.5](https://github.com/Ucellar/Local_Booru/releases/tag/v1.5)
 
-# Галерея
+# Gallery
 
 <img src="screenshots/галерея.png" width="500">
 
-*Это тестовый экран. На нормальном архиве оно выглядит заметно лучше, но свой архив я сюда положить не могу по вполне понятным причинам.*
+*This is a test screen. With a real archive it looks noticeably better, but I cannot include my own archive here for obvious reasons.*
 
 ---
 
-# Авто теггер
+# Auto Tagger
 
 <img src="screenshots/парсер.png" width="500">
 
 ---
 
-# Настройки
+# Settings
 
 <img src="screenshots/настройки.png" width="500">
 
@@ -38,99 +38,91 @@ Local Booru — локальная программа для Windows для уп
 
 ---
 
-## Для чего это нужно
+## What it is for
 
-Если архив выглядит примерно так:
-
-```text
-Новая папка
-Новая папка (2)
-Разобрать потом
-Разобрать потом 2
-Разобрать точно потом
-Разобрать уже когда-нибудь
-```
-
-то программа как раз про это.
-
-Local Booru нужен не для двадцати картинок. Он нужен, когда файлов уже тысячи или десятки тысяч, а вручную искать источники, копировать теги, чистить дубликаты и сортировать всё по папкам становится бессмысленно.
-
----
-
-## Что умеет
-
-- локальная галерея изображений и видео;
-- отдельная галерея манги;
-- поиск по тегам, источникам и текстовым полям;
-- автоматический поиск источников и тегов;
-- точный поиск по MD5;
-- поиск похожих файлов через pHash;
-- reverse-поиск через IQDB, Danbooru IQDB, e621 IQDB, SauceNAO и TinEye;
-- скачивание найденных постов;
-- подписки на теги и авторов;
-- поиск и очистка дубликатов;
-- кэш превью;
-- SQLite-база для тегов, источников, статусов сайтов и очередей;
-- работа с несколькими booru-источниками;
-- добавление пользовательских сайтов;
-- встроенный браузер и browser companion для сложных сайтов;
-- визуальный Blueprint-парсер для настройки конвейера;
-- несколько тем оформления.
-
----
-
-## Что нового в v1.4
-
-Главное обновление v1.4 — парсер стал модульным и асинхронным.
-
-Добавлено и переработано:
-
-- **Blueprint-парсер** — визуальная схема конвейера: MD5-сайты, reverse-ветки, side queues, relay-блоки и локальная подготовка.
-- **Async reverse side queue** — медленные reverse-методы больше не должны тормозить основной MD5-конвейер.
-- **Per-site checkpoints** — приложение помнит, какие сайты уже проверены для каждого файла, и после перезапуска продолжает только незавершённое.
-- **SQLite recovery/write gate** — после падения или ошибки диска запись в базу блокируется до проверки целостности.
-- **Source/Post URL → MD5 relay** — найденные ссылки могут превращаться в MD5 и повторно прогоняться через обычные MD5-сайты.
-- **rule34 image-key relay** — отдельная side-ветка для 40hex image-key и hotlink/post locator.
-- **ATF pixel_hash locator** — поиск ATF через `media_assets.json` и `pixel_hash`.
-- **e621 browser companion fallback** — запасной API-путь через контекст браузера.
-- **FHD-режим интерфейса** — Blueprint и панели стали удобнее на 1920×1080.
-- **MD5 в статусе парсера** — в таблице задач виден текущий MD5.
-
-Исправлено:
-
-- reverse больше не блокирует основной MD5-парсер;
-- TinEye больше не запускается, если выключен в настройках;
-- Blueprint уважает выключатели парсера;
-- найденный файл больше не должен оставаться в старом NO_MATCH-состоянии;
-- rule34 image-key вынесен из основного MD5-пути в side queue;
-- после аварийного завершения база проверяется перед записью;
-- исправлены падения Blueprint-редактора и проблемы с раскладкой блоков.
-
----
-
-## Как работает поиск источников
-
-Программа сначала пытается идти быстрым путём:
+If your archive looks something like this:
 
 ```text
-файл → реальный MD5 → проверка booru-сайтов → теги и источник
+New folder
+New folder (2)
+Sort later
+Sort later 2
+Definitely sort later
+Sort someday, maybe
 ```
 
-Если точный MD5 не найден, файл может уйти в медленную очередь reverse-поиска:
+then this program is exactly about that.
+
+Local Booru is not made for twenty pictures. It is made for cases where you already have thousands or tens of thousands of files, and manually searching for sources, copying tags, cleaning duplicates, and sorting everything into folders stops making sense.
+
+---
+
+## Features
+
+- local image and video gallery;
+- separate manga gallery;
+- search by tags, sources, and text fields;
+- automatic source and tag lookup;
+- exact MD5 search;
+- similar-file search using pHash;
+- reverse search through IQDB, Danbooru IQDB, e621 IQDB, SauceNAO, and TinEye;
+- downloading found posts;
+- subscriptions to tags and artists;
+- duplicate search and cleanup;
+- thumbnail cache;
+- SQLite database for tags, sources, site statuses, and queues;
+- support for multiple booru sources;
+- custom site support;
+- built-in browser and browser companion for difficult sites;
+- visual Blueprint parser for pipeline configuration;
+- multiple UI themes.
+
+---
+
+## What is new in v1.5
+
+v1.5 focuses on first-run usability and safer database rebuilds.
+
+Added:
+
+- **First-run language picker** — on a fresh workspace/profile the app asks the user to choose **English** or **Russian** before opening the main window.
+- The language choice is saved in settings as `language` and `language_selected_once`, so the dialog appears only once.
+- The interface language can still be changed later from the Settings page.
+- Added English public README text for GitHub publication.
+
+Fixed and improved:
+
+- Fixed the `m024_reverse_branch_status` migration crash that could happen after deleting and rebuilding the SQLite database.
+- Migration journaling now has a safe fallback name if a future migration file misses its `NAME` field.
+- Legacy NO_MATCH and deleted-file registry imports now commit in batches, reducing long SQLite writer locks during clean database rebuilds.
+- Parser startup no longer treats a locked SQLite database as an empty database.
+- Added safer SQLite startup readiness checks and a low-memory parser profile for large archive runs.
+
+---
+
+## How source lookup works
+
+The program first tries the fast path:
+
+```text
+file → real MD5 → booru site checks → tags and source
+```
+
+If the exact MD5 is not found, the file can be sent to a slower reverse-search queue:
 
 ```text
 IQDB → Danbooru IQDB → e621 IQDB → SauceNAO → TinEye
 ```
 
-Если reverse находит ссылку на пост или файл, программа пытается извлечь из неё MD5 и снова прогнать через обычные booru API.
+If reverse search finds a post URL or file URL, the program tries to extract an MD5 from it and run that MD5 through the regular booru APIs again.
 
-Это важно: TinEye и SauceNAO сами по себе не являются основными источниками тегов. Они помогают найти ссылку или MD5, а теги по возможности берутся уже с booru-сайтов.
+This is important: TinEye and SauceNAO are not primary tag sources by themselves. They help find a link or MD5, and tags are then fetched from booru sites whenever possible.
 
 ---
 
-## Поддерживаемые источники
+## Supported sources
 
-Лучше всего протестированы:
+Best tested:
 
 - Danbooru;
 - Gelbooru;
@@ -139,96 +131,96 @@ IQDB → Danbooru IQDB → e621 IQDB → SauceNAO → TinEye
 - e621;
 - booru.allthefallen.moe;
 - SauceNAO;
-- TinEye как запасной locator.
+- TinEye as a fallback locator.
 
-Также можно добавлять пользовательские сайты через настройки. Лучше всего работают сайты с Danbooru/Gelbooru/Moebooru-похожим API.
+You can also add custom sites through the settings. Sites with Danbooru/Gelbooru/Moebooru-like APIs work best.
 
-Но разные сайты ведут себя по-разному: у одних нормальное API, у других ограничения, Cloudflare, капча или нестабильные ответы. Поэтому добавление сайта не гарантирует идеальную работу.
-
----
-
-## Граббер и подписки
-
-Подписки и граббер — это не просто “скачай картинки по тегу”.
-
-Программа пытается:
-
-- искать посты на нескольких сайтах;
-- показывать превью без скачивания оригинала;
-- объединять одинаковые изображения с разных источников;
-- скачивать файл один раз;
-- сохранять теги и ссылки со всех сайтов, где файл нашёлся;
-- скрывать уже скачанные или уже обработанные элементы.
-
-Если одна и та же картинка есть на нескольких сайтах, нет смысла качать её несколько раз. Но есть смысл собрать данные отовсюду.
+Different sites behave differently: some have a normal API, while others have limits, Cloudflare, captchas, or unstable responses. Because of that, adding a site does not guarantee perfect operation.
 
 ---
 
-## Хранение данных
+## Grabber and subscriptions
 
-Рабочие данные хранятся отдельно от кода программы.
+Subscriptions and the grabber are not just “download images by tag”.
 
-Обычно используется структура:
+The program tries to:
+
+- search posts across multiple sites;
+- show previews without downloading the original file;
+- merge identical images from different sources;
+- download the file only once;
+- save tags and links from every site where the file was found;
+- hide already downloaded or already processed items.
+
+If the same image exists on multiple sites, there is no point in downloading it several times. But it is useful to collect data from all of them.
+
+---
+
+## Data storage
+
+Working data is stored separately from the program code.
+
+The usual structure is:
 
 ```text
 Local_Booru_Archive/
-├─ output/      # медиа и рабочая библиотека
-└─ settings/    # SQLite, настройки, кэш, runtime, cookies, служебные данные
+├─ output/      # media and working library
+└─ settings/    # SQLite, settings, cache, runtime, cookies, service data
 ```
 
-SQLite хранит:
+SQLite stores:
 
-- теги;
-- источники;
-- MD5;
-- статусы проверки сайтов;
-- NO_MATCH/FOUND-состояния;
-- очереди повторов;
-- служебные данные парсера.
+- tags;
+- sources;
+- MD5 values;
+- site check statuses;
+- NO_MATCH/FOUND states;
+- retry queues;
+- parser service data.
 
-После плохого завершения приложение может сначала проверить SQLite и только потом разрешить запись. Это нормально.
+After a bad shutdown, the app may check SQLite first and only then allow database writes. This is normal.
 
 ---
 
-## Установка из исходников
+## Installing from source
 
-### 1. Установить Python
+### 1. Install Python
 
-Нужен Python 3.10 или новее.
+Python 3.10 or newer is required.
 
-Проверить в PowerShell:
+Check it in PowerShell:
 
 ```powershell
 python --version
 ```
 
-### 2. Скачать проект
+### 2. Download the project
 
-Если скачан ZIP с GitHub:
+If you downloaded a ZIP from GitHub:
 
-1. Распаковать архив.
-2. Открыть PowerShell в папке проекта.
+1. Extract the archive.
+2. Open PowerShell in the project folder.
 
-### 3. Установить зависимости
+### 3. Install dependencies
 
 ```powershell
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-Для встроенного браузера и некоторых сайтов может понадобиться Playwright:
+For the built-in browser and some sites, Playwright may also be required:
 
 ```powershell
 python -m playwright install
 ```
 
-### 4. Запустить программу
+### 4. Run the program
 
 ```powershell
 python app.py
 ```
 
-Или:
+Or:
 
 ```text
 run_from_source.bat
@@ -236,102 +228,102 @@ run_from_source.bat
 
 ---
 
-## Сборка EXE для Windows
+## Building a Windows EXE
 
-Обычная сборка папкой:
+Regular folder-based build:
 
 ```powershell
 build_exe.bat
 ```
 
-После сборки программа появится примерно здесь:
+After the build, the program should appear roughly here:
 
 ```text
 dist\Local Booru\Local Booru.exe
 ```
 
-Для раздачи архивировать нужно всю папку:
+To distribute it, archive the whole folder:
 
 ```text
 dist\Local Booru
 ```
 
-Сборка одним файлом:
+Single-file build:
 
 ```powershell
 build_exe_onefile.bat
 ```
 
-Для PySide6 вариант папкой обычно стабильнее.
+For PySide6, the folder-based build is usually more stable.
 
 ---
 
-## Важное предупреждение
+## Important warning
 
-Проект активно дорабатывается.
+The project is under active development.
 
-Перед массовой обработкой большого архива лучше сначала проверить программу на копии небольшой папки.
+Before processing a large archive, it is better to test the program on a copy of a small folder first.
 
-Особенно это касается:
+This especially applies to:
 
-- удаления дубликатов;
-- массовой загрузки;
-- пересборки базы;
-- подписок на большие теги;
-- работы с новым сайтом;
-- ручного ремонта SQLite.
+- duplicate deletion;
+- mass downloading;
+- database rebuilding;
+- subscriptions to large tags;
+- work with a new site;
+- manual SQLite repair.
 
-Если нажать “скачать всё” или “удалить отмеченные”, программа действительно попытается это сделать. Защита есть, но лучше не проверять её на единственной копии архива.
+If you click “download everything” or “delete selected”, the program will actually try to do that. Safeguards exist, but it is better not to test them on the only copy of your archive.
 
 ---
 
-## Для кого программа
+## Who this program is for
 
-Local Booru подойдёт тем, кто хочет хранить большой локальный архив изображений и видео и не хочет постоянно вручную:
+Local Booru is for people who want to keep a large local image and video archive and do not want to constantly do everything manually:
 
-- искать источники;
-- копировать теги;
-- чистить дубликаты;
-- сортировать файлы;
-- открывать десятки сайтов;
-- следить за новыми постами.
+- search for sources;
+- copy tags;
+- clean duplicates;
+- sort files;
+- open dozens of sites;
+- track new posts.
 
-Идеальный сценарий:
+The ideal workflow:
 
 ```text
-добавил папку
-нажал старт
-программа попыталась разобрать архив
+add a folder
+press start
+the program tries to sort out the archive
 ```
 
-Именно попыталась. Некоторые файлы уже прошли через Telegram, Discord, пережатие, обрезку, водяные знаки и перезаливы, поэтому стопроцентной магии не будет.
+It tries. Some files have already gone through Telegram, Discord, recompression, cropping, watermarks, and reuploads, so there is no such thing as perfect magic.
 
 ---
 
-## Разработка
+## Development
 
-Проект активно разрабатывается при помощи ИИ-инструментов, но цель остаётся практической: сделать удобный локальный архиватор, а не демонстрацию ради демонстрации.
+The project is actively developed with the help of AI tools, but the goal remains practical: to build a convenient local archive manager, not a demo for the sake of a demo.
 
-Основной упор сейчас:
+Current focus:
 
-- стабильность;
-- работа с большими архивами;
-- быстрый MD5-конвейер;
-- асинхронные fallback-очереди;
-- нормальная галерея;
-- удобный граббер;
-- безопасная SQLite-модель;
-- меньше ручной рутины.
+- stability;
+- large archive support;
+- fast MD5 pipeline;
+- asynchronous fallback queues;
+- proper gallery;
+- convenient grabber;
+- safe SQLite model;
+- less manual routine.
 
 ---
 
-## Важно
+## Important
 
-Local Booru не поставляет никакой контент сам по себе.
+Local Booru does not provide any content by itself.
 
-Программа работает с файлами пользователя и с сайтами, которые пользователь сам добавил или выбрал для поиска и подписок.
+The program works with the user’s own files and with sites that the user has added or selected for search and subscriptions.
 
-Что хранить, что искать и что скачивать решает пользователь.
+What to store, what to search for, and what to download is decided by the user.
 
 ---
 

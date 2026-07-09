@@ -16,6 +16,8 @@ from core.database.storage import (
     enqueue_reverse_retry,
     remove_reverse_retry,
     pending_reverse_retry_paths,
+    mark_reverse_branch_status,
+    reverse_branch_status_many,
     record_task_event,
 )
 
@@ -23,5 +25,6 @@ __all__ = [
     "processed_records_many", "mark_site_scanned", "site_scan_status_many",
     "enqueue_tag_enrichment", "seed_background_tag_enrichment", "pending_tag_enrichments",
     "complete_tag_enrichment", "retry_tag_enrichment", "enqueue_reverse_retry",
-    "remove_reverse_retry", "pending_reverse_retry_paths", "record_task_event",
+    "remove_reverse_retry", "pending_reverse_retry_paths",
+    "mark_reverse_branch_status", "reverse_branch_status_many", "record_task_event",
 ]

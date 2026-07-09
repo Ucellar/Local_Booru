@@ -12,7 +12,23 @@ from pathlib import Path
 _STARTUP_T0 = time.time()
 _STARTUP_DONE = False
 _STARTUP_LAST_STEP = "boot"
-_STARTUP_LOG_FILE = Path(__file__).with_name("startup_console.log")
+
+def _startup_log_path() -> Path:
+    # Keep startup logs in Local_Booru_Archive/settings/output/logs instead of
+    # the install/app directory.  Program Files and unpacked release folders may
+    # be read-only, and logs should stay with the user's data.
+    override = os.environ.get("LOCAL_BOORU_STARTUP_LOG", "").strip()
+    if override:
+        return Path(override).expanduser()
+    try:
+        from core.paths import LOGS_DIR
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        return LOGS_DIR / "startup_console.log"
+    except Exception:
+        return Path(__file__).with_name("startup_console.log")
+
+
+_STARTUP_LOG_FILE = _startup_log_path()
 
 
 def _startup_log(message: str) -> None:
@@ -145,7 +161,8 @@ try:
 except Exception:
     pass
 
-from core.tagger import load_settings, cleanup_preview_cache
+from core.settings import load_settings
+from core.tagger import cleanup_preview_cache
 
 
 def _log_exception(exc_type, exc, tb):
@@ -174,6 +191,16 @@ def main() -> int:
     import logging
     _applog = logging.getLogger("local_booru")
     _applog.info("=== Local Booru starting ===")
+    try:
+        from core.paths import DATA_DIR, SETTINGS_FILE, WORKSPACE_POINTER_FILE, STABLE_WORKSPACE_POINTER_FILE
+        _startup_log(f"workspace DATA_DIR: {DATA_DIR}")
+        _startup_log(f"workspace SETTINGS_FILE: {SETTINGS_FILE}")
+        _startup_log(f"workspace local pointer: {WORKSPACE_POINTER_FILE}")
+        _startup_log(f"workspace global pointer: {STABLE_WORKSPACE_POINTER_FILE}")
+        _applog.info("Workspace DATA_DIR: %s", DATA_DIR)
+        _applog.info("Workspace SETTINGS_FILE: %s", SETTINGS_FILE)
+    except Exception:
+        pass
 
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LocalBooru.App")
@@ -198,6 +225,21 @@ def main() -> int:
     try:
         _startup_log("загрузка настроек для QPixmapCache")
         _settings_for_pixmap = load_settings()
+        try:
+            from core.language_bootstrap import apply_language_choice, should_show_language_dialog
+            if should_show_language_dialog(_settings_for_pixmap) and os.environ.get("LOCAL_BOORU_SKIP_LANGUAGE_DIALOG", "").strip().lower() not in {"1", "true", "yes", "on"}:
+                _startup_log("первичный выбор языка интерфейса")
+                from ui.language_dialog import choose_startup_language
+                _chosen_language = choose_startup_language(_settings_for_pixmap.get("language", "ru"))
+                apply_language_choice(_settings_for_pixmap, _chosen_language)
+                from core.settings import save_settings as _save_language_settings
+                _save_language_settings(_settings_for_pixmap)
+                _startup_log(f"язык интерфейса выбран: {_chosen_language}")
+        except Exception as _language_dialog_error:
+            try:
+                _applog.warning("Startup language dialog failed: %s", _language_dialog_error)
+            except Exception:
+                pass
         _pix_mb = int(_settings_for_pixmap.get("pixmap_cache_mb", 128) or 128)
         _pix_mb = max(32, min(512, _pix_mb))
         QPixmapCache.setCacheLimit(_pix_mb * 1024)
@@ -235,6 +277,19 @@ def main() -> int:
         _startup_log("SQLite startup fast checks / миграции")
         _db_startup_results = run_startup_checks(_startup_settings, log=lambda m: (_startup_log(str(m)), _applog.info(m))[1])
         _startup_log("SQLite startup fast checks завершены")
+        # v406: settings-level guard complements the .initialized marker near
+        # the DB.  The marker protects the normal case; this flag also catches
+        # "folder/marker disappeared" after the app has successfully used a DB
+        # at least once.  It is written only here on the canonical settings dict
+        # in the main thread, never from database.connect() worker/session copies.
+        try:
+            if not bool(_startup_settings.get("db_initialized_once", False)):
+                _startup_settings["db_initialized_once"] = True
+                from core.settings import save_settings as _save_settings
+                _save_settings(_startup_settings)
+                _startup_log("SQLite DB guard enabled: db_initialized_once=True")
+        except Exception as _db_guard_save_error:
+            _applog.warning("Could not persist db_initialized_once guard: %s", _db_guard_save_error)
         _sqlite_writes_wait_for_health = bool(_db_startup_results.get("write_deferred_until_health"))
         if _db_startup_results.get("write_blocked") and not _sqlite_writes_wait_for_health:
             raise RuntimeError("SQLite is in read-only safety mode: " + str(_db_startup_results.get("db_integrity", "integrity check failed")))
@@ -303,6 +358,25 @@ def main() -> int:
                 _removed_parts,
             )
     except Exception as _cleanup_error:
+        try:
+            from core.database.connection import DatabaseMissingError
+        except Exception:
+            DatabaseMissingError = None
+        if DatabaseMissingError is not None and isinstance(_cleanup_error, DatabaseMissingError):
+            _applog.error("SQLite database is missing: %s", _cleanup_error)
+            _startup_log(f"SQLite база не найдена: {_cleanup_error}")
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    None,
+                    "SQLite база не найдена",
+                    "Local Booru отказался создавать новую пустую SQLite вместо уже инициализированной базы.\n\n"
+                    + str(_cleanup_error),
+                )
+            except Exception:
+                pass
+            _STARTUP_DONE = True
+            return 2
         _applog.warning("Startup cache/.part cleanup failed: %s", _cleanup_error)
 
     icon_path = Path(__file__).parent / "assets" / "app_icon.ico"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections import Counter, OrderedDict
+import time
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
@@ -11,7 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QStyledItemDelegate, QStyle, QMenu, QApplication, QMessageBox,
 )
 from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect, QMimeData, QUrl, QEvent
-from PySide6.QtGui import QPixmap, QColor, QBrush, QIcon, QPainter, QPen
+from PySide6.QtGui import QPixmap, QColor, QBrush, QIcon, QPainter, QPen, QDrag
 
 from core.library import sort_tag_items
 from core.tag_utils import normalize_tag, tag_display_color
@@ -57,10 +58,33 @@ _PH_CACHE: dict[tuple, QPixmap] = {}
 _TAG_GROUP_COUNT_CACHE: dict[tuple, tuple[float, object]] = {}
 
 
+def _cap_placeholder_cache(max_items: int = 256) -> None:
+    try:
+        while len(_PH_CACHE) > int(max_items):
+            _PH_CACHE.pop(next(iter(_PH_CACHE)))
+    except Exception:
+        pass
+
+
 def _parser_running(main) -> bool:
+    try:
+        settings = getattr(main, "settings", {}) or {}
+        if isinstance(settings, dict) and bool(settings.get("_parser_running", False)):
+            return True
+    except Exception:
+        pass
     try:
         worker = getattr(getattr(main, "tagger_page", None), "worker", None)
         return bool(worker and worker.isRunning())
+    except Exception:
+        return False
+
+
+def _gallery_heavy_tasks_blocked(main) -> bool:
+    """True while the parser is active and gallery must not run global SQL/previews."""
+    try:
+        settings = getattr(main, "settings", {}) or {}
+        return bool(_parser_running(main) and settings.get("gallery_block_heavy_tasks_while_parser", True))
     except Exception:
         return False
 
@@ -107,6 +131,7 @@ def _placeholder(w: int, h: int) -> QPixmap:
         painter.drawText(p.rect(), Qt.AlignCenter, "…")
         painter.end()
         _PH_CACHE[key] = p
+        _cap_placeholder_cache()
     return _PH_CACHE[key]
 
 
@@ -128,6 +153,7 @@ def _missing_placeholder(w: int, h: int, file_name: str = "") -> QPixmap:
         painter.drawText(p.rect().adjusted(8, 8, -8, -8), Qt.AlignCenter | Qt.TextWordWrap, text)
         painter.end()
         _PH_CACHE[key] = p
+        _cap_placeholder_cache()
     return _PH_CACHE[key]
 
 
@@ -153,8 +179,8 @@ class ImageCard(QFrame):
             )
         elif _CURRENT_THEME == "r34":
             self.setStyleSheet(
-                "QFrame{background:#a8d99f;border:1px solid #6da36b;border-radius:2px;}"
-                "QFrame:hover{background:#8cc57d;border:1px solid #3a7a35;}"
+                "QFrame{background:#b7e2af;border:1px solid #6da36b;border-radius:0px;}"
+                "QFrame:hover{background:#8cc57d;border:1px solid #3a7a35;border-radius:0px;}"
             )
         else:
             self.setStyleSheet(
@@ -454,6 +480,13 @@ class _TagCompleteEdit(QLineEdit):
                 "QListWidget::item{padding:2px 6px;border-radius:0px;}"
                 "QListWidget::item:selected{background:#000080;color:#ffffff;}"
             )
+        elif _CURRENT_THEME == "r34":
+            self._popup.setStyleSheet(
+                "QListWidget{background:#b7e2af;border:1px solid #6da36b;color:#111111;font-size:12px;border-radius:0px;}"
+                "QListWidget::item{padding:2px 6px;border-radius:0px;}"
+                "QListWidget::item:hover{background:#a8d99f;color:#111111;}"
+                "QListWidget::item:selected{background:#8cc57d;color:#111111;}"
+            )
         else:
             self._popup.setStyleSheet(
                 "QListWidget{background:#0f1118;border:1px solid #2e3347;color:#c9cdd6;font-size:12px;border-radius:8px;}"
@@ -606,6 +639,11 @@ class GalleryPage(QWidget):
             self.gallery_sort.addItem(m, m)
 
         self.fav = QCheckBox()
+        # v335: on some DPI/theme combinations the indicator of this inline
+        # checkbox could be squeezed/painted invisible while the click logic
+        # still worked. Keep enough room for the square and the Russian label.
+        self.fav.setMinimumWidth(160)
+        self.fav.setMinimumHeight(24)
         self.rating_min = QComboBox()
         self.rating_min.setToolTip("Минимальный рейтинг")
         for label, val in [("★ все","0"),("★","1"),("★★","2"),
@@ -658,7 +696,10 @@ class GalleryPage(QWidget):
         self.sources_title = QLabel()
         self.sources_list = QListWidget()
         self.sources_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sources_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.sources_list.setFixedWidth(360)
+        self.sources_list.setMinimumHeight(180)
+        self.sources_list.setMaximumHeight(420)
         self.sources_toggle = QPushButton()
         self.sources_toggle.clicked.connect(self._toggle_sources)
         ll.addWidget(self.sources_title)
@@ -706,6 +747,8 @@ class GalleryPage(QWidget):
         self.view.setMovement(QListView.Static)
         self.view.setUniformItemSizes(True)
         self.view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.view.setDragEnabled(True)
+        self.view.setAcceptDrops(False)
         self.view.setWrapping(True)
         self.view.setSpacing(14)
         self.view.setWordWrap(False)
@@ -720,6 +763,8 @@ class GalleryPage(QWidget):
         self.view.customContextMenuRequested.connect(self._show_context_menu)
         self.view.viewport().installEventFilter(self)
         self._last_wheel_page_time = 0.0
+        self._drag_start_pos = None
+        self._drag_start_row = -1
         rl.addWidget(self.view, 1)
 
         # Pager
@@ -767,23 +812,73 @@ class GalleryPage(QWidget):
 
     def eventFilter(self, obj, event):
         try:
-            if obj is self.view.viewport() and event.type() == QEvent.Wheel:
-                import time as _time
-                now = _time.time()
-                if now - float(getattr(self, "_last_wheel_page_time", 0.0) or 0.0) < 0.18:
+            if obj is self.view.viewport():
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    idx = self.view.indexAt(event.position().toPoint() if hasattr(event, "position") else event.pos())
+                    self._drag_start_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                    self._drag_start_row = idx.row() if idx.isValid() else -1
+                elif event.type() == QEvent.MouseMove and self._drag_start_pos is not None and self._drag_start_row >= 0:
+                    try:
+                        buttons = event.buttons()
+                    except Exception:
+                        buttons = Qt.NoButton
+                    if buttons & Qt.LeftButton:
+                        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                        if (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
+                            if self._start_gallery_export_drag(self._drag_start_row):
+                                self._drag_start_pos = None; self._drag_start_row = -1
+                                event.accept()
+                                return True
+                elif event.type() in (QEvent.MouseButtonRelease, QEvent.Leave):
+                    self._drag_start_pos = None; self._drag_start_row = -1
+                if event.type() == QEvent.Wheel:
+                    now = time.time()
+                    if now - float(getattr(self, "_last_wheel_page_time", 0.0) or 0.0) < 0.18:
+                        event.accept()
+                        return True
+                    self._last_wheel_page_time = now
+                    delta = event.angleDelta().y()
+                    if delta < 0:
+                        self._next_page()
+                    elif delta > 0:
+                        self._prev_page()
                     event.accept()
                     return True
-                self._last_wheel_page_time = now
-                delta = event.angleDelta().y()
-                if delta < 0:
-                    self._next_page()
-                elif delta > 0:
-                    self._prev_page()
-                event.accept()
-                return True
         except Exception:
             pass
         return super().eventFilter(obj, event)
+
+    def _start_gallery_export_drag(self, row: int) -> bool:
+        if row < 0 or row >= len(self._batch):
+            return False
+        item = dict(self._batch[row] or {})
+        try:
+            enrich_items(self.main.settings, [item], tag_source="all")
+        except Exception:
+            pass
+        try:
+            from core.metadata_export import export_gallery_item_copy, cleanup_old_drag_exports, drag_export_root
+            cleanup_old_drag_exports(self.main.settings)
+            export_dir = drag_export_root(self.main.settings) / ("drag_" + str(int(time.time() * 1000)))
+            exported = export_gallery_item_copy(self.main.settings, item, export_dir)
+        except Exception as e:
+            try:
+                QMessageBox.warning(self, "Экспорт", f"Не удалось подготовить копию для перетаскивания:\n{e}")
+            except Exception:
+                pass
+            return False
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(exported))])
+        drag = QDrag(self.view)
+        drag.setMimeData(mime)
+        try:
+            pix = self.model._cached_pix(str(item.get("path", "")))
+            if pix is not None and not pix.isNull():
+                drag.setPixmap(pix.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception:
+            pass
+        drag.exec(Qt.CopyAction)
+        return True
 
     def retranslate(self):
         t = getattr(self.main, "t", lambda x: x)
@@ -887,6 +982,15 @@ class GalleryPage(QWidget):
         if self._facets_task is not None:
             try: self._facets_task.cancel()
             except Exception: pass
+            self._facets_task = None
+        if _gallery_heavy_tasks_blocked(self.main):
+            # Parser mass-run owns SQLite. Do not launch global autocomplete/source
+            # aggregations here: these queries were the observed RAM spike path.
+            try:
+                self._render_source_list(getattr(self, "_source_hosts", []) or [])
+            except Exception:
+                pass
+            return
         def done(result):
             if generation != self._facets_generation or not result:
                 return
@@ -899,8 +1003,8 @@ class GalleryPage(QWidget):
                 host = host_from_url(url) if "://" in str(url) else str(url)
                 if host and host not in seen:
                     seen.add(host); hosts.append(host)
-            self._source_hosts = sorted(hosts)
             self._source_counts = dict(result.get("source_counts", {}))
+            self._source_hosts = sorted(hosts, key=lambda h: (-int(self._source_counts.get(h, 0) or 0), str(h)))
             self._source_unique_total = int(result.get("source_total", 0) or 0)
             cur_src = self.source.currentText() or "all"
             self.source.blockSignals(True); self.source.clear(); self.source.addItem("all")
@@ -923,14 +1027,20 @@ class GalleryPage(QWidget):
         # Each source count may include the same image. "all" must show unique
         # files, not the sum of file↔source links.
         all_count = int(getattr(self, "_source_unique_total", 0) or 0) if sc else self._sql_total
-        items = [("all", all_count)] + sorted((h, sc.get(h, 0)) for h in hosts)
-        visible = items if self._sources_expanded else items[:5]
+        sorted_hosts = sorted(list(hosts or []), key=lambda h: (-int(sc.get(h, 0) or 0), str(h)))
+        items = [("all", all_count)] + [(h, int(sc.get(h, 0) or 0)) for h in sorted_hosts]
+        # Collapsed view: keep the global "all" row plus the 3 most common
+        # sources.  No user setting: larger source counts are always higher.
+        # Expanded view shows the whole list.
+        visible = items if self._sources_expanded else items[:4]
         for h, cnt in visible:
             label = f"{h}  {cnt}" if cnt else h
             self.sources_list.addItem(label)
-        h_px = min(300, 10 + max(1, len(visible)) * 22)
+        h_px = min(420, max(92, 10 + max(1, len(visible)) * 22))
         self.sources_list.setFixedHeight(h_px)
-        self.sources_toggle.setVisible(len(items) > 5)
+        self.sources_toggle.setVisible(len(items) > 4)
+        t = getattr(self.main, "t", lambda x: x)
+        self.sources_toggle.setText(t("Hide") if self._sources_expanded else t("Show all"))
 
     def _toggle_sources(self):
         self._sources_expanded = not self._sources_expanded
@@ -984,6 +1094,11 @@ class GalleryPage(QWidget):
         ff = self.file_filter.currentData() or "all"
         mode = self.gallery_sort.currentData() or "filename"
         order = {"newest": "newest", "oldest": "oldest"}.get(mode, "path")
+        if ff == "inbox":
+            # Вкладка "Новые" должна показывать последние результаты парсера/импорта,
+            # а не настоящую дату скачивания или mtime исходного файла. Поэтому
+            # по умолчанию и в режиме "Новые" сортируем по indexed_at.
+            order = "parsed_oldest" if mode == "oldest" else "parsed_newest"
 
         # Build extra conditions BEFORE count
         _parse_result = parse_query(raw_q)
@@ -1172,6 +1287,10 @@ class GalleryPage(QWidget):
         display_source = str(self.source.currentText() or "all").lower().replace("www.", "")
         if self._global_tag_task is not None:
             return
+        if _gallery_heavy_tasks_blocked(self.main):
+            # Full sidebar counters run ROW_NUMBER/GROUP BY over image_source_tags.
+            # While parser writes, they can grow SQLite temp memory into many GB.
+            return
         import time as _time
         cache_key = (display_source, "live")
         cached = _TAG_GROUP_COUNT_CACHE.get(cache_key)
@@ -1207,6 +1326,8 @@ class GalleryPage(QWidget):
         happen after the visible page was painted, and no metadata is modified.
         """
         if self._prefetch_task is not None or not bool(self.main.settings.get("thumb_prefetch_pages", True)):
+            return
+        if _gallery_heavy_tasks_blocked(self.main):
             return
         per = self._per_page()
         if per <= 0:
@@ -1276,7 +1397,7 @@ class GalleryPage(QWidget):
                     it.setToolTip(f"{group}: {tag} (только текущая страница; парсер активен)")
                     it.setForeground(QBrush(QColor(tag_display_color(tag, group, self.main.settings, GROUP_COLORS))))
                     self.page_tags.addItem(it)
-            if self._global_tag_task is None:
+            if self._global_tag_task is None and not _gallery_heavy_tasks_blocked(self.main):
                 delay = max(3000, int(self.main.settings.get("gallery_sidebar_refresh_delay_ms", 7000) or 7000))
                 QTimer.singleShot(delay, self._request_global_tag_groups)
             return

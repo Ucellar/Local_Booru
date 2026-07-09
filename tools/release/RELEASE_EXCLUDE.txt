@@ -1,0 +1,16 @@
+# Local Booru release ZIP exclude list.
+# Dev handoff archives may keep more files, but public/user builds should not.
+AI_MEMORY.md
+AI_MEMORY.dev.md
+CHANGELOG_v*.txt
+startup_console.log
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+browser_cookies/
+data/
+models/clip/
+__pycache__/
+*.pyc
+
+.pytest_cache/

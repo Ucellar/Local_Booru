@@ -104,6 +104,11 @@ def repair(settings: dict, *, mark_missing_deleted: bool = True) -> dict[str, An
                 cur = con.execute(st)
                 removed += max(cur.rowcount or 0, 0)
             cleanup_orphans(con)
+            try:
+                from .storage import refresh_effective_tag_categories
+                refresh_effective_tag_categories(con, None)
+            except Exception:
+                pass
             fixed["orphan_rows_removed"] = removed
             con.execute("UPDATE integrity_issues SET status='repaired', repaired_at=? WHERE status='open'", (now,))
         after = check(settings, persist=True)

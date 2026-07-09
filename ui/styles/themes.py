@@ -317,6 +317,12 @@ QCheckBox::indicator:checked{{image:url(assets/check_r34.png);background:#b7e2af
 QMenu{{background:#b7e2af;color:#111111;border:1px solid #6da36b;padding:2px;}}
 QMenu::item:selected{{background:#8cc57d;color:#111111;}}
 QToolTip{{background:#ffffe1;color:#000000;border:1px solid #000000;}}
+/* v403: r34 is deliberately old-web/angular. Do not let generic modern
+   widgets/card containers keep rounded/floating blocks in this theme. */
+QFrame,QGroupBox,QTabWidget::pane,QTabBar::tab{{border-radius:0px;}}
+QListWidget::item,QMenu::item,QComboBox QAbstractItemView::item,QComboBox QListView::item{{border-radius:0px;}}
+QScrollBar:vertical,QScrollBar::handle:vertical,QScrollBar:horizontal,QScrollBar::handle:horizontal{{border-radius:0px;}}
+QProgressBar,QProgressBar::chunk{{border-radius:0px;}}
 a{{color:#0033cc;}}
 """
 
@@ -806,21 +812,63 @@ QSplitter::handle:hover {{
 
 def _checkbox_visibility_patch(key: str) -> str:
     check = "assets/check_r34.png" if key in ("r34", "win95", "windows95", "light") else "assets/check_dark.png"
+    if key in ("r34",):
+        bg = "#b7e2af"
+        border = "#4f7f49"
+        checked_bg = "#b7e2af"
+        checked_border = "#4f7f49"
+        radius = "0px"
+        disabled_bg = "#8ea886"
+    elif key in ("win95", "windows95"):
+        bg = "#ffffff"
+        border = "#808080"
+        checked_bg = "#ffffff"
+        checked_border = "#808080"
+        radius = "0px"
+        disabled_bg = "#d0d0d0"
+    elif key in ("light",):
+        bg = "#ffffff"
+        border = "#a8aec8"
+        checked_bg = "#6050c0"
+        checked_border = "#6050c0"
+        radius = "4px"
+        disabled_bg = "#ececf4"
+    else:
+        bg = "#12151f"
+        border = "#4a4f68"
+        checked_bg = "#ff9000"
+        checked_border = "#ff9000"
+        radius = "4px"
+        disabled_bg = "#181818"
     return f"""
-/* v155: visible ticks for item-view checkboxes too.  QTableWidgetItem checks
-   are not QCheckBox widgets, so they need QAbstractItemView::indicator. */
-QAbstractItemView::indicator {{
-    width: 13px;
-    height: 13px;
+/* v333/v335: all checkboxes must draw a real square, not only the tick image.
+   Some themes/drivers rendered QTableWidgetItem and regular QCheckBox
+   indicators as invisible/blank cells, so toggles looked missing although the
+   click logic still worked. */
+QAbstractItemView::indicator, QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    margin: 0px;
+    border: 2px solid {border};
+    border-radius: {radius};
+    background: {bg};
 }}
-QAbstractItemView::indicator:unchecked {{
+QAbstractItemView::indicator:unchecked, QCheckBox::indicator:unchecked {{
     image: none;
+    border: 2px solid {border};
+    border-radius: {radius};
+    background: {bg};
 }}
-QAbstractItemView::indicator:checked {{
+QAbstractItemView::indicator:checked, QCheckBox::indicator:checked {{
     image: url({check});
+    border: 2px solid {checked_border};
+    border-radius: {radius};
+    background: {checked_bg};
 }}
-QAbstractItemView::indicator:disabled {{
+QAbstractItemView::indicator:disabled, QCheckBox::indicator:disabled {{
     image: none;
+    border: 2px solid #303030;
+    background: {disabled_bg};
 }}
 """
 

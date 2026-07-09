@@ -1,5 +1,6 @@
 from __future__ import annotations
 from .connection import db, db_path
+from .storage import _safe_ident
 
 
 def optimize(settings):
@@ -26,7 +27,7 @@ def stats(settings):
     with db(settings, readonly=True) as con:
         tables = {}
         for t in ("images","tags","image_tags","sources","image_sources","processed_files","delete_log"):
-            try: tables[t] = int(con.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] or 0)
+            try: tables[t] = int(con.execute(f"SELECT COUNT(*) c FROM {_safe_ident(t)}").fetchone()["c"] or 0)
             except Exception: tables[t] = 0
     return tables
 
@@ -129,6 +130,12 @@ def repair_e621_tag_metadata(settings):
                         fixed_categories += 1
                     con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, int(tag_row['id'])))
                     affected_images.add(image_id)
+        try:
+            from .storage import refresh_effective_tag_categories
+            for _image_id in sorted(affected_images):
+                refresh_effective_tag_categories(con, int(_image_id))
+        except Exception:
+            pass
         con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
     return {
         'renamed_links': fixed_names,
@@ -185,10 +192,13 @@ def vacuum(settings, *, make_backup=True):
     if make_backup and not backup:
         raise RuntimeError("Не удалось создать backup SQLite. VACUUM отменён.")
     before = int(path.stat().st_size)
-    from .connection import close_pooled_connections, writes_blocked, writes_blocked_reason
+    from .connection import close_thread_pooled_connections, writes_blocked, writes_blocked_reason
     if writes_blocked():
         raise RuntimeError("SQLite в безопасном режиме только чтения: " + writes_blocked_reason())
-    close_pooled_connections()
+    # Do not force-close pooled connections owned by worker threads here.
+    # VACUUM will fail cleanly with database-is-locked if another subsystem is
+    # still writing; that is safer than closing another thread's active handle.
+    close_thread_pooled_connections(settings)
     con = sqlite3.connect(str(path), timeout=120)
     try:
         con.execute("PRAGMA busy_timeout=120000")

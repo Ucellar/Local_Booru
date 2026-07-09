@@ -4233,8 +4233,17 @@ class DownloaderPage(QWidget):
         source_rows = [("", all_item)]
 
         # Всегда учитываем все включённые сайты, даже если текущий буфер ещё не
-        # успел подгрузить их карточки. Порядок = порядок вкладки «Парсер».
-        visible_sources = list(enabled_hosts)
+        # успел подгрузить их карточки. Порядок жёсткий: больше найдено/загружено выше.
+        def _source_sort_key(site):
+            total = totals.get(site)
+            loaded = source_counts.get(site, 0)
+            try:
+                value = int(total) if isinstance(total, int) else int(loaded or 0)
+            except Exception:
+                value = 0
+            return (-value, str(site))
+
+        visible_sources = sorted(list(enabled_hosts), key=_source_sort_key)
         for site in visible_sources:
             loaded_count = source_counts.get(site, 0)
             total_count = totals.get(site)
@@ -4250,7 +4259,8 @@ class DownloaderPage(QWidget):
             source_rows.append((site, it))
 
         expanded = bool(getattr(self, "preview_sources_expanded", False))
-        rows_to_show = source_rows if expanded else source_rows[:5]
+        # Collapsed view = all + top 3 sources by total/loaded count. No user sort.
+        rows_to_show = source_rows if expanded else source_rows[:4]
         selected_source = str(getattr(self, "_preview_site_filter", "") or "")
         for site, it in rows_to_show:
             if selected_source == site:
@@ -4259,7 +4269,7 @@ class DownloaderPage(QWidget):
         try:
             visible_count = max(1, len(rows_to_show))
             self.preview_sources_list.setFixedHeight(min(300, 10 + visible_count * 24))
-            self.preview_sources_toggle.setVisible(len(source_rows) > 5)
+            self.preview_sources_toggle.setVisible(len(source_rows) > 4)
             self.preview_sources_toggle.setText("Скрыть" if expanded else "Показать все")
         except Exception:
             pass

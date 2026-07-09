@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import time
+import re
 from typing import Iterable
 from urllib.parse import urlparse, parse_qs
 
@@ -29,8 +30,17 @@ def _category_for_tag(name: str, category: str) -> str:
 
 
 
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+def _safe_ident(name: str) -> str:
+    name = str(name or "")
+    if not _IDENT_RE.fullmatch(name):
+        raise ValueError(f"unsafe SQLite identifier: {name!r}")
+    return name
+
 def _has_column(con, table: str, column: str) -> bool:
     try:
+        table = _safe_ident(table)
         return column in {str(r[1]) for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
     except Exception:
         return False
@@ -108,6 +118,7 @@ def add_image_tags(con, image_id, groups):
 def replace_image_tags(con, image_id, groups):
     con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
     add_image_tags(con, image_id, groups)
+    refresh_effective_tag_categories(con, image_id)
 
 
 def _is_navigational_source_url(url: str) -> bool:
@@ -200,6 +211,66 @@ def _sync_merged_image_tags(con, image_id: int) -> None:
     """, (int(image_id),))
 
 
+def refresh_effective_tag_categories(con, image_id: int | None = None) -> None:
+    """Refresh the compact effective category cache used by gallery facets.
+
+    The table is created by migration v23.  Older databases or readonly test
+    fixtures without the table simply no-op, keeping this safe for mixed builds.
+    """
+    try:
+        con.execute("SELECT 1 FROM image_effective_tag_category LIMIT 1")
+    except Exception:
+        return
+    now = int(time.time())
+    params = []
+    where = ""
+    if image_id is not None:
+        image_id = int(image_id)
+        con.execute("DELETE FROM image_effective_tag_category WHERE image_id=?", (image_id,))
+        where = "WHERE ist.image_id=?"
+        params.append(image_id)
+    else:
+        con.execute("DELETE FROM image_effective_tag_category")
+    try:
+        con.execute(f"""
+            INSERT OR REPLACE INTO image_effective_tag_category(image_id, tag_id, category, updated_at)
+            WITH ranked AS (
+                SELECT ist.image_id, ist.tag_id,
+                       LOWER(COALESCE(NULLIF(ist.category, ''), 'general')) AS category,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ist.image_id, ist.tag_id
+                           ORDER BY CASE LOWER(COALESCE(NULLIF(ist.category, ''), 'general'))
+                               WHEN 'artist' THEN 0 WHEN 'contributor' THEN 1 WHEN 'character' THEN 2
+                               WHEN 'copyright' THEN 3 WHEN 'species' THEN 4 WHEN 'meta' THEN 5
+                               WHEN 'lore' THEN 6 WHEN 'invalid' THEN 7 WHEN 'parody' THEN 8
+                               WHEN 'language' THEN 9 WHEN 'category' THEN 10 WHEN 'pages' THEN 11
+                               WHEN 'general' THEN 99 ELSE 50 END,
+                               ist.source_id
+                       ) AS rn
+                FROM image_source_tags ist {where}
+            )
+            SELECT image_id, tag_id, category, ? FROM ranked WHERE rn=1
+        """, [*params, now])
+    except Exception:
+        return
+    # Legacy no-provenance links remain visible.
+    try:
+        if image_id is not None:
+            con.execute("""
+                INSERT OR IGNORE INTO image_effective_tag_category(image_id, tag_id, category, updated_at)
+                SELECT it.image_id, it.tag_id, LOWER(COALESCE(NULLIF(t.category, ''), 'general')), ?
+                FROM image_tags it JOIN tags t ON t.id=it.tag_id WHERE it.image_id=?
+            """, (now, image_id))
+        else:
+            con.execute("""
+                INSERT OR IGNORE INTO image_effective_tag_category(image_id, tag_id, category, updated_at)
+                SELECT it.image_id, it.tag_id, LOWER(COALESCE(NULLIF(t.category, ''), 'general')), ?
+                FROM image_tags it JOIN tags t ON t.id=it.tag_id
+            """, (now,))
+    except Exception:
+        pass
+
+
 def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sources=False):
     """Store one independent confirmed tag set per site/host.
 
@@ -251,6 +322,7 @@ def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sou
                 stored += 1
     if touched_hosts:
         _sync_merged_image_tags(con, image_id)
+        refresh_effective_tag_categories(con, image_id)
     return stored
 
 
@@ -305,6 +377,7 @@ def remove_media_tag_link(settings, media_path, tag_name, source_host="all") -> 
                 _sync_merged_image_tags(con, image_id)
             else:
                 con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+            refresh_effective_tag_categories(con, image_id)
         else:
             con.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
         con.execute("""
@@ -337,6 +410,7 @@ def remove_media_source_link(settings, media_path, source_url="", source_host=""
             _sync_merged_image_tags(con, image_id)
         else:
             con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+        refresh_effective_tag_categories(con, image_id)
         con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
     return True
 
@@ -417,6 +491,7 @@ def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_t
         safe_post_url = str(post_url or "").strip()
         if _is_navigational_source_url(safe_post_url):
             safe_post_url = ""
+        refresh_effective_tag_categories(con, image_id)
         if raw is not None or safe_post_url or file_url or site:
             try:
                 raw_json = json.dumps(raw if raw is not None else {}, ensure_ascii=False)
@@ -476,6 +551,8 @@ def refine_source_tag_categories(settings, media_path, source_url, groups, *, me
                 if cat != "general" and old_cat in ("", "general"):
                     con.execute("UPDATE tags SET category=? WHERE id=?", (cat, tag_id))
                 updated += 1
+        if updated:
+            refresh_effective_tag_categories(con, image_id)
         ignored = len(seen_candidates - set(known))
         return {"updated": updated, "ignored": ignored, "known": len(known)}
 
@@ -507,7 +584,10 @@ def processed_status_many(settings, original_paths):
     if not paths:
         return {}
     result = {}
-    with db(settings) as con:
+    # Uses write=True only to allow self-healing CREATE TABLE/INDEX for users
+    # who opened a DB that predates the v024 migration import fix.
+    with db(settings, write=True) as con:
+        _ensure_reverse_branch_status_table(con)
         for i in range(0, len(paths), 500):
             chunk = paths[i:i+500]
             keys = [str(x) for x in chunk]
@@ -537,7 +617,10 @@ def processed_records_many(settings, original_paths):
     if not paths:
         return {}
     result = {}
-    with db(settings) as con:
+    # Uses write=True only to allow self-healing CREATE TABLE/INDEX for users
+    # who opened a DB that predates the v024 migration import fix.
+    with db(settings, write=True) as con:
+        _ensure_reverse_branch_status_table(con)
         for i in range(0, len(paths), 500):
             keys = [str(x) for x in paths[i:i+500]]
             placeholders = ",".join(["?"] * len(keys))
@@ -1003,11 +1086,34 @@ def database_stats(settings):
         out = {}
         for name in ("images", "tags", "image_tags", "sources", "image_sources", "processed_files", "delete_log"):
             try:
-                out[name] = int(con.execute(f"SELECT COUNT(*) AS c FROM {name}").fetchone()["c"] or 0)
+                out[name] = int(con.execute(f"SELECT COUNT(*) AS c FROM {_safe_ident(name)}").fetchone()["c"] or 0)
             except Exception:
                 out[name] = 0
         return out
 
+
+
+def _ensure_reverse_branch_status_table(con) -> None:
+    """Compatibility guard for databases opened before m024 was recorded.
+
+    v408 shipped the table definition but the migration runner did not import
+    m024, so older user databases may miss reverse_branch_status until the next
+    successful migration.  Keep the storage path self-healing as an additional
+    safety net: this table is a durable cache/journal, not destructive schema.
+    """
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS reverse_branch_status (
+            original_path TEXT NOT NULL,
+            branch_key TEXT NOT NULL,
+            scan_revision INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(original_path, branch_key, scan_revision)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_reverse_branch_status_path ON reverse_branch_status(original_path, scan_revision, status)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_reverse_branch_status_branch ON reverse_branch_status(branch_key, scan_revision, status)")
 
 # --- v115 diagnostics event audit ------------------------------------------------
 def record_task_event(settings, task_type, status, message=""):
@@ -1018,3 +1124,50 @@ def record_task_event(settings, task_type, status, message=""):
             "INSERT INTO task_log(task_type,status,message,created_at,updated_at) VALUES(?,?,?,?,?)",
             (str(task_type or ""), str(status or ""), str(message or ""), now, now),
         )
+
+
+def mark_reverse_branch_status(settings, original_path, branch_key, *, status="done_miss", reason="", scan_revision=1):
+    """Persist terminal progress for one reverse branch of one source file."""
+    original = str(Path(original_path))
+    branch = str(branch_key or "").strip().lower()
+    if not original or not branch:
+        return
+    now = int(time.time())
+    with db(settings, write=True) as con:
+        _ensure_reverse_branch_status_table(con)
+        con.execute(
+            """
+            INSERT INTO reverse_branch_status(original_path, branch_key, scan_revision, status, reason, updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(original_path, branch_key, scan_revision) DO UPDATE SET
+                status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at
+            """,
+            (original, branch, int(scan_revision or 1), str(status or ""), str(reason or "")[:1000], now),
+        )
+
+
+def reverse_branch_status_many(settings, original_paths, branch_keys, *, scan_revision=1):
+    """Return {original_path: {branch_key: status}} for a batch of paths/branches."""
+    paths = [str(Path(p)) for p in list(original_paths or []) if str(p or "")]
+    branches = [str(b or "").strip().lower() for b in list(branch_keys or []) if str(b or "").strip()]
+    out = {p: {} for p in paths}
+    if not paths or not branches:
+        return out
+    # Uses write=True only to allow self-healing CREATE TABLE/INDEX for users
+    # who opened a DB that predates the v024 migration import fix.
+    with db(settings, write=True) as con:
+        _ensure_reverse_branch_status_table(con)
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i+500]
+            ph_paths = ",".join("?" for _ in chunk)
+            ph_br = ",".join("?" for _ in branches)
+            rows = con.execute(
+                f"""
+                SELECT original_path, branch_key, status FROM reverse_branch_status
+                WHERE scan_revision=? AND original_path IN ({ph_paths}) AND branch_key IN ({ph_br})
+                """,
+                [int(scan_revision or 1), *chunk, *branches],
+            ).fetchall()
+            for r in rows:
+                out.setdefault(str(r["original_path"]), {})[str(r["branch_key"])] = str(r["status"] or "")
+    return out

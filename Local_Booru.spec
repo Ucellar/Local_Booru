@@ -31,10 +31,12 @@ a = Analysis(
         ('assets', 'assets'),
         ('core', 'core'),
         ('ui', 'ui'),
+        ('tools', 'tools'),
     ] + ai_datas,
     hiddenimports=[
         # Core modules
-        'core.tagger_engine', 'core.tagger.engine',
+        'core.tagger_engine', 'core.tagger.engine', 'core.tagger.hashing', 'core.tagger.tag_groups', 'core.tagger.cookies_io', 'core.tagger.atf_html',
+    'core.tagger.filename_hints',
         'core.database.repository', 'core.database.schema', 'core.database.connection',
         'core.thumb_service', 'core.media_utils', 'core.image_safe',
         'core.settings', 'core.paths', 'core.app_context', 'core.task_manager',
@@ -44,7 +46,7 @@ a = Analysis(
         'ui.tags_page', 'ui.settings_page', 'ui.downloader_page',
         'ui.duplicates_page', 'ui.manga_page', 'ui.games_page', 'ui.nomatch_page',
         'ui.styles.themes', 'ui.modules.registry',
-        'ui.downloader', 'ui.downloader.page', 'ui.downloader.worker',
+        'ui.downloader', 'ui.downloader.page', 'ui.downloader.worker', 'ui.tagger', 'ui.tagger.workers',
         # Qt
         'PySide6.QtWebEngineWidgets', 'PySide6.QtWebEngineCore',
         'PySide6.QtMultimedia', 'PySide6.QtMultimediaWidgets',

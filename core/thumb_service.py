@@ -100,6 +100,7 @@ class ThumbnailService(QObject):
         self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 16)))
         self._pending: set[tuple] = set()
         self._callbacks: dict[tuple, list[Callable]] = {}
+        self._max_pending = 256
         self._lock = QMutex()
         self._signals = _Signals()
         self._signals.done.connect(self._on_done)
@@ -126,10 +127,17 @@ class ThumbnailService(QObject):
 
         key = (path, width, height)
         with QMutexLocker(self._lock):
+            if key in self._pending:
+                if callback:
+                    self._callbacks.setdefault(key, []).append(callback)
+                return None
+            # Never allow the UI to enqueue an unbounded thumbnail backlog.
+            # Dropping a background warm-up request is safe: placeholders stay
+            # visible and the file can be requested again later.
+            if len(self._pending) >= int(self._max_pending or 256):
+                return None
             if callback:
                 self._callbacks.setdefault(key, []).append(callback)
-            if key in self._pending:
-                return None
             self._pending.add(key)
 
         self._pool.start(_ThumbWorker(path, width, height, self._signals))
@@ -176,12 +184,18 @@ class ThumbnailService(QObject):
     def clear_memory_cache(self) -> None:
         _PIX_CACHE.clear()
 
-    def configure(self, *, max_threads: int | None = None, memory_items: int | None = None) -> None:
+    def pending_count(self) -> int:
+        with QMutexLocker(self._lock):
+            return len(self._pending)
+
+    def configure(self, *, max_threads: int | None = None, memory_items: int | None = None, max_pending: int | None = None) -> None:
         """Apply lightweight thumbnail settings without rebuilding the service."""
         if max_threads is not None:
             self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 16)))
         if memory_items is not None:
             _PIX_CACHE.set_maxsize(int(memory_items or 400))
+        if max_pending is not None:
+            self._max_pending = max(16, min(int(max_pending or 256), 2000))
 
     def memory_cache_items(self) -> int:
         return _PIX_CACHE.size()

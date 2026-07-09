@@ -100,6 +100,21 @@ def init_db(con, force=False):
         PRIMARY KEY(original_path, service)
     );
 
+
+    -- Durable per-reverse-branch journal.  Exact MD5 site checks have
+    -- site_scan_status; reverse branches need the same restart-safe memory so
+    -- a 60-second IQDB/Danbooru/SauceNAO miss is not repeated on every resumed
+    -- run unless the user explicitly asks to retry reverse/no_match.
+    CREATE TABLE IF NOT EXISTS reverse_branch_status (
+        original_path TEXT NOT NULL,
+        branch_key TEXT NOT NULL,
+        scan_revision INTEGER NOT NULL DEFAULT 1,
+        status TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL DEFAULT '',
+        updated_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(original_path, branch_key, scan_revision)
+    );
+
     -- Durable low-priority metadata enrichment. Exact-search lanes must only
     -- collect tags/sources; flat-tag category recovery runs in the background.
     CREATE TABLE IF NOT EXISTS tag_enrichment_queue (
@@ -333,6 +348,8 @@ def init_db(con, force=False):
     CREATE INDEX IF NOT EXISTS idx_site_scan_path ON site_scan_status(original_path, scan_revision);
     CREATE INDEX IF NOT EXISTS idx_site_scan_site ON site_scan_status(site_key, scan_revision, outcome);
     CREATE INDEX IF NOT EXISTS idx_reverse_retry_due ON reverse_retry_queue(service, retry_after);
+    CREATE INDEX IF NOT EXISTS idx_reverse_branch_status_path ON reverse_branch_status(original_path, scan_revision, status);
+    CREATE INDEX IF NOT EXISTS idx_reverse_branch_status_branch ON reverse_branch_status(branch_key, scan_revision, status);
     CREATE INDEX IF NOT EXISTS idx_tag_enrichment_pending ON tag_enrichment_queue(status, retry_after, job_key);
     CREATE INDEX IF NOT EXISTS idx_deleted_rules_active ON deleted_media_rules(active, manual_delete);
     CREATE INDEX IF NOT EXISTS idx_service_state_cooldown ON service_state(cooldown_until);

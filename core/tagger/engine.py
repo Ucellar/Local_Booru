@@ -45,6 +45,11 @@ try:
     from core.browser_companion_api import enqueue_e621_browser_fetch as _enqueue_e621_browser_fetch
 except Exception:
     _enqueue_e621_browser_fetch = None
+try:
+    from core.browser_companion_api import enqueue_pixiv_browser_fetch as _enqueue_pixiv_browser_fetch, pixiv_bridge_status_detail as _pixiv_bridge_status_detail
+except Exception:
+    _enqueue_pixiv_browser_fetch = None
+    _pixiv_bridge_status_detail = None
 
 try:
     from core.site_driver import SiteDriver as _SiteDriver
@@ -73,6 +78,74 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
 MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
+# v404: first safe cut of the Tagger god-module.  These names are still
+# re-exported in engine.py for compatibility, but their implementations live
+# in small testable modules.
+from core.tagger.hashing import (
+    is_md5, file_md5, file_phash, danbooru_pixel_hash, phash_distance, video_frame_image,
+)
+from core.tagger.tag_groups import (
+    TAG_CATEGORY_MAP, tag_is_numeric_symbol_only, filter_numeric_tags, unique_keep_order,
+    empty_tag_groups, normalize_tag, group_from_tag_type, add_tags_to_groups,
+    merge_tag_groups, groups_to_tags,
+)
+from core.tagger.cookies_io import (
+    cookie_file_for_url, load_netscape_cookie_file, load_txt_cookiejar_for_host,
+    _normalize_cookie_records, load_cookie_bundle_for_host, load_system_cookiejar_for_host,
+)
+from core.tagger.atf_html import atf_find_post_view_url_from_html, atf_parse_post_view_html
+from core.tagger.filename_hints import extract_rule34_40hex_key, is_generic_media_filename
+
+
+# ATF verification gate.
+# The ATF PoW/challenge cookie is process-wide in practice, while the parser
+# may run several independent TaggerEngine instances/branches. Without this
+# gate every branch can hit the same verification page and solve PoW again.
+_ATF_VERIFY_LOCK = threading.Lock()
+_ATF_VERIFY_LAST_OK = 0.0
+_ATF_VERIFY_COOKIE_SNAPSHOT = []
+
+
+def _snapshot_cookies_for_host(session, host):
+    out = []
+    host = (host or "").lower().replace("www.", "")
+    try:
+        for c in getattr(session, "cookies", []) or []:
+            name = getattr(c, "name", None)
+            value = getattr(c, "value", None)
+            domain = getattr(c, "domain", None) or host
+            path = getattr(c, "path", None) or "/"
+            if not name or value is None:
+                continue
+            d = str(domain).lstrip(".").lower()
+            if host and d and not (host == d or host.endswith("." + d) or d.endswith("." + host)):
+                continue
+            out.append((str(name), str(value), str(domain or host), str(path or "/")))
+    except Exception:
+        return []
+    return out
+
+
+def _apply_cookie_snapshot(session, snapshot, host):
+    copied = 0
+    host = (host or "").lower().replace("www.", "")
+    for name, value, domain, path in list(snapshot or []):
+        try:
+            if not name or value is None:
+                continue
+            domain = str(domain or host)
+            if host and domain.lstrip(".").lower() in {"", "localhost"}:
+                domain = host
+            session.cookies.set(str(name), str(value), domain=domain, path=str(path or "/"))
+            copied += 1
+        except Exception:
+            try:
+                session.cookies.set(str(name), str(value), path=str(path or "/"))
+                copied += 1
+            except Exception:
+                pass
+    return copied
+
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
 _RULE34_HOTLINK_PLAYWRIGHT_LOCK = threading.Lock()
 _E621_BROWSER_API_LOCK = threading.Lock()
@@ -89,11 +162,13 @@ DEFAULT_SETTINGS = {
     "root": "C:/Local_Booru_Input",
     "saucenao_api_key": "",
     "min_similarity": 85.0,
-    "delay_seconds": 8.0,
+    "delay_seconds": 0.0,
     "tagger_low_power_mode": False,
     "tagger_site_interval_seconds": 1.10,
-    "tagger_conveyor_window": 32,
+    "tagger_conveyor_window": 100,
     "tagger_background_tag_groups": True,
+    "tagger_category_overlay_429_cooldown_seconds": 900,
+    "tagger_gelbooru_category_single_tag_fallback": True,
     "request_timeout_seconds": 30,
     "request_connect_timeout_seconds": 10,
     "request_read_timeout_seconds": 30,
@@ -115,6 +190,17 @@ DEFAULT_SETTINGS = {
     "rule34_image_key_hotlink_playwright_fallback": True,
     "rule34_image_key_hotlink_playwright_headless": False,
     "rule34_image_key_hotlink_playwright_timeout": 25.0,
+    "rule34_image_key_hotlink_playwright_supervisor": True,
+    "rule34_image_key_hotlink_playwright_retries": 1,
+    "rule34_image_key_hotlink_playwright_ephemeral": True,
+    "browser_fallback_disable_gpu": True,
+    # Parser browser safety: never launch/attach/control the user's normal
+    # Google Chrome during mass parsing. Chrome may stay open for the user.
+    # e621 is special: companion/page-context fetch is allowed because it runs
+    # inside the already-open user tab and Local Booru does not start chrome.exe.
+    "parser_never_touch_system_chrome": True,
+    "parser_disable_companion_chrome_fetch": False,
+    "browser_fallback_launch_watchdog_seconds": 18.0,
     "rule34_image_key_bucket_probe_enabled": False,
     "rule34_image_key_bucket_probe_sequence": "",
     "rule34_image_key_bucket_probe_max": 9999,
@@ -131,6 +217,7 @@ DEFAULT_SETTINGS = {
     "e621_browser_api_verify_timeout_seconds": 120,
     "e621_browser_api_backend": "companion_extension",
     "e621_browser_api_companion_timeout_seconds": 120,
+    "e621_companion_v342_default_attached": True,
     "e621_browser_api_allow_external_chrome_cdp": False,
     "e621_browser_api_cdp_port": 9222,
     "e621_browser_api_launch_external_chrome": False,
@@ -149,8 +236,86 @@ DEFAULT_SETTINGS = {
     "iqdb_min_similarity": 75.0,
     "r34_fuzzy_min_similarity": 60.0,
     "strict_atf_md5": True,
+    # v372: ATF has TWO branches: exact MD5 first, then pixel_hash only as a
+    # variant/fallback locator.  Do not replace one with the other.
+    "atf_exact_md5_enabled": True,
+    "atf_exact_md5_accept_missing_md5_from_api": True,
+    # v382: pixel_hash is a final fallback after reverse branches, not an inline
+    # exact-MD5 miss fallback.  Existing configs may still contain the old key;
+    # engine_by_md5 only honors it when _allow_atf_pixel_hash_inline is explicit.
+    "atf_pixel_hash_after_exact_md5_miss": False,
+    "atf_pixel_hash_after_reverse_miss": True,
     "atf_pixel_hash_locator_enabled": True,
     "atf_pixel_hash_max_assets": 5,
+    # Source URL -> MD5 donor relays. These are locators only: tags from
+    # Yande.re/Pixiv are deliberately ignored; resolved MD5 is faned out through
+    # the normal trusted booru sites (rule34/danbooru/gelbooru/e621/ATF/etc.).
+    "source_md5_relay_yandere_enabled": True,
+    "source_md5_relay_pixiv_enabled": True,
+    "source_md5_relay_pixiv_max_pages": 2,
+    "source_md5_relay_pixiv_max_file_mb": 40,
+    "source_md5_relay_pixiv_timeout_seconds": 12,
+    "source_md5_relay_pixiv_companion_timeout_seconds": 8,
+    "source_md5_relay_pixiv_companion_max_requests": 1,
+    "source_md5_relay_pixiv_donor_time_budget_seconds": 10.0,
+    "source_md5_relay_pixiv_miss_cache_ttl_days": 30,
+    # Pixiv source relay should stay a cheap donor lookup.  Older builds could
+    # expand one artwork into 40+ source:* queries; keep only exact URL, pixiv_id
+    # and the most likely page filename probes.
+    "source_md5_relay_pixiv_source_max_queries": 12,
+    "source_md5_relay_pixiv_source_max_pages": 3,
+    # Hard guard: Pixiv source relay must never explode into 40+ source:* probes.
+    # If an old expansion path survives, trim it here and run it under a short
+    # per-URL budget.  Pixiv remains a donor locator, not a blocking branch.
+    "source_md5_relay_pixiv_source_time_budget_seconds": 8.0,
+    "source_md5_relay_pixiv_source_skip_atf": True,
+    # Limit how many separate Pixiv artworks the early SauceNAO donor pass may
+    # chase for one local file.  SauceNAO can return several plausible Pixiv
+    # artworks for collages/crops; after the best 1-2 candidates, extra Pixiv
+    # relays are usually expensive source-only noise.
+    "source_md5_relay_fast_saucenao_pixiv_max_artworks_per_file": 1,
+    # i.pximg.net HTTP 500/404 from guessed original extensions is a donor miss,
+    # not a reason to keep the whole file in retry_network forever.
+    "source_md5_relay_pixiv_ignore_pximg_transient": True,
+    # Fast source-MD5 probe: run a single SauceNAO pass early and use only
+    # Pixiv/Yande.re-like source URLs for MD5 relay before slow IQDB branches.
+    # The same SauceNAO result list is reused by the normal SauceNAO stage, so
+    # this changes ordering, not the number of SauceNAO calls for a file.
+    "source_md5_relay_fast_saucenao_enabled": True,
+    "source_md5_relay_fast_saucenao_force": True,
+    "source_md5_relay_fast_saucenao_min_similarity": 80.0,
+    "source_md5_relay_fast_saucenao_max_results": 5,
+    "source_md5_relay_fast_saucenao_trusted_booru_enabled": True,
+    "source_md5_relay_fast_saucenao_trusted_min_similarity": 90.0,
+    "iqdb_relay_min_similarity": 85.0,
+    "iqdb_relay_candidate_cap_high": 2,
+    "iqdb_relay_candidate_cap_medium": 1,
+    # v369 branch model: exact local MD5 site checks are the first branch.
+    # Reverse branches may run only after all enabled direct MD5 lanes miss or
+    # after the per-site journal says those direct MD5 checks were already done.
+    "tagger_md5_first_before_reverse": True,
+    # Reverse-search URLs from Patreon/Kemono/Nijie/DeviantArt/E-Hentai/etc.
+    # are donor locators only.  They may be used to extract/relay a verified MD5
+    # through the main trusted booru sites (rule34/e621/danbooru/gelbooru/ATF),
+    # but they must never become tag sources and must not be HTML-scraped with
+    # long retries just because SauceNAO returned the URL.
+    "source_md5_relay_unsupported_donor_enabled": True,
+    "source_md5_relay_unsupported_donor_min_similarity": 85.0,
+    "source_md5_relay_unsupported_donor_max_urls_per_file": 3,
+    # Hard budgets for unsupported donor URLs. These URLs are useful only as
+    # source->MD5 locators; if they do not relay quickly through trusted booru
+    # APIs, keep the SauceNAO URL as source-only and move on.
+    "source_md5_relay_unsupported_donor_max_queries_per_url": 2,
+    "source_md5_relay_unsupported_donor_time_budget_seconds": 8.0,
+    # Weak unsupported donor source-relay (Patreon/Kemono/Nijie/E-Hentai/etc.)
+    # must not solve ATF PoW by default. ATF remains available for exact/normal
+    # ATF parsing and can be re-enabled for donor relay from settings if desired.
+    "source_md5_relay_unsupported_donor_skip_atf": True,
+    "source_md5_relay_unsupported_donor_max_urls_hard_cap": 2,
+    # Compatibility knob: when donor relay is disabled, high-confidence
+    # unsupported URLs may still be saved as source-only hints.
+    "reverse_unsupported_source_only_enabled": True,
+    "reverse_unsupported_source_only_min_similarity": 85.0,
     "enable_atf_auto_tags": False,
     "max_preview_cache_files": 1000,
     "preview_cache_max_age_days": 14,
@@ -172,18 +337,31 @@ DEFAULT_SETTINGS = {
 
 
 def load_settings():
-    if SETTINGS_FILE.exists():
-        try:
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            merged = DEFAULT_SETTINGS.copy()
-            retired = {"copy_results_enabled", "copy_mode", "tags_suffix", "sources_suffix", "output_suffix", "mark_no_match", "tagger_site_conveyor_enabled", "use_browser_auth", "use_system_browser_cookies", "browser_auth_url", "browser_auth_wait_seconds"}
-            merged.update({k: v for k, v in data.items() if k not in retired})
-            merged["sites"] = {**DEFAULT_SETTINGS["sites"], **data.get("sites", {})}
-            merged["custom_sites"] = data.get("custom_sites", [])
-            return merged
-        except Exception:
-            return DEFAULT_SETTINGS.copy()
-    return DEFAULT_SETTINGS.copy()
+    """Compatibility wrapper for older imports.
+
+    v377 still let app.py and a few legacy callers import settings through
+    core.tagger.engine.  That bypassed the central workspace-aware loader in
+    core.settings, so after moving Local_Booru_Archive to another SSD the app
+    could open the correct SQLite/settings folder but keep stale output/root/UI
+    fields from the copied app_settings.json.  Delegate to the central loader so
+    DATA_DIR, SETTINGS_FILE and output_dir are locked to the active workspace.
+    """
+    try:
+        from core.settings import load_settings as _load_application_settings
+        return _load_application_settings()
+    except Exception:
+        if SETTINGS_FILE.exists():
+            try:
+                data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+                merged = DEFAULT_SETTINGS.copy()
+                retired = {"copy_results_enabled", "copy_mode", "tags_suffix", "sources_suffix", "output_suffix", "mark_no_match", "tagger_site_conveyor_enabled", "use_browser_auth", "use_system_browser_cookies", "browser_auth_url", "browser_auth_wait_seconds"}
+                merged.update({k: v for k, v in data.items() if k not in retired})
+                merged["sites"] = {**DEFAULT_SETTINGS["sites"], **data.get("sites", {})}
+                merged["custom_sites"] = data.get("custom_sites", [])
+                return merged
+            except Exception:
+                return DEFAULT_SETTINGS.copy()
+        return DEFAULT_SETTINGS.copy()
 
 
 def save_settings(settings):
@@ -200,523 +378,52 @@ def redact_sensitive_url(text):
     return sanitize_text(text)
 
 
-def is_md5(text):
-    if len(text) != 32:
-        return False
-    try:
-        int(text, 16)
-        return True
-    except ValueError:
-        return False
-
-
-def file_md5(path):
-    h = hashlib.md5()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def file_phash(path):
-    try:
-        img = Image.open(path).convert("RGB")
-        return str(imagehash.phash(img))
-    except Exception:
-        return ""
-
-
-def danbooru_pixel_hash(path):
-    """Return Danbooru/ATF-style pixel_hash for static images.
-
-    Danbooru media assets store a pixel_hash that is MD5(PAM header + raw
-    RGBA pixel bytes) after orientation/color normalization.  The exact server
-    implementation uses libvips; this implementation prefers Pillow so Local
-    Booru does not gain a hard pyvips dependency.  For videos/animated images
-    Danbooru falls back to the byte MD5, so do the same.
-    """
-    path = Path(path)
-    try:
-        ext = path.suffix.lower()
-        if ext in VIDEO_EXTS:
-            return file_md5(path).lower()
-        with Image.open(path) as img:
-            try:
-                if bool(getattr(img, "is_animated", False)) and int(getattr(img, "n_frames", 1) or 1) > 1:
-                    return file_md5(path).lower()
-            except Exception:
-                pass
-            try:
-                img = ImageOps.exif_transpose(img)
-            except Exception:
-                pass
-            try:
-                icc = img.info.get("icc_profile") if hasattr(img, "info") else None
-                if icc and ImageCms is not None:
-                    src_profile = ImageCms.ImageCmsProfile(__import__('io').BytesIO(icc))
-                    dst_profile = ImageCms.createProfile("sRGB")
-                    img = ImageCms.profileToProfile(img, src_profile, dst_profile, outputMode="RGBA")
-                else:
-                    img = img.convert("RGBA")
-            except Exception:
-                img = img.convert("RGBA")
-            if img.mode != "RGBA":
-                img = img.convert("RGBA")
-            width, height = img.size
-            header = (
-                "P7\n"
-                f"WIDTH {int(width)}\n"
-                f"HEIGHT {int(height)}\n"
-                "DEPTH 4\n"
-                "MAXVAL 255\n"
-                "TUPLTYPE RGB_ALPHA\n"
-                "ENDHDR\n"
-            )
-            h = hashlib.md5()
-            h.update(header.encode("ascii"))
-            h.update(img.tobytes())
-            return h.hexdigest().lower()
-    except Exception:
-        return ""
-
-
-def phash_distance(a, b):
-    try:
-        return imagehash.hex_to_hash(a) - imagehash.hex_to_hash(b)
-    except Exception:
-        return 999
-
-
-
-
-def tag_is_numeric_symbol_only(tag):
-    return bool(re.match(r"^[\d\W_]+$", str(tag)))
-
-
-
-def atf_find_post_view_url_from_html(html_text, base_url="https://booru.allthefallen.moe", md5_hash=""):
-    """
-    ATF search pages can show the real post card in several forms:
-    /posts/123, escaped /posts\\/123, urlencoded %2Fposts%2F123,
-    data-id/data-post-id, or JSON blobs.
-    Full grouped tags are on /posts/ID?q=md5%3AHASH.
-    """
-    base_url = (base_url or "https://booru.allthefallen.moe").rstrip("/")
-    html_text = html_text or ""
-
-    def build_url(post_id):
-        post_id = str(post_id).strip()
-        if not post_id or not post_id.isdigit():
-            return ""
-        url = f"{base_url}/posts/{post_id}"
-        if md5_hash:
-            url += "?q=md5%3A" + str(md5_hash)
-        return url
-
-    try:
-        import html as _html_mod
-        from urllib.parse import unquote as _url_unquote
-
-        variants = []
-        for v in [html_text, _html_mod.unescape(html_text), _url_unquote(html_text)]:
-            if v and v not in variants:
-                variants.append(v)
-
-        candidates = []
-
-        for variant in variants:
-            soup = BeautifulSoup(variant, "html.parser")
-
-            # Direct links.
-            for a in soup.find_all("a", href=True):
-                href = str(a.get("href", ""))
-                m = re.search(r"/posts/(\d+)(?:[/?#][^\"\' <]*)?", href)
-                if m:
-                    candidates.append(m.group(1))
-
-            # Image/thumb links can carry parent post id in parent blocks.
-            for el in soup.find_all(True):
-                attrs = getattr(el, "attrs", {}) or {}
-                cls = " ".join(attrs.get("class", [])) if isinstance(attrs.get("class"), list) else str(attrs.get("class", ""))
-                for key, val in attrs.items():
-                    k = str(key).lower()
-                    v = str(val)
-
-                    if "post" in k and "id" in k:
-                        m = re.search(r"\d{2,}", v)
-                        if m:
-                            candidates.append(m.group(0))
-
-                    if k in {"data-id", "id"} or "post" in cls.lower():
-                        m = re.search(r"(?:post[_-]?)?(\d{2,})", v)
-                        if m:
-                            candidates.append(m.group(1))
-
-            raw_patterns = [
-                r"/posts/(\d+)(?:[/?#][^\"\' <]*)?",
-                r"\\/posts\\/(\d+)",
-                r"%2Fposts%2F(\d+)",
-                r"posts\\?/(\d+)",
-                r"post[_-]?id[\"\'\s:=]+(\d{2,})",
-                r"data-post-id[\"\'\s:=]+(\d{2,})",
-                r"data-id[\"\'\s:=]+(\d{2,})",
-                r"id=[\"']post[_-](\d{2,})[\"']",
-                r"post\D{0,20}(\d{5,})",
-            ]
-            for pat in raw_patterns:
-                for m in re.finditer(pat, variant, flags=re.I):
-                    candidates.append(m.group(1))
-
-        # Preserve order, avoid obviously wrong numbers.
-        seen = set()
-        for cid in candidates:
-            cid = str(cid).strip()
-            if not cid.isdigit():
-                continue
-            if int(cid) < 100:
-                continue
-            if cid in seen:
-                continue
-            seen.add(cid)
-            return build_url(cid)
-
-    except Exception:
-        pass
-
-    return ""
-
-
-
-def atf_parse_post_view_html(html_text):
-    """Parse an ATF post sidebar without ever trusting visible link text.
-
-    ATF is Danbooru-based. Visible sidebar labels can contain counts/UI text;
-    only the ``tags=`` query value in a tag-search href is accepted as a tag.
-    Returns (tags, groups).
-    """
-    groups = {
-        "artist": [],
-        "character": [],
-        "copyright": [],
-        "species": [],
-        "general": [],
-        "meta": [],
-    }
-
-    def tag_from_href(anchor):
-        try:
-            href = html.unescape(str(anchor.get("href", "")))
-            vals = parse_qs(urlparse(href).query).get("tags", [])
-            if not vals:
-                return ""
-            tag = html.unescape(str(vals[0])).strip().replace(" ", "_")
-            if not tag or tag.startswith(("rating:", "sort:", "md5:", "user:", "score:")):
-                return ""
-            if tag.lower() in {"?", "posts", "post", "all"}:
-                return ""
-            return tag
-        except Exception:
-            return ""
-
-    try:
-        soup = BeautifulSoup(html_text or "", "html.parser")
-        category_map = {
-            "0": "general",
-            "1": "artist",
-            "3": "copyright",
-            "4": "character",
-            "5": "meta",
-        }
-
-        # Numeric Danbooru/ATF categories.
-        for cls_num, group_name in category_map.items():
-            for el in soup.select(f".category-{cls_num} a.search-tag[href*='tags='], .category-{cls_num} a[href*='tags=']"):
-                tag = tag_from_href(el)
-                if tag and tag not in groups[group_name]:
-                    groups[group_name].append(tag)
-
-        # Named sidebar classes used by newer page variants.
-        named_classes = {
-            "artist": "artist", "character": "character", "copyright": "copyright",
-            "general": "general", "metadata": "meta", "meta": "meta", "species": "species",
-        }
-        for cls_part, group_name in named_classes.items():
-            for el in soup.select(f".tag-type-{cls_part} a.search-tag[href*='tags='], .tag-type-{cls_part} a[href*='tags=']"):
-                tag = tag_from_href(el)
-                if tag and tag not in groups[group_name]:
-                    groups[group_name].append(tag)
-
-        all_tags = []
-        for group_name in ("artist", "copyright", "character", "species", "general", "meta"):
-            for tag in groups[group_name]:
-                if tag not in all_tags:
-                    all_tags.append(tag)
-        return all_tags, {k: v for k, v in groups.items() if v}
-    except Exception:
-        return [], {}
-
-
-def filter_numeric_tags(tags, enabled):
-    if not enabled:
-        return tags
-    return [t for t in tags if not tag_is_numeric_symbol_only(t)]
-
-
-def video_frame_image(path):
-    """Extract a searchable jpg frame from videos/gifs. Returns temp jpg path or original path.
-
-    Uses a short md5 filename instead of the original basename so Windows does not
-    fail on long paths, Cyrillic names, or punctuation-heavy video names.
-    """
-    path = Path(path)
-    suffix = path.suffix.lower()
-
-    def make_temp_frame_path(src_path):
-        import tempfile
-        tmp_dir = Path(CACHE_DIR) / "preview_cache" / "local_booru_frames"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = hashlib.md5(str(src_path).encode("utf-8")).hexdigest()
-        return tmp_dir / f"{safe_name}.jpg"
-
-    if suffix == ".gif":
-        try:
-            img = Image.open(path)
-            try:
-                frames = getattr(img, "n_frames", 1)
-                img.seek(max(0, frames // 2))
-            except Exception:
-                pass
-            tmp = make_temp_frame_path(path)
-            img.convert("RGB").save(tmp, "JPEG", quality=95)
-            return tmp
-        except Exception:
-            return path
-
-    if suffix not in VIDEO_EXTS:
-        return path
-
-    try:
-        import cv2
-        cap = cv2.VideoCapture(str(path))
-        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        if frames > 5:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frames // 2))
-        ok, frame = cap.read()
-        cap.release()
-        if not ok or frame is None:
-            return path
-        tmp = make_temp_frame_path(path)
-        cv2.imwrite(str(tmp), frame)
-        return tmp
-    except Exception:
-        return path
-
-def unique_keep_order(items):
-    seen = set()
-    out = []
-    for x in items:
-        x = normalize_tag(x)
-        key = canonical_tag_key(x)
-        if x and key not in seen:
-            seen.add(key)
-            out.append(x)
-    return out
-
-def empty_tag_groups():
-    return {
-        "artist": [],
-        "contributor": [],
-        "character": [],
-        "copyright": [],
-        "species": [],
-        "general": [],
-        "meta": [],
-        "lore": [],
-        "invalid": [],
-        "parody": [],
-        "language": [],
-        "category": [],
-        "pages": []
-    }
-
-
-TAG_CATEGORY_MAP = {
-    "0": "general", 0: "general", "general": "general",
-    "1": "artist", 1: "artist", "artist": "artist",
-    "3": "copyright", 3: "copyright", "copyright": "copyright", "series": "copyright",
-    "4": "character", 4: "character", "character": "character",
-    "5": "meta", 5: "meta", "metadata": "meta", "meta": "meta",
-    "species": "species", "specie": "species",
-    "contributor": "contributor", "contributors": "contributor",
-    "lore": "lore", "invalid": "invalid",
-}
-
-def normalize_tag(tag):
-    return _shared_normalize_tag(tag)
-
-def group_from_tag_type(value):
-    if value is None:
-        return "general"
-    key = str(value).strip().lower()
-    return TAG_CATEGORY_MAP.get(key, "general")
-
-def add_tags_to_groups(groups, group, tags):
-    if group not in groups:
-        group = "general"
-    for tag in tags or []:
-        t = normalize_tag(str(tag))
-        if t and t not in groups[group]:
-            groups[group].append(t)
-
-
-def merge_tag_groups(groups_list):
-    merged = empty_tag_groups()
-
-    for groups in groups_list:
-        if not isinstance(groups, dict):
-            continue
-
-        for key in merged:
-            merged[key] += groups.get(key, [])
-
-    for key in merged:
-        merged[key] = unique_keep_order(merged[key])
-
-    return merged
-
-
-def groups_to_tags(groups):
-    tags = []
-
-    for key in ["artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid", "parody", "language", "category", "pages"]:
-        tags += groups.get(key, [])
-
-    return unique_keep_order(tags)
-
-def cookie_file_for_url(url):
-    host = urlparse(url).netloc.lower().replace("www.", "")
-    if not host:
-        host = "default"
-    safe = host.replace(":", "_").replace("/", "_")
-    return BROWSER_COOKIES_DIR / f"{safe}.json"
-
-
-
-
-def load_netscape_cookie_file(path):
-    jar = MozillaCookieJar()
-    try:
-        jar.load(str(path), ignore_discard=True, ignore_expires=True)
-        return jar
-    except Exception:
-        return None
-
-
-def load_txt_cookiejar_for_host(host):
-    try:
-        host = (host or "").lower().replace("www.", "")
-        if not host:
-            return None, "empty host"
-
-        txt_path = BROWSER_COOKIES_DIR / f"{host}.txt"
-
-        if not txt_path.exists():
-            return None, "txt not found"
-
-        jar = load_netscape_cookie_file(txt_path)
-
-        if not jar:
-            return None, "failed parse"
-
-        return jar, f"txt:{txt_path.name}"
-
-    except Exception as e:
-        return None, str(e)
-
-
-def _normalize_cookie_records(raw):
-    """Return a safe list of cookie dicts from several saved formats.
-
-    Older/local cookie files can be either:
-    - {"cookies": [{"name": ..., "value": ...}], "user_agent": ...}
-    - [{"name": ..., "value": ...}]
-    - {"cookie_name": "cookie_value"}
-
-    The previous code assumed every item was a dict and crashed with
-    "'str' object has no attribute 'get'" when iterating a dict.
-    """
-    if not raw:
-        return []
-    if isinstance(raw, list):
-        return [c for c in raw if isinstance(c, dict)]
-    if isinstance(raw, dict):
-        if isinstance(raw.get("cookies"), list):
-            return [c for c in raw.get("cookies", []) if isinstance(c, dict)]
-        out = []
-        for name, value in raw.items():
-            if name in ("user_agent", "headers", "meta"):
-                continue
-            if isinstance(value, dict):
-                c = dict(value)
-                c.setdefault("name", name)
-                out.append(c)
-            elif isinstance(value, (str, int, float, bool)):
-                out.append({"name": str(name), "value": str(value), "domain": "", "path": "/"})
-        return out
-    return []
-
-
-def load_cookie_bundle_for_host(host):
-    host = (host or "").lower().replace("www.", "")
-    path = BROWSER_COOKIES_DIR / f"{host}.json"
-
-    if not path.exists():
-        return [], None
-
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            return _normalize_cookie_records(data), data.get("user_agent")
-        return _normalize_cookie_records(data), None
-    except Exception:
-        return [], None
-
-
-def load_system_cookiejar_for_host(host):
-    """
-    Load cookies from the user's real Chrome/Edge/Firefox profiles.
-    This avoids Playwright/Cloudflare problems. Browser may need to be closed
-    on some systems if the cookie DB is locked.
-    """
-    if browser_cookie3 is None:
-        return None, "browser-cookie3 is not installed"
-
-    host = (host or "").lower().replace("www.", "")
-    domains = [host]
-    if host.startswith("booru."):
-        domains.append(host.replace("booru.", "", 1))
-
-    loaders = [
-        ("edge", getattr(browser_cookie3, "edge", None)),
-        ("chrome", getattr(browser_cookie3, "chrome", None)),
-        ("firefox", getattr(browser_cookie3, "firefox", None)),
-        ("chromium", getattr(browser_cookie3, "chromium", None)),
-    ]
-
-    last_error = None
-    for browser_name, loader in loaders:
-        if loader is None:
-            continue
-
-        for domain in domains:
-            try:
-                jar = loader(domain_name=domain)
-                if jar:
-                    return jar, browser_name
-            except Exception as e:
-                last_error = e
-
-    return None, str(last_error) if last_error else "no cookies found"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 _CF_HOSTS = {
@@ -1412,8 +1119,13 @@ class Tagger:
         self._saucenao_deferred = False
         self._saucenao_defer_reason = ""
         self._saucenao_retry_after = 0
-        self._last_saucenao_source_only = []
+        # SauceNAO reverse workers run concurrently. Keep transient SauceNAO
+        # state (Pixiv page hints, source-only candidates, embedded MD5 hints)
+        # thread-local so one file cannot overwrite another file's relay state.
+        self._saucenao_tls = threading.local()
+        self._last_saucenao_source_only = []  # legacy/debug mirror only
         self._last_reverse_source_only = []
+        self._pixiv_md5_candidate_cache = {}
         self._tineye_tagged_total = 0
         self._tineye_source_only_total = 0
         # Parser-only cooldown for the TinEye reverse fallback.  Do not use this
@@ -1457,9 +1169,34 @@ class Tagger:
         except Exception:
             pass
 
+    def _ignore_transient_network_event(self, text):
+        """Return True for transient events that are only optional donor noise."""
+        text = str(text or "")
+        try:
+            if bool(self.settings.get("source_md5_relay_pixiv_ignore_pximg_transient", True)) and (
+                "i.pximg.net" in text or "pximg.net" in text
+            ):
+                # Pixiv originals are guessed/downloaded only to derive MD5 donor
+                # candidates.  404/500/timeouts here must not keep the whole file
+                # in retry_network after SauceNAO already produced source-only.
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _prune_ignored_transient_network_events(self):
+        try:
+            events = list(getattr(self, "_transient_network_events", []) or [])
+            kept = [e for e in events if not self._ignore_transient_network_event(e)]
+            if len(kept) != len(events):
+                self._transient_network_events = kept
+                self._transient_network_hosts = set(_network_error_host(e) for e in kept if e)
+        except Exception:
+            pass
+
     def _log_and_track(self, message):
         text = sanitize_text(message)
-        if _is_transient_network_error_text(text):
+        if _is_transient_network_error_text(text) and not self._ignore_transient_network_event(text):
             self._transient_network_events.append(text[:400])
             self._transient_network_hosts.add(_network_error_host(text))
         self._external_log(text)
@@ -1469,9 +1206,11 @@ class Tagger:
         self._transient_network_hosts = set()
 
     def transient_network_failed(self):
+        self._prune_ignored_transient_network_events()
         return bool(self._transient_network_events)
 
     def network_failure_summary(self):
+        self._prune_ignored_transient_network_events()
         hosts = sorted(h for h in self._transient_network_hosts if h)
         return ", ".join(hosts) if hosts else "network"
 
@@ -1658,12 +1397,44 @@ class Tagger:
 
     def _atf_get(self, session, url, host, **kwargs):
         r = session.get(url, **kwargs)
-        if self._is_atf_verification_html(r.text):
-            if self.log:
-                self.log("  ATF VERIFY PAGE DETECTED")
+        if not self._is_atf_verification_html(r.text):
+            return r
+
+        if self.log:
+            self.log("  ATF VERIFY PAGE DETECTED")
+
+        h = str(host or "").lower().replace("www.", "")
+        if h not in ("booru.allthefallen.moe", "allthefallen.moe"):
             if self._pass_atf_verification(session, url, r.text, host):
                 r = session.get(url, **kwargs)
-        return r
+            return r
+
+        global _ATF_VERIFY_LAST_OK, _ATF_VERIFY_COOKIE_SNAPSHOT
+        with _ATF_VERIFY_LOCK:
+            # Another branch may have solved the challenge while this branch was
+            # waiting for the lock. Reuse its fresh cookies first instead of
+            # immediately burning another PoW solve.
+            try:
+                age = time.time() - float(_ATF_VERIFY_LAST_OK or 0.0)
+            except Exception:
+                age = 999999.0
+            if _ATF_VERIFY_COOKIE_SNAPSHOT and age < 600:
+                copied = _apply_cookie_snapshot(session, _ATF_VERIFY_COOKIE_SNAPSHOT, h)
+                if self.log:
+                    self.log(f"  ATF VERIFY GATE: reused shared cookies copied={copied} age={age:.1f}s")
+                r2 = session.get(url, **kwargs)
+                if not self._is_atf_verification_html(r2.text):
+                    return r2
+                r = r2
+
+            ok = self._pass_atf_verification(session, url, r.text, h)
+            if ok:
+                _ATF_VERIFY_LAST_OK = time.time()
+                _ATF_VERIFY_COOKIE_SNAPSHOT = _snapshot_cookies_for_host(session, h)
+                if self.log:
+                    self.log(f"  ATF VERIFY GATE: solved once; shared_cookies={len(_ATF_VERIFY_COOKIE_SNAPSHOT)}")
+                r = session.get(url, **kwargs)
+            return r
 
     def enabled_domains(self):
         domains = set()
@@ -1773,12 +1544,92 @@ class Tagger:
         return ""
 
 
-    def _normalize_pixiv_relay_queries(self, url: str):
-        """Build safe booru source-search queries for one Pixiv/Pximg URL.
+    def _saucenao_pixiv_page_from_text(self, text: str):
+        """Return (artwork_id, page_index) from SauceNAO Pixiv filename text."""
+        raw = html.unescape(str(text or ""))
+        try:
+            raw = unquote(raw)
+        except Exception:
+            pass
+        m = re.search(r"(?<!\d)(\d{5,})_p(\d+)(?:_[^\s/\\]+)?\.(?:jpe?g|png|gif|webp)", raw, re.I)
+        if not m:
+            return "", None
+        try:
+            page = int(m.group(2))
+        except Exception:
+            return "", None
+        return str(m.group(1)), page
 
-        Never use a bare ``source:*<id>*`` query: Danbooru can match the same
-        digit run inside unrelated Twitter/Fanbox/etc URLs.  All wildcard
-        queries are scoped to Pixiv/Pximg or the Pixiv page filename form.
+    def _record_saucenao_pixiv_page_hint(self, result):
+        """Remember exact Pixiv page indexes returned by SauceNAO.
+
+        SauceNAO labels often contain the best matching page filename
+        (for example 67005913_p8.jpg). Pixiv itself may not reveal original
+        URLs, but booru source fields often keep this filename. Store the
+        page indexes so source→MD5 relay can query exactly those pages instead
+        of only p0..p5.
+        """
+        try:
+            if not isinstance(result, dict):
+                return
+            header = result.get("header", {}) or {}
+            data = result.get("data", {}) or {}
+            hay_parts = [
+                str(header.get("index_name") or ""),
+                str(data.get("source") or ""),
+                str(data.get("title") or ""),
+                str(data.get("material") or ""),
+            ]
+            for u in list(data.get("ext_urls", []) or []):
+                hay_parts.append(str(u or ""))
+            aid = ""
+            pages = []
+            for part in hay_parts:
+                got_aid, got_page = self._saucenao_pixiv_page_from_text(part)
+                if got_aid and got_page is not None:
+                    aid = aid or got_aid
+                    if got_aid == aid and got_page not in pages:
+                        pages.append(got_page)
+            if not aid or not pages:
+                return
+            state = self._saucenao_thread_state()
+            cache = state.get("pixiv_page_hints") or {}
+            old = list(cache.get(aid) or [])
+            merged = []
+            for page in old + pages:
+                try:
+                    page = int(page)
+                except Exception:
+                    continue
+                if page >= 0 and page not in merged:
+                    merged.append(page)
+            cache[aid] = merged
+            state["pixiv_page_hints"] = cache
+            self._saucenao_pixiv_page_hints = cache  # legacy/debug mirror
+        except Exception:
+            pass
+
+    def _pixiv_page_hints_for_artwork(self, artwork_id: str):
+        artwork_id = str(artwork_id or "").strip()
+        cache = self._saucenao_thread_state().get("pixiv_page_hints") or {}
+        pages = []
+        for page in list(cache.get(artwork_id) or []):
+            try:
+                page = int(page)
+            except Exception:
+                continue
+            if page >= 0 and page not in pages:
+                pages.append(page)
+        return pages
+
+    def _normalize_pixiv_relay_queries(self, url: str):
+        """Build bounded source-search queries for one Pixiv/Pximg URL.
+
+        Pixiv is useful as a source->MD5 donor, but a broad expansion over p0..p5
+        with jpg/png/master/original variants makes one SauceNAO hit become 40+
+        booru API probes.  Keep this request-scoped and small: exact source URL,
+        pixiv_id, the generic pximg artwork anchor, and only the page indexes that
+        SauceNAO/URL actually suggested plus p0.
         """
         url = str(url or "").strip()
         out = []
@@ -1796,53 +1647,772 @@ class Tagger:
                 out.append(q)
 
         pid = ""
-        patterns = [
-            r"/artworks/(\d{5,})",
-            r"[?&]illust_id=(\d{5,})",
-            r"/(\d{5,})_p\d+",
-            r"/(\d{5,})(?:_ugoira)?(?:\.|$)",
-        ]
-        haystacks = [path, query, url]
-        for hay in haystacks:
-            for pat in patterns:
-                m = re.search(pat, hay)
-                if m:
-                    pid = m.group(1)
+        direct_page = None
+        page_m = re.search(r"/(\d{5,})_p(\d+)", path + " " + url)
+        if page_m:
+            pid = page_m.group(1)
+            try:
+                direct_page = int(page_m.group(2))
+            except Exception:
+                direct_page = None
+        if not pid:
+            patterns = [
+                r"/artworks/(\d{5,})",
+                r"[?&]illust_id=(\d{5,})",
+                r"/(\d{5,})(?:_ugoira)?(?:\.|$)",
+            ]
+            for hay in (path, query, url):
+                for pat in patterns:
+                    m = re.search(pat, hay)
+                    if m:
+                        pid = m.group(1)
+                        break
+                if pid:
                     break
-            if pid:
-                break
 
-        # Exact current URL is safe if it already contains a Pixiv/Pximg host.
         if ("pixiv.net" in host or "pximg.net" in host) and url:
             add(f"source:{url}")
 
         if pid:
             add(f"pixiv_id:{pid}")
             add(f"source:*i.pximg.net*{pid}*")
-            # Danbooru often stores the direct original URL only, e.g.
-            # .../40884608_p0.jpg, not pixiv.net/artworks/40884608.
-            for page in range(0, 6):
+
+            page_hints = []
+            if direct_page is not None:
+                page_hints.append(direct_page)
+            for page in self._pixiv_page_hints_for_artwork(pid):
+                if page not in page_hints:
+                    page_hints.append(page)
+            if 0 not in page_hints:
+                page_hints.append(0)
+            try:
+                max_pages = int(self.settings.get("source_md5_relay_pixiv_source_max_pages", 3) or 3)
+            except Exception:
+                max_pages = 3
+            page_hints = [p for p in page_hints if isinstance(p, int) and p >= 0][:max(1, max_pages)]
+
+            for page in page_hints:
                 add(f"source:*{pid}_p{page}*")
-            add(f"source:*pixiv.net/artworks/{pid}*")
-            add(f"source:*pixiv.net/en/artworks/{pid}*")
+                add(f"source:*{pid}_p{page}.jpg*")
+                add(f"source:*{pid}_p{page}.png*")
+
+            # Exact Pixiv page forms are cheap and often present in source_url.
+            add(f"source:https://www.pixiv.net/artworks/{pid}")
+            add(f"source:https://www.pixiv.net/en/artworks/{pid}")
+            add(f"source:https://www.pixiv.net/member_illust.php?mode=medium&illust_id={pid}")
             add(f"source:*member_illust.php*illust_id={pid}*")
-        return out
+
+        try:
+            max_q = int(self.settings.get("source_md5_relay_pixiv_source_max_queries", 12) or 12)
+        except Exception:
+            max_q = 12
+        return out[:max(4, min(max_q, 64))]
 
     def _source_relay_query_strings_for_url(self, url: str):
-        """Return safe source-search queries for unsupported reverse URLs."""
+        """Return safe source-search queries for reverse donor URLs.
+
+        Pixiv needs an expanded set because booru sites store many pximg/source
+        variants.  Patreon/Kemono/Nijie/DeviantArt/E-Hentai are much weaker
+        donor locators: keep them to a tiny ordered query set so one SauceNAO
+        hit cannot fan out into dozens of slow API probes.
+        """
         url = str(url or "").strip()
         if not url:
+            return []
+        try:
+            parsed0 = urlparse(url)
+            host = (parsed0.netloc or "").lower().replace("www.", "")
+            path0 = parsed0.path or ""
+            query0 = parse_qs(parsed0.query or "")
+        except Exception:
+            host, path0, query0 = "", "", {}
+        if "pixiv.net" in host or "pximg.net" in host:
+            return self._normalize_pixiv_relay_queries(url)
+
+        queries = []
+        def add(q):
+            q = str(q or "").strip()
+            if q and q not in queries:
+                queries.append(q)
+
+        # Source-only donor families: use specific post/hash URL fragments first.
+        # Avoid full exact+wildcard+mirror expansion by default; the caller also
+        # applies a hard max_queries budget.
+        try:
+            h = host
+            path = path0
+            q = query0
+            if h in ("patreon.com",) or h.endswith(".patreon.com"):
+                m = re.search(r"/posts/(\d+)", path)
+                uid = (q.get("u") or [""])[0]
+                if m:
+                    pid = m.group(1)
+                    add(f"source:*patreon.com/posts/{pid}*")
+                    add(f"source:*kemono.su/patreon/user/*/post/{pid}*")
+                    add(f"source:*kemono.party/patreon/user/*/post/{pid}*")
+                    return queries
+                if uid:
+                    add(f"source:*patreon.com/user?u={uid}*")
+                    add(f"source:*kemono.su/patreon/user/{uid}*")
+                    add(f"source:*kemono.party/patreon/user/{uid}*")
+                    return queries
+
+            if h in ("kemono.party", "kemono.su") or h.endswith(".kemono.party") or h.endswith(".kemono.su"):
+                parts = [x for x in path.strip("/").split("/") if x]
+                if len(parts) >= 5 and parts[0].lower() == "patreon" and parts[1].lower() == "user" and parts[3].lower() == "post" and parts[4].isdigit():
+                    uid, pid = parts[2], parts[4]
+                    add(f"source:*patreon.com/posts/{pid}*")
+                    add(f"source:*kemono.su/patreon/user/{uid}/post/{pid}*")
+                    add(f"source:*kemono.party/patreon/user/{uid}/post/{pid}*")
+                    return queries
+                if len(parts) >= 3 and parts[0].lower() == "patreon" and parts[1].lower() == "user" and parts[2].isdigit():
+                    uid = parts[2]
+                    add(f"source:*patreon.com/user?u={uid}*")
+                    add(f"source:*kemono.su/patreon/user/{uid}*")
+                    add(f"source:*kemono.party/patreon/user/{uid}*")
+                    return queries
+
+            if h == "nijie.info":
+                nid = (q.get("id") or [""])[0]
+                if nid:
+                    add(f"source:*nijie.info/view.php?id={nid}*")
+                    return queries
+
+            if h in ("e-hentai.org", "exhentai.org"):
+                sh = (q.get("f_shash") or [""])[0]
+                if sh:
+                    add(f"source:*f_shash={str(sh).lower()}*")
+                    add(f"source:*{h}*{str(sh).lower()}*")
+                    return queries
+
+            if h == "deviantart.com" or h.endswith(".deviantart.com"):
+                nums = re.findall(r"\d+", path)
+                if nums:
+                    did = nums[-1]
+                    add(f"source:*deviantart.com*{did}*")
+                    return queries
+        except Exception:
+            pass
+
+        # Generic fallback for other source locators.
+        add(f"source:{url}")
+        add(f"source:*{url}*")
+        return queries
+
+    def _pixiv_artwork_id_from_url(self, url: str) -> str:
+        """Extract Pixiv artwork id from artwork/ajax/pximg/member_illust URLs."""
+        raw = html.unescape(str(url or "").strip())
+        if not raw:
+            return ""
+        try:
+            parsed = urlparse(raw)
+            path = unquote(parsed.path or "")
+            query = parsed.query or ""
+        except Exception:
+            path, query = raw, raw
+        patterns = [
+            r"/artworks/(\d{5,})",
+            r"/ajax/illust/(\d{5,})/pages",
+            r"[?&]illust_id=(\d{5,})",
+            r"/(\d{5,})_p\d+",
+            r"/(\d{5,})(?:_ugoira)?(?:\.|$)",
+        ]
+        for hay in (path, query, raw):
+            for pat in patterns:
+                m = re.search(pat, hay)
+                if m:
+                    return m.group(1)
+        return ""
+
+    def _pixiv_original_url_limit(self):
+        try:
+            max_pages = int(self.settings.get("source_md5_relay_pixiv_max_pages", 8) or 8)
+        except Exception:
+            max_pages = 8
+        return max(1, max_pages)
+
+    def _pixiv_add_url_once(self, out, url):
+        url = str(url or "").strip()
+        if not url or not url.startswith(("http://", "https://")):
+            return
+        try:
+            host = (urlparse(url).netloc or "").lower()
+        except Exception:
+            host = ""
+        if "pximg.net" not in host:
+            return
+        if not re.search(r"(?i)\.(?:jpe?g|png|gif|webp)(?:[?#].*)?$", url):
+            return
+        if url not in out:
+            out.append(url)
+
+    def _pixiv_url_matches_artwork(self, url, artwork_id: str) -> bool:
+        """True only when a pximg candidate clearly belongs to this Pixiv artwork.
+
+        Pixiv HTML/error/preload pages can contain unrelated pximg URLs (icons,
+        cached script data, previously opened artwork data).  Never hash those as
+        a donor for the current SauceNAO/Pixiv source; otherwise two different
+        artworks can accidentally resolve to the same stale original file MD5.
+        """
+        aid = str(artwork_id or "").strip()
+        if not aid or not aid.isdigit():
+            return False
+        raw = html.unescape(str(url or ""))
+        try:
+            raw = unquote(raw)
+        except Exception:
+            pass
+        return bool(re.search(rf"(?<!\d){re.escape(aid)}_p\d+", raw))
+
+    def _pixiv_filter_urls_for_artwork(self, urls, artwork_id: str):
+        out = []
+        discarded = 0
+        for u in list(urls or []):
+            if self._pixiv_url_matches_artwork(u, artwork_id):
+                if u not in out:
+                    out.append(u)
+            else:
+                discarded += 1
+        if discarded:
+            try:
+                self.log(f"  PIXIV MD5 DONOR FILTER: discarded_nonmatching={discarded} artwork={artwork_id}")
+            except Exception:
+                pass
+        return out
+
+    def _pixiv_original_candidates_from_pximg_url(self, url):
+        """Return original-file URL candidates from Pixiv preview/master URLs.
+
+        Pixiv JSON/HTML sometimes exposes only a master1200/regular preview.
+        The date/id path is still enough to build conservative original candidates;
+        the downloader verifies each URL by HTTP status before hashing.
+        """
+        url = html.unescape(str(url or "").strip())
+        if not url or "pximg.net" not in url:
+            return []
+        out = []
+        if "/img-original/" in url:
+            out.append(url)
+            return out
+        m = re.search(r"/img-master/img/(.+?)/(\d{5,}_p\d+)(?:_[^/]+)?\.(jpe?g|png|gif|webp)(?:[?#].*)?$", url, re.I)
+        if not m:
+            m = re.search(r"/c/[^/]+/img-master/img/(.+?)/(\d{5,}_p\d+)(?:_[^/]+)?\.(jpe?g|png|gif|webp)(?:[?#].*)?$", url, re.I)
+        if not m:
+            return out
+        path_part, stem, ext = m.group(1), m.group(2), (m.group(3) or "jpg").lower()
+        host = "https://i.pximg.net"
+        preferred = "jpg" if ext in ("jpg", "jpeg") else ext
+        for e in unique_keep_order([preferred, "png", "jpg", "jpeg", "webp"]):
+            out.append(f"{host}/img-original/img/{path_part}/{stem}.{e}")
+        return out
+
+    def _pixiv_original_urls_from_pages_response(self, data):
+        body = data.get("body") if isinstance(data, dict) else None
+        if not isinstance(body, list):
+            return []
+        out = []
+        for page in body:
+            if not isinstance(page, dict):
+                continue
+            urls = page.get("urls") if isinstance(page.get("urls"), dict) else {}
+            original = str(urls.get("original") or "").strip()
+            if original:
+                self._pixiv_add_url_once(out, original)
+            # Defensive fallback for old/Pixiv-restricted JSON that gives only preview URLs.
+            for key in ("regular", "small", "thumb_mini"):
+                for cand in self._pixiv_original_candidates_from_pximg_url(urls.get(key) or ""):
+                    self._pixiv_add_url_once(out, cand)
+        return out[:self._pixiv_original_url_limit()]
+
+    def _pixiv_original_urls_from_any_json(self, data):
+        """Extract Pixiv original candidates from /pages, /illust and preload JSON shapes."""
+        out = []
+
+        # First handle the normal /pages shape.
+        for u in self._pixiv_original_urls_from_pages_response(data):
+            self._pixiv_add_url_once(out, u)
+
+        def walk(obj, key=""):
+            if len(out) >= self._pixiv_original_url_limit():
+                return
+            if isinstance(obj, dict):
+                # Common Pixiv shapes: body.urls.original, meta_single_page.original_image_url,
+                # meta_pages[*].image_urls.original, preload illust entries, etc.
+                for k, v in obj.items():
+                    lk = str(k or "").lower()
+                    if lk in ("original", "original_image_url", "url", "regular", "small", "thumb", "thumb_mini") and isinstance(v, str):
+                        self._pixiv_add_url_once(out, v)
+                        for cand in self._pixiv_original_candidates_from_pximg_url(v):
+                            self._pixiv_add_url_once(out, cand)
+                    walk(v, lk)
+            elif isinstance(obj, list):
+                for v in obj:
+                    walk(v, key)
+            elif isinstance(obj, str):
+                if "pximg.net" in obj:
+                    for m in re.finditer(r"https?://[^\s'\"<>]+pximg\.net/[^\s'\"<>]+", obj):
+                        u = html.unescape(m.group(0))
+                        self._pixiv_add_url_once(out, u)
+                        for cand in self._pixiv_original_candidates_from_pximg_url(u):
+                            self._pixiv_add_url_once(out, cand)
+
+        walk(data)
+        return out[:self._pixiv_original_url_limit()]
+
+    def _pixiv_original_urls_from_html_text(self, text):
+        text = str(text or "")
+        if not text:
+            return []
+        out = []
+        # Pixiv usually embeds preload JSON in a meta tag.  Parse it if possible,
+        # but also regex-scan HTML because deleted/restricted pages can vary.
+        m = re.search(r'<meta[^>]+id=["\']meta-preload-data["\'][^>]+content=["\']([^"\']+)["\']', text, re.I | re.S)
+        if m:
+            try:
+                data = json.loads(html.unescape(m.group(1)))
+                for u in self._pixiv_original_urls_from_any_json(data):
+                    self._pixiv_add_url_once(out, u)
+            except Exception:
+                pass
+        for m in re.finditer(r"https?://[^\s'\"<>]+pximg\.net/[^\s'\"<>]+", text):
+            u = html.unescape(m.group(0))
+            self._pixiv_add_url_once(out, u)
+            for cand in self._pixiv_original_candidates_from_pximg_url(u):
+                self._pixiv_add_url_once(out, cand)
+        return out[:self._pixiv_original_url_limit()]
+
+    def _pixiv_companion_get_json_response(self, api_url: str, *, referer: str = "", context: str = "pages"):
+        """Fetch Pixiv JSON through the already-open Chrome companion extension.
+
+        This never launches chrome.exe. It is only a short page-context probe for
+        Pixiv cookies/referrer. If the extension/Pixiv tab is unavailable, return
+        None and let the normal direct request path fail/continue.
+        """
+        if _enqueue_pixiv_browser_fetch is None:
+            return None
+        try:
+            timeout_s = float(self.settings.get("source_md5_relay_pixiv_companion_timeout_seconds", 18) or 18)
+        except Exception:
+            timeout_s = 18
+        try:
+            st = _pixiv_bridge_status_detail() if _pixiv_bridge_status_detail else {}
+            if st:
+                self.log(f"  PIXIV MD5 DONOR COMPANION QUEUE: pending={st.get('pending', 0)} inflight={st.get('inflight', 0)}")
+            self.log("  PIXIV MD5 DONOR COMPANION: using Chrome companion/extension worker; no chrome.exe launch")
+            result = _enqueue_pixiv_browser_fetch(api_url, referer=referer, timeout_s=timeout_s)
+        except Exception as e:
+            self.log(f"  PIXIV MD5 DONOR COMPANION ERROR: {type(e).__name__}: {e}")
+            return None
+        if not result:
+            self.log("  PIXIV MD5 DONOR COMPANION MISS: extension did not answer; reload Local Booru Companion v0.1.10; old 0.1.6/0.1.9 may miss Pixiv target-tab result reporting")
+            return None
+        status = int((result or {}).get("status") or 0)
+        text = str((result or {}).get("text") or "")
+        headers = dict((result or {}).get("headers") or {})
+        bridge_mode = str((result or {}).get("bridge_mode") or "")
+        self.log(f"  PIXIV MD5 DONOR COMPANION {context}: status={status} mode={bridge_mode}")
+        page_fetch_error = str((result or {}).get("page_fetch_error") or "")
+        if page_fetch_error:
+            self.log(f"  PIXIV MD5 DONOR COMPANION {context} NOTE: {page_fetch_error[:240]}")
+            if 'user_id=no' in page_fetch_error and bridge_mode == 'pixiv_extension_worker_fetch_forced':
+                self.log("  PIXIV MD5 DONOR COMPANION WARNING: Pixiv user id not visible to extension; open/login Pixiv or reload Companion v0.1.10 with cookies permission")
+        if bridge_mode == "pixiv_page_main_world_fetch" and status >= 400:
+            self.log("  PIXIV MD5 DONOR COMPANION STALE EXTENSION: reload Local Booru Companion v0.1.10; Pixiv worker fetch is not active")
+        if (result or {}).get("error"):
+            self.log(f"  PIXIV MD5 DONOR COMPANION {context} ERROR: {(result or {}).get('error')}")
+        if not headers.get("content-type"):
+            headers["content-type"] = "application/json" if text.strip().startswith(("{", "[")) else "text/plain"
+        if page_fetch_error:
+            headers["x-localbooru-page-fetch-error"] = page_fetch_error
+        return _SyntheticHTTPResponse(status, text, headers, (result or {}).get("url") or api_url)
+
+    def _pixiv_companion_stale_abort(self, response, artwork_id: str) -> bool:
+        """True when the companion is clearly stuck on a stale/missing Pixiv tab.
+
+        Do not abort merely because page_context_skipped mentions another tab: the
+        worker fetch can still return the requested JSON. Abort only on failed
+        responses/no-tab signals where no matching data can be trusted.
+        """
+        try:
+            status = int(getattr(response, "status_code", 0) or 0)
+            headers = getattr(response, "headers", {}) or {}
+            note = str(headers.get("x-localbooru-page-fetch-error") or "")
+        except Exception:
+            return False
+        if status < 400 and "No tab with id" not in note and "target_tab_status=404" not in note:
+            return False
+        ids = re.findall(r"/artworks/(\d{5,})", note)
+        if ids and str(artwork_id) not in ids:
+            return True
+        if "No tab with id" in note or "target_tab_status=404" in note:
+            return True
+        return False
+
+    def _pixiv_original_urls_for_artwork(self, artwork_id: str):
+        """Return Pixiv original image URLs for an artwork.
+
+        Try the normal Pixiv AJAX pages endpoint first, then fall back to the
+        artwork metadata endpoint and finally the artwork HTML/preload JSON.  All
+        browser-side requests go through the already-open companion extension;
+        Local Booru never starts system Chrome for this relay.
+        """
+        artwork_id = str(artwork_id or "").strip()
+        if not artwork_id.isdigit():
+            return []
+        host = "www.pixiv.net"
+        referer = f"https://www.pixiv.net/artworks/{artwork_id}"
+        json_urls = [
+            (f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages?lang=en", "pages"),
+            (f"https://www.pixiv.net/ajax/illust/{artwork_id}/pages", "pages"),
+            (f"https://www.pixiv.net/ajax/illust/{artwork_id}?lang=en", "illust"),
+            (f"https://www.pixiv.net/ajax/illust/{artwork_id}", "illust"),
+        ]
+        html_urls = [(referer, "html")]
+        headers_json = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36 LocalBooru/1.0",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": referer,
+            "Origin": "https://www.pixiv.net",
+        }
+        headers_html = {
+            "User-Agent": headers_json["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": referer,
+        }
+        try:
+            timeout_s = float(self.settings.get("source_md5_relay_pixiv_timeout_seconds", 30) or 30)
+        except Exception:
+            timeout_s = 30
+        self.log(f"  PIXIV MD5 DONOR START: artwork={artwork_id}")
+
+        seen_urls = []
+        def add_many(items):
+            for u in self._pixiv_filter_urls_for_artwork(list(items or []), artwork_id):
+                self._pixiv_add_url_once(seen_urls, u)
+            return seen_urls[:self._pixiv_original_url_limit()]
+
+        # 1) Direct requests: cheap and works for public/non-protected Pixiv pages.
+        direct_errors = []
+        for api_url, context in json_urls:
+            try:
+                r = self.session_for_host(host).get(api_url, timeout=timeout_s, headers=headers_json)
+                direct_status = int(getattr(r, "status_code", 0) or 0)
+                data = safe_json_response(r, host)
+                out = self._pixiv_original_urls_from_any_json(data)
+                if out:
+                    before_count = len(seen_urls)
+                    add_many(out)
+                    if len(seen_urls) > before_count:
+                        self.log(f"  PIXIV MD5 DONOR {context.upper()}: direct urls={len(seen_urls)} artwork={artwork_id}")
+                        return seen_urls[:self._pixiv_original_url_limit()]
+                    direct_errors.append(f"{context}=filtered status={direct_status}")
+                    continue
+                direct_errors.append(f"{context}=empty status={direct_status}")
+            except Exception as e:
+                direct_errors.append(f"{context}={type(e).__name__}: {e}")
+        # Direct HTML/preload fallback.
+        for html_url, context in html_urls:
+            try:
+                r = self.session_for_host(host).get(html_url, timeout=timeout_s, headers=headers_html)
+                direct_status = int(getattr(r, "status_code", 0) or 0)
+                out = self._pixiv_original_urls_from_html_text(getattr(r, "text", "") or "")
+                if out:
+                    before_count = len(seen_urls)
+                    add_many(out)
+                    if len(seen_urls) > before_count:
+                        self.log(f"  PIXIV MD5 DONOR HTML: direct urls={len(seen_urls)} status={direct_status} artwork={artwork_id}")
+                        return seen_urls[:self._pixiv_original_url_limit()]
+                    direct_errors.append(f"{context}=filtered status={direct_status}")
+                    continue
+                direct_errors.append(f"{context}=empty status={direct_status}")
+            except Exception as e:
+                direct_errors.append(f"{context}={type(e).__name__}: {e}")
+        self.log(f"  PIXIV MD5 DONOR DIRECT MISS: artwork={artwork_id} {'; '.join(direct_errors[:4])}")
+
+        # 2) Companion browser/extension worker requests.  Keep this request-scoped
+        # and bounded.  In long parser runs a stale Pixiv tab can otherwise make
+        # every endpoint repeat the same unrelated context and spam filtered 404s.
+        companion_errors = []
+        try:
+            _companion_max = int(self.settings.get("source_md5_relay_pixiv_companion_max_requests", 3) or 3)
+        except Exception:
+            _companion_max = 3
+        _companion_requests = 0
+        _companion_seen_contexts = set()
+        for api_url, context in json_urls:
+            if context in _companion_seen_contexts:
+                continue
+            _companion_seen_contexts.add(context)
+            if _companion_requests >= max(1, _companion_max):
+                companion_errors.append("bounded_after_json_attempts")
+                break
+            _companion_requests += 1
+            br = self._pixiv_companion_get_json_response(api_url, referer=referer, context=context)
+            if br is None:
+                companion_errors.append(f"{context}=no_response")
+                continue
+            if self._pixiv_companion_stale_abort(br, artwork_id):
+                companion_errors.append(f"{context}=stale_target_abort status={int(getattr(br, 'status_code', 0) or 0)}")
+                break
+            try:
+                data = safe_json_response(br, host)
+                out = self._pixiv_original_urls_from_any_json(data)
+                if out:
+                    before_count = len(seen_urls)
+                    add_many(out)
+                    if len(seen_urls) > before_count:
+                        self.log(f"  PIXIV MD5 DONOR {context.upper()}: companion urls={len(seen_urls)} artwork={artwork_id}")
+                        return seen_urls[:self._pixiv_original_url_limit()]
+                    companion_errors.append(f"{context}=filtered status={int(getattr(br, 'status_code', 0) or 0)}")
+                    continue
+                companion_errors.append(f"{context}=empty status={int(getattr(br, 'status_code', 0) or 0)}")
+            except Exception as e:
+                companion_errors.append(f"{context}={type(e).__name__}: {e}")
+        # HTML through companion too, but only if the bounded JSON probes did not
+        # already consume the request budget.
+        for html_url, context in html_urls:
+            if _companion_requests >= max(1, _companion_max):
+                companion_errors.append("bounded_before_html")
+                break
+            _companion_requests += 1
+            br = self._pixiv_companion_get_json_response(html_url, referer=referer, context=context)
+            if br is None:
+                companion_errors.append(f"{context}=no_response")
+                continue
+            if self._pixiv_companion_stale_abort(br, artwork_id):
+                companion_errors.append(f"{context}=stale_target_abort status={int(getattr(br, 'status_code', 0) or 0)}")
+                break
+            try:
+                out = self._pixiv_original_urls_from_html_text(getattr(br, "text", "") or "")
+                if out:
+                    before_count = len(seen_urls)
+                    add_many(out)
+                    if len(seen_urls) > before_count:
+                        self.log(f"  PIXIV MD5 DONOR HTML: companion urls={len(seen_urls)} artwork={artwork_id}")
+                        return seen_urls[:self._pixiv_original_url_limit()]
+                    companion_errors.append(f"{context}=filtered status={int(getattr(br, 'status_code', 0) or 0)}")
+                    continue
+                companion_errors.append(f"{context}=empty status={int(getattr(br, 'status_code', 0) or 0)}")
+            except Exception as e:
+                companion_errors.append(f"{context}={type(e).__name__}: {e}")
+        if companion_errors:
+            self.log(f"  PIXIV MD5 DONOR COMPANION MISS DETAIL: artwork={artwork_id} {'; '.join(companion_errors[:5])}")
+        return []
+
+    def _pixiv_miss_cache_key(self, artwork_id: str) -> str:
+        return f"pixiv_md5_miss::{str(artwork_id or '').strip()}"
+
+    def _pixiv_miss_cache_ttl_seconds(self) -> int:
+        try:
+            days = float(self.settings.get("source_md5_relay_pixiv_miss_cache_ttl_days", 30) or 30)
+        except Exception:
+            days = 30.0
+        return int(max(1.0, days) * 86400)
+
+    def _pixiv_miss_cache_hit(self, artwork_id: str) -> bool:
+        aid = str(artwork_id or "").strip()
+        if not aid:
+            return False
+        try:
+            from core.database.connection import db
+            with db(self.settings) as con:
+                row = con.execute("SELECT value FROM app_state WHERE key=?", (self._pixiv_miss_cache_key(aid),)).fetchone()
+            if not row:
+                return False
+            data = json.loads(str(row["value"] or "{}"))
+            stamp = int(data.get("ts") or 0)
+            if stamp <= 0 or time.time() - stamp > self._pixiv_miss_cache_ttl_seconds():
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _pixiv_miss_cache_store(self, artwork_id: str, reason: str = "miss") -> None:
+        aid = str(artwork_id or "").strip()
+        if not aid:
+            return
+        try:
+            from core.database.connection import db
+            payload = json.dumps({"ts": int(time.time()), "reason": str(reason or "miss")[:120]}, ensure_ascii=False)
+            with db(self.settings, write=True) as con:
+                con.execute("INSERT OR REPLACE INTO app_state(key,value) VALUES(?,?)", (self._pixiv_miss_cache_key(aid), payload))
+        except Exception:
+            pass
+
+    def _md5_of_remote_pixiv_original(self, original_url: str, *, artwork_id: str = "") -> str:
+        """Download a Pixiv original image and compute byte MD5.
+
+        Only used as Pixiv source -> MD5 donor. The returned MD5 is later checked
+        through the ordinary enabled booru MD5 pipeline; Pixiv tags are ignored.
+        """
+        original_url = str(original_url or "").strip()
+        if not original_url.startswith(("http://", "https://")):
+            return ""
+        try:
+            parsed = urlparse(original_url)
+            host = (parsed.netloc or "").lower().replace("www.", "")
+        except Exception:
+            host = ""
+        if not (host == "i.pximg.net" or host.endswith(".pximg.net")):
+            return ""
+        try:
+            timeout_s = float(self.settings.get("source_md5_relay_pixiv_timeout_seconds", 30) or 30)
+        except Exception:
+            timeout_s = 30
+        try:
+            max_mb = float(self.settings.get("source_md5_relay_pixiv_max_file_mb", 40) or 40)
+        except Exception:
+            max_mb = 40
+        max_bytes = int(max(1.0, max_mb) * 1024 * 1024)
+        referer = f"https://www.pixiv.net/artworks/{artwork_id}" if artwork_id else "https://www.pixiv.net/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36 LocalBooru/1.0",
+            "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Referer": referer,
+        }
+        # Use a raw one-shot request here, not the parser-wide safe session with
+        # retry/backoff.  Pixiv original URLs are guessed donor probes; a 500 from
+        # one guessed .webp/.jpg variant is just a miss, not a global network
+        # failure and not worth retrying.
+        try:
+            r = requests.get(original_url, timeout=(8, timeout_s), headers=headers, stream=True)
+        except Exception as e:
+            self.log(f"  PIXIV MD5 DONOR DOWNLOAD MISS: request {type(e).__name__} url={redact_sensitive_url(original_url)}")
+            return ""
+        status = int(getattr(r, "status_code", 0) or 0)
+        if status >= 400:
+            self.log(f"  PIXIV MD5 DONOR DOWNLOAD MISS: status={status} url={redact_sensitive_url(original_url)}")
+            return ""
+        try:
+            content_len = int((getattr(r, "headers", {}) or {}).get("content-length") or 0)
+        except Exception:
+            content_len = 0
+        if content_len and content_len > max_bytes:
+            self.log(f"  PIXIV MD5 DONOR SKIP: original too large {content_len} bytes url={redact_sensitive_url(original_url)}")
+            return ""
+        h = hashlib.md5()
+        total = 0
+        try:
+            for chunk in r.iter_content(chunk_size=1024 * 256):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    self.log(f"  PIXIV MD5 DONOR SKIP: original exceeded {max_bytes} bytes url={redact_sensitive_url(original_url)}")
+                    return ""
+                h.update(chunk)
+        except AttributeError:
+            data = getattr(r, "content", b"") or b""
+            total = len(data)
+            if total > max_bytes:
+                self.log(f"  PIXIV MD5 DONOR SKIP: original exceeded {max_bytes} bytes url={redact_sensitive_url(original_url)}")
+                return ""
+            h.update(data)
+        if total <= 0:
+            return ""
+        return h.hexdigest().lower()
+
+    def pixiv_md5_candidates_from_url(self, url: str):
+        """Resolve Pixiv artwork/source URL to original-file MD5 candidates."""
+        if not bool(self.settings.get("source_md5_relay_pixiv_enabled", True)):
+            self.log("  PIXIV MD5 DONOR SKIP: disabled")
+            return []
+        artwork_id = self._pixiv_artwork_id_from_url(url)
+        if not artwork_id:
+            self.log(f"  PIXIV MD5 DONOR SKIP: no artwork id in {redact_sensitive_url(url)}")
+            return []
+        cache = getattr(self, "_pixiv_md5_candidate_cache", {}) or {}
+        if artwork_id in cache:
+            cached = list(cache.get(artwork_id) or [])
+            self.log(f"  PIXIV MD5 DONOR CACHE: artwork={artwork_id} md5s={len(cached)}")
+            return cached
+        if self._pixiv_miss_cache_hit(artwork_id):
+            self.log(f"  PIXIV MD5 DONOR MISS-CACHE: artwork={artwork_id}")
+            cache[artwork_id] = []
+            self._pixiv_md5_candidate_cache = cache
+            return []
+        try:
+            budget = float(self.settings.get("source_md5_relay_pixiv_donor_time_budget_seconds", 10.0) or 10.0)
+        except Exception:
+            budget = 10.0
+        started = time.time()
+        try:
+            original_urls = self._pixiv_original_urls_for_artwork(artwork_id)
+        except Exception as e:
+            self.log(f"  PIXIV MD5 DONOR ERROR: pages artwork={artwork_id}: {type(e).__name__}: {e}")
+            cache[artwork_id] = []
+            self._pixiv_md5_candidate_cache = cache
+            self._pixiv_miss_cache_store(artwork_id, "pages_error")
+            return []
+        if not original_urls:
+            self.log(f"  PIXIV MD5 DONOR MISS: no artwork-matching original urls artwork={artwork_id}")
+            cache[artwork_id] = []
+            self._pixiv_md5_candidate_cache = cache
+            self._pixiv_miss_cache_store(artwork_id, "no_original_urls")
+            return []
+        out = []
+        for idx, original in enumerate(original_urls):
+            if time.time() - started > max(2.0, budget):
+                self.log(f"  PIXIV MD5 DONOR BUDGET STOP: artwork={artwork_id} budget={budget:.1f}s")
+                break
+            if callable(getattr(self, "cancel_callback", None)) and self.cancel_callback():
+                self.log(f"  PIXIV MD5 DONOR CANCELLED: artwork={artwork_id}")
+                break
+            try:
+                md5v = self._md5_of_remote_pixiv_original(original, artwork_id=artwork_id)
+            except Exception as e:
+                self.log(f"  PIXIV MD5 DONOR ERROR: p{idx} {type(e).__name__}: {e}")
+                continue
+            if md5v and is_md5(md5v) and md5v not in out:
+                self.log(f"  PIXIV MD5 DONOR: artwork={artwork_id} page={idx} md5={md5v}")
+                out.append(md5v)
+        cache[artwork_id] = list(out)
+        self._pixiv_md5_candidate_cache = cache
+        if not out:
+            self._pixiv_miss_cache_store(artwork_id, "no_md5")
+        return out
+
+    def extract_md5_candidates_from_post_url(self, url: str):
+        """Return one or more verified/source-derived MD5 candidates from URL.
+
+        Yande.re returns authoritative post md5 in JSON. Pixiv does not; for
+        Pixiv, download original bytes and compute MD5 locally. Neither source
+        contributes tags directly.
+        """
+        url = str(url or "").strip()
+        if not url.startswith(("http://", "https://")):
             return []
         try:
             host = (urlparse(url).netloc or "").lower().replace("www.", "")
         except Exception:
             host = ""
-        if "pixiv.net" in host or "pximg.net" in host:
-            return self._normalize_pixiv_relay_queries(url)
-        # For non-Pixiv unsupported URLs use only full normalized URL, not a
-        # bare numeric/id substring.  This keeps FA/Fanbox/Kemono/E-Hentai relay
-        # safe as a locator while avoiding broad false positives.
-        return [f"source:{url}", f"source:*{url}*"]
+        out = []
+        def add(v):
+            v = str(v or "").strip().lower()
+            if is_md5(v) and v not in out:
+                out.append(v)
+        if host in ("pixiv.net", "i.pximg.net") or host.endswith(".pixiv.net") or host.endswith(".pximg.net"):
+            for v in self.pixiv_md5_candidates_from_url(url):
+                add(v)
+            if out:
+                return out
+        if self._is_no_relay_reverse_host(host):
+            # Unsupported donor hosts are not tag sources and must not be HTML-
+            # scraped directly.  Only explicit 32-hex md5/hash query values are
+            # accepted here; otherwise _reverse_md5_relay will try safe
+            # source:*URL* lookup against trusted booru APIs.
+            try:
+                q = parse_qs(urlparse(url).query or "")
+                for key in ("md5", "file_md5", "hash"):
+                    got = str((q.get(key) or [""])[0]).strip().lower()
+                    if is_md5(got):
+                        add(got)
+            except Exception:
+                pass
+            return out
+        got = self.extract_md5_from_post_url(url)
+        add(got)
+        return out
 
     def _first_md5_from_posts(self, posts):
         for post in posts or []:
@@ -2032,16 +2602,24 @@ class Tagger:
             posts = self._post_dicts_from_data(data)
         return [p for p in posts if isinstance(p, dict)]
 
-    def _source_relay_probe_sites(self, query):
+    def _source_relay_probe_sites(self, query, *, sites=None, deadline=None):
         """Try one safe source query across trusted booru APIs and return md5/site."""
-        attempts = [
+        all_attempts = [
             ("danbooru.donmai.us", self._source_relay_posts_danbooru),
             ("gelbooru.com", lambda q: self._source_relay_posts_gelbooru_like("gelbooru.com", q)),
             ("rule34.xxx", self._source_relay_posts_rule34xxx),
-            ("booru.allthefallen.moe", self._source_relay_posts_atf),
             ("e621.net", self._source_relay_posts_e621),
+            ("booru.allthefallen.moe", self._source_relay_posts_atf),
         ]
+        allowed = set(str(x or "").strip() for x in (sites or []))
+        attempts = [(site, func) for site, func in all_attempts if not allowed or site in allowed]
         for site, func in attempts:
+            if deadline is not None and time.monotonic() >= float(deadline):
+                try:
+                    self.log(f"  SOURCE MD5 RELAY BUDGET EXHAUSTED before {site}: {query}")
+                except Exception:
+                    pass
+                break
             try:
                 posts = func(query)
                 got = self._first_md5_from_posts(posts)
@@ -2207,28 +2785,111 @@ class Tagger:
         Unsupported reverse-search hits (Pixiv/Fanbox/FA/Kemono/etc.) are not
         tag sources.  They are only locators.  We search the URL/source ID on
         trusted booru APIs, take an authoritative MD5 from the found post, then
-        pass that MD5 through the ordinary MD5 pipeline.
+        pass that MD5 through the ordinary MD5 pipeline.  The unsupported site
+        itself is not HTML-scraped here.
         """
         url = str(url or "").strip()
         if not url.startswith(("http://", "https://")):
             return ""
+        cache_key = self._unsupported_donor_url_key(url) or self._canonical_reverse_url(url)
+        cache = getattr(self, "_source_md5_relay_url_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._source_md5_relay_url_cache = cache
+        if cache_key and cache_key in cache:
+            got = str(cache.get(cache_key) or "").strip().lower()
+            if got:
+                self.log(f"  SOURCE MD5 RELAY CACHE HIT: md5={got} url={url}")
+            else:
+                self.log(f"  SOURCE MD5 RELAY CACHE MISS: {url}")
+            return got if is_md5(got) else ""
         queries = self._source_relay_query_strings_for_url(url)
         if not queries:
+            if cache_key:
+                cache[cache_key] = ""
             return ""
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower().replace("www.", "")
+        except Exception:
+            host = ""
+        unsupported_donor = self._is_no_relay_reverse_host(host)
+        pixiv_donor = False
+        try:
+            pixiv_donor = bool(self._pixiv_artwork_id_from_url(url)) and ("pixiv" in url or "pximg" in url)
+        except Exception:
+            pixiv_donor = False
+        if unsupported_donor:
+            try:
+                max_q = int(self.settings.get("source_md5_relay_unsupported_donor_max_queries_per_url", 2) or 2)
+            except Exception:
+                max_q = 2
+            # Hard cap for old persisted settings: unsupported donors are weak
+            # locators, not a place to fan out broad source:* queries.
+            max_q = max(1, min(max_q, 2))
+            if len(queries) > max_q:
+                self.log(f"  SOURCE MD5 RELAY DONOR QUERY BUDGET: using {max_q}/{len(queries)} for {url}")
+                queries = queries[:max_q]
+            try:
+                budget_s = float(self.settings.get("source_md5_relay_unsupported_donor_time_budget_seconds", 8.0) or 8.0)
+            except Exception:
+                budget_s = 8.0
+            # Keep the legacy setting from accidentally allowing minute-long
+            # donor relay. If it cannot help quickly, save source-only and move on.
+            budget_s = max(2.0, min(budget_s, 8.0))
+            deadline = time.monotonic() + budget_s
+            relay_sites = ["danbooru.donmai.us", "gelbooru.com", "rule34.xxx", "e621.net"]
+            if not bool(self.settings.get("source_md5_relay_unsupported_donor_skip_atf", True)):
+                relay_sites.append("booru.allthefallen.moe")
+            else:
+                self.log("  SOURCE MD5 RELAY DONOR ATF SKIP: weak donor relay uses cheap sites only")
+        elif pixiv_donor:
+            try:
+                max_q = int(self.settings.get("source_md5_relay_pixiv_source_max_queries", 12) or 12)
+            except Exception:
+                max_q = 12
+            max_q = max(1, min(max_q, 16))
+            if len(queries) > max_q:
+                self.log(f"  PIXIV SOURCE RELAY HARD TRIM: using {max_q}/{len(queries)} for {url}")
+                queries = queries[:max_q]
+            try:
+                budget_s = float(self.settings.get("source_md5_relay_pixiv_source_time_budget_seconds", 8.0) or 8.0)
+            except Exception:
+                budget_s = 8.0
+            deadline = time.monotonic() + max(3.0, min(budget_s, 30.0))
+            skip_atf = bool(self.settings.get("source_md5_relay_pixiv_source_skip_atf", True))
+            relay_sites = ["danbooru.donmai.us", "gelbooru.com", "rule34.xxx", "e621.net"]
+            if not skip_atf:
+                relay_sites.append("booru.allthefallen.moe")
+        else:
+            deadline = None
+            relay_sites = None
+        try:
+            aid = self._pixiv_artwork_id_from_url(url) if ("pixiv" in url or "pximg" in url) else ""
+            hint_pages = self._pixiv_page_hints_for_artwork(aid) if aid else []
+            if aid and hint_pages:
+                self.log(f"  PIXIV SOURCE RELAY QUERY EXPANDED: artwork={aid} pages={','.join(str(p) for p in hint_pages)} queries={len(queries)}")
+        except Exception:
+            pass
         seen = set()
         for query in queries:
             query = str(query or "").strip()
             if not query or query in seen:
                 continue
             seen.add(query)
+            if deadline is not None and time.monotonic() >= deadline:
+                self.log(f"  SOURCE MD5 RELAY DONOR BUDGET EXHAUSTED: {url}")
+                break
             # Absolute safety: never run bare source:*12345678* style probes.
             if re.fullmatch(r"source:\*?\d{5,}\*?", query):
                 self.log(f"  SOURCE MD5 RELAY UNSAFE QUERY SKIPPED: {query}")
                 continue
             try:
-                md5v, site, count = self._source_relay_probe_sites(query)
+                md5v, site, count = self._source_relay_probe_sites(query, sites=relay_sites, deadline=deadline)
                 if md5v:
                     self.log(f"  SOURCE MD5 RELAY FOUND: md5={md5v} via={site} query={query} posts={count}")
+                    if cache_key:
+                        cache[cache_key] = md5v.lower()
                     return md5v.lower()
             except Exception as e:
                 try:
@@ -2236,6 +2897,8 @@ class Tagger:
                 except Exception:
                     pass
         self.log(f"  SOURCE MD5 RELAY MISS: {url}")
+        if cache_key:
+            cache[cache_key] = ""
         return ""
 
     def tags_from_url(self, url):
@@ -2346,12 +3009,16 @@ class Tagger:
         except Exception as e:
             self.log(f"    {host} HTML CATEGORY OVERLAY ERROR: {type(e).__name__}: {e}")
 
-        # In the background category pipeline HTML is the sorter.  The tag-index
-        # API remains a non-background fallback only, so foreground/queue work
-        # never mutates the old flat-list contract.
-        if self._needs_background_tag_groups(url):
+        # In normal foreground lanes category recovery is deferred.  The durable
+        # background worker, however, is *the* place where flat sources must be
+        # classified.  If the visible HTML/sidebar did not expose categories,
+        # fall back to the documented tag-index API for already-confirmed tags.
+        # This keeps rule34.xxx membership guarded by the post API, but prevents
+        # source-specific views from staying forever under `general`.
+        if self._needs_background_tag_groups(url) and not bool(self.settings.get("_background_category_worker", False)):
             return self._guarded_category_projection(api_tags, {}, baseline)
-        return self._categorize_flat_tags("rule34.xxx" if host == "api.rule34.xxx" else host, api_tags)
+        dapi_groups = self._categorize_flat_tags("rule34.xxx" if host == "api.rule34.xxx" else host, api_tags)
+        return self._guarded_category_projection(api_tags, dapi_groups, baseline)
 
     def grouped_tags_from_url(self, url):
         host = urlparse(url).netloc.lower().replace("www.", "")
@@ -2957,7 +3624,53 @@ class Tagger:
             return groups
         s = self.session_for_host(session_host)
 
-        # Small chunks keep URLs below browser/server limits.
+        def _extract_tag_rows_from_response(r):
+            rows = []
+            data = None
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+            if isinstance(data, list):
+                rows = data
+            elif isinstance(data, dict):
+                tag_data = data.get("tag") or data.get("tags") or data.get("post")
+                if isinstance(tag_data, list):
+                    rows = tag_data
+                elif isinstance(tag_data, dict):
+                    rows = [tag_data]
+                elif data.get("name"):
+                    rows = [data]
+            # XML fallback, because Gelbooru-family DAPI installs may ignore json=1.
+            if not rows:
+                try:
+                    soup = BeautifulSoup(r.text or "", "xml")
+                    rows = [dict(node.attrs) for node in soup.find_all("tag")]
+                except Exception:
+                    rows = []
+            return [row for row in rows if isinstance(row, dict)]
+
+        def _apply_tag_rows(rows, *, strict_names=None):
+            strict = {normalize_tag(x) for x in (strict_names or []) if normalize_tag(x)} if strict_names is not None else None
+            applied = 0
+            for row in rows or []:
+                name = normalize_tag(row.get("name") or row.get("tag") or row.get("label") or row.get("tag_name") or "")
+                if not name:
+                    continue
+                if strict is not None and name not in strict:
+                    continue
+                typ = row.get("type", row.get("category", row.get("tag_type", row.get("tagType"))))
+                group = group_from_tag_type(typ)
+                add_tags_to_groups(groups, group, [name])
+                cache_updates[name] = group
+                if name in remaining:
+                    remaining.discard(name)
+                applied += 1
+            return applied
+
+        # First try a compact batch request.  Some Gelbooru installs accept
+        # names=<many tags>; if it fails, v394 falls back to exact single-tag
+        # lookups instead of leaving the whole source stuck under general.
         for i in range(0, len(clean), 50):
             chunk = clean[i:i + 50]
             params = {
@@ -2977,55 +3690,27 @@ class Tagger:
                 r = s.get(base, params=params, timeout=self.timeout, headers=req_headers)
                 if host == "rule34.xxx":
                     self._rule34xxx_log_response_problem(r, "tag-category")
-                data = None
-                try:
-                    data = r.json()
-                except Exception:
-                    data = None
-
-                rows = []
-                if isinstance(data, list):
-                    rows = data
-                elif isinstance(data, dict):
-                    tag_data = data.get("tag") or data.get("tags") or data.get("post")
-                    if isinstance(tag_data, list):
-                        rows = tag_data
-                    elif isinstance(tag_data, dict):
-                        rows = [tag_data]
-                    elif data.get("name"):
-                        rows = [data]
-
-                # XML fallback, because some DAPI installs ignore json=1.
-                if not rows:
-                    try:
-                        soup = BeautifulSoup(r.text or "", "xml")
-                        for node in soup.find_all("tag"):
-                            rows.append(dict(node.attrs))
-                    except Exception:
-                        pass
-
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    name = normalize_tag(row.get("name") or row.get("tag") or "")
-                    if not name:
-                        continue
-                    typ = row.get("type", row.get("category", row.get("tag_type")))
-                    group = group_from_tag_type(typ)
-                    add_tags_to_groups(groups, group, [name])
-                    cache_updates[name] = group
-                    remaining.discard(name)
+                _apply_tag_rows(_extract_tag_rows_from_response(r), strict_names=chunk)
             except Exception as e:
                 self.log(f"    TAG CATEGORY ERROR [{host}]: {e}")
 
-        # Gelbooru's current documentation explicitly supports names=<many tags>.
-        # Do not turn one matched post into tens of API requests in its live
-        # lane; a failed/unclassified batch will be retried by the guarded
-        # background overlay.  Keep the expensive compatibility fallback only
-        # for other Gelbooru-family engines whose API behaviour is uncertain.
-        single_tag_fallback = host != "gelbooru.com"
+        # v394: Gelbooru often returns a flat post tag string while its tag
+        # catalogue may not honour the multi-name `names=` parameter.  The old
+        # code deliberately avoided single-tag fallback for gelbooru.com, which
+        # is why source-specific Gelbooru views could remain all-general forever.
+        # Do exact per-tag fallback in the background category worker and on
+        # explicit category requests; source membership is still guarded by the
+        # already-confirmed post tag set.
+        background_worker = bool(self.settings.get("_background_category_worker", False))
+        force_single = bool(self.settings.get("tagger_gelbooru_category_single_tag_fallback", True))
+        single_tag_fallback = host != "gelbooru.com" or background_worker or force_single
+        if single_tag_fallback and remaining and host == "gelbooru.com":
+            self.log(f"    gelbooru.com TAG CATEGORY SOURCE: single_tag_fallback remaining={len(remaining)}")
         for tag in list(remaining) if single_tag_fallback else []:
-            for key in ("name", "name_pattern"):
+            # Prefer exact `name=` on Gelbooru.  Keep name_pattern as a
+            # compatibility fallback for forks that expose only pattern search.
+            keys = ("name", "name_pattern") if host != "gelbooru.com" else ("name", "name_pattern")
+            for key in keys:
                 try:
                     params = {"page": "dapi", "s": "tag", "q": "index", "json": "1", key: tag}
                     if host == "rule34.xxx":
@@ -3037,42 +3722,10 @@ class Tagger:
                     r = s.get(base, params=params, timeout=self.timeout, headers=req_headers)
                     if host == "rule34.xxx":
                         self._rule34xxx_log_response_problem(r, "tag-category-single")
-                    rows = []
-                    try:
-                        data = r.json()
-                    except Exception:
-                        data = None
-                    if isinstance(data, list):
-                        rows = data
-                    elif isinstance(data, dict):
-                        td = data.get("tag") or data.get("tags")
-                        if isinstance(td, list):
-                            rows = td
-                        elif isinstance(td, dict):
-                            rows = [td]
-                        elif data.get("name"):
-                            rows = [data]
-                    if not rows:
-                        try:
-                            soup = BeautifulSoup(r.text or "", "xml")
-                            rows = [dict(node.attrs) for node in soup.find_all("tag")]
-                        except Exception:
-                            rows = []
-                    found = False
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        name = normalize_tag(row.get("name") or row.get("tag") or "")
-                        if name != tag:
-                            continue
-                        typ = row.get("type", row.get("category", row.get("tag_type")))
-                        group = group_from_tag_type(typ)
-                        add_tags_to_groups(groups, group, [tag])
-                        cache_updates[tag] = group
-                        remaining.discard(tag)
-                        found = True
-                        break
-                    if found:
+                    rows = _extract_tag_rows_from_response(r)
+                    before = tag in remaining
+                    applied = _apply_tag_rows(rows, strict_names=[tag])
+                    if applied and before and tag not in remaining:
                         break
                 except Exception:
                     pass
@@ -3383,10 +4036,17 @@ class Tagger:
         backend = str(self.settings.get("e621_browser_api_backend") or "companion_extension").strip().lower()
         if backend not in ("companion_extension", "external_chrome_cdp", "playwright_chromium"):
             backend = "companion_extension"
-        # v314's default external CDP profile is unreliable with e621 Cloudflare and
-        # can hang forever on the managed challenge.  Keep it available only as an
-        # explicit advanced option; the normal fallback is the user-installed
-        # browser companion extension running in the user's real browser session.
+        # e621 Cloudflare/TOS is the reason the Chrome companion exists: requests
+        # may not get the same verified cookies, but the already-open user Chrome
+        # tab can fetch official JSON from its page context.  This does NOT mean
+        # Local Booru may start/control system chrome.exe during parsing.
+        if self._parser_protect_user_chrome() and backend == "external_chrome_cdp":
+            if not getattr(self, "_e621_external_chrome_block_logged", False):
+                self.log("    e621.net BROWSER POLICY: external Chrome/CDP launch blocked; using companion extension/page-context instead")
+                self._e621_external_chrome_block_logged = True
+            backend = "companion_extension"
+        # Keep external CDP available only as an explicit advanced override when
+        # the user deliberately disables parser_never_touch_system_chrome and opts in.
         if backend == "external_chrome_cdp" and not bool(self.settings.get("e621_browser_api_allow_external_chrome_cdp", False)):
             backend = "companion_extension"
         return backend
@@ -3399,6 +4059,39 @@ class Tagger:
 
     def _e621_cdp_version_url(self):
         return f"http://127.0.0.1:{self._e621_cdp_port()}/json/version"
+
+    def _parser_protect_user_chrome(self):
+        """True means parser must not launch/attach/control normal Chrome.
+
+        The user can keep Chrome open.  Local Booru must not create or control
+        C:/Program Files/Google/Chrome/Application/chrome.exe during parsing.
+        e621 companion/page-context fetch is still allowed: it is a request to
+        the already-installed extension in the already-open user tab, not a
+        new Chrome launch and not CDP control.
+        """
+        return bool(self.settings.get("parser_never_touch_system_chrome", True))
+
+    def _browser_launch_args_safe(self):
+        args = [
+            "--disable-extensions",
+            "--disable-background-networking",
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-sync",
+            "--disable-features=Translate,CalculateNativeWinOcclusion,HardwareMediaKeyHandling,MediaRouter",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-dev-shm-usage",
+        ]
+        if bool(self.settings.get("browser_fallback_disable_gpu", True)):
+            args.extend(["--disable-gpu", "--disable-gpu-compositing"])
+        return args
+
+    def _browser_launch_watchdog_seconds(self):
+        try:
+            return max(5.0, min(60.0, float(self.settings.get("browser_fallback_launch_watchdog_seconds", 18.0) or 18.0)))
+        except Exception:
+            return 18.0
 
     def _e621_cdp_is_ready(self):
         try:
@@ -3439,6 +4132,9 @@ class Tagger:
         return ""
 
     def _launch_external_chrome_for_e621(self, host="e621.net"):
+        if self._parser_protect_user_chrome():
+            self.log("    e621.net BROWSER POLICY: external system Chrome launch blocked during parser")
+            return False
         if not bool(self.settings.get("e621_browser_api_launch_external_chrome", True)):
             return False
         if self._e621_cdp_is_ready():
@@ -3508,13 +4204,22 @@ class Tagger:
             profile_dir = Path(BROWSER_PROFILE_DIR) / "e621_browser_api"
             profile_dir.mkdir(parents=True, exist_ok=True)
             headless = bool(self.settings.get("e621_browser_api_headless", False))
-            self.log(f"    e621.net BROWSER API: opening Playwright Chromium profile={profile_dir} headless={headless}")
+            launch_args = self._browser_launch_args_safe()
+            self.log(
+                f"    e621.net BROWSER API: opening isolated Playwright Chromium "
+                f"profile={profile_dir} headless={headless} system_chrome=0 gpu={'0' if bool(self.settings.get('browser_fallback_disable_gpu', True)) else '1'}"
+            )
+            t0 = time.monotonic()
             self._e621_browser_context = self._e621_browser_pw.chromium.launch_persistent_context(
                 str(profile_dir),
                 headless=headless,
                 viewport={"width": 1280, "height": 900},
                 locale="en-US",
+                args=launch_args,
             )
+            launch_dt = time.monotonic() - t0
+            if launch_dt > self._browser_launch_watchdog_seconds():
+                self.log(f"    e621.net BROWSER API WARN: isolated Chromium launch took {launch_dt:.1f}s")
             self._e621_browser_page = self._e621_browser_context.pages[0] if self._e621_browser_context.pages else self._e621_browser_context.new_page()
             self._e621_browser_host = host
             self._e621_browser_backend_active = "playwright_chromium"
@@ -3583,6 +4288,9 @@ class Tagger:
         return False
 
     def _e621_companion_get_json_response(self, url, *, params=None, auth=None, host="e621.net", context="api"):
+        if bool(self.settings.get("parser_disable_companion_chrome_fetch", False)):
+            self.log("    e621.net COMPANION API SKIP: companion/page-context fetch disabled in settings")
+            return None
         if _enqueue_e621_browser_fetch is None:
             self.log("    e621.net COMPANION API SKIP: browser companion bridge is unavailable")
             return None
@@ -3595,7 +4303,7 @@ class Tagger:
             timeout_s = float(self.settings.get("e621_browser_api_companion_timeout_seconds", 120) or 120)
         except Exception:
             timeout_s = 120
-        self.log("    e621.net COMPANION API: waiting for installed Chrome extension/e621 tab to fetch JSON")
+        self.log("    e621.net COMPANION API: using already-open Chrome extension/e621 tab; no chrome.exe launch")
         result = _enqueue_e621_browser_fetch(full_url, auth_header=auth_header, timeout_s=timeout_s)
         if not result:
             self.log("    e621.net COMPANION API: no response; install/update companion extension and keep e621.net open in normal Chrome")
@@ -3997,6 +4705,34 @@ class Tagger:
                     result = ordered + [s for s in result if str(s.get("domain", "")).lower().replace("www.", "") not in used]
         except Exception:
             pass
+
+        # v371: blueprint order can accidentally omit ATF even when the site is
+        # enabled in the normal site table.  ATF is a first-class MD5 lane, not
+        # only a pixel_hash/reverse side locator.  Keep it in the exact-MD5 fanout
+        # unless the user explicitly disabled the site itself or disables this guard.
+        try:
+            if bool(self.settings.get("tagger_force_atf_md5_lane", True)):
+                has_atf = any("allthefallen" in str(site.get("domain", "")).lower() for site in result if isinstance(site, dict))
+                if not has_atf:
+                    candidates = []
+                    if isinstance(sites, dict):
+                        for domain, cfg in sites.items():
+                            if isinstance(cfg, dict):
+                                item = dict(cfg)
+                                item.setdefault("domain", str(domain).lower().replace("www.", ""))
+                                candidates.append(item)
+                    if isinstance(custom_sites, list):
+                        candidates.extend([dict(x) for x in custom_sites if isinstance(x, dict)])
+                    for raw in candidates:
+                        text = " ".join(str(raw.get(k, "")) for k in ("domain", "name", "base_url", "login_url", "url")).lower()
+                        if "allthefallen" not in text:
+                            continue
+                        site = normalize_site(raw, is_custom=False)
+                        if site and bool(site.get("enabled", True)):
+                            result.append(site)
+                            break
+        except Exception:
+            pass
         return result
 
     def _auth_params_for_site(self, site):
@@ -4373,6 +5109,11 @@ class Tagger:
         Checks existing cookies - if no cf_clearance found, tries to get one
         via DrissionPage/patchright/playwright and saves to cookie file.
         """
+        if self._parser_protect_user_chrome():
+            if not getattr(self, "_cf_auto_system_chrome_block_logged", False):
+                self.log("  CF AUTO POLICY: system Chrome auto-solve disabled during parser; user Chrome is left untouched")
+                self._cf_auto_system_chrome_block_logged = True
+            return
         if not _get_cf:
             return
         cf_hosts = ["donmai.us", "allthefallen.moe"]
@@ -4593,13 +5334,21 @@ class Tagger:
                     pass
         keys = []
         seen = set()
-        rx = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
         for text in texts:
-            for m in rx.findall(text or ""):
-                key = m.lower()
-                if key not in seen:
-                    seen.add(key)
-                    keys.append(key)
+            key = extract_rule34_40hex_key(text)
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if not keys:
+            try:
+                for text in texts:
+                    if is_generic_media_filename(text):
+                        # Generic names are intentionally skipped only for this
+                        # filename-locator branch.  Content reverse searches keep
+                        # running and can still find the file by pixels.
+                        return []
+            except Exception:
+                pass
         return keys
 
     def _rule34xxx_post_contains_image_key(self, post, image_key):
@@ -4993,82 +5742,140 @@ class Tagger:
                     timeout_sec = 25.0
                 timeout_ms = int(max(8000, min(90000, timeout_sec * 1000)))
                 headless = bool(self.settings.get("rule34_image_key_hotlink_playwright_headless", False))
-                # Keep one persistent profile and one launch at a time.  Chromium
-                # profile locking makes concurrent launch_persistent_context calls fail.
-                profile_dir = Path(BROWSER_PROFILE_DIR) / "rule34_hotlink_playwright"
-                profile_dir.mkdir(parents=True, exist_ok=True)
+                supervised = bool(self.settings.get("rule34_image_key_hotlink_playwright_supervisor", True))
+                ephemeral = bool(self.settings.get("rule34_image_key_hotlink_playwright_ephemeral", True))
+                try:
+                    max_retries = int(self.settings.get("rule34_image_key_hotlink_playwright_retries", 1) or 1)
+                except Exception:
+                    max_retries = 1
+                max_retries = max(0, min(3, max_retries))
                 cookie_records = _playwright_cookie_records()
+                launch_args = ["--disable-blink-features=AutomationControlled"] + self._browser_launch_args_safe()
                 self.log(
                     f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT START: url={hotlink_url} "
-                    f"mode={'headless' if headless else 'visible'} cookies={len(cookie_records)}"
+                    f"mode={'headless' if headless else 'visible'} cookies={len(cookie_records)} "
+                    f"supervised={1 if supervised else 0} profile={'ephemeral' if ephemeral else 'persistent'} system_chrome=0"
                 )
                 out = []
-                with _RULE34_HOTLINK_PLAYWRIGHT_LOCK:
+
+                def _inspect_page(page):
+                    deadline = time.time() + min(12.0, timeout_ms / 1000.0)
+                    while time.time() < deadline:
+                        try:
+                            cur = str(page.url or "")
+                            _extract_post_ids_from_text_blob(out, cur)
+                            if out:
+                                break
+                        except Exception:
+                            pass
+                        try:
+                            page.wait_for_timeout(250)
+                        except Exception:
+                            time.sleep(0.25)
                     try:
-                        with _sync_playwright() as pw:
-                            context = None
-                            try:
-                                context = pw.chromium.launch_persistent_context(
+                        cur = str(page.url or "")
+                        _extract_post_ids_from_text_blob(out, cur)
+                        if not out:
+                            html_text = page.content() or ""
+                            _extract_post_ids_from_text_blob(out, html_text)
+                    except Exception:
+                        pass
+                    try:
+                        return str(page.url or "")
+                    except Exception:
+                        return ""
+
+                # One browser fallback worker at a time, but no shared system Chrome.
+                # v340: use Playwright Chromium as an isolated disposable process by
+                # default. This avoids touching the user's normal chrome.exe and also
+                # avoids Lian-Li/Gigabyte/NVIDIA CEF subprocesses.
+                with _RULE34_HOTLINK_PLAYWRIGHT_LOCK:
+                    attempts = max_retries + 1 if supervised else 1
+                    for attempt in range(1, attempts + 1):
+                        context = None
+                        browser = None
+                        pw_obj = None
+                        try:
+                            pw_obj = _sync_playwright().start()
+                            if ephemeral:
+                                browser = pw_obj.chromium.launch(
+                                    headless=headless,
+                                    args=launch_args,
+                                )
+                                context = browser.new_context(
+                                    viewport={"width": 1280, "height": 900},
+                                    user_agent=browser_ua,
+                                    accept_downloads=False,
+                                )
+                            else:
+                                # Kept only for manual troubleshooting. Persistent
+                                # profiles can lock/corrupt after hard Chromium exits;
+                                # ephemeral is the safe default for mass parsing.
+                                profile_dir = Path(BROWSER_PROFILE_DIR) / "rule34_hotlink_playwright"
+                                profile_dir.mkdir(parents=True, exist_ok=True)
+                                context = pw_obj.chromium.launch_persistent_context(
                                     user_data_dir=str(profile_dir),
                                     headless=headless,
                                     viewport={"width": 1280, "height": 900},
                                     user_agent=browser_ua,
                                     accept_downloads=False,
-                                    args=["--disable-blink-features=AutomationControlled"],
+                                    args=launch_args,
                                 )
-                                try:
-                                    if cookie_records:
-                                        context.add_cookies(cookie_records)
-                                except Exception as ce:
-                                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT COOKIES WARN: {type(ce).__name__}: {str(ce)[:120]}")
-                                page = context.pages[0] if context.pages else context.new_page()
-                                try:
-                                    page.goto(hotlink_url, wait_until="domcontentloaded", timeout=timeout_ms)
-                                except Exception as ge:
-                                    # Cloudflare/browser redirects can finish after Playwright
-                                    # reports a navigation timeout.  Continue and inspect URL/DOM.
-                                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT GOTO WARN: {type(ge).__name__}: {str(ge)[:120]}")
-                                deadline = time.time() + min(12.0, timeout_ms / 1000.0)
-                                while time.time() < deadline:
-                                    try:
-                                        cur = str(page.url or "")
-                                        _extract_post_ids_from_text_blob(out, cur)
-                                        if out:
-                                            break
-                                    except Exception:
-                                        pass
-                                    try:
-                                        page.wait_for_timeout(250)
-                                    except Exception:
-                                        time.sleep(0.25)
-                                try:
-                                    cur = str(page.url or "")
-                                    _extract_post_ids_from_text_blob(out, cur)
-                                    if not out:
-                                        html_text = page.content() or ""
-                                        _extract_post_ids_from_text_blob(out, html_text)
-                                except Exception:
-                                    pass
-                                final_url = ""
-                                try:
-                                    final_url = str(page.url or "")
-                                except Exception:
-                                    pass
-                                if out:
-                                    self.log(
-                                        f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT CANDIDATES: key={image_key} "
-                                        f"ids={','.join(out[:5])} url={final_url}"
-                                    )
-                                else:
-                                    self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT MISS: url={final_url or hotlink_url}")
-                            finally:
-                                try:
-                                    if context is not None:
-                                        context.close()
-                                except Exception:
-                                    pass
-                    except Exception as e:
-                        self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT ERROR: {type(e).__name__}: {str(e)[:180]}")
+                            try:
+                                context.set_default_timeout(timeout_ms)
+                                context.set_default_navigation_timeout(timeout_ms)
+                            except Exception:
+                                pass
+                            try:
+                                if cookie_records:
+                                    context.add_cookies(cookie_records)
+                            except Exception as ce:
+                                self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT COOKIES WARN: {type(ce).__name__}: {str(ce)[:120]}")
+                            page = context.pages[0] if context.pages else context.new_page()
+                            try:
+                                page.goto(hotlink_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                            except Exception as ge:
+                                # Cloudflare/browser redirects can finish after Playwright
+                                # reports a navigation timeout. Continue and inspect URL/DOM.
+                                self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT GOTO WARN: {type(ge).__name__}: {str(ge)[:120]}")
+                            final_url = _inspect_page(page)
+                            if out:
+                                self.log(
+                                    f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT CANDIDATES: key={image_key} "
+                                    f"ids={','.join(out[:5])} url={final_url}"
+                                )
+                            else:
+                                self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT MISS: url={final_url or hotlink_url}")
+                            break
+                        except Exception as e:
+                            msg = str(e)[:220]
+                            # No global parser pause: this is only the browser fallback worker.
+                            if attempt <= max_retries:
+                                self.log(
+                                    f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT SUPERVISOR RESTART: "
+                                    f"{type(e).__name__}: {msg}; retry {attempt}/{max_retries}"
+                                )
+                                # No parser-wide wait/cooldown here.  Recreate the
+                                # isolated browser worker immediately and retry only
+                                # this browser task.
+                                continue
+                            self.log(f"    {label} IMAGE KEY HOTLINK PLAYWRIGHT FAILED: {type(e).__name__}: {msg}")
+                        finally:
+                            try:
+                                if context is not None:
+                                    context.close()
+                            except Exception:
+                                pass
+                            try:
+                                if browser is not None:
+                                    browser.close()
+                            except Exception:
+                                pass
+                            try:
+                                if pw_obj is not None:
+                                    pw_obj.stop()
+                            except Exception:
+                                pass
                 return out
 
             # Keep the rule34 session as a fallback only after the bridged hl
@@ -5979,7 +6786,13 @@ class Tagger:
 
         _rejected_post_ids_this_md5 = set()  # skip post IDs already rejected in this engine_by_md5 call
 
-        for api, params, fmt in self._engine_api_attempts(site, md5):
+        if is_atf:
+            if bool(self.settings.get("atf_exact_md5_enabled", True)):
+                self.log(f"    {label} ATF EXACT MD5 CHECK: md5={md5}")
+            else:
+                self.log(f"    {label} ATF EXACT MD5 DISABLED: md5={md5}")
+
+        for api, params, fmt in ([] if (is_atf and not bool(self.settings.get("atf_exact_md5_enabled", True))) else self._engine_api_attempts(site, md5)):
             try:
                 request_kwargs = {"params": params, "timeout": self.timeout, "headers": headers}
                 if official_danbooru or is_atf:
@@ -6001,6 +6814,11 @@ class Tagger:
                     return [], "", empty_tag_groups()
                 if not posts:
                     continue
+                if is_atf:
+                    try:
+                        self.log(f"    {label} ATF EXACT MD5 RESPONSE: posts={len(posts) if isinstance(posts, list) else '?'}")
+                    except Exception:
+                        pass
 
                 # rule34.xxx DAPI is treated as an exact-MD5 authority only when
                 # a returned post explicitly exposes the requested md5. Real
@@ -6056,9 +6874,24 @@ class Tagger:
                     restricted_danbooru_candidate = bool(
                         official_danbooru and _pid_str and not post_md5
                     )
-                    _md5_ok = (post_md5 == wanted_md5) or restricted_danbooru_candidate
+                    # ATF exact-MD5 search is still the primary branch.
+                    # Some ATF posts (deleted/hidden/limited visibility) are returned by
+                    # the exact tags=md5:<hash> API query but omit the md5/file_url field
+                    # in JSON.  That is not a pixel_hash hit; it is an exact-MD5 API
+                    # candidate with hidden hash.  Accept missing-md5 ATF candidates
+                    # from the exact JSON query, but still reject an explicit different
+                    # remote md5.
+                    atf_exact_missing_md5_candidate = bool(
+                        is_atf
+                        and _pid_str
+                        and not post_md5
+                        and bool(self.settings.get("atf_exact_md5_accept_missing_md5_from_api", True))
+                    )
+                    _md5_ok = (post_md5 == wanted_md5) or restricted_danbooru_candidate or atf_exact_missing_md5_candidate
                     if restricted_danbooru_candidate:
                         self.log(f"    {label} RESTRICTED CANDIDATE: post={_pid_str} remote=hidden exact_md5_query=1")
+                    if atf_exact_missing_md5_candidate:
+                        self.log(f"    {label} ATF EXACT MD5 CANDIDATE: post={_pid_str} remote=hidden accepted_by_exact_query=1")
 
                     if not _md5_ok:
                         if official_danbooru:
@@ -6176,6 +7009,9 @@ class Tagger:
                         except Exception:
                             pass
                     if tags:
+                        if is_atf:
+                            self._last_lookup_match_method = "md5"
+                            self.log(f"    {label} ATF EXACT MD5 MATCH: post={_pid_str or '?'} tags={len(tags)}")
                         return tags, source_url or root, groups
 
             except Exception as e:
@@ -6191,9 +7027,15 @@ class Tagger:
             self.log(f"    {label} no exact JSON candidate; restricted HTML fallback not allowed")
             return [], "", empty_tag_groups()
         if is_atf:
-            tags, src, groups = self._atf_pixel_hash_locator_lookup(site, md5)
-            if tags:
-                return tags, src, groups
+            self.log(f"    {label} ATF EXACT MD5 MISS: md5={md5}")
+            inline_atf_pixel = bool(self.settings.get("_allow_atf_pixel_hash_inline", False)) and bool(self.settings.get("atf_pixel_hash_after_exact_md5_miss", False))
+            if inline_atf_pixel:
+                self.log(f"    {label} ATF PIXEL HASH FALLBACK: inline enabled after exact MD5 miss")
+                tags, src, groups = self._atf_pixel_hash_locator_lookup(site, md5)
+                if tags:
+                    return tags, src, groups
+            else:
+                self.log(f"    {label} ATF PIXEL HASH FALLBACK: deferred until reverse queues miss")
             self.log(f"    {label} JSON only: no exact API MD5 match; HTML fallback disabled")
             return [], "", empty_tag_groups()
         if is_documented_dapi_exact:
@@ -6298,12 +7140,30 @@ class Tagger:
             for site in sites:
                 label = self._site_label(site)
                 try:
+                    # Report every MD5 fanout, including MD5 relay executed from the
+                    # reverse side queue.  The old UI only showed the outer reverse
+                    # service (IQDB/SauceNAO), so site rows looked idle even while
+                    # danbooru/gelbooru/rule34/e621/ATF were being checked by relay.
+                    try:
+                        _activity_path = str(getattr(self, "_current_md5_lookup_path", "") or "")
+                        _relay_mode = bool(self.settings.get("_allow_reverse_md5_relay_lookup", False)) and not bool(self.settings.get("enable_md5_lookup", True))
+                        if _relay_mode:
+                            self.report_activity("source→MD5 relay", _activity_path, f"MD5 fanout → {label}")
+                            self.report_activity(label, _activity_path, "MD5 relay")
+                        else:
+                            self.report_activity(label, _activity_path, "MD5 direct")
+                    except Exception:
+                        pass
                     self.log(f"  MD5 CHECK: {label}")
 
                     self._last_lookup_match_method = "md5"
                     tags, source, groups = self.engine_by_md5(site, md5)
                     method = str(getattr(self, "_last_lookup_match_method", "md5") or "md5")
                     if tags:
+                        try:
+                            self.report_activity(label, getattr(self, "_current_md5_lookup_path", ""), f"Найдено: {len(tags)} тегов")
+                        except Exception:
+                            pass
                         self.log(f"  MD5 MATCH: {label} {redact_sensitive_url(source)}" if method == "md5" else f"  VARIANT MATCH: {label} {method} {redact_sensitive_url(source)}")
                         all_tags += tags
                         sources.append(f"{method} {label} {source}")
@@ -6311,6 +7171,11 @@ class Tagger:
                             all_groups.append(groups)
                         if source:
                             source_tag_groups.append({"url": source, "groups": groups or {"general": list(tags)}, "method": method})
+                    else:
+                        try:
+                            self.report_activity(label, getattr(self, "_current_md5_lookup_path", ""), "Нет exact MD5")
+                        except Exception:
+                            pass
                 except Exception as e:
                     self.log(f"  MD5 ERROR: {label}: {e}")
         finally:
@@ -7686,6 +8551,148 @@ class Tagger:
 
         return data.get("results", [])
 
+    def _saucenao_thread_state(self):
+        """Return per-worker transient SauceNAO state.
+
+        The parser has multiple reverse workers but only one Tagger instance.
+        Shared attributes like _saucenao_pixiv_page_hints caused Pixiv page
+        hints/source-only lists from one file to leak into another file.
+        """
+        tls = getattr(self, "_saucenao_tls", None)
+        if tls is None:
+            tls = threading.local()
+            self._saucenao_tls = tls
+        state = getattr(tls, "state", None)
+        if not isinstance(state, dict):
+            state = {
+                "source_only": [],
+                "md5_candidates": {},
+                "pixiv_page_hints": {},
+            }
+            tls.state = state
+        state.setdefault("source_only", [])
+        state.setdefault("md5_candidates", {})
+        state.setdefault("pixiv_page_hints", {})
+        return state
+
+    def _reset_saucenao_thread_state(self):
+        state = self._saucenao_thread_state()
+        state["source_only"] = []
+        state["md5_candidates"] = {}
+        state["pixiv_page_hints"] = {}
+        # Legacy mirrors are kept for old diagnostics only. The runtime reads
+        # the thread-local state through helper methods below.
+        self._last_saucenao_source_only = state["source_only"]
+        self._last_saucenao_md5_candidates = state["md5_candidates"]
+        self._saucenao_pixiv_page_hints = state["pixiv_page_hints"]
+        return state
+
+    def _saucenao_source_only_candidates(self):
+        return list((self._saucenao_thread_state().get("source_only") or []))
+
+    def _canonical_reverse_url(self, url):
+        """Stable dedupe key for reverse-search result URLs.
+
+        SauceNAO often returns the same post/source several times with different
+        filenames, similarity values, or HTML-escaped query order.  The parser
+        should relay/check that source once per file, then keep only the best
+        source-only hint.
+        """
+        raw = html.unescape(str(url or "").strip())
+        if not raw:
+            return ""
+        try:
+            raw = unquote(raw)
+        except Exception:
+            pass
+        try:
+            u = urlparse(raw)
+            host = (u.netloc or "").lower().replace("www.", "")
+            path = re.sub(r"/+", "/", u.path or "/").rstrip("/") or "/"
+            q = parse_qs(u.query or "", keep_blank_values=True)
+            # Drop obvious cache/noise params, preserve identity params such as id, md5, f_shash.
+            for noise in ("utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "ref", "ref_src"):
+                q.pop(noise, None)
+            query = urlencode(sorted(q.items()), doseq=True) if q else ""
+            return f"{host}{path}" + (f"?{query}" if query else "")
+        except Exception:
+            return raw.lower().rstrip("/")
+
+
+    def _is_no_relay_reverse_host(self, host):
+        """Hosts that should not be network-probed as MD5 relays.
+
+        These are reverse-search source locators only.  Without a strict local
+        parser/API implementation they should not call arbitrary HTML pages or
+        DNS-flaky mirrors, because that turns one weak SauceNAO hit into 100s of
+        retries and marks the whole file as retry_network.
+        """
+        host = str(host or "").lower().replace("www.", "")
+        if not host:
+            return False
+        exact = {
+            "patreon.com",
+            "kemono.party",
+            "kemono.su",
+            "nijie.info",
+            "deviantart.com",
+            "e-hentai.org",
+            "exhentai.org",
+            "furaffinity.net",
+            "inkbunny.net",
+            "skeb.jp",
+            "bcy.net",
+            "mangadex.org",
+            "madokami.al",
+            "nhentai.net",
+            "twitter.com",
+            "x.com",
+        }
+        if host in exact:
+            return True
+        suffixes = (
+            ".deviantart.com",
+            ".furaffinity.net",
+            ".patreon.com",
+            ".kemono.party",
+            ".kemono.su",
+            ".bcy.net",
+            ".twitter.com",
+            ".x.com",
+        )
+        return any(host.endswith(suf) for suf in suffixes)
+
+    def _unsupported_reverse_relay_action(self, label, url, similarity=0.0, host=""):
+        """Return source_only/skip/empty for unsupported reverse-source URLs.
+
+        Patreon/Kemono/Nijie/DeviantArt/E-Hentai/etc. are not tag sources, but
+        the user explicitly uses them as MD5/source relay donors.  Therefore the
+        normal action is empty: _reverse_md5_relay will try only safe MD5
+        extraction and source:*URL* lookups against the trusted booru APIs.
+        """
+        try:
+            host = (host or urlparse(str(url or "")).netloc or "").lower().replace("www.", "")
+        except Exception:
+            host = str(host or "").lower().replace("www.", "")
+        if not self._is_no_relay_reverse_host(host):
+            return ""
+        if bool(self.settings.get("source_md5_relay_unsupported_donor_enabled", True)):
+            return ""
+        if not bool(self.settings.get("reverse_unsupported_source_only_enabled", True)):
+            return "skip"
+        try:
+            simv = float(similarity or 0.0)
+        except Exception:
+            simv = 0.0
+        try:
+            min_sim = float(self.settings.get("reverse_unsupported_source_only_min_similarity", 85.0) or 85.0)
+        except Exception:
+            min_sim = 85.0
+        return "source_only" if simv >= min_sim else "skip"
+
+    def _saucenao_md5_candidate_for_url(self, url):
+        return str((self._saucenao_thread_state().get("md5_candidates") or {}).get(str(url or "")) or "").strip().lower()
+
     def _e621_md5_candidate_from_saucenao_result(self, result):
         """Extract e621 MD5 candidate from SauceNAO's e621 filename text.
 
@@ -7719,17 +8726,107 @@ class Tagger:
                 return got
         return ""
 
+    def _unsupported_donor_url_key(self, url):
+        """Group unsupported donor URLs so one SauceNAO result cannot fan out
+        into Patreon post + Patreon user + Kemono mirror + Kemono user retries.
+        These URLs are locators for source→MD5 relay only, never tag sources.
+        """
+        raw = html.unescape(str(url or "").strip())
+        if not raw:
+            return ""
+        try:
+            parsed = urlparse(raw)
+            host = (parsed.netloc or "").lower().replace("www.", "")
+            path = unquote(parsed.path or "")
+            q = parse_qs(parsed.query or "")
+        except Exception:
+            return self._canonical_reverse_url(raw)
+        parts = [x for x in path.strip("/").split("/") if x]
+        # Patreon post pages and Kemono mirrors of Patreon posts are the same
+        # donor family.  Prefer post ids; user pages are broad fallback only.
+        if host in ("patreon.com",) or host.endswith(".patreon.com"):
+            m = re.search(r"/posts/(\d+)", path)
+            if m:
+                return f"patreon-post:{m.group(1)}"
+            uid = (q.get("u") or [""])[0]
+            if uid:
+                return f"patreon-user:{uid}"
+        if host in ("kemono.party", "kemono.su") or host.endswith(".kemono.party") or host.endswith(".kemono.su"):
+            # /patreon/user/<uid>/post/<postid>
+            if len(parts) >= 5 and parts[0].lower() == "patreon" and parts[1].lower() == "user" and parts[3].lower() == "post" and parts[4].isdigit():
+                return f"patreon-post:{parts[4]}"
+            if len(parts) >= 3 and parts[0].lower() == "patreon" and parts[1].lower() == "user" and parts[2].isdigit():
+                return f"patreon-user:{parts[2]}"
+        if host == "nijie.info":
+            nid = (q.get("id") or [""])[0]
+            if nid:
+                return f"nijie:{nid}"
+        if host in ("e-hentai.org", "exhentai.org"):
+            sh = (q.get("f_shash") or [""])[0]
+            if sh:
+                return f"ehentai:{sh.lower()}"
+        if host == "deviantart.com" or host.endswith(".deviantart.com"):
+            nums = re.findall(r"\d+", path)
+            if nums:
+                return f"deviantart:{nums[-1]}"
+        return self._canonical_reverse_url(raw)
+
+    def _unsupported_donor_url_rank(self, url):
+        """Higher is better when pruning unsupported donor relay candidates."""
+        try:
+            parsed = urlparse(str(url or ""))
+            host = (parsed.netloc or "").lower().replace("www.", "")
+            path = parsed.path or ""
+            q = parse_qs(parsed.query or "")
+        except Exception:
+            return 0
+        if host in ("e-hentai.org", "exhentai.org") and (q.get("f_shash") or q.get("md5") or q.get("hash")):
+            return 95
+        if host in ("patreon.com",) or host.endswith(".patreon.com"):
+            if re.search(r"/posts/\d+", path):
+                return 90
+            return 20
+        if host in ("kemono.party", "kemono.su") or host.endswith(".kemono.party") or host.endswith(".kemono.su"):
+            if re.search(r"/post/\d+", path):
+                return 85
+            return 18
+        if host == "nijie.info" and (q.get("id") or []):
+            return 80
+        if host == "deviantart.com" or host.endswith(".deviantart.com"):
+            return 70
+        if host in ("furaffinity.net", "inkbunny.net", "skeb.jp") or host.endswith(".furaffinity.net"):
+            return 60
+        return 40
+
     def saucenao_urls(self, img_path):
         urls = []
-        self._last_saucenao_source_only = []
-        self._last_saucenao_md5_candidates = {}
+        _sauce_state = self._reset_saucenao_thread_state()
+        _sauce_source_only = _sauce_state["source_only"]
+        _sauce_md5_candidates = _sauce_state["md5_candidates"]
+        _sauce_seen_urls = set()
+        _sauce_seen_source_only = set()
+        _sauce_seen_donor_keys = set()
+        _sauce_donor_url_count = 0
         domains = self.enabled_domains()
         min_similarity = float(self.settings.get("min_similarity", 85.0) or 85.0)
-        relay_min = float(self.settings.get("unsupported_relay_min_similarity", min_similarity) or min_similarity)
+        relay_min = float(self.settings.get("source_md5_relay_unsupported_donor_min_similarity", self.settings.get("unsupported_relay_min_similarity", min_similarity)) or min_similarity)
+        try:
+            donor_max_urls = int(self.settings.get("source_md5_relay_unsupported_donor_max_urls_per_file", 3) or 3)
+        except Exception:
+            donor_max_urls = 3
+        try:
+            donor_hard_cap = int(self.settings.get("source_md5_relay_unsupported_donor_max_urls_hard_cap", 2) or 2)
+        except Exception:
+            donor_hard_cap = 2
+        # User configs from older builds may still allow 3+ unsupported donors.
+        # Keep a hard ceiling so one SauceNAO page cannot spend 30-60s on
+        # Patreon + mirror + E-Hentai + Nijie before the real parser moves on.
+        donor_max_urls = max(0, min(donor_max_urls, max(1, donor_hard_cap), 20))
         for result in self.saucenao_search(img_path):
             sim = float(result.get("header", {}).get("similarity", 0))
             index_name = result.get("header", {}).get("index_name", "unknown")
             data = result.get("data", {}) or {}
+            self._record_saucenao_pixiv_page_hint(result)
             source_title = str(data.get("source") or data.get("title") or data.get("material") or "").strip()
             label = f"{index_name}" + (f" - {source_title}" if source_title else "")
             self.log(f"  SauceNAO {sim:.2f}% {label}")
@@ -7770,31 +8867,67 @@ class Tagger:
                 continue
 
             for u in supported_urls:
+                key = self._canonical_reverse_url(u)
+                if key and key in _sauce_seen_urls:
+                    continue
+                if key:
+                    _sauce_seen_urls.add(key)
                 if e621_md5_candidate:
-                    self._last_saucenao_md5_candidates[str(u)] = e621_md5_candidate
+                    _sauce_md5_candidates[str(u)] = e621_md5_candidate
                 urls.append((u, sim))
 
-            # Unsupported 85%+ candidates are not tag sources, but they are now
-            # passed back to process_image so MD5/source relay can try to find a
-            # trusted booru post before falling back to SOURCE-ONLY.
-            for u in unsupported_urls:
-                if sim >= relay_min:
+            # Unsupported 85%+ candidates are donor locators only: pass a
+            # small, de-duplicated set back to process_image for safe source→MD5
+            # relay through trusted booru APIs.  Do not let Patreon user pages,
+            # Kemono mirrors, Nijie duplicates, etc. explode into 100s/file.
+            if sim >= relay_min and donor_max_urls > 0 and bool(self.settings.get("source_md5_relay_unsupported_donor_enabled", True)):
+                ranked_unsupported = sorted(
+                    list(unsupported_urls or []),
+                    key=lambda x: self._unsupported_donor_url_rank(x),
+                    reverse=True,
+                )
+                # Broad user pages are fallback only; if this SauceNAO result has
+                # a concrete post/hash URL, do not also enqueue the user root.
+                has_specific = any(self._unsupported_donor_url_rank(x) >= 60 for x in ranked_unsupported)
+                for u in ranked_unsupported:
+                    if _sauce_donor_url_count >= donor_max_urls:
+                        break
+                    rank = self._unsupported_donor_url_rank(u)
+                    if has_specific and rank < 60:
+                        continue
+                    key = self._unsupported_donor_url_key(u) or self._canonical_reverse_url(u)
+                    if key and key in _sauce_seen_donor_keys:
+                        continue
+                    if key:
+                        _sauce_seen_donor_keys.add(key)
+                    ckey = self._canonical_reverse_url(u)
+                    if ckey and ckey in _sauce_seen_urls:
+                        continue
+                    if ckey:
+                        _sauce_seen_urls.add(ckey)
                     if e621_md5_candidate:
-                        self._last_saucenao_md5_candidates[str(u)] = e621_md5_candidate
+                        _sauce_md5_candidates[str(u)] = e621_md5_candidate
                     urls.append((u, sim))
+                    _sauce_donor_url_count += 1
 
             # Preserve unsupported pages as source-only hints when relay does not
-            # yield a trusted MD5/tag match.
+            # yield a trusted MD5/tag match.  Keep only one hint per canonical
+            # source URL so repeated Nijie/E-Hentai/Kemono/Skeb results cannot
+            # make one file spend a minute on identical relay misses.
             if unsupported_urls or (not supported_urls and not result_urls):
                 best_url = unsupported_urls[0] if unsupported_urls else ""
-                best_host = urlparse(best_url).netloc.lower().replace("www.", "") if best_url else ""
-                self._last_saucenao_source_only.append({
-                    "url": best_url,
-                    "host": best_host,
-                    "label": label,
-                    "similarity": sim,
-                    "index_name": str(index_name or ""),
-                })
+                best_key = self._canonical_reverse_url(best_url) or f"no-url:{label}"
+                if best_key not in _sauce_seen_source_only:
+                    _sauce_seen_source_only.add(best_key)
+                    best_host = urlparse(best_url).netloc.lower().replace("www.", "") if best_url else ""
+                    _sauce_source_only.append({
+                        "url": best_url,
+                        "host": best_host,
+                        "label": label,
+                        "similarity": sim,
+                        "index_name": str(index_name or ""),
+                        "reason": "unsupported_host",
+                    })
         return urls
 
 
@@ -7806,7 +8939,7 @@ class Tagger:
         """
         urls = []
         domains = self.enabled_domains()
-        min_sim = float(self.settings.get("iqdb_min_similarity", 75.0))
+        min_sim = max(float(self.settings.get("iqdb_min_similarity", 75.0)), float(self.settings.get("iqdb_relay_min_similarity", 85.0)))
 
         try:
             r = _post_with_file(self.session, "https://iqdb.org/", img_path,
@@ -7840,8 +8973,14 @@ class Tagger:
             if host == "gelbooru.com":
                 gel_q = parse_qs(urlparse(href).query)
                 if gel_q.get("page", [""])[0].lower() == "post" and gel_q.get("s", [""])[0].lower() == "list":
-                    self.log(f"  IQDB REJECT NON-POST SOURCE [gelbooru.com]: {href}")
-                    continue
+                    md5q = str((gel_q.get("md5") or [""])[0]).strip().lower()
+                    if is_md5(md5q):
+                        # IQDB sometimes gives Gelbooru list URLs with an exact md5.
+                        # They are not tag sources, but they are perfect relay keys.
+                        self.log(f"  IQDB MD5 RELAY CANDIDATE [gelbooru.com]: md5={md5q}")
+                    else:
+                        self.log(f"  IQDB REJECT NON-POST SOURCE [gelbooru.com]: {href}")
+                        continue
                 if "page=post" not in href:
                     continue
 
@@ -7882,6 +9021,15 @@ class Tagger:
                 seen.add(u)
                 out.append((u, sim))
 
+        out.sort(key=lambda x: float(x[1] or 0.0), reverse=True)
+        try:
+            cap_high = max(1, int(self.settings.get("iqdb_relay_candidate_cap_high", 2) or 2))
+            cap_med = max(1, int(self.settings.get("iqdb_relay_candidate_cap_medium", 1) or 1))
+        except Exception:
+            cap_high, cap_med = 2, 1
+        cap = cap_high if out and float(out[0][1] or 0.0) >= 98.0 else cap_med
+        out = out[:cap]
+
         for u, sim in out[:10]:
             self.log(f"  IQDB {sim:.2f}% {u}")
 
@@ -7898,7 +9046,7 @@ class Tagger:
         """
         urls = []
         domains = self.enabled_domains()
-        min_sim = float(self.settings.get("iqdb_min_similarity", 75.0))
+        min_sim = max(float(self.settings.get("iqdb_min_similarity", 75.0)), float(self.settings.get("iqdb_relay_min_similarity", 85.0)))
 
         try:
             r = _post_with_file(self.session, "https://danbooru.iqdb.org/", img_path,
@@ -7932,8 +9080,12 @@ class Tagger:
             if host == "gelbooru.com":
                 gel_q = parse_qs(parsed.query)
                 if gel_q.get("page", [""])[0].lower() == "post" and gel_q.get("s", [""])[0].lower() == "list":
-                    self.log(f"  DANBOORU IQDB REJECT NON-POST SOURCE [gelbooru.com]: {href}")
-                    continue
+                    md5q = str((gel_q.get("md5") or [""])[0]).strip().lower()
+                    if is_md5(md5q):
+                        self.log(f"  DANBOORU IQDB MD5 RELAY CANDIDATE [gelbooru.com]: md5={md5q}")
+                    else:
+                        self.log(f"  DANBOORU IQDB REJECT NON-POST SOURCE [gelbooru.com]: {href}")
+                        continue
                 if "page=post" not in href:
                     continue
             if host not in domains:
@@ -7965,6 +9117,15 @@ class Tagger:
             if u not in seen:
                 seen.add(u)
                 out.append((u, sim))
+
+        out.sort(key=lambda x: float(x[1] or 0.0), reverse=True)
+        try:
+            cap_high = max(1, int(self.settings.get("iqdb_relay_candidate_cap_high", 2) or 2))
+            cap_med = max(1, int(self.settings.get("iqdb_relay_candidate_cap_medium", 1) or 1))
+        except Exception:
+            cap_high, cap_med = 2, 1
+        cap = cap_high if out and float(out[0][1] or 0.0) >= 98.0 else cap_med
+        out = out[:cap]
 
         for u, sim in out[:10]:
             self.log(f"  DANBOORU IQDB {sim:.2f}% {u}")
@@ -8222,6 +9383,8 @@ class Tagger:
         if not url.startswith(("http://", "https://")):
             return False
         normalized_label = str(label or "Reverse").strip() or "Reverse"
+        # Avoid noisy duplicates like "SAUCENAO SOURCE-ONLY SOURCE-ONLY CANDIDATE".
+        normalized_label = re.sub(r"(?i)\s+source-only\s*$", "", normalized_label).strip() or "Reverse"
         upper_label = normalized_label.upper()
         try:
             host = urlparse(url).netloc.lower().replace("www.", "")
@@ -8237,10 +9400,21 @@ class Tagger:
             sim = 0.0
         if not hasattr(self, "_last_reverse_source_only") or self._last_reverse_source_only is None:
             self._last_reverse_source_only = []
+        canon = self._canonical_reverse_url(url) or url
         for item in list(self._last_reverse_source_only or []):
-            if str(item.get("url") or "") == url:
+            existing_url = str(item.get("url") or "")
+            existing_key = str(item.get("key") or "") or (self._canonical_reverse_url(existing_url) or existing_url)
+            if existing_key == canon:
+                try:
+                    if sim > float(item.get("similarity") or 0.0):
+                        item["label"] = normalized_label
+                        item["url"] = url
+                        item["similarity"] = sim
+                    item["key"] = canon
+                except Exception:
+                    pass
                 return True
-        self._last_reverse_source_only.append({"label": normalized_label, "url": url, "similarity": sim})
+        self._last_reverse_source_only.append({"label": normalized_label, "url": url, "key": canon, "similarity": sim})
         self.log(f"  {upper_label} SOURCE-ONLY CANDIDATE: {sim:.2f}% {url}")
         return True
 
@@ -8567,11 +9741,13 @@ class Tagger:
             with _sync_playwright() as _pw:
                 context = None
                 try:
+                    self.log("  TINEYE BROWSER POLICY: isolated Playwright Chromium; normal Chrome untouched")
                     context = _pw.chromium.launch_persistent_context(
                         user_data_dir=str(profile_dir),
                         headless=headless,
                         viewport={"width": 1365, "height": 900},
                         accept_downloads=False,
+                        args=self._browser_launch_args_safe(),
                     )
 
                     try:
@@ -9552,8 +10728,9 @@ class Tagger:
         self._saucenao_deferred = False
         self._saucenao_defer_reason = ""
         self._saucenao_retry_after = 0
-        self._last_saucenao_source_only = []
+        self._reset_saucenao_thread_state()
         self._last_reverse_source_only = []
+        self._pixiv_md5_candidate_cache = {}
 
         if self.settings.get("skip_existing") and not self.settings.get("retry_nomatch"):
             already = output_processed_status(self.settings, img)
@@ -9595,58 +10772,137 @@ class Tagger:
             url = str(url or "").strip()
             if not url:
                 return {"kind": "none"}
-            md5v = ""
-            relay_origin = ""
+            try:
+                _relay_host = urlparse(url).netloc.lower().replace("www.", "")
+            except Exception:
+                _relay_host = ""
+            self.report_activity("source→MD5 relay", img, f"{label}: URL→MD5")
+            _unsupported_action = self._unsupported_reverse_relay_action(label, url, similarity, _relay_host)
+            if _unsupported_action == "source_only":
+                self.log(f"  {label} UNSUPPORTED HOST SOURCE-ONLY: {url}")
+                self._record_reverse_source_only(f"{label} unsupported", url, similarity)
+                return {"kind": "source_only", "md5": ""}
+            if _unsupported_action == "skip":
+                self.log(f"  {label} UNSUPPORTED HOST SKIP: {url}")
+                return {"kind": "skip_url"}
+
+            # If reverse search gives a concrete e621/e926 post URL, read that
+            # post directly first.  Otherwise a valid e621 hit can degrade into
+            # source-only when its MD5 has no tags on the other enabled booru.
+            if _relay_host in ("e621.net", "e926.net") and self._post_id_from_url_for_md5_relay(url, _relay_host):
+                try:
+                    tags_direct = self.tags_from_url(url)
+                    groups_direct = self.groups_or_defer_background(url, tags_direct)
+                    if tags_direct:
+                        self.log(f"  {label} E621 DIRECT TAGS: received={len(tags_direct)} url={url}")
+                        return {
+                            "kind": "tags",
+                            "md5": "",
+                            "tags": unique_keep_order(filter_numeric_tags(list(tags_direct or []), self.settings.get("ignore_numeric_tags"))),
+                            "sources": [url],
+                            "groups": [groups_direct or {"general": list(tags_direct)}],
+                            "source_tag_groups": [{"url": url, "groups": groups_direct or {"general": list(tags_direct)}, "method": f"{str(label).lower().replace(' ', '_')}_e621_direct"}],
+                        }
+                    self.log(f"  {label} E621 DIRECT MISS: no post JSON tags; continuing MD5 relay {url}")
+                except Exception as e:
+                    self.log(f"  {label} E621 DIRECT ERROR: {type(e).__name__}: {e}; continuing MD5 relay {url}")
+            md5_candidates = []
+            relay_origin_by_md5 = {}
+            def _add_md5_candidate(v, origin):
+                v = str(v or "").strip().lower()
+                if is_md5(v) and v not in md5_candidates:
+                    md5_candidates.append(v)
+                    relay_origin_by_md5[v] = str(origin or "")
             try:
                 if str(label).lower().startswith("saucenao"):
-                    md5v = str((getattr(self, "_last_saucenao_md5_candidates", {}) or {}).get(url) or "").strip().lower()
-                    if md5v and is_md5(md5v):
-                        relay_origin = "embedded-md5"
-                        self.log(f"  {label} E621 TITLE MD5 CANDIDATE: {md5v}")
-                if not md5v:
-                    md5v = self.extract_md5_from_post_url(url)
-                    if md5v:
-                        relay_origin = "post-url"
-                if not md5v:
-                    md5v = self.extract_md5_from_source_url_relay(url)
-                    if md5v:
-                        relay_origin = "source-search"
+                    got = self._saucenao_md5_candidate_for_url(url)
+                    if got and is_md5(got):
+                        _add_md5_candidate(got, "embedded-md5")
+                        self.log(f"  {label} E621 TITLE MD5 CANDIDATE: {got}")
+                for got in self.extract_md5_candidates_from_post_url(url):
+                    _add_md5_candidate(got, "post-url")
+                if not md5_candidates:
+                    got = self.extract_md5_from_source_url_relay(url)
+                    _add_md5_candidate(got, "source-search")
             except Exception as e:
                 self.log(f"  {label} MD5 RELAY EXTRACT ERROR: {type(e).__name__}: {e}")
-                md5v = ""
-                relay_origin = ""
-            md5v = str(md5v or "").strip().lower()
-            if md5v and str(label).lower().startswith("tineye"):
-                self.log(f"  TINEYE SOURCE URL RELAY: origin={relay_origin or 'unknown'} md5={md5v} url={url}")
-            if not is_md5(md5v):
+                md5_candidates = []
+                relay_origin_by_md5 = {}
+            if not md5_candidates:
+                self.report_activity("source→MD5 relay", img, f"{label}: MD5 не найден")
+                # High-confidence Pixiv/Yande results from SauceNAO are still
+                # useful as source-only evidence even when no trusted booru can
+                # relay them to a verified MD5. Do this before returning none so
+                # the final NO_MATCH row keeps the best source instead of losing
+                # the reverse-search hit entirely.
+                try:
+                    host = urlparse(url).netloc.lower().replace("www.", "")
+                except Exception:
+                    host = ""
+                try:
+                    simv = float(similarity or 0.0)
+                except Exception:
+                    simv = 0.0
+                try:
+                    relay_min = float(self.settings.get("unsupported_relay_min_similarity", self.settings.get("min_similarity", 85.0)) or 85.0)
+                except Exception:
+                    relay_min = 85.0
+                if str(label).lower().startswith("saucenao") and simv >= relay_min and (
+                    host in ("pixiv.net", "i.pximg.net", "yande.re")
+                    or host.endswith(".pixiv.net")
+                    or host.endswith(".pximg.net")
+                    or host.endswith(".yande.re")
+                    or self._is_no_relay_reverse_host(host)
+                ):
+                    self._record_reverse_source_only(f"{label} source-only", url, simv)
+                    return {"kind": "source_only", "md5": ""}
                 return {"kind": "none"}
-            if md5v in known_md5s:
-                self.log(f"  {label} MD5 RELAY SKIP: already checked md5={md5v}")
-                return {"kind": "seen", "md5": md5v}
-            known_md5s.add(md5v)
+
             relay_lookup_allowed = bool(
                 self.settings.get("enable_md5_lookup")
                 or self.settings.get("_allow_reverse_md5_relay_lookup")
             )
-            if not relay_lookup_allowed:
-                self.log(f"  {label} MD5 RELAY FOUND BUT MD5 LOOKUP DISABLED: md5={md5v} url={url}")
+            first_source_only = None
+            first_seen = None
+            for md5v in md5_candidates:
+                md5v = str(md5v or "").strip().lower()
+                relay_origin = relay_origin_by_md5.get(md5v) or "unknown"
+                if md5v and str(label).lower().startswith("tineye"):
+                    self.log(f"  TINEYE SOURCE URL RELAY: origin={relay_origin} md5={md5v} url={url}")
+                if not is_md5(md5v):
+                    continue
+                if md5v in known_md5s:
+                    self.log(f"  {label} MD5 RELAY SKIP: already checked md5={md5v}")
+                    if first_seen is None:
+                        first_seen = {"kind": "seen", "md5": md5v}
+                    continue
+                known_md5s.add(md5v)
+                self.report_activity("source→MD5 relay", img, f"{label}: MD5 {md5v}")
+                if not relay_lookup_allowed:
+                    self.log(f"  {label} MD5 RELAY FOUND BUT MD5 LOOKUP DISABLED: md5={md5v} url={url}")
+                    self._record_reverse_source_only(f"{label} MD5 relay", url, similarity)
+                    if first_source_only is None:
+                        first_source_only = {"kind": "source_only", "md5": md5v}
+                    continue
+                self.log(f"  {label} MD5 RELAY: origin={relay_origin} url={url} md5={md5v}")
+                old_lookup_path = getattr(self, "_current_md5_lookup_path", "")
+                self._current_md5_lookup_path = str(img)
+                try:
+                    tags_r, srcs_r, groups_r = self.md5_lookup_all(md5v)
+                    stg_r = list(getattr(self, "_last_md5_source_tag_groups", []) or [])
+                finally:
+                    self._current_md5_lookup_path = old_lookup_path
+                tags_r = unique_keep_order(filter_numeric_tags(list(tags_r or []), self.settings.get("ignore_numeric_tags")))
+                if tags_r:
+                    self.report_activity("source→MD5 relay", img, f"{label}: найдено {len(tags_r)} тегов")
+                    self.log(f"  {label} MD5 RELAY TAGS: md5={md5v} tags={len(tags_r)} sources={len(srcs_r or [])}")
+                    return {"kind": "tags", "md5": md5v, "tags": tags_r, "sources": list(srcs_r or []), "groups": list(groups_r or []), "source_tag_groups": stg_r}
+                self.report_activity("source→MD5 relay", img, f"{label}: source-only")
+                self.log(f"  {label} MD5 RELAY SOURCE-ONLY: md5={md5v} no tags from enabled MD5 sites; url={url}")
                 self._record_reverse_source_only(f"{label} MD5 relay", url, similarity)
-                return {"kind": "source_only", "md5": md5v}
-            self.log(f"  {label} MD5 RELAY: url={url} md5={md5v}")
-            old_lookup_path = getattr(self, "_current_md5_lookup_path", "")
-            self._current_md5_lookup_path = str(img)
-            try:
-                tags_r, srcs_r, groups_r = self.md5_lookup_all(md5v)
-                stg_r = list(getattr(self, "_last_md5_source_tag_groups", []) or [])
-            finally:
-                self._current_md5_lookup_path = old_lookup_path
-            tags_r = unique_keep_order(filter_numeric_tags(list(tags_r or []), self.settings.get("ignore_numeric_tags")))
-            if tags_r:
-                self.log(f"  {label} MD5 RELAY TAGS: md5={md5v} tags={len(tags_r)} sources={len(srcs_r or [])}")
-                return {"kind": "tags", "md5": md5v, "tags": tags_r, "sources": list(srcs_r or []), "groups": list(groups_r or []), "source_tag_groups": stg_r}
-            self.log(f"  {label} MD5 RELAY SOURCE-ONLY: md5={md5v} no tags from enabled MD5 sites; url={url}")
-            self._record_reverse_source_only(f"{label} MD5 relay", url, similarity)
-            return {"kind": "source_only", "md5": md5v}
+                if first_source_only is None:
+                    first_source_only = {"kind": "source_only", "md5": md5v}
+            return first_source_only or first_seen or {"kind": "none"}
 
         def _accept_reverse_md5_relay(label, relay):
             before_count = len(set(all_tags))
@@ -9658,7 +10914,209 @@ class Tagger:
                     all_groups.append(grp)
             source_tag_groups.extend(list(relay.get("source_tag_groups") or []))
             merged_added = len(set(all_tags)) - before_count
-            self.log(f"  {label} MD5 RELAY ACCEPTED: md5={relay.get('md5','')} added_unique={max(merged_added, 0)}")
+            if str(relay.get('md5', '') or '').strip():
+                self.log(f"  {label} MD5 RELAY ACCEPTED: md5={relay.get('md5','')} added_unique={max(merged_added, 0)}")
+            else:
+                self.log(f"  {label} DIRECT RELAY ACCEPTED: added_unique={max(merged_added, 0)}")
+
+        def _is_fast_source_md5_candidate_url(url):
+            try:
+                host = urlparse(str(url or "")).netloc.lower()
+            except Exception:
+                host = ""
+            if not host:
+                return False
+            if host in ("pixiv.net", "www.pixiv.net", "i.pximg.net", "yande.re"):
+                return True
+            return host.endswith(".pixiv.net") or host.endswith(".pximg.net") or host.endswith(".yande.re")
+
+        _fast_saucenao_results = None
+
+        def _run_fast_saucenao_source_md5_probe():
+            """Run SauceNAO early only to harvest Pixiv/Yande.re source-MD5 relays.
+
+            This is deliberately narrow: it does not accept arbitrary SauceNAO URL
+            tags before IQDB.  The result list is cached in this process_image call
+            and reused by the normal SauceNAO stage, so we avoid a second SauceNAO
+            HTTP call for the same file.
+            """
+            nonlocal _fast_saucenao_results
+
+            def _bool_setting(name, default=False):
+                v = self.settings.get(name, default)
+                if isinstance(v, str):
+                    return v.strip().lower() not in ("0", "false", "no", "off", "нет", "выкл", "disabled")
+                return bool(v)
+
+            force_fast = _bool_setting("source_md5_relay_fast_saucenao_force", True)
+            enabled_fast = _bool_setting("source_md5_relay_fast_saucenao_enabled", True)
+            if not (force_fast or enabled_fast):
+                self.log("  FAST SOURCE-MD5 PROBE SKIP: disabled by settings")
+                return False
+            if not self.settings.get("enable_saucenao"):
+                self.log("  FAST SOURCE-MD5 PROBE SKIP: SauceNAO disabled")
+                return False
+            if self.settings.get("_saucenao_retry_only", False):
+                self.log("  FAST SOURCE-MD5 PROBE SKIP: SauceNAO retry-only pass")
+                return False
+            if all_tags or self.cancelled():
+                return False
+            try:
+                min_sim = float(self.settings.get("source_md5_relay_fast_saucenao_min_similarity", 80.0) or 80.0)
+            except Exception:
+                min_sim = 80.0
+            try:
+                max_results = int(self.settings.get("source_md5_relay_fast_saucenao_max_results", 5) or 5)
+            except Exception:
+                max_results = 5
+            max_results = max(1, min(max_results, 20))
+
+            self.log(f"  FAST SOURCE-MD5 PROBE: SauceNAO first for Pixiv/Yande/trusted-booru min={min_sim:.1f}% max={max_results}")
+            self.report_activity("source→MD5 relay", img, "SauceNAO fast: поиск URL→MD5")
+            self.report_activity("SauceNAO", img, "Fast donor probe")
+            try:
+                _fast_saucenao_results = list(self.saucenao_urls(search_img) or [])
+            except Exception as e:
+                self.log(f"  FAST SOURCE-MD5 PROBE ERROR: {type(e).__name__}: {e}")
+                _fast_saucenao_results = []
+                return False
+
+            checked = 0
+            source_only = 0
+            trusted_checked = 0
+            trusted_supported = 0
+
+            def _trusted_booru_fast_enabled():
+                return _bool_setting("source_md5_relay_fast_saucenao_trusted_booru_enabled", True)
+
+            def _trusted_booru_min_similarity():
+                try:
+                    return float(self.settings.get("source_md5_relay_fast_saucenao_trusted_min_similarity", 90.0) or 90.0)
+                except Exception:
+                    return 90.0
+
+            def _is_fast_trusted_booru_url(url):
+                try:
+                    pu = urlparse(str(url or ""))
+                    host = pu.netloc.lower().replace("www.", "")
+                    path = pu.path.lower()
+                except Exception:
+                    return False
+                if not host:
+                    return False
+                # Only sites whose normal strict parsers already verify post metadata.
+                if host == "danbooru.donmai.us":
+                    return "/posts/" in path or "/post/show/" in path
+                if host == "gelbooru.com":
+                    q = parse_qs(pu.query)
+                    return q.get("page", [""])[0].lower() == "post" and q.get("s", [""])[0].lower() == "view" and bool(q.get("id", [""])[0])
+                if host == "rule34.xxx":
+                    q = parse_qs(pu.query)
+                    return q.get("page", [""])[0].lower() == "post" and q.get("s", [""])[0].lower() == "view" and bool(q.get("id", [""])[0])
+                if host == "e621.net":
+                    return "/posts/" in path
+                if host == "booru.allthefallen.moe":
+                    return "/posts/" in path or "/post/show/" in path
+                return False
+
+            # First keep the original narrow Pixiv/Yande source->MD5 pass.
+            try:
+                _pixiv_artwork_limit = int(self.settings.get("source_md5_relay_fast_saucenao_pixiv_max_artworks_per_file", 2) or 2)
+            except Exception:
+                _pixiv_artwork_limit = 2
+            # Hard cap for old persisted settings: probing many Pixiv artworks
+            # from one SauceNAO response is expensive and mostly produces
+            # source-only misses.
+            _pixiv_artwork_limit = max(1, min(_pixiv_artwork_limit, 2))
+            _fast_pixiv_artworks_seen = set()
+            for url, sim in list(_fast_saucenao_results)[:max_results]:
+                if self.cancelled() or all_tags:
+                    break
+                try:
+                    simv = float(sim or 0.0)
+                except Exception:
+                    simv = 0.0
+                if simv < min_sim:
+                    continue
+                if not _is_fast_source_md5_candidate_url(url):
+                    continue
+                _fast_host = ""
+                try:
+                    _fast_host = urlparse(str(url or "")).netloc.lower().replace("www.", "")
+                except Exception:
+                    _fast_host = ""
+                _fast_aid = self._pixiv_artwork_id_from_url(url) if ("pixiv" in _fast_host or "pximg" in _fast_host) else ""
+                if _fast_aid and _fast_aid not in _fast_pixiv_artworks_seen and len(_fast_pixiv_artworks_seen) >= _pixiv_artwork_limit:
+                    self.log(f"  FAST SOURCE-MD5 PROBE PIXIV SKIP: artwork budget {_pixiv_artwork_limit} reached; artwork={_fast_aid} sim={simv:.2f}")
+                    self._record_reverse_source_only("SauceNAO fast source-MD5 source-only", url, simv)
+                    source_only += 1
+                    continue
+                if _fast_aid:
+                    _fast_pixiv_artworks_seen.add(_fast_aid)
+                checked += 1
+                self.log(f"  FAST SOURCE-MD5 PROBE MATCH: {simv:.2f}% {url}")
+                relay = _reverse_md5_relay("SauceNAO fast source-MD5", url, simv)
+                if relay.get("kind") == "tags":
+                    _accept_reverse_md5_relay("SauceNAO fast source-MD5", relay)
+                    sources.append(f"SauceNAO fast source-MD5 {simv:.2f}% relay-source {url}")
+                    return True
+                if relay.get("kind") in ("source_only", "skip_url"):
+                    source_only += 1
+                    self.log(f"  FAST SOURCE-MD5 PROBE SOURCE-ONLY CANDIDATE: {simv:.2f}% {url}")
+                    continue
+
+            # v360: if SauceNAO already returned a high-confidence trusted booru
+            # post, do not wait for IQDB to rediscover the same post 10-60s later.
+            # This uses the same strict URL/tag pipeline as the normal SauceNAO
+            # stage, just earlier, and still reuses the single SauceNAO response.
+            if not all_tags and _trusted_booru_fast_enabled():
+                booru_min = max(_trusted_booru_min_similarity(), min_sim)
+                for url, sim in list(_fast_saucenao_results)[:max_results]:
+                    if self.cancelled() or all_tags:
+                        break
+                    try:
+                        simv = float(sim or 0.0)
+                    except Exception:
+                        simv = 0.0
+                    if simv < booru_min:
+                        continue
+                    if not _is_fast_trusted_booru_url(url):
+                        continue
+                    trusted_supported += 1
+                    self.log(f"  FAST SAUCENAO TRUSTED BOORU MATCH: {simv:.2f}% {url}")
+                    relay = _reverse_md5_relay("SauceNAO fast trusted-booru", url, simv)
+                    if relay.get("kind") == "tags":
+                        _accept_reverse_md5_relay("SauceNAO fast trusted-booru", relay)
+                        sources.append(f"SauceNAO fast trusted-booru {simv:.2f}% relay-source {url}")
+                        return True
+                    if relay.get("kind") in ("source_only", "skip_url"):
+                        source_only += 1
+                        self.log(f"  FAST SAUCENAO TRUSTED BOORU SOURCE-ONLY CANDIDATE: {simv:.2f}% {url}")
+                        continue
+                    try:
+                        tags = self.tags_from_url(url)
+                        groups = self.groups_or_defer_background(url, tags)
+                    except Exception as e:
+                        self.log(f"  FAST SAUCENAO TRUSTED BOORU URL ERROR: {url} {type(e).__name__}: {e}")
+                        continue
+                    trusted_checked += 1
+                    if tags:
+                        before_count = len(set(all_tags))
+                        all_tags.extend(list(tags or []))
+                        if groups and groups_to_tags(groups):
+                            all_groups.append(groups)
+                        sources.append(f"SauceNAO fast trusted-booru {simv:.2f}% {url}")
+                        source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "saucenao_fast_trusted_booru"})
+                        merged_added = len(set(all_tags)) - before_count
+                        self.log(f"  FAST SAUCENAO TRUSTED BOORU TAGS: received={len(tags)} added_unique={max(merged_added, 0)}")
+                        return True
+                    self.log(f"  FAST SAUCENAO TRUSTED BOORU MISS: no tags {url}")
+
+            if checked or source_only or trusted_checked or trusted_supported:
+                self.log(f"  FAST SOURCE-MD5 PROBE DONE: checked={checked} trusted={trusted_supported}/{trusted_checked} source_only={source_only} tags={len(set(all_tags))}")
+            else:
+                self.log("  FAST SOURCE-MD5 PROBE DONE: no Pixiv/Yande/trusted-booru source candidates")
+            return bool(all_tags)
 
         # v238: exact MD5 lookup must use the real byte hash of the input file,
         # not a 32-hex filename.  Users can rename Telegram/booru files, or a
@@ -9783,8 +11241,17 @@ class Tagger:
             except Exception as e:
                 self.log(f"  GRABBER MD5 CACHE ERROR: {type(e).__name__}: {e}")
 
-        # Preserve paid SauceNAO quota: normal files try free reverse sources first.
-        # A durable SauceNAO retry sets _saucenao_retry_only and skips this stage.
+        # Fast source-MD5 donor probe (Pixiv/Yande.re only) before slow IQDB
+        # branches.  It reuses the same SauceNAO result list later, so the normal
+        # SauceNAO stage will not spend a second request for this file.
+        # v352: force-on by default and log explicit skip reasons, so old persisted
+        # configs cannot silently bypass this stage.
+        if not all_tags:
+            _run_fast_saucenao_source_md5_probe()
+
+        # Preserve paid SauceNAO quota when fast probe is disabled: normal files
+        # try free reverse sources first. A durable SauceNAO retry sets
+        # _saucenao_retry_only and skips this stage.
         if self.settings.get("enable_iqdb") and not all_tags and not self.settings.get("_saucenao_retry_only", False):
             _fallback_started = time.monotonic()
             self.report_activity("IQDB", img, "Обратный поиск")
@@ -9815,7 +11282,7 @@ class Tagger:
                         sources.append(f"IQDB {sim:.2f}% relay-source {url}")
                         selected_with_tags += 1
                         break
-                    if relay.get("kind") == "source_only":
+                    if relay.get("kind") in ("source_only", "skip_url"):
                         continue
                     tags = self.tags_from_url(url)
                     groups = self.groups_or_defer_background(url, tags)
@@ -9879,7 +11346,7 @@ class Tagger:
                         sources.append(f"Danbooru IQDB {sim:.2f}% relay-source {url}")
                         selected_with_tags += 1
                         break
-                    if relay.get("kind") == "source_only":
+                    if relay.get("kind") in ("source_only", "skip_url"):
                         continue
                     tags = self.tags_from_url(url)
                     groups = self.groups_or_defer_background(url, tags)
@@ -9927,13 +11394,45 @@ class Tagger:
             for url, sim in self.e621_iqdb_urls(search_img):
                 try:
                     self.log(f"  E621 IQDB MATCH: {url}")
+                    # e621 IQDB already returns an e621 post id.  Fetch that post
+                    # directly first; do not let MD5 relay turn a perfectly good
+                    # e621 hit into source-only just because other enabled MD5
+                    # sites have no matching tags.
+                    try:
+                        _iqdb_host = urlparse(str(url or "")).netloc.lower().replace("www.", "")
+                    except Exception:
+                        _iqdb_host = ""
+                    if _iqdb_host in ("e621.net", "e926.net"):
+                        tags = self.tags_from_url(url)
+                        groups = self.groups_or_defer_background(url, tags)
+                        if tags:
+                            before_count = len(set(all_tags))
+                            all_tags += tags
+                            if groups and groups_to_tags(groups):
+                                all_groups.append(groups)
+                            else:
+                                try:
+                                    guessed = self._categorize_flat_tags("e621.net", tags)
+                                    if guessed and groups_to_tags(guessed):
+                                        all_groups.append(guessed)
+                                except Exception:
+                                    pass
+                            sources.append(f"E621 IQDB direct-post {url}")
+                            source_tag_groups.append({"url": url, "groups": groups or {"general": list(tags)}, "method": "e621_iqdb_direct"})
+                            e621_with_tags += 1
+                            merged_added = len(set(all_tags)) - before_count
+                            self.log(f"  E621 IQDB DIRECT TAGS: received={len(tags)} added_unique={max(merged_added, 0)}")
+                            break
+                        else:
+                            self.log(f"  E621 IQDB DIRECT MISS: no post JSON tags; trying MD5 relay {url}")
+
                     relay = _reverse_md5_relay("E621 IQDB", url, sim)
                     if relay.get("kind") == "tags":
                         _accept_reverse_md5_relay("E621 IQDB", relay)
                         sources.append(f"E621 IQDB relay-source {url}")
                         e621_with_tags += 1
                         break
-                    if relay.get("kind") == "source_only":
+                    if relay.get("kind") in ("source_only", "skip_url"):
                         continue
                     tags = self.tags_from_url(url)
                     groups = self.groups_or_defer_background(url, tags)
@@ -9989,7 +11488,7 @@ class Tagger:
                         _accept_reverse_md5_relay("ASCII2D", relay)
                         sources.append(f"ASCII2D relay-source {url}")
                         break
-                    if relay.get("kind") == "source_only":
+                    if relay.get("kind") in ("source_only", "skip_url"):
                         continue
 
                     tags = self.tags_from_url(url)
@@ -10023,21 +11522,32 @@ class Tagger:
             else:
                 self.log(f"  SAUCENAO START AFTER IQDB/ASCII2D MISS: {img.name}")
             self.report_activity("SauceNAO", img, "Обратный поиск")
-            try:
-                sauce_urls = self.saucenao_urls(search_img)
-            except Exception as e:
-                self.log(f"  SAUCENAO SEARCH ERROR: {e}")
-                sauce_urls = []
+            if _fast_saucenao_results is not None and not self.settings.get("_saucenao_retry_only", False):
+                sauce_urls = list(_fast_saucenao_results or [])
+                self.log(f"  SAUCENAO REUSE FAST SOURCE-MD5 PROBE RESULTS: {len(sauce_urls)}")
+            else:
+                try:
+                    sauce_urls = self.saucenao_urls(search_img)
+                except Exception as e:
+                    self.log(f"  SAUCENAO SEARCH ERROR: {e}")
+                    sauce_urls = []
 
+            _sauce_seen_process_urls = set()
             for url, sim in sauce_urls:
                 try:
+                    _sauce_key = self._canonical_reverse_url(url)
+                    if _sauce_key and _sauce_key in _sauce_seen_process_urls:
+                        self.log(f"  SAUCE SKIP DUPLICATE SOURCE: {url}")
+                        continue
+                    if _sauce_key:
+                        _sauce_seen_process_urls.add(_sauce_key)
                     self.log(f"  SAUCE MATCH: {sim:.2f}% {url}")
                     relay = _reverse_md5_relay("SauceNAO", url, sim)
                     if relay.get("kind") == "tags":
                         _accept_reverse_md5_relay("SauceNAO", relay)
                         sources.append(f"SauceNAO {sim:.2f}% relay-source {url}")
                         break
-                    if relay.get("kind") == "source_only":
+                    if relay.get("kind") in ("source_only", "skip_url"):
                         continue
                     tags = self.tags_from_url(url)
                     groups = self.groups_or_defer_background(url, tags)
@@ -10089,7 +11599,7 @@ class Tagger:
                             sources.append(f"TinEye {sim:.2f}% relay-source {url}")
                             accepted += 1
                             break
-                        if relay.get("kind") == "source_only":
+                        if relay.get("kind") in ("source_only", "skip_url"):
                             source_only_saved += 1
                             continue
                         tags, groups = self.reverse_url_tags_and_groups(url, method="tineye")
@@ -10132,6 +11642,7 @@ class Tagger:
             return "skip"
 
         if all_tags:
+            self.report_activity("Финальная сборка", img, "Склейка source/tag bundles")
             tag_groups = merge_tag_groups(all_groups)
             if not groups_to_tags(tag_groups):
                 tag_groups["general"] = all_tags
@@ -10178,11 +11689,15 @@ class Tagger:
                     f"({self.network_failure_summary()}); file deferred, NOT sent to NO_MATCH"
                 )
                 return "retry_network"
+            if self.settings.get("_reverse_branch_no_nomatch", False):
+                self.report_activity("Финальная сборка", img, "Reverse branch miss; ждёт остальные ветки")
+                self.log("  REVERSE BRANCH MISS: final NO_MATCH is delayed until all reverse queues finish")
+                return "nomatch"
             source_only = None
             try:
                 candidates = []
                 candidates.extend(list(getattr(self, "_last_reverse_source_only", []) or []))
-                candidates.extend(list(getattr(self, "_last_saucenao_source_only", []) or []))
+                candidates.extend(self._saucenao_source_only_candidates())
                 # Prefer the best real source-only hint across TinEye/SauceNAO.
                 # Internal helper/proxy URLs are filtered before they enter this list.
                 candidates.sort(key=lambda x: float(x.get("similarity", 0) or 0), reverse=True)
@@ -10251,12 +11766,14 @@ class Tagger:
                 except Exception:
                     pass
             if source_only:
+                self.report_activity("Финальная сборка", img, "Source-only: сохраняю лучший источник")
                 self.log(
                     "  SOURCE-ONLY SAVED TO SQLITE: "
                     f"{float(source_only.get('similarity', 0) or 0):.2f}% "
                     f"{source_only.get('label','')} {source_only.get('url','')}"
                 )
             else:
+                self.report_activity("Финальная сборка", img, "No match после веток")
                 self.log("  NO MATCH SAVED TO SQLITE")
             return "nomatch"
 

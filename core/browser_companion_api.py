@@ -269,7 +269,10 @@ def check_one(settings: dict | None, item: dict[str, Any]) -> dict[str, Any]:
                 ).fetchall()]
                 result["known_sites"] = sites
     except Exception as exc:
-        log.warning("browser companion DB check failed: %s", exc)
+        # Do not log every companion DB miss/error here. During heavy parser runs
+        # SQLite can briefly return disk I/O/busy errors, and RotatingFileHandler
+        # can itself fail if the log file is locked. The extension should simply
+        # show cards instead of spamming traceback/logging errors.
         result.update({"status": "error", "action": "show", "reason": str(exc)[:180]})
     return result
 
@@ -405,6 +408,134 @@ def e621_bridge_status() -> dict[str, Any]:
     return {"pending": pending, "inflight": inflight}
 
 
+
+# --- Pixiv browser-extension API bridge -------------------------------------
+# Pixiv source relay needs the user's already-open Chrome/Pixiv session for the
+# AJAX pages endpoint.  Local Booru must not launch chrome.exe for this.  The
+# extension returns JSON/text only; original images are still downloaded by the
+# app with the discovered original URL + Referer and then MD5 is computed locally.
+_PIXIV_TASK_COND = threading.Condition()
+_PIXIV_TASKS: dict[str, dict[str, Any]] = {}
+_PIXIV_TASK_SEQ = 0
+
+
+def enqueue_pixiv_browser_fetch(url: str, *, referer: str = "", timeout_s: float = 6.0) -> dict[str, Any] | None:
+    """Ask the companion extension to fetch Pixiv JSON from an existing Pixiv tab.
+
+    This does not start Chrome.  It only succeeds when the extension is loaded
+    and a Pixiv tab is open/available in the user's normal browser.
+    """
+    global _PIXIV_TASK_SEQ
+    raw_url = str(url or "").strip()
+    if not raw_url.startswith(("https://www.pixiv.net/", "https://pixiv.net/")):
+        return None
+    try:
+        timeout_s = max(1.0, min(15.0, float(timeout_s or 6.0)))
+    except Exception:
+        timeout_s = 6.0
+    with _PIXIV_TASK_COND:
+        _PIXIV_TASK_SEQ += 1
+        task_id = f"pixiv-{int(time.time())}-{_PIXIV_TASK_SEQ}"
+        _PIXIV_TASKS[task_id] = {
+            "id": task_id,
+            "url": raw_url,
+            "referer": str(referer or ""),
+            "created_at": time.time(),
+            "deadline": time.time() + timeout_s,
+            "state": "pending",
+            "result": None,
+        }
+        _PIXIV_TASK_COND.notify_all()
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            remain = max(0.1, deadline - time.time())
+            _PIXIV_TASK_COND.wait(timeout=min(0.75, remain))
+            task = _PIXIV_TASKS.get(task_id)
+            if not task:
+                return None
+            if task.get("state") == "done":
+                result = task.get("result") if isinstance(task.get("result"), dict) else None
+                _PIXIV_TASKS.pop(task_id, None)
+                return result
+            if task.get("state") == "error":
+                result = task.get("result") if isinstance(task.get("result"), dict) else None
+                _PIXIV_TASKS.pop(task_id, None)
+                return result
+        _PIXIV_TASKS.pop(task_id, None)
+        _PIXIV_TASK_COND.notify_all()
+        return None
+
+
+def _pixiv_bridge_next_task() -> dict[str, Any]:
+    now = time.time()
+    with _PIXIV_TASK_COND:
+        for tid, task in list(_PIXIV_TASKS.items()):
+            if float(task.get("deadline") or 0) < now:
+                _PIXIV_TASKS.pop(tid, None)
+                continue
+            if task.get("state") in {"pending", "inflight"}:
+                inflight_at = float(task.get("inflight_at") or 0)
+                if task.get("state") == "inflight" and now - inflight_at < 3.0:
+                    continue
+                task["state"] = "inflight"
+                task["inflight_at"] = now
+                return {
+                    "ok": True,
+                    "has_task": True,
+                    "task": {
+                        "id": tid,
+                        "url": str(task.get("url") or ""),
+                        "referer": str(task.get("referer") or ""),
+                    },
+                }
+        return {"ok": True, "has_task": False, "pending": len(_PIXIV_TASKS)}
+
+
+def _pixiv_bridge_store_result(data: dict[str, Any]) -> dict[str, Any]:
+    tid = str((data or {}).get("id") or "").strip()
+    if not tid:
+        return {"ok": False, "error": "missing_id"}
+    result = {
+        "status": int((data or {}).get("status") or 0),
+        "url": str((data or {}).get("url") or ""),
+        "headers": (data or {}).get("headers") if isinstance((data or {}).get("headers"), dict) else {},
+        "text": str((data or {}).get("text") or ""),
+        "error": str((data or {}).get("error") or ""),
+        "bridge_mode": str((data or {}).get("bridge_mode") or ""),
+        "page_url": str((data or {}).get("page_url") or ""),
+        "page_title": str((data or {}).get("page_title") or ""),
+        "page_fetch_error": str((data or {}).get("page_fetch_error") or ""),
+    }
+    with _PIXIV_TASK_COND:
+        task = _PIXIV_TASKS.get(tid)
+        if not task:
+            return {"ok": False, "error": "unknown_or_expired_task"}
+        task["state"] = "error" if result.get("error") else "done"
+        task["result"] = result
+        _PIXIV_TASK_COND.notify_all()
+    return {"ok": True}
+
+
+def pixiv_bridge_status() -> dict[str, Any]:
+    with _PIXIV_TASK_COND:
+        pending = sum(1 for t in _PIXIV_TASKS.values() if t.get("state") == "pending")
+        inflight = sum(1 for t in _PIXIV_TASKS.values() if t.get("state") == "inflight")
+    return {"pending": pending, "inflight": inflight}
+
+
+def pixiv_bridge_status_detail() -> dict[str, Any]:
+    now = time.time()
+    with _PIXIV_TASK_COND:
+        pending = sum(1 for t in _PIXIV_TASKS.values() if t.get("state") == "pending")
+        inflight = sum(1 for t in _PIXIV_TASKS.values() if t.get("state") == "inflight")
+        oldest_age = 0.0
+        for t in _PIXIV_TASKS.values():
+            try:
+                oldest_age = max(oldest_age, now - float(t.get("created_at") or now))
+            except Exception:
+                pass
+    return {"pending": pending, "inflight": inflight, "oldest_age": round(oldest_age, 1)}
+
 @dataclass
 class CompanionServerHandle:
     server: ThreadingHTTPServer
@@ -473,10 +604,19 @@ class _Handler(BaseHTTPRequestHandler):
         data = json.loads(raw.decode("utf-8", "replace"))
         return data if isinstance(data, dict) else {}
 
-    def _authorized_post(self) -> bool:
+    def _authorized_companion(self) -> bool:
         if not _origin_allowed(self.headers.get("Origin", "")):
             return False
         return self.headers.get(_COMPANION_HEADER, "").strip() == "1"
+
+    def _authorized_post(self) -> bool:
+        return self._authorized_companion()
+
+    def _authorized_get(self) -> bool:
+        # GET used to expose status/bridge metadata to any local/browser caller.
+        # Keep it extension-only like POST; CORS alone is not an auth boundary for
+        # localhost APIs because local tools can read the response directly.
+        return self._authorized_companion()
 
     def do_OPTIONS(self) -> None:
         if _origin_allowed(self.headers.get("Origin", "")):
@@ -486,6 +626,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if not self._authorized_get():
+            self._send_json(403, {"ok": False, "error": "forbidden"}, cors=False)
+            return
         if path in {"/", "/extension/status", "/extension/health"}:
             self._send_json(200, {
                 "ok": True,
@@ -493,6 +636,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "version": 315,
                 "enabled": bool(self.settings.get("browser_companion_api_enabled", True)),
                 "e621_bridge": e621_bridge_status(),
+                "pixiv_bridge": pixiv_bridge_status(),
             })
             return
         self._send_json(404, {"ok": False, "error": "not_found"})
@@ -515,6 +659,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/extension/e621/result":
             self._send_json(200, _e621_bridge_store_result(data))
+            return
+        if path == "/extension/pixiv/next":
+            self._send_json(200, _pixiv_bridge_next_task())
+            return
+        if path == "/extension/pixiv/result":
+            self._send_json(200, _pixiv_bridge_store_result(data))
             return
         if path == "/extension/check":
             self._send_json(200, check_items(self.settings, data.get("items") or []))

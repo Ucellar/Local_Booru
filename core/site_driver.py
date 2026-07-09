@@ -56,7 +56,7 @@ _DEFAULT_SITE_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "atf.json": {
         "engine": "danbooru",
-        "description": "AllTheFallen / Danbooru-compatible API; JSON-only exact MD5, no HTML rescue",
+        "description": "AllTheFallen / Danbooru-compatible API; exact MD5 first; pixel_hash is a separate fallback locator",
         "known_hosts": ["booru.allthefallen.moe"],
         "requires_auth": False,
         "cf_protected": ["booru.allthefallen.moe"],
@@ -411,7 +411,7 @@ def _upgrade_atf_api_first(cfg: dict[str, Any], *, file_name: str = "") -> tuple
 
     forced_values = {
         "engine": "danbooru",
-        "description": "AllTheFallen / Danbooru-compatible API; API-first exact MD5 via /posts.json, no automatic HTML rescue",
+        "description": "AllTheFallen / Danbooru-compatible API; exact MD5 first; pixel_hash remains separate fallback locator",
         "known_hosts": ["booru.allthefallen.moe"],
         "requires_auth": False,
         "cf_protected": ["booru.allthefallen.moe"],

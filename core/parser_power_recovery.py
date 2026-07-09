@@ -2,9 +2,15 @@
 
 The parser already journals per-site results in SQLite, but a hard power cut can
 happen between copying/merging a result and committing every related site-status
-row.  Keep a tiny rolling list of the most recently *started* files.  If the
+row.  Keep a tiny rolling list of the most recently *completed* files.  If the
 previous parser session did not shut down cleanly, the next run forces those
 files through the normal found-check/merge path again.
+
+Important: earlier builds tracked files as soon as they were submitted to the
+parser window.  With large conveyor windows that meant the recovery pass could
+recheck the first/oldest files in the queue, not the files that actually finished
+last.  Completed-file tracking is the authoritative list now; started-file
+tracking is kept only as a compatibility fallback for old state files.
 """
 from __future__ import annotations
 
@@ -51,7 +57,15 @@ def begin_parser_session(settings: dict, root: str | Path) -> list[Path]:
     old = _read_state()
     recent: list[Path] = []
     if bool(old.get("active")):
-        for raw in list(old.get("recent") or [])[-MAX_RECENT:]:
+        # Prefer the files that actually completed last.  Fall back to the old
+        # started/submitted list only for state written by older builds.
+        source = (
+            list(old.get("completed_recent") or [])
+            or list(old.get("recent_completed") or [])
+            or list(old.get("recent") or [])
+            or list(old.get("recent_started") or [])
+        )
+        for raw in list(source)[-MAX_RECENT:]:
             try:
                 p = Path(str(raw))
                 if p.exists():
@@ -63,7 +77,8 @@ def begin_parser_session(settings: dict, root: str | Path) -> list[Path]:
         "root": str(root or settings.get("root", "")),
         "started_at": int(time.time()),
         "updated_at": int(time.time()),
-        "recent": [],
+        "recent_started": [],
+        "completed_recent": [],
     })
     # Preserve order and uniqueness.
     out: list[Path] = []
@@ -77,16 +92,44 @@ def begin_parser_session(settings: dict, root: str | Path) -> list[Path]:
 
 
 def record_parser_file(settings: dict, path: str | Path) -> None:
-    """Remember that a file has entered parser processing."""
+    """Remember that a file has entered parser processing.
+
+    This list is not used for normal recovery selection anymore.  It is only a
+    fallback when no completed-file list exists, because submit order is not the
+    same as completion order in the per-site conveyor.
+    """
     try:
         p = str(Path(path))
         data = _read_state()
-        recent = [str(x) for x in (data.get("recent") or []) if str(x) != p]
+        recent = [str(x) for x in (data.get("recent_started") or data.get("recent") or []) if str(x) != p]
         recent.append(p)
         data.update({
             "active": True,
             "updated_at": int(time.time()),
-            "recent": recent[-MAX_RECENT:],
+            "recent_started": recent[-MAX_RECENT:],
+        })
+        _write_state(data)
+    except Exception:
+        pass
+
+
+def record_parser_file_completed(settings: dict, path: str | Path) -> None:
+    """Remember that a file has finished parser processing.
+
+    Power-loss recovery must replay the latest *completed* files, not the first
+    files submitted to a large conveyor window.
+    """
+    try:
+        p = str(Path(path))
+        data = _read_state()
+        recent = [str(x) for x in (data.get("completed_recent") or data.get("recent_completed") or []) if str(x) != p]
+        recent.append(p)
+        data.update({
+            "active": True,
+            "updated_at": int(time.time()),
+            "completed_recent": recent[-MAX_RECENT:],
+            # Compatibility/debug alias: old code/readers used the word recent.
+            "recent_completed": recent[-MAX_RECENT:],
         })
         _write_state(data)
     except Exception:

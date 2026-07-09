@@ -19,6 +19,7 @@ from core.database.connection import db, db_path
 from core.paths import ERROR_LOG_FILE, LOGS_DIR, SETTINGS_DIR, CACHE_DIR
 from core.source_protection import source_root, output_root, recent_blocked_events
 from core.redaction import sanitize_object, sanitize_text
+from core.media_utils import MEDIA_EXTS
 
 
 AUTO_DELETE_REASONS = {
@@ -79,13 +80,51 @@ def _fmt_bytes(value: int) -> str:
     return f"{n:.2f} TB"
 
 
+SITE_SCAN_KEY_REVISIONS = {
+    "rule34.us": "remote-media-md5-v2",
+    # Must match ui.tagger_page._site_scan_key().  The parser writes rule34.xxx
+    # checkpoints under the revised internal key, while the audit used to read
+    # only the visible domain key.  That made diagnostics show
+    # rule34.xxx checked=0 even when the parser had actually checkpointed it.
+    "rule34.xxx": "sample-image-key-locator-v6",
+    "api.rule34.xxx": "sample-image-key-locator-v6",
+}
+
+
+def _canonical_site_key(key: str) -> str:
+    key = str(key or "").strip().lower().replace("www.", "")
+    if not key:
+        return ""
+    suffix = SITE_SCAN_KEY_REVISIONS.get(key)
+    return f"{key}::{suffix}" if suffix else key
+
+
+def _site_scan_aliases(key: str) -> list[str]:
+    """Return all journal keys that can represent the same visible site.
+
+    The visible diagnostics should show stable domains such as rule34.xxx, but
+    the journal can intentionally use revision-suffixed keys when a parser lane
+    changes semantics.  Count both the current key and any legacy unsuffixed key
+    so old partial runs do not disappear from the audit.
+    """
+    raw = str(key or "").strip().lower().replace("www.", "")
+    if not raw:
+        return []
+    base = raw.split("::", 1)[0]
+    aliases = [raw]
+    canonical = _canonical_site_key(base)
+    if canonical and canonical not in aliases:
+        aliases.append(canonical)
+    if base and base not in aliases:
+        aliases.append(base)
+    return aliases
+
+
 def _enabled_site_keys(settings: dict) -> list[str]:
     keys: list[str] = []
     for host, cfg in dict((settings or {}).get("sites") or {}).items():
         if isinstance(cfg, dict) and bool(cfg.get("enabled", False)):
             key = str(host or "").strip().lower().replace("www.", "")
-            if key == "rule34.us":
-                key += "::remote-media-md5-v2"
             if key and key not in keys:
                 keys.append(key)
     for cfg in list((settings or {}).get("custom_sites") or []):
@@ -345,11 +384,77 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
         journal_paths = scalar("SELECT COUNT(DISTINCT original_path) FROM site_scan_status")
         site_stats = []
         for key in active_keys:
-            checked = scalar("SELECT COUNT(DISTINCT original_path) FROM site_scan_status WHERE site_key=? AND scan_revision=1", (key,))
-            matches = scalar("SELECT COUNT(*) FROM site_scan_status WHERE site_key=? AND scan_revision=1 AND outcome='match'", (key,))
-            errors = scalar("SELECT COUNT(*) FROM site_scan_status WHERE site_key=? AND scan_revision=1 AND outcome IN ('error','deferred_network')", (key,))
-            site_stats.append({"site": key, "checked": checked, "matches": matches, "pending_among_started": max(0, journal_paths - checked), "errors": errors})
+            aliases = _site_scan_aliases(key)
+            if aliases:
+                placeholders = ",".join("?" for _ in aliases)
+                checked = scalar(
+                    f"SELECT COUNT(DISTINCT original_path) FROM site_scan_status "
+                    f"WHERE scan_revision=1 AND site_key IN ({placeholders})",
+                    tuple(aliases),
+                )
+                matches = scalar(
+                    f"SELECT COUNT(*) FROM site_scan_status "
+                    f"WHERE scan_revision=1 AND outcome='match' AND site_key IN ({placeholders})",
+                    tuple(aliases),
+                )
+                errors = scalar(
+                    f"SELECT COUNT(*) FROM site_scan_status "
+                    f"WHERE scan_revision=1 AND outcome IN ('error','deferred_network') AND site_key IN ({placeholders})",
+                    tuple(aliases),
+                )
+            else:
+                checked = matches = errors = 0
+            item = {"site": key, "checked": checked, "matches": matches, "pending_among_started": max(0, journal_paths - checked), "errors": errors}
+            canonical = _canonical_site_key(key)
+            if canonical and canonical != key:
+                item["journal_key"] = canonical
+            site_stats.append(item)
         report["site_scan"] = {"started_paths": journal_paths, "enabled_sites": active_keys, "sites": site_stats}
+
+        # v403: explicit reconciliation for the confusing trio:
+        # Windows source count vs site_scan_status vs live gallery rows.
+        source_audit = {
+            "source_root": str(source_root(settings) or ""),
+            "source_files": 0,
+            "source_media_files": 0,
+            "journal_distinct_paths": int(journal_paths or 0),
+            "journal_existing_on_disk": 0,
+            "journal_missing_on_disk": 0,
+            "journal_outside_source": 0,
+        }
+        try:
+            sr = source_root(settings)
+            if sr and Path(sr).exists():
+                for fp in Path(sr).rglob("*"):
+                    try:
+                        if not fp.is_file():
+                            continue
+                        source_audit["source_files"] += 1
+                        if fp.suffix.lower() in MEDIA_EXTS:
+                            source_audit["source_media_files"] += 1
+                    except Exception:
+                        continue
+                sr_resolved = Path(sr).resolve()
+            else:
+                sr_resolved = None
+            rows = con.execute("SELECT DISTINCT original_path FROM site_scan_status").fetchall()
+            for r in rows:
+                try:
+                    op = Path(str(r["original_path"] or ""))
+                    if op.exists():
+                        source_audit["journal_existing_on_disk"] += 1
+                    else:
+                        source_audit["journal_missing_on_disk"] += 1
+                    if sr_resolved is not None:
+                        try:
+                            op.resolve().relative_to(sr_resolved)
+                        except Exception:
+                            source_audit["journal_outside_source"] += 1
+                except Exception:
+                    source_audit["journal_missing_on_disk"] += 1
+        except Exception as audit_exc:
+            source_audit["error"] = str(audit_exc)[:200]
+        report["source_journal"] = source_audit
 
         all_indices = {str(r["name"]) for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
         missing_indices = [name for name in CRITICAL_INDEXES if name not in all_indices]
@@ -428,6 +533,11 @@ def format_report_text(report: dict[str, Any]) -> str:
         f"  Живых файлов: {lib.get('live_files',0)}    Размер: {_fmt_bytes(lib.get('live_bytes',0))}",
         f"  В корзине: {lib.get('trash_files',0)}    Размер: {_fmt_bytes(lib.get('trash_bytes',0))}",
         f"  Без source: {lib.get('without_source',0)}    Без тегов: {lib.get('without_tags',0)}    С несколькими source: {lib.get('multi_source_files',0)}",
+        "",
+        "Сверка исходника и журнала",
+        f"  Файлов в исходной папке: {report.get('source_journal',{}).get('source_files',0)}    Медиа: {report.get('source_journal',{}).get('source_media_files',0)}",
+        f"  Уникальных путей в site_scan_status: {report.get('source_journal',{}).get('journal_distinct_paths',0)}",
+        f"  Из них существуют на диске: {report.get('source_journal',{}).get('journal_existing_on_disk',0)}    отсутствуют: {report.get('source_journal',{}).get('journal_missing_on_disk',0)}    вне текущего источника: {report.get('source_journal',{}).get('journal_outside_source',0)}",
         "",
         "Имена файлов / защита от коллизий",
         f"  Одинаковых path в SQLite: {report.get('filename_collisions',{}).get('duplicate_live_paths',0)}",

@@ -3,13 +3,13 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames
+from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames, m023_effective_tag_categories, m024_reverse_branch_status
 
 # Version 13 is the consolidated SQLite schema shipped before the numbered
 # runner existed.  v130 records that existing working state as a baseline and
 # applies only subsequent migrations.
 BASELINE_VERSION = 13
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 24
 MIGRATIONS = {
     14: m014_database_health_maintenance,
     15: m015_saucenao_quota_snapshot,
@@ -20,6 +20,8 @@ MIGRATIONS = {
     20: m020_nomatch_reasons_source_only,
     21: m021_v158_maintenance_indexes,
     22: m022_v159_content_safe_filenames,
+    23: m023_effective_tag_categories,
+    24: m024_reverse_branch_status,
 }
 
 
@@ -81,21 +83,22 @@ def run_migrations(con, *, log: Callable[[str], None] | None = None) -> dict:
         if version in recorded or version <= current:
             continue
         module = MIGRATIONS[version]
+        name = str(getattr(module, "NAME", module.__name__.rsplit(".", 1)[-1]))
         try:
             module.apply(con)
             con.execute(
                 "INSERT OR REPLACE INTO schema_migrations(version,name,status,error,applied_at) VALUES(?,?,?,?,?)",
-                (version, module.NAME, "applied", "", int(time.time())),
+                (version, name, "applied", "", int(time.time())),
             )
-            actions.append(f"applied:{version}:{module.NAME}")
+            actions.append(f"applied:{version}:{name}")
             current = version
-            log(f"SQLite migration applied: {version:03d} {module.NAME}")
+            log(f"SQLite migration applied: {version:03d} {name}")
         except Exception as exc:
             con.execute(
                 "INSERT OR REPLACE INTO schema_migrations(version,name,status,error,applied_at) VALUES(?,?,?,?,?)",
-                (version, module.NAME, "failed", str(exc), int(time.time())),
+                (version, name, "failed", str(exc), int(time.time())),
             )
-            raise RuntimeError(f"SQLite migration {version:03d} {module.NAME} failed: {exc}") from exc
+            raise RuntimeError(f"SQLite migration {version:03d} {name} failed: {exc}") from exc
 
     final_version = max(current, BASELINE_VERSION if _has_user_schema(con) else 0)
     con.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(final_version),))

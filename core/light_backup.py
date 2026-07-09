@@ -14,7 +14,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from core.database.connection import db, db_path, close_pooled_connections
+from core.database.connection import db, db_path, close_thread_pooled_connections
+from core.database.storage import _safe_ident
 from core.paths import SETTINGS_FILE, RUNTIME_DIR, DATA_DIR
 
 
@@ -38,7 +39,7 @@ def _backup_root(settings: dict) -> Path:
 
 def _count_table(con, table: str) -> int:
     try:
-        return int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+        return int(con.execute(f"SELECT COUNT(*) FROM {_safe_ident(table)}").fetchone()[0] or 0)
     except Exception:
         return 0
 
@@ -68,7 +69,7 @@ def checkpoint_sqlite(settings: dict, *, truncate: bool = True, optimize: bool =
     # before a TRUNCATE checkpoint. During active parser work PASSIVE must not
     # destroy warm reader/writer handles.
     if truncate:
-        close_pooled_connections()
+        close_thread_pooled_connections(settings)
     con = sqlite3.connect(str(path), timeout=120)
     try:
         con.execute("PRAGMA busy_timeout=120000")

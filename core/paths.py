@@ -129,10 +129,21 @@ def _settings_root_from_config(data: dict) -> Path | None:
 
 
 def _valid_portable_settings_root(target: str | Path | None) -> Path | None:
+    """Return a usable Local Booru settings root.
+
+    Prefer a complete settings/config/app_settings.json, but also accept a
+    copied archive whose settings/db exists and config will be repaired on the
+    next save.  This makes SSD moves tolerant to selecting the archive root,
+    output, settings, or a renamed archive folder.
+    """
     if not target:
         return None
     root = _resolved(target)
-    return root if (root / "config" / "app_settings.json").is_file() else None
+    if (root / "config" / "app_settings.json").is_file():
+        return root
+    if (root / "db" / "local_booru_index.sqlite3").is_file():
+        return root
+    return None
 
 
 def _read_pointer_settings_root(pointer: Path) -> Path | None:
@@ -152,7 +163,19 @@ def _read_pointer_settings_root(pointer: Path) -> Path | None:
 
 
 def _pointer_settings_root() -> Path | None:
-    for pointer in _workspace_pointer_files():
+    """Return the selected portable workspace from locator files.
+
+    The OS-stable pointer in %%LOCALAPPDATA%% is the authoritative user choice.
+    A pointer travelling beside the program is only a fallback.  This prevents
+    an old source checkout/zip folder from snapping the app back to the old
+    drive after the library was moved to SSD.
+    """
+    ordered = [stable_workspace_pointer_file(), workspace_pointer_file()]
+    seen: set[Path] = set()
+    for pointer in ordered:
+        if pointer in seen:
+            continue
+        seen.add(pointer)
         target = _read_pointer_settings_root(pointer)
         if target is not None:
             return target
@@ -194,11 +217,12 @@ def persistent_base_dir() -> Path:
 
 
 def ensure_output_base(selected: str | Path | None, root: str | Path | None = None) -> Path:
-    """Return the managed archive-content root (``Local_Booru_Archive/output``).
+    """Return the managed archive-content root.
 
-    Old ``Local_Booru_Output`` selections remain readable so existing libraries
-    are not unexpectedly moved or duplicated.  New archive selections always
-    receive the two-branch Local_Booru_Archive layout.
+    If the user selected an existing archive root on another drive, use its
+    output/ branch even when the root is renamed and not literally
+    Local_Booru_Archive.  Only create a new Local_Booru_Archive wrapper when
+    the selected folder is not already archive-like.
     """
     selected_s = str(selected or "").strip()
     if selected_s:
@@ -207,29 +231,33 @@ def ensure_output_base(selected: str | Path | None, root: str | Path | None = No
         root_s = str(root or "").strip()
         base = (Path(root_s).expanduser().parent if root_s else documents_dir())
     base = _resolved(base)
+
     if base.name.lower() == LEGACY_OUTPUT_FOLDER_NAME.lower():
         base.mkdir(parents=True, exist_ok=True)
         return base
-    if base.name.lower() == "output" and base.parent.name.lower() == OUTPUT_FOLDER_NAME.lower():
+
+    # Already the output branch of either canonical or renamed archive root.
+    if base.name.lower() == "output":
         base.mkdir(parents=True, exist_ok=True)
         (base.parent / "settings").mkdir(parents=True, exist_ok=True)
         return base
-    if base.name.lower() == OUTPUT_FOLDER_NAME.lower():
+
+    # Existing archive root, including renamed roots: output/ + settings/.
+    if (base / "output").exists() or (base / "settings").exists() or base.name.lower() == OUTPUT_FOLDER_NAME.lower():
         archive_root = base
     else:
         archive_root = base / OUTPUT_FOLDER_NAME
+
     output = archive_root / "output"
     output.mkdir(parents=True, exist_ok=True)
     (archive_root / "settings").mkdir(parents=True, exist_ok=True)
     return output
 
-
 def suggested_settings_storage_dir(settings: dict) -> Path:
     output = ensure_output_base((settings or {}).get("output_dir"), (settings or {}).get("root"))
-    if output.name.lower() == "output" and output.parent.name.lower() == OUTPUT_FOLDER_NAME.lower():
+    if output.name.lower() == "output":
         return output.parent / "settings"
-    # A legacy output folder selected for an old library still receives a new
-    # private branch beside it when the portable workspace option is enabled.
+    # Legacy output folder selected for an old library still receives a private branch beside it.
     return output.parent / OUTPUT_FOLDER_NAME / "settings"
 
 
@@ -310,18 +338,57 @@ def _remove_empty_legacy_dirs() -> None:
         pass
 
 
+def normalize_archive_settings_root(selected: str | Path | None) -> Path | None:
+    """Resolve a user-selected archive/output/settings path to settings/.
+
+    Accept all common SSD-move selections:
+      * Local_Booru_Archive
+      * any renamed archive root containing output/ and settings/
+      * output/ inside such archive root
+      * settings/ itself
+      * a parent folder containing Local_Booru_Archive/
+    """
+    if not selected:
+        return None
+    p = _resolved(selected)
+    candidates: list[Path] = []
+
+    # settings/ itself
+    if p.name.lower() == "settings":
+        candidates.append(p)
+
+    # output/ under any archive-like root
+    if p.name.lower() == "output":
+        candidates.append(p.parent / "settings")
+
+    # archive root named Local_Booru_Archive OR renamed root containing branches
+    candidates.append(p / "settings")
+
+    # parent folder containing Local_Booru_Archive
+    candidates.append(p / OUTPUT_FOLDER_NAME / "settings")
+
+    # Some users select the config/db/cache parent directly but it is not named settings.
+    if (p / "config").exists() or (p / "db").exists():
+        candidates.append(p)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            key = candidate.resolve()
+        except Exception:
+            key = candidate.absolute()
+        if key in seen:
+            continue
+        seen.add(key)
+        target = _valid_portable_settings_root(candidate)
+        if target is not None:
+            return target
+    return None
+
+
 def connect_existing_archive(selected: str | Path) -> Path | None:
     """Connect an existing Local_Booru_Archive without overwriting its config."""
-    p = _resolved(selected)
-    if p.name.lower() == "settings":
-        target = p
-    elif p.name.lower() == "output" and p.parent.name.lower() == OUTPUT_FOLDER_NAME.lower():
-        target = p.parent / "settings"
-    elif p.name.lower() == OUTPUT_FOLDER_NAME.lower():
-        target = p / "settings"
-    else:
-        target = p / OUTPUT_FOLDER_NAME / "settings"
-    target = _valid_portable_settings_root(target)
+    target = normalize_archive_settings_root(selected)
     if target is None:
         return None
     write_workspace_pointer(target)
@@ -387,7 +454,11 @@ def _retire_legacy_full_settings_if_portable() -> None:
     try:
         if not USING_SEPARATE_STORAGE or not SETTINGS_FILE.exists():
             return
-        write_workspace_pointer(DATA_DIR)
+        # Do not rewrite workspace pointers on every startup.  Rewriting the
+        # active old path made fresh SSD switches lose to a newly-touched stale
+        # local pointer.  Pointers are written only by explicit connect/save.
+        if not any(pointer.exists() for pointer in _workspace_pointer_files()):
+            write_workspace_pointer(DATA_DIR)
         if BOOTSTRAP_SETTINGS_FILE.exists() and BOOTSTRAP_SETTINGS_FILE.resolve() != SETTINGS_FILE.resolve():
             BOOTSTRAP_SETTINGS_FILE.unlink(missing_ok=True)
     except Exception:

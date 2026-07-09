@@ -89,6 +89,12 @@ def migrate_legacy_nomatch_cache(settings: dict) -> dict:
         return {"imported": 0, "backup": ""}
     items = _legacy_items()
     try:
+        batch_size = int((settings or {}).get("legacy_nomatch_migration_batch_size", 500) or 500)
+    except Exception:
+        batch_size = 500
+    batch_size = max(100, min(5000, batch_size))
+    imported = 0
+    try:
         from core.database.connection import db
         with db(settings, write=True) as con:
             for item in items:
@@ -103,11 +109,18 @@ def migrate_legacy_nomatch_cache(settings: dict) -> dict:
                        updated_at=MAX(no_match_items.updated_at,excluded.updated_at),active=1""",
                     (path, path, str(item.get("reason") or "legacy_cache"), str(item.get("manual_url") or ""), int(float(item.get("ts") or time.time()))),
                 )
+                imported += 1
+                # Release SQLite's writer lock periodically. On a deliberately
+                # rebuilt DB the legacy NO_MATCH cache can contain thousands of
+                # rows; one huge transaction makes startup health/lifecycle
+                # probes wait until busy_timeout.
+                if imported % batch_size == 0:
+                    con.commit()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         backup = NO_MATCH_DB_FILE.with_name(f"nomatch_cache_{stamp}_legacy_before_sqlite.json.bak")
         shutil.copy2(NO_MATCH_DB_FILE, backup)
-        _MIGRATION_MARK.write_text(f"imported={len(items)}\nat={int(time.time())}\nbackup={backup}\n", encoding="utf-8")
-        return {"imported": len(items), "backup": str(backup)}
+        _MIGRATION_MARK.write_text(f"imported={imported}\nat={int(time.time())}\nbackup={backup}\n", encoding="utf-8")
+        return {"imported": imported, "backup": str(backup)}
     except Exception as exc:
         return {"imported": 0, "backup": "", "error": str(exc)}
 

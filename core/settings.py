@@ -3,7 +3,7 @@ from pathlib import Path
 from core.paths import (
     SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE, DATA_DIR, USING_SEPARATE_STORAGE,
     prepare_separate_storage, write_workspace_pointer, remove_workspace_pointer,
-    activate_portable_workspace,
+    activate_portable_workspace, normalize_archive_settings_root, OUTPUT_FOLDER_NAME,
 )
 
 
@@ -56,7 +56,31 @@ DEFAULT_SETTINGS = {
     "logo_fit": "crop",
     "appearance": "dark",
     "show_search_preview": True,
-    "max_console_lines": 2500,
+    # v339: parser can produce tens of thousands of low-level lines per run.
+    # Keep UI history compact; full forensic logs still go through the file logger.
+    "max_console_lines": 1000,
+    "tagger_ui_log_throttle": True,
+    "tagger_ui_log_summary_interval_seconds": 5.0,
+    "tagger_ui_log_flush_interval_ms": 120,
+    "tagger_ui_log_flush_batch": 250,
+    "tagger_ui_log_queue_cap": 5000,
+    # v375: emergency RAM guard for mass parser runs.  If a leak/regression
+    # starts eating the system, stop parser queues before Windows falls over.
+    "tagger_ram_safe_mode": True,
+    "tagger_ram_guard_enabled": True,
+    "tagger_ram_guard_check_interval_seconds": 5.0,
+    "tagger_ram_soft_limit_mb": 12288,
+    "tagger_ram_min_free_mb": 3072,
+    "tagger_ram_system_load_limit_percent": 94,
+    "tagger_ram_safe_console_lines": 120,
+    "tagger_ram_safe_log_queue_cap": 300,
+    "tagger_ram_safe_log_flush_batch": 40,
+    "tagger_ram_compact_match_logs": True,
+    "tagger_ram_safe_hard_limit_mb": 12288,
+    "tagger_ram_trim_at_mb": 8192,
+    "tagger_ram_safe_disable_activity_thumbs": False,
+    "tagger_ram_safe_disable_parser_preview": False,
+    "gallery_block_heavy_tasks_while_parser": True,
     "enable_error_console": True,
     "developer_preload_md5_index": True,
     "grabber_exact_md5_fanout": True,
@@ -91,9 +115,15 @@ DEFAULT_SETTINGS = {
     "local_db_read_workers": 2,
     "local_preflight_enabled": True,
     "local_preflight_phash": True,
+    # Parser performance profile is resolved at runtime from detected RAM.
+    # auto: <=18GB low_memory, <=36GB balanced, otherwise performance.
+    "tagger_performance_profile": "auto",
+    "tagger_reverse_admit_window_files": 64,
+    "local_preflight_low_memory_skip_threshold": 5000,
+    "tagger_db_startup_lock_wait_seconds": 90,
     "local_tagger_workers": 4,
     "local_thumb_workers": 4,
-    "local_thumb_pregen_workers": 4,
+    "local_thumb_pregen_workers": 1,
     "local_background_workers": 4,
     "visual_nomatch_classify_enabled": True,
     "visual_nomatch_backend": "clip_local",
@@ -115,12 +145,23 @@ DEFAULT_SETTINGS = {
     "rule34_image_key_hotlink_playwright_fallback": True,
     "rule34_image_key_hotlink_playwright_headless": False,
     "rule34_image_key_hotlink_playwright_timeout": 25.0,
+    "rule34_image_key_hotlink_playwright_supervisor": True,
+    "rule34_image_key_hotlink_playwright_retries": 1,
+    "rule34_image_key_hotlink_playwright_ephemeral": True,
+    "browser_fallback_disable_gpu": True,
+    "parser_never_touch_system_chrome": True,
+    "parser_disable_companion_chrome_fetch": False,
+    "browser_fallback_launch_watchdog_seconds": 18.0,
     "rule34_image_key_bucket_probe_enabled": False,
     "rule34_image_key_bucket_probe_sequence": "",
     "rule34_image_key_bucket_probe_max": 9999,
     "rule34_image_key_bucket_probe_step": 100,
     "rule34_image_key_bucket_request_timeout": 3.0,
     "rule34_image_key_bucket_total_timeout": 90.0,
+    "atf_exact_md5_enabled": True,
+    "atf_exact_md5_accept_missing_md5_from_api": True,
+    "atf_pixel_hash_after_exact_md5_miss": False,
+    "atf_pixel_hash_after_reverse_miss": True,
     "atf_pixel_hash_locator_enabled": True,
     "atf_pixel_hash_workers": 2,
     "atf_pixel_hash_delay_ms": 1100,
@@ -166,16 +207,27 @@ DEFAULT_SETTINGS = {
     "skip_existing": True,
     "tag_only_untagged": True,
     "retry_nomatch": False,
-    "delay_seconds": 8.0,
+    "delay_seconds": 0.0,
     # Per-site conveyor: every enabled site advances independently through the
     # file queue while one global result writer serializes SQLite commits.
     # Low-power mode keeps this journal/conveyor but reduces its active window to one file.
     # Flat-tag sources collect quickly; categories are recovered later in a durable low-priority pass.
     "tagger_background_tag_groups": True,
     "tagger_background_rule34_categories": True,  # legacy alias
+    "tagger_category_overlay_429_cooldown_seconds": 900,
+    "tagger_gelbooru_category_single_tag_fallback": True,
     "tagger_low_power_mode": False,
     "tagger_site_interval_seconds": 1.10,
-    "tagger_conveyor_window": 32,
+    "tagger_conveyor_window": 100,
+    # v373: true per-site cursors: every site scans its own pending files and never waits for ATF/other sites.
+    "tagger_true_per_site_cursors": True,
+    # v374: reverse branches also have independent queues after MD5-all-sites-miss.
+    "tagger_true_per_reverse_branch_queues": True,
+    "tagger_reverse_branch_no_nomatch_until_all_done": True,
+    # v371: keep fast exact-MD5 lanes fed even when ATF/reverse/CF sites are slow.
+    "tagger_md5_lane_min_state_limit": 4096,
+    "tagger_force_atf_md5_lane": True,
+    "tagger_site_activity_column_widths": [150, 165, 250, 275],
     "request_timeout_seconds": 30,
     "request_connect_timeout_seconds": 10,
     "request_read_timeout_seconds": 30,
@@ -196,10 +248,13 @@ DEFAULT_SETTINGS = {
     "e621_browser_api_verify_timeout_seconds": 120,
     "e621_browser_api_backend": "companion_extension",
     "e621_browser_api_companion_timeout_seconds": 120,
+    "e621_companion_v342_default_attached": True,
     "e621_browser_api_allow_external_chrome_cdp": False,
     "e621_browser_api_cdp_port": 9222,
     "e621_browser_api_launch_external_chrome": False,
     "e621_iqdb_max_results": 5,
+    # Branch-local cooldown only. 429 from e621 IQDB must not stop the whole parser.
+    "e621_iqdb_branch_cooldown_seconds": 300,
     "enable_tineye": False,
     "tineye_delay_min": 30,
     "tineye_delay_max": 90,
@@ -212,6 +267,7 @@ DEFAULT_SETTINGS = {
     "saucenao_api_key": "",
     "min_similarity": 85.0,
     "language": "ru",
+    "language_selected_once": False,
     "tag_sort": "count_desc",
     "gallery_tag_sort": "count_desc",
     "all_tags_sort": "count_desc",
@@ -237,11 +293,15 @@ DEFAULT_SETTINGS = {
     "sqlite_compute_md5_on_index": False,
     "sqlite_compute_phash_on_index": True,
     "sqlite_db_folder": "",
+    # Safety: after the DB was initialized once, a missing sqlite file means
+    # disconnected/wrong archive path until the user explicitly overrides it.
+    "db_initialized_once": False,
+    "sqlite_allow_recreate_missing_db": False,
     "task_max_workers": 4,
     "gallery_sql_page_size": 200,
     "thumbnail_worker_enabled": True,
-    "thumbs_pregen_on_index": True,
-    "thumb_pregen_workers": 4,
+    "thumbs_pregen_on_index": False,
+    "thumb_pregen_workers": 1,
     "thumb_cache_w": 256,
     "thumb_cache_h": 256,
     "thumb_cache_card_w": 240,
@@ -250,7 +310,7 @@ DEFAULT_SETTINGS = {
     # SQLite cache is per connection. Keep the default conservative because the
     # parser, gallery and background workers may each own a connection.
     "sqlite_cache_mb": 40,
-    "sqlite_temp_store": "MEMORY",
+    "sqlite_temp_store": "FILE",
     "sqlite_wal_limit_mb": 512,
     "sqlite_checkpoint_on_exit": True,
     "db_batch_commit_size": 100,
@@ -268,9 +328,9 @@ DEFAULT_SETTINGS = {
     "thumb_keep_recent": 500,
     # Gallery performance controls; safe defaults match the existing v115 behaviour.
     "thumb_quality_scale": 2,
-    "thumb_memory_items": 400,
-    "thumb_threads": 4,
-    "thumb_prefetch_pages": True,
+    "thumb_memory_items": 120,
+    "thumb_threads": 1,
+    "thumb_prefetch_pages": False,
     "gallery_defer_sidebar_counts_while_parser": True,
     "gallery_sidebar_refresh_delay_ms": 7000,
     "pixmap_cache_mb": 128,
@@ -397,6 +457,46 @@ def _canonicalize_new_portable_workspace(settings, target):
     fixed["output_dir"] = str(output)
     return fixed
 
+
+def _requested_existing_workspace(settings):
+    """Detect an explicit request to switch to another existing archive.
+
+    When the app is already running from a portable archive, normal saving must
+    keep paths locked to the active DATA_DIR.  The exception is when the user
+    selected an existing Local_Booru_Archive through the reconnect action or by
+    choosing its output folder.  In that case saving must update only the small
+    workspace pointer and must not overwrite the target archive's config with
+    the currently loaded old archive settings.
+    """
+    if not USING_SEPARATE_STORAGE:
+        return None
+    data = settings or {}
+    candidates = []
+    explicit = str(data.get("settings_storage_dir", "") or "").strip()
+    if explicit:
+        candidates.append(explicit)
+    output = str(data.get("output_dir", "") or "").strip()
+    if output:
+        try:
+            op = Path(output).expanduser()
+            if op.name.lower() == "output" and op.parent.name.lower() == OUTPUT_FOLDER_NAME.lower():
+                candidates.append(op.parent)
+            elif op.name.lower() == OUTPUT_FOLDER_NAME.lower():
+                candidates.append(op)
+        except Exception:
+            candidates.append(output)
+    for candidate in candidates:
+        target = normalize_archive_settings_root(candidate)
+        if target is None:
+            continue
+        try:
+            if target.resolve() == DATA_DIR.resolve():
+                continue
+        except Exception:
+            pass
+        return target
+    return None
+
 _REMOVED_REVERSE_SERVICES_V204 = (
     "enable_fuzzysearch",
     "fuzzysearch_api_key",
@@ -425,7 +525,8 @@ def load_settings():
     for candidate in (SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE):
         if candidate.exists():
             try:
-                loaded = deep_merge(DEFAULT_SETTINGS, json.loads(candidate.read_text(encoding="utf-8")))
+                raw_loaded = json.loads(candidate.read_text(encoding="utf-8"))
+                loaded = deep_merge(DEFAULT_SETTINGS, raw_loaded)
                 loaded = _drop_removed_reverse_services(_lock_to_active_portable_workspace(loaded))
                 # v160: switch the default gallery/grabber page shape from the
                 # old 4x4 test layout to a 16:9-friendly 8x4 layout.  Only
@@ -449,6 +550,16 @@ def load_settings():
                     loaded["parser_blueprint_auto_add_sites"] = True
                     loaded["parser_blueprint_respect_site_enabled"] = True
                     loaded["parser_blueprint_v321_default_attached"] = True
+                # v342: v341 overcorrected and forced e621 away from the
+                # companion extension.  Restore the intended mode: use the
+                # already-open Chrome/e621 tab through the companion bridge,
+                # but keep auto-launch/CDP control of system Chrome disabled.
+                if not (isinstance(raw_loaded, dict) and raw_loaded.get("e621_companion_v342_default_attached")):
+                    loaded["e621_browser_api_backend"] = "companion_extension"
+                    loaded["parser_disable_companion_chrome_fetch"] = False
+                    loaded["e621_browser_api_allow_external_chrome_cdp"] = False
+                    loaded["e621_browser_api_launch_external_chrome"] = False
+                    loaded["e621_companion_v342_default_attached"] = True
                 if candidate == SETTINGS_FILE:
                     activate_portable_workspace()
                 return loaded
@@ -471,40 +582,50 @@ def save_settings(settings):
         settings.pop(retired, None)
     settings["items_per_page"] = int(settings.get("columns", 8)) * int(settings.get("rows_per_page", 4))
 
-    # A process opened through Local_Booru_Archive/settings must never be able
-    # to detach itself merely because an old migrated config still had the
-    # legacy checkbox disabled.  Moving to another archive is performed by the
-    # explicit "Подключить существующий архив" action.
-    portable_requested = USING_SEPARATE_STORAGE or bool(settings.get("separate_settings_storage", False))
-    if portable_requested:
-        if USING_SEPARATE_STORAGE:
-            target = DATA_DIR
-            normalized = _lock_to_active_portable_workspace(settings)
-        else:
-            target = prepare_separate_storage(settings)
-            if target is None:
-                raise OSError("Не удалось определить Local_Booru_Archive/settings")
-            normalized = _canonicalize_new_portable_workspace(settings, target)
+    # A process opened through Local_Booru_Archive/settings must never detach
+    # itself merely because stale config fields changed.  However, when the user
+    # explicitly points the UI at another existing Local_Booru_Archive, saving
+    # must not snap the workspace pointer back to the old DATA_DIR.
+    switch_target = _requested_existing_workspace(settings)
+    if switch_target is not None:
+        normalized = _canonicalize_new_portable_workspace(settings, switch_target)
+        normalized["_workspace_switch_pending"] = True
         settings.update(normalized)
-        data = json.dumps(settings, ensure_ascii=False, indent=2)
-        canonical = target / "config" / "app_settings.json"
-        _atomic_write_settings(canonical, data)
-        # The locator contains only paths.  Never mirror API keys, cookies or
-        # user configuration into Documents when a portable archive is active.
-        write_workspace_pointer(target)
-        # Once the active process itself is portable, safely remove any obsolete
-        # full settings copy from Documents.
-        try:
-            if USING_SEPARATE_STORAGE and BOOTSTRAP_SETTINGS_FILE.exists() and BOOTSTRAP_SETTINGS_FILE.resolve() != canonical.resolve():
-                BOOTSTRAP_SETTINGS_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+        # Only update the locators.  The target archive already has its own
+        # app_settings.json/database/cookies and must not be overwritten by the
+        # old currently-loaded settings.  Restart will load the target config.
+        write_workspace_pointer(switch_target)
     else:
-        # Legacy mode is retained only until the user selects/creates a portable
-        # Local_Booru_Archive.  A connected archive cannot fall back here.
-        data = json.dumps(settings, ensure_ascii=False, indent=2)
-        remove_workspace_pointer()
-        _atomic_write_settings(BOOTSTRAP_SETTINGS_FILE, data)
+        portable_requested = USING_SEPARATE_STORAGE or bool(settings.get("separate_settings_storage", False))
+        if portable_requested:
+            if USING_SEPARATE_STORAGE:
+                target = DATA_DIR
+                normalized = _lock_to_active_portable_workspace(settings)
+            else:
+                target = prepare_separate_storage(settings)
+                if target is None:
+                    raise OSError("Не удалось определить Local_Booru_Archive/settings")
+                normalized = _canonicalize_new_portable_workspace(settings, target)
+            settings.update(normalized)
+            data = json.dumps(settings, ensure_ascii=False, indent=2)
+            canonical = target / "config" / "app_settings.json"
+            _atomic_write_settings(canonical, data)
+            # The locator contains only paths.  Never mirror API keys, cookies or
+            # user configuration into Documents when a portable archive is active.
+            write_workspace_pointer(target)
+            # Once the active process itself is portable, safely remove any obsolete
+            # full settings copy from Documents.
+            try:
+                if USING_SEPARATE_STORAGE and BOOTSTRAP_SETTINGS_FILE.exists() and BOOTSTRAP_SETTINGS_FILE.resolve() != canonical.resolve():
+                    BOOTSTRAP_SETTINGS_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            # Legacy mode is retained only until the user selects/creates a portable
+            # Local_Booru_Archive.  A connected archive cannot fall back here.
+            data = json.dumps(settings, ensure_ascii=False, indent=2)
+            remove_workspace_pointer()
+            _atomic_write_settings(BOOTSTRAP_SETTINGS_FILE, data)
 
     if _original_settings_ref is not None and _original_settings_ref is not settings:
         _original_settings_ref.clear()

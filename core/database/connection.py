@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sqlite3
 from contextlib import contextmanager
 from threading import Lock, local
@@ -17,6 +18,16 @@ class DatabaseWriteBlockedError(RuntimeError):
     """Raised when startup integrity checks put the working DB in read-only safety mode."""
 
 
+class DatabaseMissingError(RuntimeError):
+    """Raised when a previously initialised Local Booru SQLite DB disappeared.
+
+    SQLite normally creates a new empty file on connect().  That is dangerous for
+    this app: a disconnected/misconfigured archive drive would look like "all
+    tags vanished".  Intentional full resets remain possible with an explicit
+    marker/env override.
+    """
+
+
 def set_writes_blocked(reason: str = "") -> None:
     global _WRITE_BLOCK_REASON
     _WRITE_BLOCK_REASON = str(reason or "").strip()
@@ -30,7 +41,7 @@ def writes_blocked() -> bool:
     return bool(_WRITE_BLOCK_REASON)
 
 
-def db_path(settings):
+def _db_root(settings, *, create: bool = True) -> Path:
     folder = str((settings or {}).get("sqlite_db_folder", "")).strip()
     if folder:
         root = Path(folder).expanduser()
@@ -40,12 +51,86 @@ def db_path(settings):
             root = Path(DB_DIR)
         except Exception:
             root = Path.cwd() / "Local_Booru_Archive" / "settings" / "db"
-    root.mkdir(parents=True, exist_ok=True)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def db_path(settings):
+    root = _db_root(settings, create=True)
     return root / "local_booru_index.sqlite3"
+
+
+def _db_init_marker(path: Path) -> Path:
+    return path.with_name(path.name + ".initialized")
+
+
+def _allow_missing_db_recreate(settings, path: Path) -> bool:
+    if str(os.environ.get("LOCAL_BOORU_ALLOW_NEW_DB", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        if bool((settings or {}).get("sqlite_allow_recreate_missing_db", False)):
+            return True
+    except Exception:
+        pass
+    # Manual emergency override: create this file beside the expected DB.
+    # It is intentionally explicit so accidental disconnected drives do not
+    # silently create a fresh empty SQLite.
+    try:
+        return (path.parent / "ALLOW_CREATE_EMPTY_DB.txt").exists()
+    except Exception:
+        return False
+
+
+def _guard_missing_existing_db(settings, path: Path, *, readonly: bool) -> None:
+    if path.exists():
+        return
+    if readonly:
+        return
+    if _allow_missing_db_recreate(settings, path):
+        return
+    already_init = False
+    try:
+        already_init = bool((settings or {}).get("db_initialized_once", False))
+    except Exception:
+        already_init = False
+    try:
+        already_init = already_init or _db_init_marker(path).exists()
+    except Exception:
+        pass
+    if already_init:
+        raise DatabaseMissingError(
+            "SQLite database is missing and Local Booru will not create a new empty DB automatically: "
+            + str(path)
+            + ". Проверь диск/путь. Если это намеренный полный сброс базы, создай рядом файл "
+            + "ALLOW_CREATE_EMPTY_DB.txt или запусти с LOCAL_BOORU_ALLOW_NEW_DB=1."
+        )
+
+
+def _mark_db_initialized(settings, path: Path) -> None:
+    """Persist only the filesystem marker that this DB path was initialized.
+
+    Do not call save_settings() from connect()/ensure_initialized().  Those
+    functions are used by parser lanes and maintenance workers with temporary
+    session dictionaries; serialising such dictionaries can either fail on
+    callables (for example _cancel_callback) or permanently leak per-run
+    overrides into app_settings.json.  The marker file is enough to prevent
+    silent recreation of a missing previously-initialised SQLite file.
+    """
+    try:
+        marker = _db_init_marker(path)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            "Local Booru SQLite was initialised here. Delete only when intentionally resetting the DB.\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def connect(settings, *, readonly: bool = False):
     path = db_path(settings)
+    _guard_missing_existing_db(settings, path, readonly=readonly)
     opened_readonly = bool(readonly and path.exists())
     if opened_readonly:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30, check_same_thread=False)
@@ -90,7 +175,7 @@ def connect(settings, *, readonly: bool = False):
     return con
 
 
-def ensure_initialized(con, *, force=False):
+def ensure_initialized(con, *, force=False, settings=None):
     try:
         path = con.execute("PRAGMA database_list").fetchone()[2]
     except Exception:
@@ -113,6 +198,10 @@ def ensure_initialized(con, *, force=False):
                 pass
             else:
                 raise
+        try:
+            _mark_db_initialized(settings, Path(path))
+        except Exception:
+            pass
         _INIT_DONE.add(path)
 
 
@@ -142,7 +231,7 @@ def get_pooled_connection(settings, *, readonly: bool = False):
             except Exception: pass
             cache.pop(key, None)
     con = connect(settings, readonly=readonly)
-    ensure_initialized(con)
+    ensure_initialized(con, settings=settings)
     cache[key] = con
     with _POOL_LOCK:
         _ALL_CONNECTIONS.append(con)
@@ -219,7 +308,7 @@ def db(settings, write: bool = False, readonly: bool = False, allow_blocked_writ
     con = get_pooled_connection(settings, readonly=readonly and not write) if use_pool else connect(settings, readonly=readonly and not write)
     try:
         if not use_pool:
-            ensure_initialized(con)
+            ensure_initialized(con, settings=settings)
         yield con
         if write:
             con.commit()
@@ -245,5 +334,5 @@ def get_connection(settings):
     if bool((settings or {}).get("sqlite_connection_pool", True)):
         return get_pooled_connection(settings)
     con = connect(settings)
-    ensure_initialized(con)
+    ensure_initialized(con, settings=settings)
     return con

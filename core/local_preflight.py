@@ -57,6 +57,7 @@ def start_parser_local_preflight(
 
     def one(path: Path) -> tuple[bool, bool]:
         md5_done = phash_done = False
+        search_path = None
         try:
             from core.file_hash_cache import get_or_compute_md5
             get_or_compute_md5(settings, path)
@@ -72,6 +73,15 @@ def start_parser_local_preflight(
                 phash_done = True
             except Exception as e:
                 _log.debug("local preflight phash failed: %s: %s", path, e)
+            finally:
+                # Do not let Pillow/OpenCV temporary buffers linger between
+                # thousands of preflight jobs.  This is deliberately inside the
+                # worker task, not only at parser STOP.
+                try:
+                    import gc
+                    gc.collect()
+                except Exception:
+                    pass
         return md5_done, phash_done
 
     def runner() -> None:

@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.1.2",
-  "description": "Скрывает уже скачанные booru-карточки и помогает Local Booru получать e621 JSON через обычный браузер после Cloudflare.",
+  "version": "0.1.10",
+  "description": "Скрывает уже скачанные booru-карточки и помогает Local Booru получать e621/Pixiv JSON через обычный браузер без запуска Chrome парсером. Pixiv fetch идёт через service worker с user-id/cookie headers и при 404 явно возвращает результат целевой Pixiv-вкладки без запуска chrome.exe.",
   "permissions": [
     "storage",
     "contextMenus",
     "tabs",
-    "scripting"
+    "scripting",
+    "alarms",
+    "cookies"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
@@ -19,6 +21,8 @@
     "*://danbooru.donmai.us/*",
     "*://e621.net/*",
     "*://e926.net/*",
+    "*://www.pixiv.net/*",
+    "*://pixiv.net/*",
     "*://booru.allthefallen.moe/*"
   ],
   "background": {
@@ -34,6 +38,8 @@
         "*://danbooru.donmai.us/*",
         "*://e621.net/*",
         "*://e926.net/*",
+        "*://www.pixiv.net/*",
+        "*://pixiv.net/*",
         "*://booru.allthefallen.moe/*"
       ],
       "js": [

@@ -499,13 +499,15 @@ class SettingsPage(QWidget):
         self.appearance=QComboBox(); self.appearance.setObjectName("SettingsCombo"); self.appearance.setView(QListView()); self.appearance.addItem("Abyss (тёмный синий)","abyss"); self.appearance.addItem("Ember (тёмный янтарный)","ember"); self.appearance.addItem("Slate (нейтральный серый)","slate"); self.appearance.addItem("Sakura (тёмно-розовый)","sakura"); self.appearance.addItem("PornHub (чёрный+оранжевый)","pornhub"); self.appearance.addItem("R34 / Old web green","r34"); self.appearance.addItem("R34 Dark / Old web night","r34dark"); self.appearance.addItem("Windows 95","win95"); self.appearance.addItem("Light (светлый)","light")
         self.title=QLineEdit(); self.logo=QLineEdit(); self.logo_fit=QComboBox(); self.logo_fit.addItem("Crop","crop"); self.logo_fit.addItem("Contain","contain"); self.logo_choose=QPushButton(); self.logo_choose.clicked.connect(self.choose_logo); self.logo_crop=QPushButton(); self.logo_crop.clicked.connect(self.crop_logo)
         lrow=QHBoxLayout(); lrow.addWidget(self.logo,1); lrow.addWidget(self.logo_choose); lrow.addWidget(self.logo_crop)
-        self.output_dir=QLineEdit(); self.choose_output=QPushButton("..."); self.choose_output.clicked.connect(self.choose_output_dir); outrow=QHBoxLayout(); outrow.addWidget(self.output_dir,1); outrow.addWidget(self.choose_output)
+        self.output_dir=QLineEdit(); self.choose_output=QPushButton("..."); self.choose_output.clicked.connect(self.choose_output_dir); self.connect_archive_btn = QPushButton("Подключить существующий архив..."); self.connect_archive_btn.clicked.connect(self.connect_existing_archive); outrow=QHBoxLayout(); outrow.addWidget(self.output_dir,1); outrow.addWidget(self.choose_output); outrow.addWidget(self.connect_archive_btn)
+        # Storage is no longer a separate user decision: a connected archive always uses
+        # Local_Booru_Archive/output + Local_Booru_Archive/settings.  Keep widgets
+        # hidden only for backward-compatible load/save code.
         self.separate_settings = QCheckBox("Хранить служебные данные в Local_Booru_Archive/settings")
         self.settings_storage_dir = QLineEdit(); self.settings_storage_dir.setPlaceholderText("будет создано внутри выбранного Local_Booru_Archive")
         self.settings_storage_dir.setReadOnly(True)
-        self.connect_archive_btn = QPushButton("Подключить существующий архив...")
-        self.connect_archive_btn.clicked.connect(self.connect_existing_archive)
-        storage_row = QHBoxLayout(); storage_row.addWidget(self.separate_settings); storage_row.addWidget(self.settings_storage_dir,1); storage_row.addWidget(self.connect_archive_btn)
+        self.separate_settings.setVisible(False); self.settings_storage_dir.setVisible(False)
+        storage_row = QHBoxLayout(); storage_row.addWidget(self.separate_settings); storage_row.addWidget(self.settings_storage_dir,1)
         self.debug_logging=QCheckBox()
         self.debug_logging.setChecked(False)
 
@@ -643,6 +645,13 @@ class SettingsPage(QWidget):
         self.legacy_sidecars_btn.clicked.connect(self.import_legacy_sidecars)
         _mrow5.addWidget(self.repair_e621_btn, 1); _mrow5.addWidget(self.legacy_sidecars_btn, 1)
         _maintenance.addLayout(_mrow5)
+        _mrow6 = QHBoxLayout()
+        self.recheck_general_categories_btn = QPushButton("Переразложить ВСЕ general-only теги")
+        self.recheck_general_categories_btn.setToolTip("Найдёт все уже сохранённые source-наборы Danbooru/Gelbooru/rule34/e621/ATF, где все теги лежат в general, и заново запросит категории у каждого сайта. Лимита 10000 больше нет. Новые теги не добавляются, только исправляются категории существующих тегов.")
+        self.recheck_general_categories_btn.clicked.connect(self.recheck_general_only_categories)
+        _mrow6.addWidget(self.recheck_general_categories_btn, 1)
+        _mrow6.addStretch(1)
+        _maintenance.addLayout(_mrow6)
         self.sql_status=QLabel("")
         self.sql_status.setWordWrap(True)
         self.sql_status.setVisible(False)
@@ -1110,7 +1119,6 @@ class SettingsPage(QWidget):
             ("Галерея и превью", "Сетка, кэш, фильтры тегов и экспорт метаданных."),
             ("Граббер / Подписки", "Онлайн-галерея сайтов, подписки и общий блоклист скачивания."),
             ("Обслуживание", "Проверки, индексы и безопасный ремонт рабочей библиотеки."),
-            ("Потоки", "Локальные worker-pool'ы: хэширование, pHash, превью, видео и фоновые задачи."),
             ("Удаление и сброс", "Опасные действия только над рабочей библиотекой."),
             ("Для разработчика", "Логи, консоль, совместимость и внутренние параметры."),
         ]
@@ -1155,7 +1163,7 @@ class SettingsPage(QWidget):
         self.section_description.setText(description)
         form_groups = {
             "Основные": {"Language", "Appearance", "Title", "Logo path", "Logo fit"},
-            "Библиотека": {"Images folder", "Output folder", "Хранение настроек", "Manga folder", "Папка игр"},
+            "Библиотека": {"Images folder", "Output folder", "Manga folder", "Папка игр"},
             "Галерея и превью": {"Columns", "Rows/page", "Card height", "Ignore numeric tags", "Search preview"},
             "Для разработчика": {"Debug logging", "Console line limit", "Error console"},
         }
@@ -1176,7 +1184,7 @@ class SettingsPage(QWidget):
         self.gallery_display_box.setVisible(title == "Галерея и превью")
         self.grabber_subs_box.setVisible(title == "Граббер / Подписки")
         self.maintenance_box.setVisible(title == "Обслуживание")
-        self.threading_box.setVisible(title == "Потоки")
+        self.threading_box.setVisible(False)
         self.danger_box.setVisible(title == "Удаление и сброс")
         self.developer_tools_box.setVisible(title == "Для разработчика")
         is_developer = title == "Для разработчика"
@@ -1445,7 +1453,7 @@ class SettingsPage(QWidget):
         self.imports_to_inbox.setChecked(bool(s.get("imports_to_inbox", True))); self.inbox_hours.setValue(int(s.get("inbox_auto_archive_hours", 24) or 24)); self.thumb_cleanup_exit.setChecked(bool(s.get("thumb_cleanup_on_exit", True))); self.thumb_keep_recent.setValue(int(s.get("thumb_keep_recent", 500) or 500))
         self.thumb_quality.setCurrentIndex(max(0, self.thumb_quality.findData(int(s.get("thumb_quality_scale", 2) or 2))))
         self.thumb_memory_items.setValue(int(s.get("thumb_memory_items", 400) or 400)); self.thumb_threads.setValue(int(s.get("thumb_threads", s.get("local_thumb_workers", 4)) or 4)); self.thumb_prefetch.setChecked(bool(s.get("thumb_prefetch_pages", True))); self.performance_slow_ms.setValue(int(s.get("performance_slow_ms", 100) or 100)); self.developer_preload_md5_index.setChecked(bool(s.get("developer_preload_md5_index", True))); self.developer_grabber_md5_cache_enabled.setChecked(bool(s.get("grabber_disk_metadata_cache_enabled", s.get("developer_grabber_md5_cache_enabled", True)))); self.grabber_exact_md5_fanout.setChecked(bool(s.get("grabber_exact_md5_fanout", True))); self.grabber_visual_hash_merge.setChecked(bool(s.get("grabber_visual_hash_merge", False))); self.grabber_visual_hash_distance.setValue(int(s.get("grabber_visual_hash_distance", 3) or 3)); self.developer_filesystem_duplicate_fallback.setChecked(bool(s.get("developer_filesystem_duplicate_fallback", False)))
-        self.local_total_workers.setValue(int(s.get("local_total_workers", 8) or 8)); self.local_scan_workers.setValue(int(s.get("local_scan_workers", 2) or 2)); self.local_hash_workers.setValue(int(s.get("local_hash_workers", 4) or 4)); self.local_image_workers.setValue(int(s.get("local_image_workers", 4) or 4)); self.local_video_workers.setValue(int(s.get("local_video_workers", 2) or 2)); self.local_db_read_workers.setValue(int(s.get("local_db_read_workers", 2) or 2)); self.local_tagger_workers.setValue(int(s.get("local_tagger_workers", s.get("tagger_parallel_workers", 4)) or 4)); self.local_thumb_workers.setValue(int(s.get("local_thumb_workers", s.get("thumb_threads", 4)) or 4)); self.local_thumb_pregen_workers.setValue(int(s.get("local_thumb_pregen_workers", s.get("thumb_pregen_workers", 4)) or 4)); self.local_background_workers.setValue(int(s.get("local_background_workers", s.get("task_max_workers", 4)) or 4)); self.visual_nomatch_workers.setValue(int(s.get("visual_nomatch_workers", 2) or 2)); self.visual_nomatch_real_threshold.setValue(float(s.get("visual_nomatch_real_threshold", 0.34) or 0.34)); self.visual_nomatch_classify_enabled.setChecked(bool(s.get("visual_nomatch_classify_enabled", True))); self.visual_nomatch_backend.setCurrentIndex(max(0, self.visual_nomatch_backend.findData(str(s.get("visual_nomatch_backend", "clip_local") or "clip_local")))); self.visual_nomatch_clip_model_dir.setText(str(s.get("visual_nomatch_clip_model_dir", "") or "")); self.visual_nomatch_auto_download_model.setChecked(bool(s.get("visual_nomatch_auto_download_model", True))); self.visual_nomatch_device.setCurrentIndex(max(0, self.visual_nomatch_device.findData(str(s.get("visual_nomatch_device", "auto") or "auto")))); self.visual_nomatch_ai_min_confidence.setValue(float(s.get("visual_nomatch_ai_min_confidence", 0.62) or 0.62)); self.visual_nomatch_ai_min_margin.setValue(float(s.get("visual_nomatch_ai_min_margin", 0.12) or 0.12)); self.visual_nomatch_ai_fallback_heuristic.setChecked(bool(s.get("visual_nomatch_ai_fallback_heuristic", False))); self.local_preflight_enabled.setChecked(bool(s.get("local_preflight_enabled", True))); self.local_preflight_phash.setChecked(bool(s.get("local_preflight_phash", True)))
+        self.local_total_workers.setValue(8); self.local_scan_workers.setValue(2); self.local_hash_workers.setValue(4); self.local_image_workers.setValue(4); self.local_video_workers.setValue(2); self.local_db_read_workers.setValue(2); self.local_tagger_workers.setValue(4); self.local_thumb_workers.setValue(4); self.local_thumb_pregen_workers.setValue(1); self.local_background_workers.setValue(4); self.visual_nomatch_workers.setValue(2); self.visual_nomatch_real_threshold.setValue(float(s.get("visual_nomatch_real_threshold", 0.34) or 0.34)); self.visual_nomatch_classify_enabled.setChecked(bool(s.get("visual_nomatch_classify_enabled", True))); self.visual_nomatch_backend.setCurrentIndex(max(0, self.visual_nomatch_backend.findData(str(s.get("visual_nomatch_backend", "clip_local") or "clip_local")))); self.visual_nomatch_clip_model_dir.setText(str(s.get("visual_nomatch_clip_model_dir", "") or "")); self.visual_nomatch_auto_download_model.setChecked(bool(s.get("visual_nomatch_auto_download_model", True))); self.visual_nomatch_device.setCurrentIndex(max(0, self.visual_nomatch_device.findData(str(s.get("visual_nomatch_device", "auto") or "auto")))); self.visual_nomatch_ai_min_confidence.setValue(float(s.get("visual_nomatch_ai_min_confidence", 0.62) or 0.62)); self.visual_nomatch_ai_min_margin.setValue(float(s.get("visual_nomatch_ai_min_margin", 0.12) or 0.12)); self.visual_nomatch_ai_fallback_heuristic.setChecked(bool(s.get("visual_nomatch_ai_fallback_heuristic", False))); self.local_preflight_enabled.setChecked(bool(s.get("local_preflight_enabled", True))); self.local_preflight_phash.setChecked(bool(s.get("local_preflight_phash", True)))
         self.sqlite_cache_mb.setValue(int(s.get("sqlite_cache_mb", 40) or 40)); self.sqlite_checkpoint_exit.setChecked(bool(s.get("sqlite_checkpoint_on_exit", True)))
         self.light_backup_enabled.setChecked(bool(s.get("light_backup_enabled", False))); self.light_backup_on_exit.setChecked(bool(s.get("light_backup_on_exit", True)))
         self.light_backup_interval.setValue(int(s.get("light_backup_interval_hours", 24) or 24)); self.light_backup_keep.setValue(int(s.get("light_backup_keep_last", 10) or 10))
@@ -1477,13 +1485,22 @@ class SettingsPage(QWidget):
         self.separate_settings.setChecked(True)
         self.settings_storage_dir.setText(str(target))
         self.output_dir.setText(str(target.parent / "output"))
+        try:
+            self.main.settings["_workspace_switch_pending"] = True
+            self.main.settings["separate_settings_storage"] = True
+            self.main.settings["settings_storage_dir"] = str(target)
+            self.main.settings["output_dir"] = str(target.parent / "output")
+        except Exception:
+            pass
         QMessageBox.information(
             self,
             "Архив подключён",
             "Найдены существующие настройки Local Booru:\n"
             f"{target / 'config' / 'app_settings.json'}\n\n"
-            "Они не перезаписаны. Перезапусти программу — после запуска "
-            "будут загружены настройки, база и кэш этого архива.",
+            "Указатель архива уже переключён. Даже если нажать «Сохранить» "
+            "до перезапуска, путь больше не откатится к старому архиву.\n\n"
+            "Перезапусти программу — после запуска будут загружены настройки, "
+            "база и кэш этого архива.",
         )
         return True
 
@@ -1496,36 +1513,38 @@ class SettingsPage(QWidget):
             QMessageBox.warning(
                 self,
                 "Архив не найден",
-                "В выбранной папке не найден файл\n"
-                "settings/config/app_settings.json\n\n"
-                "Выбери саму папку Local_Booru_Archive, её output или settings.",
+                "В выбранной папке не найден архив Local Booru.\n\n"
+                "Можно выбрать: папку архива, её output, её settings, "
+                "или папку, внутри которой лежит Local_Booru_Archive.\n\n"
+                "Минимум нужен settings/config/app_settings.json "
+                "или settings/db/local_booru_index.sqlite3.",
             )
 
     def choose_output_dir(self):
         f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.output_dir.text() or self.root.text())
         if f:
-            from core.paths import ensure_output_base, suggested_settings_storage_dir, SETTINGS_FILE
+            from core.paths import ensure_output_base, suggested_settings_storage_dir, SETTINGS_FILE, normalize_archive_settings_root
             safe = ensure_output_base(f, self.root.text())
-            existing = safe.parent / "settings" / "config" / "app_settings.json"
+            existing_root = normalize_archive_settings_root(f) or normalize_archive_settings_root(safe.parent)
             try:
-                is_current = existing.resolve() == Path(SETTINGS_FILE).resolve()
+                is_current = bool(existing_root and existing_root.resolve() == Path(SETTINGS_FILE).parents[1].resolve())
             except Exception:
                 is_current = False
-            if existing.is_file() and not is_current:
+            if existing_root is not None and not is_current:
                 answer = QMessageBox.question(
                     self,
                     "Найден существующий архив",
-                    "В выбранной папке уже есть настройки Local Booru.\n\n"
+                    "В выбранной папке уже есть база/настройки Local Booru.\n\n"
                     "Подключить этот архив вместо создания/перезаписи настроек?",
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
                 )
                 if answer == QMessageBox.Yes:
-                    self._connect_detected_archive(safe.parent)
+                    self._connect_detected_archive(existing_root.parent)
                     return
             self.output_dir.setText(str(safe))
             # Any new Local_Booru_Archive selection is a unified archive by
             # definition: output and settings are two fixed branches of one root.
-            if safe.name.lower() == "output" and safe.parent.name.lower() == "local_booru_archive":
+            if safe.name.lower() == "output":
                 self.separate_settings.setChecked(True)
                 preview = dict(self.main.settings); preview["output_dir"] = str(safe)
                 self.settings_storage_dir.setText(str(suggested_settings_storage_dir(preview)))
@@ -1563,11 +1582,14 @@ class SettingsPage(QWidget):
     def save(self):
         s=self.main.settings; old_separate = bool(s.get("separate_settings_storage", False)); old_dir = str(s.get("settings_storage_dir", "") or "")
         s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["imports_to_inbox"]=self.imports_to_inbox.isChecked(); s["inbox_auto_archive_hours"]=self.inbox_hours.value(); s["thumb_cleanup_on_exit"]=self.thumb_cleanup_exit.isChecked(); s["thumb_keep_recent"]=self.thumb_keep_recent.value(); s["deleted_reimport_policy"]=self.deleted_reimport.currentData(); s["trash_auto_purge_days"]=int(self.trash_days.currentData() or 0); s["hide_single_char_tags"]=self.hide_single_char_tags.isChecked(); s["hide_technical_tags"]=self.hide_technical_tags.isChecked(); s["hide_meta_tags"]=self.hide_meta_tags.isChecked(); s["hide_rating_tags"]=self.hide_rating_tags.isChecked()
-        s["separate_settings_storage"] = self.separate_settings.isChecked(); s["settings_storage_dir"] = self.settings_storage_dir.text().strip(); s["large_download_warning_count"] = self.large_download_count.value(); s["disk_free_reserve_gb"] = self.disk_reserve_gb.value()
+        s["separate_settings_storage"] = True; s["settings_storage_dir"] = self.settings_storage_dir.text().strip(); s["large_download_warning_count"] = self.large_download_count.value(); s["disk_free_reserve_gb"] = self.disk_reserve_gb.value()
         s["grabber_preview_hide_existing"] = self.grabber_hide_existing.isChecked(); s["grabber_preview_prefetch_originals"] = self.grabber_prefetch_originals.isChecked(); s["grabber_include_protected_sites"] = self.grabber_include_protected_sites.isChecked(); s["grabber_preview_stream_cards"] = self.grabber_stream_cards.isChecked(); s["grabber_cache_limit_mb"] = self.grabber_cache_limit.value(); s["grabber_open_quality"] = self.grabber_open_quality.currentData() or "medium_50"; s["grabber_metadata_ram_cache_mb"] = self.grabber_metadata_ram_cache.value(); s["grabber_image_ram_cache_mb"] = self.grabber_image_ram_cache.value(); s["grabber_subscriptions_blocklist"] = self.grabber_blocklist.toPlainText().strip(); s["downloader_blocklist"] = s["grabber_subscriptions_blocklist"]
         s["thumb_quality_scale"] = int(self.thumb_quality.currentData() or 2); s["thumb_memory_items"] = self.thumb_memory_items.value(); s["thumb_threads"] = self.thumb_threads.value(); s["thumb_prefetch_pages"] = self.thumb_prefetch.isChecked(); s["performance_slow_ms"] = self.performance_slow_ms.value(); s["developer_preload_md5_index"] = self.developer_preload_md5_index.isChecked(); s["developer_grabber_md5_cache_enabled"] = self.developer_grabber_md5_cache_enabled.isChecked(); s["grabber_disk_metadata_cache_enabled"] = self.developer_grabber_md5_cache_enabled.isChecked(); s["grabber_exact_md5_fanout"] = self.grabber_exact_md5_fanout.isChecked(); s["grabber_visual_hash_merge"] = self.grabber_visual_hash_merge.isChecked(); s["grabber_visual_hash_distance"] = self.grabber_visual_hash_distance.value(); s["developer_filesystem_duplicate_fallback"] = self.developer_filesystem_duplicate_fallback.isChecked()
-        s["local_total_workers"] = self.local_total_workers.value(); s["local_scan_workers"] = self.local_scan_workers.value(); s["local_hash_workers"] = self.local_hash_workers.value(); s["local_image_workers"] = self.local_image_workers.value(); s["local_video_workers"] = self.local_video_workers.value(); s["local_db_read_workers"] = self.local_db_read_workers.value(); s["local_tagger_workers"] = self.local_tagger_workers.value(); s["local_thumb_workers"] = self.local_thumb_workers.value(); s["local_thumb_pregen_workers"] = self.local_thumb_pregen_workers.value(); s["local_background_workers"] = self.local_background_workers.value(); s["visual_nomatch_workers"] = self.visual_nomatch_workers.value(); s["visual_nomatch_backend"] = self.visual_nomatch_backend.currentData() or "clip_local"; s["visual_nomatch_clip_model_dir"] = self.visual_nomatch_clip_model_dir.text().strip(); s["visual_nomatch_auto_download_model"] = self.visual_nomatch_auto_download_model.isChecked(); s["visual_nomatch_device"] = self.visual_nomatch_device.currentData() or "auto"; s["visual_nomatch_ai_min_confidence"] = float(self.visual_nomatch_ai_min_confidence.value()); s["visual_nomatch_ai_min_margin"] = float(self.visual_nomatch_ai_min_margin.value()); s["visual_nomatch_ai_fallback_heuristic"] = self.visual_nomatch_ai_fallback_heuristic.isChecked(); s["visual_nomatch_real_threshold"] = float(self.visual_nomatch_real_threshold.value()); s["visual_nomatch_classify_enabled"] = self.visual_nomatch_classify_enabled.isChecked(); s["local_preflight_enabled"] = self.local_preflight_enabled.isChecked(); s["local_preflight_phash"] = self.local_preflight_phash.isChecked(); s["tagger_parallel_workers"] = self.local_tagger_workers.value(); s["thumb_threads"] = self.local_thumb_workers.value(); s["thumb_pregen_workers"] = self.local_thumb_pregen_workers.value(); s["task_max_workers"] = self.local_background_workers.value()
-        s["sqlite_cache_mb"] = self.sqlite_cache_mb.value(); s.setdefault("sqlite_wal_limit_mb", 512); s.setdefault("sqlite_temp_store", "MEMORY"); s["sqlite_checkpoint_on_exit"] = self.sqlite_checkpoint_exit.isChecked()
+        # Fixed mid-PC local worker defaults; no user-facing thread tuning.
+        fixed_workers = {"local_total_workers": 8, "local_scan_workers": 2, "local_hash_workers": 4, "local_image_workers": 4, "local_video_workers": 2, "local_db_read_workers": 2, "local_tagger_workers": 4, "local_thumb_workers": 4, "local_thumb_pregen_workers": 1, "local_background_workers": 4, "visual_nomatch_workers": 2}
+        s.update(fixed_workers)
+        s["visual_nomatch_backend"] = self.visual_nomatch_backend.currentData() or "clip_local"; s["visual_nomatch_clip_model_dir"] = self.visual_nomatch_clip_model_dir.text().strip(); s["visual_nomatch_auto_download_model"] = self.visual_nomatch_auto_download_model.isChecked(); s["visual_nomatch_device"] = self.visual_nomatch_device.currentData() or "auto"; s["visual_nomatch_ai_min_confidence"] = float(self.visual_nomatch_ai_min_confidence.value()); s["visual_nomatch_ai_min_margin"] = float(self.visual_nomatch_ai_min_margin.value()); s["visual_nomatch_ai_fallback_heuristic"] = self.visual_nomatch_ai_fallback_heuristic.isChecked(); s["visual_nomatch_real_threshold"] = float(self.visual_nomatch_real_threshold.value()); s["visual_nomatch_classify_enabled"] = self.visual_nomatch_classify_enabled.isChecked(); s["local_preflight_enabled"] = True; s["local_preflight_phash"] = True; s["tagger_parallel_workers"] = fixed_workers["local_tagger_workers"]; s["thumb_threads"] = fixed_workers["local_thumb_workers"]; s["thumb_pregen_workers"] = fixed_workers["local_thumb_pregen_workers"]; s["task_max_workers"] = fixed_workers["local_background_workers"]
+        s["sqlite_cache_mb"] = self.sqlite_cache_mb.value(); s.setdefault("sqlite_wal_limit_mb", 512); s["sqlite_temp_store"] = str(s.get("sqlite_temp_store") or "FILE"); s["sqlite_checkpoint_on_exit"] = self.sqlite_checkpoint_exit.isChecked()
         s["light_backup_enabled"] = self.light_backup_enabled.isChecked(); s["light_backup_dir"] = self.light_backup_dir.text().strip(); s["light_backup_on_exit"] = self.light_backup_on_exit.isChecked(); s["light_backup_interval_hours"] = self.light_backup_interval.value(); s["light_backup_keep_last"] = self.light_backup_keep.value(); s["light_backup_include_cookies"] = self.light_backup_include_cookies.isChecked()
         if s["separate_settings_storage"]:
             from core.paths import suggested_settings_storage_dir
@@ -1587,7 +1609,9 @@ class SettingsPage(QWidget):
             pass
         self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate()
         msg = self.main.t("Settings saved")
-        if old_separate != s["separate_settings_storage"] or old_dir != s["settings_storage_dir"]:
+        if bool(s.get("_workspace_switch_pending", False)):
+            msg += "\n\nАктивный архив переключён в указателе пути. Перезапусти программу, чтобы загрузились SQLite, настройки, кэш и cookies нового архива. Текущий старый архив не перезаписан."
+        elif old_separate != s["separate_settings_storage"] or old_dir != s["settings_storage_dir"]:
             msg += "\n\nПосле перезапуска будут использоваться Local_Booru_Archive/output и Local_Booru_Archive/settings. Старые данные скопированы безопасно; полная конфигурация в Documents больше не создаётся."
         QMessageBox.information(self,self.main.t("Saved"),msg)
 
@@ -1770,6 +1794,74 @@ class SettingsPage(QWidget):
             QMessageBox.information(self, "Диагностика", f"Отчёт создан:\n{out}\n\nКлючи, логины и cookies в настройки отчёта не записываются.")
         except Exception as exc:
             QMessageBox.warning(self, "Диагностика", str(exc))
+
+    def recheck_general_only_categories(self):
+        if QMessageBox.question(
+            self,
+            "Переразложить general-only теги",
+            "Найти ВСЕ уже сохранённые Danbooru/Gelbooru/rule34/e621/ATF source-наборы, где все теги записаны как general, и заново запросить категории у сайтов?\n\n"
+            "Старого лимита 10000 больше нет: операция пойдёт по всем найденным general-only наборам.\n"
+            "Оригинальные файлы не трогаются. Новые теги не добавляются. Будет создан backup SQLite.\n"
+            "На большой базе это может идти долго, потому что часть запросов сетевые.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        self.sql_status.setVisible(True)
+        self.sql_status.setText("Поиск general-only тегов для перераскладки...")
+        self.recheck_general_categories_btn.setEnabled(False)
+        try:
+            from core.maintenance_tasks import recheck_general_only_tag_categories
+            self._general_category_task = self.main.task_manager.submit(
+                recheck_general_only_tag_categories,
+                dict(self.main.settings or {}),
+                limit=0,
+                name="maintenance.general_only_categories",
+                on_progress=lambda msg: self.sql_status.setText(str(msg)),
+                on_result=lambda result: self._general_category_recheck_done(result),
+                on_error=lambda err: self._general_category_recheck_error(err),
+            )
+        except Exception as exc:
+            self.recheck_general_categories_btn.setEnabled(True)
+            QMessageBox.warning(self, "Категории тегов", str(exc))
+
+    def _general_category_recheck_done(self, result):
+        self.recheck_general_categories_btn.setEnabled(True)
+        result = dict(result or {})
+        if result.get("error"):
+            self.sql_status.setText("Ошибка перераскладки: " + str(result.get("error")))
+            QMessageBox.warning(self, "Категории тегов", str(result.get("error")))
+            return
+        msg = (
+            f"General-only перераскладка завершена.\n"
+            f"Найдено source-наборов: {result.get('found', 0)}\n"
+            f"Проверено быстрым проходом: {result.get('processed', 0)}\n"
+            f"Исправлено быстрым проходом: {result.get('fast_fixed', 0)}\n"
+            f"Отправлено в сетевую проверку: {result.get('network_queued', 0)}\n"
+            f"Проверено сетью: {result.get('network_checked', 0)}\n"
+            f"Исправлено наборов всего: {result.get('fixed', 0)}\n"
+            f"Обновлено категорий тегов: {result.get('updated', 0)}\n"
+            f"Без найденных категорий: {result.get('no_classified', 0)}\n"
+            f"Файлов не найдено на диске: {result.get('missing', 0)}\n"
+            f"Ошибок: {result.get('errors', 0)}"
+        )
+        backup = str(result.get("backup") or "")
+        if backup:
+            msg += f"\n\nBackup SQLite:\n{backup}"
+        samples = result.get("samples") or []
+        if samples:
+            msg += "\n\nПримеры лога:\n" + "\n".join(str(x) for x in samples[:8])
+        self.sql_status.setText(msg.replace("\n", "  |  "))
+        try: self.main.tags_page.refresh_force()
+        except Exception: pass
+        try: self.main.gallery_page.refresh_force()
+        except Exception: pass
+        QMessageBox.information(self, "Категории тегов", msg)
+
+    def _general_category_recheck_error(self, error):
+        self.recheck_general_categories_btn.setEnabled(True)
+        self.sql_status.setText("Ошибка перераскладки категорий: " + str(error))
+        QMessageBox.warning(self, "Категории тегов", str(error))
 
     def repair_e621_tags(self):
         if QMessageBox.question(self, "Исправить e621-теги", "Исправить сохранённые e621-теги вида horse_231k / canine_3.0k / yourumi_Uploaded_by_the_artist и восстановить категории из сохранённых JSON-данных?\n\nРезервная копия базы будет создана автоматически.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:

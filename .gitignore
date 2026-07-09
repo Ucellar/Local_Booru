@@ -1,41 +1,116 @@
-# Python
+# Local Booru / Python / PySide6
+
+# Python bytecode and caches
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
+*$py.class
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
 .venv/
 venv/
+env/
+ENV/
 
-# Runtime data
-Local_Booru_Archive/
-data/cache/
-data/runtime/
-data/logs/
-data/temp/
-data/tmp/
-data/settings/output/runtime/
-*.db
-*.sqlite
-*.sqlite3
-*.db-wal
-*.db-shm
-*.part
+# Local environment files
+.env
+.env.*
+!.env.example
 
-# Build output
+# Build artifacts
 build/
 dist/
 *.spec.bak
-
-# Local logs / reports
+*.manifest
 *.log
-compile_results*.txt
-test_results*.txt
-full_test_results*.txt
-CHANGELOG_v*.txt
+*.tmp
+*.bak
+*.old
 
-# OS / editor
-.DS_Store
-Thumbs.db
+# PyInstaller output
+*.pyz
+*.pyzw
+
+# Local Booru workspace and runtime state
+Local_Booru_Archive/
+local_booru_workspace.json
+workspace_pointer.json
+ALLOW_CREATE_EMPTY_DB.txt
+startup_console.log
+
+# Local SQLite databases and journals
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Runtime output / generated data
+output/
+settings/
+cache/
+cache_db/
+thumbnails/
+thumbs/
+previews/
+logs/
+runtime/
+backups/
+*.part
+*.download
+
+# User/private browser and site data
+cookies/
+*.cookies
+*.cookies.txt
+cookies*.json
+browser_profile/
+playwright_profile/
+user_data_dir/
+
+# Downloaded/local model weights
+models/
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.gguf
+
+# ExifTool downloaded runtime bundle, if not intentionally vendored
+# Keep this commented if you deliberately ship tools/exiftool in releases.
+# tools/exiftool/
+
+# IDE/editor files
 .vscode/
 .idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archives generated for releases
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+
+# Test scratch data
+scratch/
+tmp/
+temp/

@@ -272,3 +272,33 @@ Windows запрещала очистить `output/found` с ошибкой `Wi
 Если добавить сайт в настройках сайтов, для него автоматически появляется блок `MD5: <domain>` в палитре Blueprint. При включённом автодобавлении сайт добавляется в стандартную MD5-ветку. Если сайт выключен в настройках, его блок остаётся на графе, но runtime пропускает его как skip/pass-through.
 
 Важно: v321 ещё использует существующий parser conveyor как исполнительный слой. Blueprint уже управляет порядком сайтов, включением reverse-веток, worker/delay настройками MD5-сайтов и количеством fallback workers, но полный per-node executor/job ledger — следующий этап.
+
+
+## v339
+Если парсер активно работает и интерфейс Windows помечает приложение как «Не отвечает», включена защита от переполнения UI-лога: однотипные строки CHECK/MISS/категорий агрегируются, а вывод в консоль пачкуется. Полные теги/совпадения сохраняются как раньше.
+
+### v342: e621 через уже открытый Chrome, без запуска нового Chrome
+Local Booru не запускает новый `chrome.exe` во время парсинга и не управляет обычным Chrome через CDP. Для e621 оставлен правильный fallback: companion/page-context fetch через уже открытый Chrome с установленным расширением и открытой вкладкой e621. Это нужно потому, что e621/Cloudflare может не отдавать рабочие cookies обычному requests/API пути, а проверенная вкладка Chrome уже имеет нужный контекст. Rule34/TinEye browser fallback остаются изолированными Playwright Chromium и не трогают пользовательский Chrome.
+
+### v343: Yande.re/Pixiv как доноры MD5
+
+В обратном поиске ссылки Yande.re и Pixiv используются только как источник MD5/оригинала. Теги с Yande.re/Pixiv не импортируются как основные теги.
+
+- Yande.re: из `post/show/<id>` берётся `md5` через JSON API, затем этот MD5 проверяется на включённых основных сайтах.
+- Pixiv: из `artworks/<id>` берётся URL оригинала, оригинальный файл скачивается для подсчёта MD5, затем этот MD5 проверяется на включённых основных сайтах.
+- Для Pixiv с несколькими страницами проверяются несколько original-файлов.
+
+### Pixiv/Yande.re как доноры MD5
+Yande.re используется только для получения `md5` поста через JSON и последующей проверки этого MD5 на основных источниках. Теги Yande.re не используются.
+Pixiv используется только как источник original URL: расширение Local Booru Companion может получить JSON Pixiv из уже открытой вкладки Chrome, приложение скачивает original-файл и считает MD5, затем проверяет этот MD5 на основных сайтах. Local Booru не запускает новый Chrome для Pixiv.
+
+
+## v347 Pixiv bridge alarm diagnostics
+- Companion extension manifest bumped to 0.1.5.
+- Added chrome.alarms-based Pixiv bridge polling plus fast in-worker polling while the MV3 worker is awake.
+- Pixiv source MD5 relay still never launches system chrome.exe; it uses already installed/open Chrome extension context.
+- Added queue diagnostic logs for Pixiv bridge pending/inflight tasks.
+
+
+## v352
+- Fast SauceNAO source-MD5 probe for Pixiv/Yande.re is force-enabled by default and now logs explicit skip reasons. Old persisted settings can no longer silently bypass the early Pixiv/Yande donor stage.

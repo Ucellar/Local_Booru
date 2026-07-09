@@ -162,6 +162,13 @@ def search_items(settings, query="", source="all", bucket="all", limit=None, off
         order_sql = "i.mtime_ns DESC, i.path COLLATE NOCASE"
     elif order == "oldest":
         order_sql = "i.mtime_ns ASC, i.path COLLATE NOCASE"
+    elif order == "parsed_newest":
+        # Gallery bucket "Новые" should mean "last parsed/imported by Local Booru",
+        # not the file's original download/mtime. indexed_at is bumped by the
+        # parser/import metadata upsert path and is cheap to sort by.
+        order_sql = "i.indexed_at DESC, i.id DESC"
+    elif order == "parsed_oldest":
+        order_sql = "i.indexed_at ASC, i.id ASC"
     elif order == "filename":
         order_sql = "i.file_name COLLATE NOCASE"
     sql += " ORDER BY " + order_sql
@@ -398,6 +405,36 @@ def tag_group_counts(settings, source="all"):
         WHEN 'language' THEN 9 WHEN 'category' THEN 10 WHEN 'pages' THEN 11
         WHEN 'general' THEN 99 ELSE 50 END"""
     with db(settings, readonly=True) as con:
+        # v404: after migration v23 the all-source facet path can use a compact
+        # materialized cache instead of the heavy ranked CTE over all provenance
+        # rows.  Source-specific facets keep the old exact path.
+        try:
+            mat_ready = selected == "all" and str(con.execute("SELECT value FROM meta WHERE key='effective_tag_category_complete'").fetchone()["value"] or "") == "1"
+        except Exception:
+            mat_ready = False
+        if mat_ready:
+            try:
+                mat_count = int(con.execute("SELECT COUNT(*) AS c FROM image_effective_tag_category").fetchone()["c"] or 0)
+            except Exception:
+                mat_count = 0
+            if mat_count:
+                rows = con.execute("""
+                    SELECT etc.category AS category, t.normalized_name AS normalized_name,
+                           MIN(t.name) AS name, COUNT(DISTINCT etc.image_id) AS c
+                    FROM image_effective_tag_category etc
+                    JOIN tags t ON t.id=etc.tag_id
+                    JOIN images i ON i.id=etc.image_id
+                    WHERE i.deleted=0
+                    GROUP BY etc.category, t.normalized_name
+                    ORDER BY etc.category, c DESC, name COLLATE NOCASE
+                """).fetchall()
+                for row in rows:
+                    norm = normalize_tag(row["normalized_name"] or row["name"])
+                    cat = str(row["category"] or "general")
+                    if norm and not should_hide_tag(row["name"], cat, settings):
+                        out[cat][norm] += int(row["c"] or 0)
+                return out
+
         provenance_count = int(con.execute("SELECT COUNT(*) AS c FROM image_source_tags").fetchone()["c"] or 0)
         if provenance_count:
             scope_join = ""

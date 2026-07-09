@@ -210,11 +210,17 @@ LB.observer = new MutationObserver((mutations) => {
 });
 LB.observer.observe(document.documentElement, { childList: true, subtree: true });
 
-// e621/e926 API bridge: when an e621 tab is open in the user's normal browser,
-// poll Local Booru for JSON API fetch tasks and execute them from this verified
-// browser session. The extension never reads the local SQLite/media archive.
+// Browser API bridges: execute JSON fetches inside the user's already-open
+// verified page context. Local Booru never launches chrome.exe for these.
 if (host() === 'e621.net' || host() === 'e926.net') {
   setInterval(() => {
     chrome.runtime.sendMessage({ type: 'LB_E621_POLL_ONCE' }).catch(() => {});
   }, 1500);
 }
+// Pixiv source->MD5 relay can be awakened from any supported companion page.
+// The service worker will use a real Pixiv tab if one exists, otherwise it will
+// use extension-worker fetch with pixiv.net host permissions. This avoids the
+// old v344 failure where Local Booru waited for a Pixiv tab and timed out.
+setInterval(() => {
+  chrome.runtime.sendMessage({ type: 'LB_PIXIV_POLL_ONCE' }).catch(() => {});
+}, 1500);

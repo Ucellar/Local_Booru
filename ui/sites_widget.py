@@ -379,11 +379,14 @@ class SitesWidget(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionsClickable(True)
         header.sectionClicked.connect(self._sort_by_header)
-        header.setSectionResizeMode(C_ENABLED, QHeaderView.ResizeToContents)
+        # v333: item-view checkbox indicator is now a real visible square.
+        # Keep the enable column wide enough on all DPI/theme combinations.
+        header.setSectionResizeMode(C_ENABLED, QHeaderView.Fixed)
         header.setSectionResizeMode(C_URL, QHeaderView.Interactive)
         header.setSectionResizeMode(C_ENGINE, QHeaderView.Interactive)
         header.setSectionResizeMode(C_LOGIN, QHeaderView.Interactive)
         header.setSectionResizeMode(C_DESCRIPTION, QHeaderView.Stretch)
+        self.table.setColumnWidth(C_ENABLED, 48)
         self.table.setColumnWidth(C_URL, 245)
         self.table.setColumnWidth(C_ENGINE, 105)
         self.table.setColumnWidth(C_LOGIN, 100)

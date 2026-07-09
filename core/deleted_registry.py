@@ -68,6 +68,11 @@ def migrate_legacy_registry(settings: dict) -> dict:
     items = [x for x in data.get("items", []) if isinstance(x, dict)]
     imported = active = 0
     try:
+        batch_size = int((settings or {}).get("legacy_deleted_migration_batch_size", 1000) or 1000)
+    except Exception:
+        batch_size = 1000
+    batch_size = max(100, min(5000, batch_size))
+    try:
         from core.database.connection import db
         with db(settings, write=True) as con:
             for item in items:
@@ -88,6 +93,8 @@ def migrate_legacy_registry(settings: dict) -> dict:
                 )
                 imported += 1
                 active += manual
+                if imported % batch_size == 0:
+                    con.commit()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         backup = DELETED_FILES_FILE.with_name(f"deleted_files_ignore_{stamp}_legacy_before_sqlite.json.bak")
         shutil.copy2(DELETED_FILES_FILE, backup)

@@ -667,6 +667,38 @@ def compile_blueprint(graph: BlueprintGraph, registry: dict[str, Any] | None = N
             has_save_found = True
         elif kind == "save_no_match":
             has_save_nomatch = True
+    # v372: ATF has two independent runtime branches.  Older/custom blueprint
+    # files may still contain only the pixel_hash node even though the user enabled
+    # booru.allthefallen.moe in the site table.  The parser must advertise and run
+    # ATF exact-MD5 as an ordinary MD5 site, while keeping pixel_hash as fallback.
+    if (settings or {}).get("tagger_force_atf_md5_lane", True):
+        try:
+            atf_dummy = BlueprintNode.from_dict({
+                "id": "atf_forced_summary",
+                "type_id": "md5_site_atf",
+                "title": "ATF",
+                "config": {"domain": "booru.allthefallen.moe"},
+                "enabled": True,
+            })
+            if _site_enabled_by_settings("booru.allthefallen.moe", atf_dummy, settings) and "booru.allthefallen.moe" not in site_order:
+                site_order.append("booru.allthefallen.moe")
+                site_runtime.setdefault("booru.allthefallen.moe", {
+                    "node_id": "atf_forced_summary",
+                    "title": "ATF",
+                    "type_id": "md5_site_atf",
+                    "workers": 1,
+                    "min_delay_ms": int((settings or {}).get("atf_pixel_hash_delay_ms", 1100) or 1100),
+                    "timeout_ms": 30000,
+                    "retry_count": 0,
+                    "rate_group": "booru.allthefallen.moe",
+                    "enabled": True,
+                    "effective_enabled": True,
+                    "on_disabled": "skip",
+                    "config": {"domain": "booru.allthefallen.moe"},
+                })
+        except Exception:
+            pass
+
     summary_bits = []
     if site_order:
         summary_bits.append("MD5: " + " → ".join(site_order))

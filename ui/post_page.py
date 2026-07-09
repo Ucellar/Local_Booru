@@ -761,19 +761,39 @@ class PostPage(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Ensure window is not off-screen after show
+        # v334: Do not pull the main window back to the primary monitor when
+        # opening the Post page from Gallery.  Older code clamped against
+        # QGuiApplication.primaryScreen(), so a window placed on a secondary
+        # monitor was treated as "off-screen" and moved to monitor #1.
+        # Only recover the window if it is outside every available screen.
         try:
             from PySide6.QtGui import QGuiApplication
-            screen = QGuiApplication.primaryScreen().availableGeometry()
             win = self.window()
-            geo = win.geometry()
-            if not screen.intersects(geo):
-                win.setGeometry(
-                    max(screen.x(), min(geo.x(), screen.right() - geo.width())),
-                    max(screen.y(), min(geo.y(), screen.bottom() - geo.height())),
-                    min(geo.width(), screen.width()),
-                    min(geo.height(), screen.height()),
-                )
+            geo = win.frameGeometry()
+            screens = list(QGuiApplication.screens() or [])
+            for scr in screens:
+                if scr.availableGeometry().intersects(geo):
+                    return
+
+            # The window is genuinely off all monitors. Restore it to the
+            # best-known current screen instead of blindly using primary.
+            screen = QGuiApplication.screenAt(geo.center())
+            if screen is None:
+                try:
+                    handle = win.windowHandle()
+                    screen = handle.screen() if handle is not None else None
+                except Exception:
+                    screen = None
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            if screen is None:
+                return
+            avail = screen.availableGeometry()
+            w = min(geo.width(), avail.width())
+            h = min(geo.height(), avail.height())
+            x = max(avail.left(), min(geo.x(), avail.right() - w + 1))
+            y = max(avail.top(), min(geo.y(), avail.bottom() - h + 1))
+            win.setGeometry(x, y, w, h)
         except Exception:
             pass
 

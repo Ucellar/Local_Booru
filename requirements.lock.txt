@@ -1,0 +1,16 @@
+PySide6  # not installed in build environment
+Pillow==12.2.0
+imagehash  # not installed in build environment
+requests==2.32.5
+beautifulsoup4==4.14.3
+playwright==1.57.0
+opencv-python==4.13.0.92
+browser-cookie3  # not installed in build environment
+PySide6-Addons  # not installed in build environment
+PyMuPDF==1.26.7
+curl_cffi  # not installed in build environment
+python-mpv  # not installed in build environment
+cloudscraper  # not installed in build environment
+patchright  # not installed in build environment
+DrissionPage  # not installed in build environment
+watchdog  # not installed in build environment

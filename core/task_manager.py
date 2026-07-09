@@ -146,6 +146,39 @@ class TaskManager(QObject):
         except Exception:
             pass
 
+
+    def cancel_by_name(self, *names: str) -> int:
+        """Cancel queued/running tasks with exact names. Returns number requested."""
+        wanted = {str(n) for n in names if str(n)}
+        if not wanted:
+            return 0
+        count = 0
+        for task in list(self.tasks):
+            try:
+                if task.name in wanted and (task.future is None or not task.future.done()):
+                    task.cancel()
+                    self.task_cancelled.emit(task.name)
+                    count += 1
+            except Exception:
+                pass
+        return count
+
+    def cancel_name_prefix(self, *prefixes: str) -> int:
+        """Cancel queued/running tasks whose name starts with one of prefixes."""
+        prefixes = tuple(str(p) for p in prefixes if str(p))
+        if not prefixes:
+            return 0
+        count = 0
+        for task in list(self.tasks):
+            try:
+                if str(task.name).startswith(prefixes) and (task.future is None or not task.future.done()):
+                    task.cancel()
+                    self.task_cancelled.emit(task.name)
+                    count += 1
+            except Exception:
+                pass
+        return count
+
     def active_snapshot(self):
         """Return user-visible state of current tasks without mutating them."""
         out = []

@@ -644,43 +644,159 @@ def library_stats(settings: dict) -> dict:
     return stats
 
 
-def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, apply: bool = False) -> dict:
-    """Locate missing indexed files under a newly selected output root.
+def _relative_after_output_branch(value: str) -> Path | None:
+    """Return path relative to an output/ branch from a stored absolute path.
 
-    The function only rewrites paths when the same relative position under the
-    output tree exists at the new location; it never guesses by filename alone.
+    SQLite stores Windows absolute paths.  This helper is intentionally string
+    based so it also works when diagnostics/tests run on a non-Windows machine.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("/", "\\")
+    marker = "\\output\\"
+    lower = normalized.lower()
+    idx = lower.find(marker)
+    if idx < 0:
+        # Legacy Local_Booru_Output support: keep path below that folder.
+        legacy = "\\local_booru_output\\"
+        idx2 = lower.find(legacy)
+        if idx2 >= 0:
+            tail = normalized[idx2 + len(legacy):]
+            return Path(*[part for part in tail.split("\\") if part]) if tail else None
+        return None
+    tail = normalized[idx + len(marker):]
+    parts = [part for part in tail.split("\\") if part]
+    return Path(*parts) if parts else None
+
+
+def _path_is_under(value: str, root: Path) -> bool:
+    try:
+        Path(value).resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        pass
+    raw = str(value or "").replace("/", "\\").lower().rstrip("\\")
+    base = str(root).replace("/", "\\").lower().rstrip("\\")
+    return bool(base and (raw == base or raw.startswith(base + "\\")))
+
+
+def _table_columns(con, table: str) -> set[str]:
+    try:
+        return {str(r[1]) for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+    except Exception:
+        return set()
+
+
+def _update_path_column_by_mapping(con, table: str, column: str, mapping: dict[str, str]) -> int:
+    cols = _table_columns(con, table)
+    if column not in cols:
+        return 0
+    changed = 0
+    for old, new in mapping.items():
+        cur = con.execute(f"UPDATE {table} SET {column}=? WHERE {column}=?", (new, old))
+        changed += int(cur.rowcount or 0)
+    return changed
+
+
+def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, apply: bool = False) -> dict:
+    """Relocate managed gallery paths after moving Local_Booru_Archive.
+
+    Earlier versions only rewrote rows whose old path was missing.  That failed
+    when the old HDD copy still existed: the gallery/database kept pointing to
+    the old absolute F:\\...\\output path even though the active archive was on
+    the SSD.  This version rewrites every live ``images.path`` that has the same
+    relative path below the selected new output root and whose target file
+    exists.  It never guesses by filename alone.
     """
     from core.paths import ensure_output_base
-    old_base = result_output_base(settings)
     new_base = ensure_output_base(new_output, settings.get("root"))
     matches: list[tuple[int, str, str]] = []
+    already_ok = missing_target = no_relative = 0
+    old_roots: dict[str, int] = {}
+
     with db(settings, readonly=True) as con:
-        rows = con.execute("SELECT id,path FROM images WHERE deleted=0 ORDER BY id").fetchall()
+        rows = [dict(r) for r in con.execute("SELECT id,path FROM images WHERE deleted=0 ORDER BY id").fetchall()]
+
     for row in rows:
-        old = Path(str(row["path"] or ""))
-        if old.exists():
+        old_s = str(row.get("path") or "")
+        if not old_s:
+            no_relative += 1
             continue
-        rel = None
-        try:
-            rel = old.relative_to(old_base)
-        except Exception:
-            parts = list(old.parts)
-            try:
-                idx = [p.lower() for p in parts].index("output")
-                rel = Path(*parts[idx + 1:])
-            except Exception:
-                rel = None
+        if _path_is_under(old_s, new_base):
+            already_ok += 1
+            continue
+        rel = _relative_after_output_branch(old_s)
         if rel is None:
+            no_relative += 1
             continue
         candidate = new_base / rel
         if candidate.exists() and candidate.is_file():
-            matches.append((int(row["id"]), str(old), str(candidate)))
+            matches.append((int(row["id"]), old_s, str(candidate)))
+            # Report the old branch for diagnostics.
+            raw = old_s.replace("/", "\\")
+            low = raw.lower()
+            idx = low.find("\\output\\")
+            root = raw[:idx + len("\\output") if idx >= 0 else len(raw)]
+            if root:
+                old_roots[root] = old_roots.get(root, 0) + 1
+        else:
+            missing_target += 1
+
+    backup = ""
+    table_updates: dict[str, int] = {}
     if apply and matches:
+        backup = force_backup_database(settings, "relocate_library_paths")
+        if not backup:
+            return {
+                "old_base": "",
+                "new_base": str(new_base),
+                "found": len(matches),
+                "updated": 0,
+                "already_ok": already_ok,
+                "missing_target": missing_target,
+                "no_relative": no_relative,
+                "backup": "",
+                "error": "Не удалось создать резервную копию базы. Перенос путей отменён.",
+                "matches": matches[:50],
+            }
+        mapping = {old: new for _image_id, old, new in matches}
+        now = _now()
         with db(settings, write=True) as con:
             for image_id, old, new in matches:
                 con.execute("UPDATE images SET path=?, file_name=? WHERE id=?", (new, Path(new).name, image_id))
-                con.execute("UPDATE processed_files SET media_path=? WHERE media_path=?", (new, old))
-    return {"old_base": str(old_base), "new_base": str(new_base), "found": len(matches), "updated": len(matches) if apply else 0, "matches": matches[:50]}
+            # Keep auxiliary managed-media references in sync. Do not rewrite
+            # original_path/site_scan_status: those usually point to the read-only
+            # source archive, not to Local_Booru_Archive/output.
+            table_updates["processed_files.media_path"] = _update_path_column_by_mapping(con, "processed_files", "media_path", mapping)
+            table_updates["no_match_items.media_path"] = _update_path_column_by_mapping(con, "no_match_items", "media_path", mapping)
+            table_updates["tag_enrichment_queue.media_path"] = _update_path_column_by_mapping(con, "tag_enrichment_queue", "media_path", mapping)
+            table_updates["delete_log.path"] = _update_path_column_by_mapping(con, "delete_log", "path", mapping)
+            table_updates["deleted_media_rules.path"] = _update_path_column_by_mapping(con, "deleted_media_rules", "path", mapping)
+            try:
+                con.execute("INSERT OR REPLACE INTO app_state(key,value) VALUES(?,?)", ("last_output_path_relocation", json.dumps({
+                    "new_base": str(new_base),
+                    "updated": len(matches),
+                    "backup": backup,
+                    "at": now,
+                }, ensure_ascii=False)))
+            except Exception:
+                pass
+
+    old_base = next(iter(old_roots), "")
+    return {
+        "old_base": old_base,
+        "old_roots": old_roots,
+        "new_base": str(new_base),
+        "found": len(matches),
+        "updated": len(matches) if apply else 0,
+        "already_ok": already_ok,
+        "missing_target": missing_target,
+        "no_relative": no_relative,
+        "backup": backup,
+        "table_updates": table_updates,
+        "matches": matches[:50],
+    }
 
 
 
