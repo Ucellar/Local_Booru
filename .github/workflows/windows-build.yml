@@ -1,8 +1,11 @@
 name: Windows build
 
-# Builds «Local Booru.exe» and the browser extension for a release and attaches them to it (the release may be a draft):
-# Actions → «Windows build» → Run workflow → the release's tag.
+# A tag «v…» pushed: «Local Booru.exe» and the browser extension are built, checked and published as that tag's
+# release — its text is the tag's message (git tag -a v5.39.0 -F release-notes.md).  The release appears only when
+# the build passed.  Actions → «Windows build» → Run workflow builds a tag again and replaces the files of its release.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -12,6 +15,9 @@ on:
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
   build:
     runs-on: windows-latest
@@ -19,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ env.TAG }}
 
       - uses: actions/setup-python@v5
         with:
@@ -54,16 +60,22 @@ jobs:
       - name: Pack
         shell: pwsh
         run: |
-          $tag = "${{ inputs.tag }}"
+          $tag = $env:TAG
           Compress-Archive -Path "dist/Local Booru" -DestinationPath "Local_Booru_${tag}_Windows_x64.zip"
           Compress-Archive -Path "extensions/chrome_local_booru_companion" -DestinationPath "Local_Booru_Companion_${tag}_Chrome.zip"
           Compress-Archive -Path "extensions/firefox_local_booru_companion/*" -DestinationPath "Local_Booru_Companion_${tag}_Firefox.zip"
           Get-ChildItem *.zip | Format-Table Name, Length
 
-      - name: Attach to the release
-        shell: pwsh
+      - name: Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $files = (Get-ChildItem Local_Booru_*.zip).FullName
-          gh release upload "${{ inputs.tag }}" @files --clobber -R "${{ github.repository }}"
+          git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          git for-each-ref "refs/tags/${TAG}" --format='%(contents)' > notes.md
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" Local_Booru_*.zip --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" Local_Booru_*.zip -R "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Local Booru ${TAG#v}" --notes-file notes.md
+          fi
