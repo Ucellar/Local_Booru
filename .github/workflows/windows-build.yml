@@ -1,16 +1,21 @@
 name: Windows build
 
-# A tag «v…» pushed: «Local Booru.exe» and the browser extension are built, checked and published as that tag's
-# release — its text is the tag's message (git tag -a v5.39.0 -F release-notes.md).  The release appears only when
-# the build passed.  Actions → «Windows build» → Run workflow builds a tag again and replaces the files of its release.
+# «Local Booru.exe» and the browser extension are built, checked and published as a release; the release appears only
+# when the build passed.  Actions → «Windows build» → Run workflow: the branch or tag to build, the release's tag (made
+# at that commit when it is new) and its text.  A tag «v…» pushed does the same, its text — the tag's message.
+# Built again for a release that exists: its files are replaced.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag of the release"
+        description: "Tag of the release (v5.39.0)"
         required: true
+      notes:
+        description: "Text of the release (Markdown)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -24,8 +29,6 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: refs/tags/${{ env.TAG }}
 
       - uses: actions/setup-python@v5
         with:
@@ -71,11 +74,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}"
-          git for-each-ref "refs/tags/${TAG}" --format='%(contents)' > notes.md
+          # the text as it came (UTF-8 from the event's file: an environment variable may lose the Cyrillic on Windows)
+          python -c "import json, os, pathlib; e = json.load(open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8')); pathlib.Path('notes.md').write_text((e.get('inputs') or {}).get('notes') or '', encoding='utf-8')"
+          if [ ! -s notes.md ]; then
+            git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}" || true
+            git for-each-ref "refs/tags/${TAG}" --format='%(contents)' > notes.md
+          fi
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release upload "$TAG" Local_Booru_*.zip --clobber -R "$GITHUB_REPOSITORY"
           else
-            gh release create "$TAG" Local_Booru_*.zip -R "$GITHUB_REPOSITORY" --verify-tag \
+            gh release create "$TAG" Local_Booru_*.zip -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --title "Local Booru ${TAG#v}" --notes-file notes.md
           fi
