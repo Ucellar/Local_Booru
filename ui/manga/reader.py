@@ -50,6 +50,8 @@ GROUP_ALIASES = {
 
 
 from ui.manga.helpers import *
+# a star import leaves out the names that start with «_» (helpers has no __all__): these two — by name
+from ui.manga.helpers import _is_virtual_archive_path, _split_virtual_archive_path
 from ui.manga.widgets import MangaCard
 
 class MangaReader(QWidget):
