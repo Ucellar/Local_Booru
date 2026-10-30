@@ -3,13 +3,13 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames, m023_effective_tag_categories, m024_reverse_branch_status
+from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames, m023_effective_tag_categories, m024_reverse_branch_status, m025_site_md5_aliases, m026_derived_cache_state, m027_file_presence_integrity, m028_duplicate_candidate_relations, m029_hash_integrity_recovery, m030_external_derived_cache, m031_saucenao_quota_governor, m032_archive_enrichment_foundation, m033_auto_heal_runtime, m034_quality_upgrade_runtime, m035_companion_family_workflows, m036_pixiv_ugoira_assets, m037_source_originals, m038_normalize_source_hosts, m039_missing_file_cards, m040_tag_search_and_category_cache, m041_variant_families, m042_downloaded_bucket, m043_card_sets, m044_drop_duplicate_indexes
 
 # Version 13 is the consolidated SQLite schema shipped before the numbered
 # runner existed.  v130 records that existing working state as a baseline and
 # applies only subsequent migrations.
 BASELINE_VERSION = 13
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 44
 MIGRATIONS = {
     14: m014_database_health_maintenance,
     15: m015_saucenao_quota_snapshot,
@@ -22,6 +22,26 @@ MIGRATIONS = {
     22: m022_v159_content_safe_filenames,
     23: m023_effective_tag_categories,
     24: m024_reverse_branch_status,
+    25: m025_site_md5_aliases,
+    26: m026_derived_cache_state,
+    27: m027_file_presence_integrity,
+    28: m028_duplicate_candidate_relations,
+    29: m029_hash_integrity_recovery,
+    30: m030_external_derived_cache,
+    31: m031_saucenao_quota_governor,
+    32: m032_archive_enrichment_foundation,
+    33: m033_auto_heal_runtime,
+    34: m034_quality_upgrade_runtime,
+    35: m035_companion_family_workflows,
+    36: m036_pixiv_ugoira_assets,
+    37: m037_source_originals,
+    38: m038_normalize_source_hosts,
+    39: m039_missing_file_cards,
+    40: m040_tag_search_and_category_cache,
+    41: m041_variant_families,
+    42: m042_downloaded_bucket,
+    43: m043_card_sets,
+    44: m044_drop_duplicate_indexes,
 }
 
 
@@ -80,19 +100,31 @@ def run_migrations(con, *, log: Callable[[str], None] | None = None) -> dict:
 
     current = max(recorded | {meta_version, BASELINE_VERSION if _has_user_schema(con) else 0})
     for version in sorted(MIGRATIONS):
-        if version in recorded or version <= current:
-            continue
         module = MIGRATIONS[version]
         name = str(getattr(module, "NAME", module.__name__.rsplit(".", 1)[-1]))
+        declared_applied = bool(version in recorded or version <= current)
+        checker = getattr(module, "is_applied", None)
+        needs_repair = False
+        if declared_applied and callable(checker):
+            try:
+                needs_repair = not bool(checker(con))
+            except Exception:
+                needs_repair = True
+        if declared_applied and not needs_repair:
+            continue
         try:
             module.apply(con)
+            if callable(checker) and not bool(checker(con)):
+                raise RuntimeError("migration objects are still incomplete after apply()")
             con.execute(
                 "INSERT OR REPLACE INTO schema_migrations(version,name,status,error,applied_at) VALUES(?,?,?,?,?)",
                 (version, name, "applied", "", int(time.time())),
             )
-            actions.append(f"applied:{version}:{name}")
-            current = version
-            log(f"SQLite migration applied: {version:03d} {name}")
+            action = "repaired" if needs_repair else "applied"
+            actions.append(f"{action}:{version}:{name}")
+            recorded.add(version)
+            current = max(current, version)
+            log(f"SQLite migration {action}: {version:03d} {name}")
         except Exception as exc:
             con.execute(
                 "INSERT OR REPLACE INTO schema_migrations(version,name,status,error,applied_at) VALUES(?,?,?,?,?)",

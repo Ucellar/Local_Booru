@@ -17,6 +17,7 @@ from typing import Any
 from core.database.connection import db, db_path, close_thread_pooled_connections
 from core.database.storage import _safe_ident
 from core.paths import SETTINGS_FILE, RUNTIME_DIR, DATA_DIR
+from core.stability import swallow
 
 
 def _now() -> int:
@@ -35,6 +36,31 @@ def _backup_root(settings: dict) -> Path:
     # Fallback stays inside the portable settings branch; it is still a useful
     # local checkpoint, but users should choose an external SSD for real safety.
     return DATA_DIR / "output" / "backups" / "light"
+
+
+def _archive_folder() -> Path:
+    """The program's own archive (``…/Local_Booru_Archive``, or the settings folder alone): it writes its
+    database and settings there whatever the folder lies in."""
+    from core.paths import OUTPUT_FOLDER_NAME
+    return DATA_DIR.parent if DATA_DIR.name.lower() == "settings" and \
+        DATA_DIR.parent.name.lower() == OUTPUT_FOLDER_NAME.lower() else DATA_DIR
+
+
+def backup_folder_problem(settings: dict, folder: str | Path | None = None) -> str:
+    """Why the copies cannot go to ``folder`` (the configured one by default); "" when they can.
+
+    The source archive is only read by the program, so a copy is not written there either — except into
+    the program's own places that lie in it (the working library, the program's archive: a source folder
+    can hold them, and the program writes there anyway).  One rule for every way a folder is chosen (the
+    settings page, the window's dialog, an old settings file)."""
+    from core.source_protection import is_inside, is_source_archive_path, source_root
+    target = Path(str(folder)).expanduser() if folder else _backup_root(settings)
+    if not is_source_archive_path(settings, target):
+        return ""
+    archive, root = _archive_folder(), source_root(settings)
+    if is_inside(target, archive) and root is not None and not is_inside(root, archive):
+        return ""
+    return "это внутри исходной папки — в неё программа ничего не пишет"
 
 
 def _count_table(con, table: str) -> int:
@@ -56,11 +82,13 @@ def _snapshot_db(source: Path, target: Path) -> None:
         src.close()
 
 
-def checkpoint_sqlite(settings: dict, *, truncate: bool = True, optimize: bool = True) -> dict[str, Any]:
+def checkpoint_sqlite(settings: dict, *, truncate: bool = True, optimize: bool = True,
+                      busy_seconds: float = 120.0) -> dict[str, Any]:
     """Flush WAL pages and optionally run PRAGMA optimize.
 
     This is safe to call on shutdown after workers are stopped.  During active
-    parser work callers should avoid truncate checkpoints.
+    parser work callers should avoid truncate checkpoints.  ``busy_seconds`` — how long to wait for
+    another writer (the window's own thread passes a few seconds: VACUUM may hold the base for minutes).
     """
     path = db_path(settings)
     if not path.exists():
@@ -70,9 +98,10 @@ def checkpoint_sqlite(settings: dict, *, truncate: bool = True, optimize: bool =
     # destroy warm reader/writer handles.
     if truncate:
         close_thread_pooled_connections(settings)
-    con = sqlite3.connect(str(path), timeout=120)
+    wait = max(0.1, float(busy_seconds))
+    con = sqlite3.connect(str(path), timeout=wait)
     try:
-        con.execute("PRAGMA busy_timeout=120000")
+        con.execute(f"PRAGMA busy_timeout={int(wait * 1000)}")
         mode = "TRUNCATE" if truncate else "PASSIVE"
         row = con.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
         if optimize:
@@ -115,6 +144,9 @@ def create_light_backup(settings: dict, *, reason: str = "manual", force: bool =
         return {"created": False, "error": "SQLite database not found", "db": str(source_db)}
 
     root = _backup_root(settings)
+    problem = backup_folder_problem(settings, root)
+    if problem:
+        return {"created": False, "error": f"папка копий {root}: {problem}", "destination": str(root)}
     try:
         root.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
@@ -190,10 +222,8 @@ def _rotate_backups(root: Path, *, keep_last: int) -> None:
     keep_last = max(1, int(keep_last or 1))
     backups = sorted(root.glob("Local_Booru_light_backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
     for old in backups[keep_last:]:
-        try:
+        with swallow("light_backup.rotate_old_backup"):
             old.unlink()
-        except Exception:
-            pass
 
 
 def maybe_auto_backup(settings: dict, *, reason: str) -> dict[str, Any]:

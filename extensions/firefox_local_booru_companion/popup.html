@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Local Booru Companion</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="top">
+    <span class="logo" aria-hidden="true">LB</span>
+    <div class="title"><h1>Local Booru</h1><div id="connection" class="status">Проверяю…</div></div>
+    <button id="status" class="icon" type="button" title="Обновить статус" aria-label="Обновить статус">↻</button>
+  </header>
+  <p id="out" class="out" role="status"></p>
+
+  <section>
+    <h2>На сайтах</h2>
+    <label class="switch"><input id="enabled" type="checkbox"><span>Включено</span></label>
+    <label class="switch"><input id="showBadge" type="checkbox"><span>Метки на карточках</span></label>
+    <label class="row">Уже скачанные
+      <select id="hideMode"><option value="hide">скрывать</option><option value="dim">затемнять</option></select>
+    </label>
+    <label class="row">Панель справа
+      <select id="dock"><option value="tab">выдвижная</option><option value="off">не показывать</option></select>
+    </label>
+    <label class="row">Блоклист программы
+      <select id="blocklistMode"><option value="blur">размывать</option><option value="hide">скрывать</option><option value="off">не применять</option></select>
+    </label>
+    <label class="switch"><input id="browserResolverEnabled" type="checkbox"><span>Browser Resolver</span></label>
+    <button id="save" class="primary" type="button">Сохранить</button>
+  </section>
+
+  <section>
+    <h2>Связь с программой</h2>
+    <label class="row">Код<input id="pairCode" type="text" inputmode="numeric" maxlength="8" placeholder="8 цифр"></label>
+    <div class="buttons"><button id="pair" type="button">Подключить</button><button id="unpair" type="button">Отключить</button></div>
+    <details>
+      <summary>Адрес программы</summary>
+      <label class="row">API<input id="apiBase" type="text" value="http://127.0.0.1:47734"></label>
+    </details>
+  </section>
+
+  <section>
+    <h2>Без программы</h2>
+    <div id="offline" class="status">Офлайн-список: —</div>
+    <button id="offlineSync" type="button">Обновить список и отправить очередь</button>
+  </section>
+
+  <details class="more">
+    <summary>Ещё</summary>
+    <button id="profiles" type="button">Обновить профили сайтов</button>
+    <button id="permissions" type="button">Разрешить профили и текущий сайт</button>
+    <button id="cookies" type="button">Передать cookies текущего сайта</button>
+  </details>
+  <script src="popup.js"></script>
+</body>
+</html>

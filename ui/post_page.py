@@ -1,7 +1,7 @@
 from pathlib import Path
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea, QSizePolicy, QMessageBox, QMenu, QComboBox, QApplication
-from PySide6.QtCore import Qt, QSize, QUrl, QTimer
-from PySide6.QtGui import QPixmap, QDesktopServices, QMovie, QImageReader, QShortcut, QKeySequence, QFontMetrics
+from PySide6.QtCore import Qt, QSize, QUrl, QTimer, QRectF, QPoint
+from PySide6.QtGui import QPixmap, QDesktopServices, QMovie, QImageReader, QShortcut, QKeySequence, QFontMetrics, QPainter, QPen, QColor
 from core.favorites import load_favorites, set_favorite
 from core.library import normalize_tag, clean_tags
 from core.tag_utils import tag_display_color
@@ -120,6 +120,73 @@ class TagButton(QPushButton):
         self.dbl(self.tag)
 
 
+class ImageNotesOverlay(QWidget):
+    """Paint versioned booru notes and local text regions over the media."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._notes: list[dict] = []
+        self._enabled = True
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+
+    def set_notes(self, notes: list[dict], enabled: bool = True) -> None:
+        self._notes = list(notes or [])
+        self._enabled = bool(enabled)
+        self.setVisible(bool(self._enabled and self._notes))
+        self.update()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+        self.setVisible(bool(self._enabled and self._notes))
+        self.update()
+
+    def _rect(self, note: dict) -> QRectF:
+        return QRectF(
+            max(0.0, min(1.0, float(note.get("x_normalized") or 0.0))) * self.width(),
+            max(0.0, min(1.0, float(note.get("y_normalized") or 0.0))) * self.height(),
+            max(0.0, min(1.0, float(note.get("width_normalized") or 0.0))) * self.width(),
+            max(0.0, min(1.0, float(note.get("height_normalized") or 0.0))) * self.height(),
+        )
+
+    def paintEvent(self, event):
+        if not self._enabled:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        for note in self._notes:
+            local = bool(note.get("local_detector"))
+            pen = QPen(QColor(80, 190, 255, 225) if local else QColor(255, 210, 55, 235), 2)
+            if local:
+                pen.setStyle(Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(QColor(60, 150, 255, 28) if local else QColor(255, 210, 55, 34))
+            painter.drawRoundedRect(self._rect(note), 3, 3)
+
+    def mouseMoveEvent(self, event):
+        from PySide6.QtWidgets import QToolTip
+        point = event.position()
+        for note in reversed(self._notes):
+            if self._rect(note).contains(point):
+                body = str(note.get("body") or "").strip()
+                source = str(note.get("source_site") or "").strip()
+                language = str(note.get("language") or "").strip()
+                title = " · ".join(x for x in (source, language) if x)
+                QToolTip.showText(event.globalPosition().toPoint(), (title + "\n" if title else "") + body, self)
+                return
+        QToolTip.hideText()
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton and self.parent() is not None:
+            try:
+                self.parent().customContextMenuRequested.emit(event.position().toPoint())
+                return
+            except Exception:
+                pass
+        super().mousePressEvent(event)
+
+
 class PostPage(QWidget):
     def __init__(self, main):
         super().__init__()
@@ -140,6 +207,8 @@ class PostPage(QWidget):
         self._tag_source_mode = "all"
         self._return_workspace = "Gallery"
         self._online_preview_context = False
+        self._notes_enabled = bool(getattr(main, "settings", {}).get("gallery_notes_enabled", True))
+        self._current_notes: list[dict] = []
         self.setFocusPolicy(Qt.StrongFocus)
 
         from PySide6.QtWidgets import QSlider, QFrame
@@ -173,6 +242,9 @@ class PostPage(QWidget):
         self.img.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.img.setContextMenuPolicy(Qt.CustomContextMenu)
         self.img.customContextMenuRequested.connect(self._show_media_context_menu)
+        self.notes_overlay = ImageNotesOverlay(self.img)
+        self.notes_overlay.customContextMenuRequested.connect(self._show_media_context_menu)
+        self.notes_overlay.hide()
         self.img_scroll.setWidget(self.img)
 
         body.addWidget(self.tags_scroll)
@@ -305,6 +377,9 @@ class PostPage(QWidget):
         self.fit_btn = _icon_btn("fit_h", w=40, fallback="▭")
         self.play_btn = _cb(); self.play_btn.setFixedWidth(38); self.play_btn.setVisible(False)
         self.fav = _icon_btn("favorite", w=40, fallback="♥")
+        self.notes_btn = _cb(); self.notes_btn.setFixedWidth(48); self.notes_btn.setCheckable(True)
+        self.notes_btn.setChecked(self._notes_enabled); self.notes_btn.setText("Notes")
+        self.notes_btn.setToolTip("Показать переводы и области текста поверх изображения")
         self.next = _icon_btn("post_next", w=40, fallback="→")
 
         # Volume: vertical popup slider
@@ -357,6 +432,7 @@ class PostPage(QWidget):
         ctrl_lay.addSpacing(4)
         ctrl_lay.addWidget(self.star_rating)
         ctrl_lay.addWidget(self.fav)
+        ctrl_lay.addWidget(self.notes_btn)
         ctrl_lay.addWidget(self.volume_btn)
         ctrl_lay.addWidget(self.fullscreen_btn)
         ctrl_lay.addSpacing(8)
@@ -368,6 +444,7 @@ class PostPage(QWidget):
         self.prev.clicked.connect(self.prev_post)
         self.next.clicked.connect(self.next_post)
         self.fav.clicked.connect(self.toggle_fav)
+        self.notes_btn.toggled.connect(self._toggle_notes_overlay)
         self.fit_btn.clicked.connect(self.toggle_fit)
         self.volume_btn.clicked.connect(self._toggle_vol_popup)
         self.play_btn.clicked.connect(self.toggle_video)
@@ -466,7 +543,7 @@ class PostPage(QWidget):
         """
         try:
             item = item or self.item()
-            if not item or item.get("_online_preview") or getattr(self, "_online_preview_context", False):
+            if not item or item.get("_online_preview") or item.get("_external_corpus") or getattr(self, "_online_preview_context", False):
                 return None
             if item.get("id") is not None:
                 return int(item.get("id"))
@@ -701,6 +778,7 @@ class PostPage(QWidget):
         self.fit_btn.setToolTip(self.main.t("Fit Width") if self.fit == "contain" else self.main.t("Fit Height"))
         self.play_btn.setText("▶")
         self.play_btn.setToolTip("Play/Pause")
+        self.notes_btn.setToolTip("Показать переводы и области текста поверх изображения")
         self.render_volume_button()
         if self.main.gallery_page._batch:
             self.render_fav(Path(self.item()["path"]))
@@ -708,6 +786,20 @@ class PostPage(QWidget):
     def item(self):
         ctx = self.context or self.main.gallery_page._batch
         return ctx[self.index]
+
+    def _open_link(self, url: str) -> None:
+        """A source link: only web addresses, in the browser chosen in the settings."""
+        from core.external_browser import is_web_url, open_external_browser_url
+        if is_web_url(url):
+            open_external_browser_url(url, self.main.settings)
+
+    def _link_button(self, button: QPushButton, url: str) -> None:
+        from core.external_browser import is_web_url
+        if is_web_url(url):
+            button.clicked.connect(lambda _=False, target=url: self._open_link(target))
+        else:                                   # stored by an old import: shown, never started
+            button.setEnabled(False)
+            button.setToolTip(f"Не веб-адрес, не открывается: {url[:200]}")
 
     def set_post(self, idx, context=None, tag_source=None):
         self.stop_video()
@@ -807,11 +899,14 @@ class PostPage(QWidget):
         self.play_btn.setVisible(False)  # video: click to pause; no separate button shown
         self.fit_btn.setVisible(not is_vid)
         self.render_media(path, item)
+        self._load_notes_overlay(item, is_vid=is_vid)
         self.render_tags(item)
         online = bool(item.get("_online_preview") or getattr(self, "_online_preview_context", False))
-        self.fav.setVisible(not online)
-        self.star_rating.setVisible(not online)
-        if not online:
+        external_readonly = bool(item.get("_external_corpus"))
+        local_state = not online and not external_readonly
+        self.fav.setVisible(local_state)
+        self.star_rating.setVisible(local_state)
+        if local_state:
             self.render_fav(path)
             self._load_rating(item)
         else:
@@ -1340,6 +1435,44 @@ class PostPage(QWidget):
             self.img.setText(path.name); self.img.adjustSize(); return
         self.img.setPixmap(pix)
         self.img.setFixedSize(pix.size())
+        try:
+            self.notes_overlay.setGeometry(0, 0, pix.width(), pix.height())
+            self.notes_overlay.raise_()
+            self.notes_overlay.set_notes(self._current_notes, self._notes_enabled)
+        except Exception:
+            pass
+
+    def _toggle_notes_overlay(self, enabled: bool) -> None:
+        self._notes_enabled = bool(enabled)
+        try:
+            self.main.settings["gallery_notes_enabled"] = self._notes_enabled
+        except Exception:
+            pass
+        try:
+            self.notes_overlay.set_enabled(self._notes_enabled)
+        except Exception:
+            pass
+
+    def _load_notes_overlay(self, item: dict, *, is_vid: bool = False) -> None:
+        self._current_notes = []
+        if is_vid or bool(item.get("_online_preview")) or bool(item.get("_external_corpus")):
+            self.notes_btn.setVisible(False)
+            self.notes_overlay.set_notes([], False)
+            return
+        image_id = int(item.get("id") or 0)
+        if image_id:
+            try:
+                from core.database.connection import db
+                from core.image_notes import notes_for_image, text_regions_for_image
+                with db(self.main.settings, readonly=True) as con:
+                    self._current_notes = notes_for_image(con, image_id) + text_regions_for_image(con, image_id)
+            except Exception:
+                self._current_notes = []
+        self.notes_btn.setVisible(bool(self._current_notes))
+        self.notes_btn.setChecked(bool(self._notes_enabled))
+        self.notes_overlay.setGeometry(0, 0, max(1, self.img.width()), max(1, self.img.height()))
+        self.notes_overlay.set_notes(self._current_notes, self._notes_enabled)
+        self.notes_overlay.raise_()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1365,6 +1498,9 @@ class PostPage(QWidget):
     def remove_tag_from_current(self, tag):
         tag = normalize_tag(tag)
         item = self.item()
+        if bool(item.get("_external_corpus")):
+            QMessageBox.information(self, "Booru Corpus", "Corpus подключён read-only; теги исходной базы не изменяются.")
+            return
         path = Path(item["path"])
         try:
             from core.services.metadata_service import remove_media_tag_link
@@ -1380,6 +1516,9 @@ class PostPage(QWidget):
 
     def remove_source_from_current(self, source_url, source_host=""):
         item = self.item()
+        if bool(item.get("_external_corpus")):
+            QMessageBox.information(self, "Booru Corpus", "Corpus подключён read-only; источники исходной базы не изменяются.")
+            return
         path = Path(item["path"])
         try:
             from core.services.metadata_service import remove_media_source_link
@@ -1543,7 +1682,7 @@ class PostPage(QWidget):
         try:
             from core.services.metadata_service import raw_metadata_for_path
             path = item.get("path", "")
-            row = raw_metadata_for_path(self.main.settings, path)
+            row = None if item.get("_external_corpus") else raw_metadata_for_path(self.main.settings, path)
             if row:
                 post_url, file_url, site = row
                 if post_url:
@@ -1554,7 +1693,7 @@ class PostPage(QWidget):
                         "border-radius:6px;padding:4px 8px;color:#7ab4ff;font-size:12px;}"
                         "QPushButton:hover{background:#102040;border-color:#4080cc;}")
                     u = post_url
-                    b.clicked.connect(lambda _=False, url=u: QDesktopServices.openUrl(QUrl(url)))
+                    self._link_button(b, u)
                     self.tags_lay.addWidget(b)
                 # Direct CDN/file URLs are intentionally not shown as sources.
                 # The visible source list must contain only original post pages;
@@ -1574,7 +1713,7 @@ class PostPage(QWidget):
                     "QPushButton{background:transparent;border:1px solid #333;"
                     "border-radius:5px;padding:2px 7px;color:#7aadff;font-size:11px;}"
                     "QPushButton:hover{border-color:#7aadff;}")
-                b.clicked.connect(lambda _=False, url=u: QDesktopServices.openUrl(QUrl(url)))
+                self._link_button(b, u)
                 self.tags_lay.addWidget(b)
 
         if not shown_urls and not item.get("sources"):
@@ -1632,13 +1771,16 @@ class PostPage(QWidget):
                 except Exception as exc:
                     QMessageBox.warning(self, "Скачать", str(exc))
             elif chosen == open_action and post_url:
-                QDesktopServices.openUrl(QUrl(post_url))
+                self._open_link(post_url)
             elif chosen == copy_action and post_url:
                 QApplication.clipboard().setText(post_url)
             return
 
         menu = QMenu(self)
         delete_action = menu.addAction("Удалить (в корзину)")
+        if bool(item.get("_external_corpus")):
+            delete_action.setText("Corpus read-only: удаление недоступно")
+            delete_action.setEnabled(False)
         chosen = menu.exec(global_point)
         if chosen != delete_action:
             return
@@ -1665,6 +1807,8 @@ class PostPage(QWidget):
             QMessageBox.warning(self, "Удаление", str(exc))
 
     def toggle_fav(self):
+        if bool(self.item().get("_external_corpus")):
+            return
         p = str(Path(self.item()["path"]))
         enabled = p not in load_favorites(self.main.settings)
         # Write only the current item. Rewriting the entire favorites set was

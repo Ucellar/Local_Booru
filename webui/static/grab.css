@@ -1,0 +1,62 @@
+/* «Граббер»: the search, the cards of the found posts (the gallery's own cards and badges) and the
+   post view.  Colours come from the look's tokens (booru.css + skins/*.css). */
+
+.grab { max-width: none; }
+/* (v5.37) the search is a panel: a big field, the sites as chips, «Скрывать…» as a switch */
+.grab .grab-panel { margin: 0 0 12px; padding: 14px 16px; }
+.grab-search { display: flex; gap: 8px; margin: 0 0 12px; max-width: 980px; }
+.grab-search input[type="search"] { flex: 1; min-width: 0; font: inherit; font-size: 15px; padding: 8px 12px; color: var(--text);
+  background: var(--field-bg, var(--bg)); border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px); }
+.grab-search button.primary { min-width: 7em; padding: 8px 18px; }
+.grab-options { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 22px; margin: 0; }
+.grab-options .site-picks { margin: 0; }
+.grab-hide { padding-bottom: 3px; }
+.grab .grab-tips { max-width: 980px; margin: 0 0 12px; text-align: left; }
+.grab-tips p { margin: 0 0 6px; }
+.grab-tips ul { margin: 0 0 8px; padding-left: 20px; }
+.grab-tips li { margin: 0 0 3px; }
+.grab:has(.grab-results > *) .grab-tips, .grab:has(.grab-status:not(:empty)) .grab-tips { display: none; }
+.grab-status { margin: 0 0 8px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; min-height: 1.4em; }
+.grab-job { margin: 0 0 10px; padding: 6px 10px; border: 1px solid var(--accent); border-radius: var(--radius); background: var(--panel); }
+.grab-job .grab-job-status { color: var(--muted); }
+.grab .grab-more { justify-content: center; margin: 14px 0 6px; }
+.grab .grab-more button { min-width: 12em; }
+
+/* cards: what the library has already is quieter */
+.grab-results .thumb[data-owned="file"] img, .grab-results .thumb[data-owned="post"] img { opacity: 0.6; }
+.grab-results .thumb[data-owned="file"]:hover img, .grab-results .thumb[data-owned="post"]:hover img { opacity: 1; }
+.badge.owned { background: var(--accent); color: var(--accent-ink); }
+.badge.warn { background: var(--danger); color: #fff; }
+
+/* the post view */
+.grab-viewer { width: min(1280px, calc(100vw - 24px)); height: min(900px, calc(100vh - 24px)); max-width: none; max-height: none;
+  padding: 0; color: var(--text); background: var(--dialog-bg, var(--bg)); border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 3px); box-shadow: var(--shadow); overflow: hidden; }
+.grab-viewer[open] { display: grid; grid-template-columns: minmax(0, 1fr) 320px; }
+.grab-viewer::backdrop { background: rgba(0, 0, 0, 0.7); }
+.gv-media { position: relative; display: grid; place-items: center; min-height: 0; background: #000; }
+.gv-media img { max-width: 100%; max-height: calc(min(900px, 100vh - 24px)); object-fit: contain; }
+.gv-note { position: absolute; left: 12px; right: 12px; bottom: 12px; margin: 0; padding: 6px 10px; color: #fff;
+  background: rgba(0, 0, 0, 0.65); border-radius: var(--radius); }
+.gv-side { min-height: 0; overflow: auto; padding: 14px 16px; border-left: 1px solid var(--border); }
+.gv-side h2 { margin: 0 0 8px; font: bold 14px/1.35 var(--font-head); overflow-wrap: anywhere; }
+.gv-owned { margin: 0 0 10px; }
+.gv-sites { margin: 0 0 12px; }
+.gv-sites li { margin: 0 0 3px; color: var(--muted); }
+.gv-tags h4 { margin: 10px 0 4px; }
+.gv-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 40px; height: 64px; font-size: 28px; line-height: 1;
+  color: #fff; background: rgba(0, 0, 0, 0.35); border: 0; border-radius: var(--radius); cursor: pointer; }
+.gv-nav:disabled { opacity: 0.25; cursor: default; }
+.gv-prev { left: 8px; }
+.gv-next { right: 336px; }
+
+@media (max-width: 900px) {
+  .grab-viewer[open] { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 60%) minmax(0, 40%); }
+  .gv-side { border-left: 0; border-top: 1px solid var(--border); }
+  .gv-next { right: 8px; top: 30%; }
+  .gv-prev { top: 30%; }
+}
+
+:root[data-skin="win98"] .grab-search input[type="search"] { border: 0; border-radius: 0; box-shadow: var(--sunken); }
+:root[data-skin="win98"] .grab-viewer { border: 0; border-radius: 0; box-shadow: var(--raised); }
+:root[data-skin="win98"] .grab-job { border-radius: 0; }

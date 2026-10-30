@@ -9,21 +9,22 @@ this service adds journaling and invariant-aware orchestration.
 
 from core.database import repository
 from core.database import journal
+from core import gallery_provider
 
 
 def page(settings, query="", source="all", bucket="all", limit=120, offset=0, order="path", enrich=True, extra_where=None, extra_params=None):
-    rows = repository.search_items(settings, query=query, source=source, bucket=bucket, limit=limit, offset=offset, order=order, extra_where=extra_where, extra_params=extra_params)
+    rows = gallery_provider.search_items(settings, query=query, source=source, bucket=bucket, limit=limit, offset=offset, order=order, extra_where=extra_where, extra_params=extra_params)
     if enrich:
-        rows = repository.enrich_items(settings, rows, tag_source=source)
+        rows = gallery_provider.enrich_items(settings, rows, tag_source=source)
     return rows
 
 
 def total(settings, query="", source="all", bucket="all", extra_where=None, extra_params=None):
-    return repository.count_search_items(settings, query=query, source=source, bucket=bucket, extra_where=extra_where, extra_params=extra_params)
+    return gallery_provider.count_search_items(settings, query=query, source=source, bucket=bucket, extra_where=extra_where, extra_params=extra_params)
 
 
 def counters(settings):
-    return repository.counts(settings)
+    return gallery_provider.counts(settings)
 
 
 def delete_by_tag(settings, tag, scope="all", delete_files=True):
@@ -82,47 +83,299 @@ def unfinished_operations(settings, limit=100):
     return journal.unfinished(settings, limit=limit)
 
 
+def validate_duplicate_group_plans(plans) -> dict:
+    """Validate and normalise duplicate-delete plans without touching SQLite.
+
+    A delete path may appear in several rendered candidate groups.  Repeating it
+    with the same keeper is harmless and is deduplicated; assigning the same
+    delete path to different keepers is ambiguous and blocks the whole batch.
+    """
+    from pathlib import Path
+    from core.path_utils import path_key
+
+    errors: list[str] = []
+    normalised: list[dict] = []
+    delete_owner: dict[str, dict] = {}
+
+    for position, raw_plan in enumerate(list(plans or []), start=1):
+        raw_plan = dict(raw_plan or {})
+        group_index = raw_plan.get("group_index", position)
+        group_label = str(raw_plan.get("group_label") or f"Группа {group_index}")
+        keep_path = str(raw_plan.get("keep_path") or "").strip()
+        keep_key = path_key(keep_path)
+
+        if not keep_path or not keep_key:
+            errors.append(f"{group_label}: отмечены все файлы; оставьте хотя бы один keeper.")
+            continue
+        if not Path(keep_path).is_file():
+            errors.append(f"{group_label}: keeper отсутствует или не является файлом: {keep_path}")
+            continue
+
+        delete_paths: list[str] = []
+        local_seen: set[str] = set()
+        for value in list(raw_plan.get("delete_paths") or []):
+            delete_path = str(value or "").strip()
+            delete_key = path_key(delete_path)
+            if not delete_path or not delete_key or delete_key in local_seen:
+                continue
+            local_seen.add(delete_key)
+
+            if delete_key == keep_key:
+                errors.append(f"{group_label}: keeper одновременно отмечен на удаление: {keep_path}")
+                continue
+            if not Path(delete_path).is_file():
+                errors.append(f"{group_label}: удаляемый файл отсутствует: {delete_path}")
+                continue
+
+            previous = delete_owner.get(delete_key)
+            if previous is not None:
+                if previous["keep_key"] != keep_key:
+                    errors.append(
+                        f"{group_label}: файл отмечен в нескольких группах с разными keeper: "
+                        f"{delete_path} (keeper: {previous['keep_path']} / {keep_path})"
+                    )
+                # Same delete path and same keeper: retain one physical action.
+                continue
+
+            delete_owner[delete_key] = {
+                "keep_key": keep_key,
+                "keep_path": keep_path,
+                "group_label": group_label,
+            }
+            delete_paths.append(delete_path)
+
+        if delete_paths:
+            normalised.append({
+                "group_index": group_index,
+                "group_label": group_label,
+                "keep_path": keep_path,
+                "keep_key": keep_key,
+                "delete_paths": delete_paths,
+            })
+
+    all_deleted = set(delete_owner)
+    for plan in normalised:
+        if plan["keep_key"] in all_deleted:
+            errors.append(
+                f"{plan['group_label']}: выбранный keeper удаляется в другой группе: "
+                f"{plan['keep_path']}"
+            )
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "plans": normalised,
+        "groups": len(normalised),
+        "files": len(delete_owner),
+    }
+
+
+def _duplicate_rows_by_path_key(con, paths) -> dict[str, dict]:
+    """Resolve live image rows by the shared platform path key.
+
+    The fast path uses exact SQLite path matches.  A rare fallback scans live
+    rows only when spelling/case/separator differences prevented an exact hit.
+    """
+    from core.path_utils import path_key
+
+    requested = [str(p or "").strip() for p in (paths or []) if str(p or "").strip()]
+    wanted = {path_key(p) for p in requested if path_key(p)}
+    if not wanted:
+        return {}
+
+    columns = "id,path,file_name,bucket,size_bytes"
+    found: dict[str, dict] = {}
+    for offset in range(0, len(requested), 400):
+        batch = requested[offset:offset + 400]
+        placeholders = ",".join("?" for _ in batch)
+        rows = con.execute(
+            f"SELECT {columns} FROM images WHERE deleted=0 AND path IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            key = path_key(item.get("path"))
+            if key in wanted:
+                found[key] = item
+
+    missing = wanted.difference(found)
+    if missing:
+        for row in con.execute(f"SELECT {columns} FROM images WHERE deleted=0").fetchall():
+            item = dict(row)
+            key = path_key(item.get("path"))
+            if key in missing:
+                found[key] = item
+                missing.discard(key)
+                if not missing:
+                    break
+    return found
+
+
+def _merge_duplicate_metadata(con, keep_id: int, source_id: int) -> None:
+    """Metadata of a duplicate goes to the kept card, one tag set per site."""
+    from core.database.storage import merge_card_metadata
+    merge_card_metadata(con, keep_id, source_id)
+
+
+def trash_duplicate_groups(settings, plans) -> dict:
+    """Merge and trash a validated duplicate batch with one DB backup.
+
+    Filesystem moves cannot be atomically committed together with SQLite, so the
+    safe ordering is: validate -> one independent DB backup -> one metadata
+    merge transaction -> one move_to_trash call without another backup.  A
+    failed move may leave extra metadata on the keeper, but cannot lose metadata.
+    """
+    from pathlib import Path
+    from core.database.connection import db, db_path
+    from core.library_lifecycle import force_backup_database, move_to_trash
+    from core.path_utils import path_key
+    from core.database.storage import refresh_effective_tag_categories
+
+    validation = validate_duplicate_group_plans(plans)
+    if not validation["ok"]:
+        raise ValueError("\n".join(validation["errors"]))
+    prepared = list(validation["plans"])
+    if not prepared:
+        return {
+            "deleted_files": 0,
+            "errors": 0,
+            "deleted_records": 0,
+            "groups": 0,
+            "requested_files": 0,
+            "backup": "",
+        }
+
+    all_paths: list[str] = []
+    for plan in prepared:
+        all_paths.append(plan["keep_path"])
+        all_paths.extend(plan["delete_paths"])
+
+    # Resolve all records before the expensive backup.  Unknown/unindexed files
+    # are blocked because there is no canonical DB row to receive metadata.
+    with db(settings, readonly=True) as con:
+        preview_rows = _duplicate_rows_by_path_key(con, all_paths)
+    missing = [p for p in all_paths if path_key(p) not in preview_rows]
+    if missing:
+        shown = "\n".join(missing[:10])
+        extra = f"\n... ещё {len(missing) - 10}" if len(missing) > 10 else ""
+        raise RuntimeError(
+            "Операция отменена: некоторые файлы не найдены среди живых записей SQLite:\n"
+            + shown + extra
+        )
+
+    backup = force_backup_database(settings, "duplicate_delete_batch", auto=True)
+    if Path(db_path(settings)).exists() and not backup:
+        raise RuntimeError("Не удалось создать резервную копию базы. Удаление отменено.")
+
+    delete_rows_by_key: dict[str, dict] = {}
+    merged = 0
+    with db(settings, write=True) as con:
+        live_rows = _duplicate_rows_by_path_key(con, all_paths)
+        missing_after_lock = [p for p in all_paths if path_key(p) not in live_rows]
+        if missing_after_lock:
+            raise RuntimeError(
+                "Операция отменена: состав библиотеки изменился во время удаления; "
+                "обновите страницу дубликатов и повторите попытку."
+            )
+
+        for plan in prepared:
+            keep_row = live_rows[plan["keep_key"]]
+            keep_id = int(keep_row["id"])
+            for delete_path in plan["delete_paths"]:
+                delete_key = path_key(delete_path)
+                source_row = live_rows[delete_key]
+                _merge_duplicate_metadata(con, keep_id, int(source_row["id"]))
+                delete_rows_by_key[delete_key] = source_row
+                merged += 1
+            refresh_effective_tag_categories(con, keep_id)
+
+    result = move_to_trash(
+        settings,
+        list(delete_rows_by_key.values()),
+        reason="duplicate_delete",
+        make_backup=False,
+    )
+    result = dict(result or {})
+    result["backup"] = backup
+    result["groups"] = int(validation["groups"] or 0)
+    result["requested_files"] = int(validation["files"] or 0)
+    result["metadata_merged"] = merged
+    return result
+
+
 def trash_duplicate_paths(settings, deleted_paths, kept_path="", keep_path=""):
+    """Compatibility wrapper: single-group deletion uses the batch-safe path."""
     if keep_path and not kept_path:
         kept_path = keep_path
-    """Move duplicate choices to Trash; merge useful metadata into kept file first."""
-    from core.database.connection import db
-    from core.library_lifecycle import move_to_trash
     paths = [str(p) for p in (deleted_paths or []) if str(p)]
     if not paths:
         return {"deleted_files": 0, "errors": 0, "deleted_records": 0}
-    with db(settings, readonly=True) as con:
-        ph = ",".join("?" for _ in paths)
-        rows = [dict(r) for r in con.execute(f"SELECT id,path,file_name,bucket,size_bytes FROM images WHERE path IN ({ph}) AND deleted=0", paths).fetchall()]
-        keep = con.execute("SELECT id FROM images WHERE path=? AND deleted=0", (str(kept_path or ""),)).fetchone() if kept_path else None
-    if keep and rows:
-        keep_id = int(keep["id"])
-        with db(settings, write=True) as con:
-            for row in rows:
-                source_id = int(row["id"])
-                con.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id) SELECT ?,tag_id FROM image_tags WHERE image_id=?", (keep_id, source_id))
-                con.execute("INSERT OR IGNORE INTO image_sources(image_id,source_id) SELECT ?,source_id FROM image_sources WHERE image_id=?", (keep_id, source_id))
-                con.execute("""
-                    INSERT OR REPLACE INTO image_source_tags(image_id,source_id,tag_id,category,acquisition,updated_at)
-                    SELECT ?,source_id,tag_id,category,acquisition,updated_at FROM image_source_tags WHERE image_id=?
-                """, (keep_id, source_id))
-                score = con.execute("SELECT rating,favorite FROM images WHERE id=?", (source_id,)).fetchone()
-                if score:
-                    con.execute("UPDATE images SET rating=MAX(COALESCE(rating,0),?), favorite=MAX(COALESCE(favorite,0),?) WHERE id=?", (int(score["rating"] or 0), int(score["favorite"] or 0), keep_id))
-    return move_to_trash(settings, rows, reason="duplicate_delete", make_backup=True)
-
+    return trash_duplicate_groups(
+        settings,
+        [{
+            "group_index": 1,
+            "group_label": "Группа",
+            "keep_path": str(kept_path or ""),
+            "delete_paths": paths,
+        }],
+    )
 
 def remember_duplicate_relation(settings, infos, relation="not_duplicate") -> int:
-    """Remember exact MD5 pairs only; never hides a future unknown similar file."""
+    """Remember exact content pairs and mark their current visual relation reviewed.
+
+    The durable decision remains MD5-based, so replacing either image's content
+    does not suppress a future unknown pair. ``duplicate_relations.status`` is a
+    UI/cache optimisation and is updated only when the stored MD5 snapshot still
+    matches the decision being recorded.
+    """
     from core.database.connection import db
-    md5s = sorted({str(i.get("md5") or "").lower() for i in (infos or []) if str(i.get("md5") or "").strip()})
-    now = __import__("time").time()
+
+    relation = str(relation or "not_duplicate")
+    items = []
+    for info in infos or []:
+        md5 = str(info.get("md5") or "").strip().lower()
+        try:
+            image_id = int(info.get("image_id") or 0)
+        except Exception:
+            image_id = 0
+        if md5:
+            items.append((image_id, md5))
+    # One image row per content MD5 is the library invariant, but de-duplicate
+    # defensively so repeated cards cannot inflate the reported decision count.
+    unique = []
+    seen = set()
+    for image_id, md5 in items:
+        key = (image_id, md5)
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+
+    now = int(__import__("time").time())
     count = 0
     with db(settings, write=True) as con:
-        for pos, a in enumerate(md5s):
-            for b in md5s[pos + 1:]:
-                con.execute("INSERT OR REPLACE INTO ignored_duplicate_pairs(md5_a,md5_b,relation,created_at) VALUES(?,?,?,?)", (a, b, relation, int(now)))
+        for pos, (id_a, md5_a_raw) in enumerate(unique):
+            for id_b, md5_b_raw in unique[pos + 1:]:
+                if md5_a_raw == md5_b_raw:
+                    continue
+                md5_a, md5_b = sorted((md5_a_raw, md5_b_raw))
+                con.execute(
+                    "INSERT OR REPLACE INTO ignored_duplicate_pairs(md5_a,md5_b,relation,created_at) VALUES(?,?,?,?)",
+                    (md5_a, md5_b, relation, now),
+                )
                 count += 1
+                if id_a > 0 and id_b > 0 and id_a != id_b:
+                    image_a, image_b = sorted((id_a, id_b))
+                    snapshot_a = md5_a_raw if id_a == image_a else md5_b_raw
+                    snapshot_b = md5_b_raw if id_b == image_b else md5_a_raw
+                    con.execute(
+                        """
+                        UPDATE duplicate_relations
+                        SET status=?,updated_at=?
+                        WHERE image_a=? AND image_b=? AND relation='visual_phash'
+                          AND md5_a=? AND md5_b=?
+                        """,
+                        (relation, now, image_a, image_b, snapshot_a, snapshot_b),
+                    )
     return count
 
 
@@ -136,29 +389,46 @@ def ignored_duplicate_pair(settings, md5_a, md5_b) -> bool:
 
 
 # UI-facing read operations: widgets depend on the service boundary, not SQL modules.
-def search_items(settings, **kwargs):
-    return repository.search_items(settings, **kwargs)
+# v471: these calls can target the normal Local Booru DB or a read-only Booru
+# Corpus Builder database without teaching the UI about either SQL schema.
+def search_items(settings, query="", source="all", bucket="all", limit=None, offset=0, order="path", extra_where=None, extra_params=None):
+    """Compatibility-preserving gallery read API.
 
-def count_search_items(settings, **kwargs):
-    return repository.count_search_items(settings, **kwargs)
+    v469 callers historically passed query/source/bucket positionally because
+    this service mirrored repository.search_items().  v471 redirected reads
+    through gallery_provider but accidentally narrowed the wrapper to **kwargs,
+    breaking Gallery.apply_filter().  Keep the legacy call contract while the
+    provider decides whether Local Booru or Booru Corpus serves the query.
+    """
+    return gallery_provider.search_items(
+        settings, query=query, source=source, bucket=bucket, limit=limit,
+        offset=offset, order=order, extra_where=extra_where, extra_params=extra_params,
+    )
+
+def count_search_items(settings, query="", source="all", bucket="all", extra_where=None, extra_params=None):
+    """Compatibility-preserving count API matching repository.count_search_items()."""
+    return gallery_provider.count_search_items(
+        settings, query=query, source=source, bucket=bucket,
+        extra_where=extra_where, extra_params=extra_params,
+    )
 
 def enrich_items(settings, items, tag_source="all"):
-    return repository.enrich_items(settings, items, tag_source=tag_source)
+    return gallery_provider.enrich_items(settings, items, tag_source=tag_source)
 
 def candidate_tags(settings, scope="all"):
-    return repository.candidate_tags(settings, scope)
+    return gallery_provider.candidate_tags(settings, scope)
 
 def candidate_sources(settings, scope="all"):
-    return repository.candidate_sources(settings, scope)
+    return gallery_provider.candidate_sources(settings, scope)
 
 def counts(settings):
-    return repository.counts(settings)
+    return gallery_provider.counts(settings)
 
 def source_unique_image_count(settings):
-    return repository.source_unique_image_count(settings)
+    return gallery_provider.source_unique_image_count(settings)
 
 def tag_group_counts(settings, source="all"):
-    return repository.tag_group_counts(settings, source=source)
+    return gallery_provider.tag_group_counts(settings, source=source)
 
 def find_images_by_tag(settings, tag, scope="all", limit=None):
     return repository.find_images_by_tag(settings, tag, scope=scope, limit=limit)

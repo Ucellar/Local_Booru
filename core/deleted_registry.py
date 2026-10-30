@@ -117,11 +117,22 @@ def record_deleted_file(path: Path, *, reason: str = "duplicate_delete", md5: st
     if settings is not None and value:
         from core.database.connection import db
         with db(settings, write=True) as con:
+            # A later automatic event (duplicate cleanup) never lifts a manual block;
+            # only forget_deleted_md5 (restore, explicit re-import) does.
             con.execute(
                 """INSERT INTO deleted_media_rules(md5,active,manual_delete,reason,path,file_name,size_bytes,created_at,updated_at)
                    VALUES(?,?,?,?,?,?,?,?,?)
-                   ON CONFLICT(md5) DO UPDATE SET active=excluded.active, manual_delete=excluded.manual_delete,
-                   reason=excluded.reason,path=excluded.path,file_name=excluded.file_name,size_bytes=excluded.size_bytes,updated_at=excluded.updated_at""",
+                   ON CONFLICT(md5) DO UPDATE SET
+                     active=MAX(deleted_media_rules.active, excluded.active),
+                     manual_delete=MAX(deleted_media_rules.manual_delete, excluded.manual_delete),
+                     reason=CASE WHEN excluded.manual_delete=1 OR deleted_media_rules.active=0
+                                 THEN excluded.reason ELSE deleted_media_rules.reason END,
+                     path=CASE WHEN excluded.manual_delete=1 OR deleted_media_rules.active=0
+                               THEN excluded.path ELSE deleted_media_rules.path END,
+                     file_name=CASE WHEN excluded.manual_delete=1 OR deleted_media_rules.active=0
+                                    THEN excluded.file_name ELSE deleted_media_rules.file_name END,
+                     size_bytes=excluded.size_bytes,
+                     updated_at=excluded.updated_at""",
                 (value, int(manual), int(manual), str(reason or ""), str(path), path.name, int(size or 0), int(time.time()), int(time.time())),
             )
         return
@@ -145,6 +156,47 @@ def has_deleted_md5(md5: str, *, settings: dict | None = None) -> bool:
             row = con.execute("SELECT 1 FROM deleted_media_rules WHERE md5=? AND active=1 AND manual_delete=1 LIMIT 1", (value,)).fetchone()
         return row is not None
     return any(str(x.get("md5", "")).strip().lower() == value and _is_manual_reason(str(x.get("reason") or "")) for x in _load_legacy().get("items", []))
+
+
+def reimport_block(md5: str, *, settings: dict) -> str:
+    """Why new copies of these bytes must stay out of the library.
+
+    "trash"   — the user put this file into Trash (it waits there for restore or purge);
+    "deleted" — the user deleted it for good and asked not to import it again;
+    ""        — nothing blocks it.  A live copy always wins: then a new copy is merged, not re-imported.
+    """
+    value = str(md5 or "").strip().lower()
+    if not value:
+        return ""
+    keys = (value, value.upper())
+    from core.database.connection import db
+    with db(settings, readonly=True) as con:
+        if con.execute("SELECT 1 FROM images WHERE hash_md5 IN (?,?) AND deleted=0 LIMIT 1", keys).fetchone():
+            return ""
+        if con.execute("SELECT 1 FROM images WHERE hash_md5 IN (?,?) AND deleted=1 AND lifecycle='trash' LIMIT 1",
+                       keys).fetchone():
+            return "trash"
+        if con.execute("SELECT 1 FROM deleted_media_rules WHERE md5=? AND active=1 AND manual_delete=1 LIMIT 1",
+                       (value,)).fetchone():
+            return "deleted"
+    return ""
+
+
+def trashed_rows(md5: str, *, settings: dict) -> list[dict]:
+    """Trash rows holding these bytes, newest first; empty when a live copy exists."""
+    value = str(md5 or "").strip().lower()
+    if not value:
+        return []
+    keys = (value, value.upper())
+    from core.database.connection import db
+    with db(settings, readonly=True) as con:
+        # «+deleted», «+lifecycle»: by the MD5's index, not every card (core/database/storage.media_path_by_md5)
+        if con.execute("SELECT 1 FROM images WHERE hash_md5 IN (?,?) AND +deleted=0 LIMIT 1", keys).fetchone():
+            return []
+        rows = con.execute(
+            """SELECT * FROM images WHERE hash_md5 IN (?,?) AND +deleted=1 AND +lifecycle='trash'
+               ORDER BY trashed_at DESC, id DESC""", keys).fetchall()
+    return [dict(r) for r in rows]
 
 
 def forget_deleted_md5(md5: str, *, settings: dict | None = None) -> int:

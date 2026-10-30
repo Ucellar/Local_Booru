@@ -1,0 +1,3 @@
+/* «r34 (как в системе)»: the look of rule34.xxx, light — or the night version when Windows uses the dark mode. */
+@import url("_r34.css");
+@import url("_r34-dark.css") (prefers-color-scheme: dark);

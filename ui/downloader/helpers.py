@@ -29,23 +29,12 @@ except Exception:
     imagehash = None
 
 
-DEFAULT_BLOCKLIST = (
-    "obese, obesity, overweight, weight_gain, "
-    "inflation, inflation_fetish, expansion, expansion_fetish, "
-    "pregnant, pregnancy, mpreg, bloated, belly_inflation, "
-    "nipple_expansion, huge_nipples, giant_nipples, "
-    "cyst, cysts, cystitis, "
-    "ai_generated, ai-assisted, ai_assisted, "
-    "scat, coprophagia, poop, feces, "
-    "necrophilia, corpse, guro, gore, vomit, fart, farting"
-)
 
 # Explicit export list is important because page.py imports helpers with
 # `from ui.downloader.helpers import *`. Python normally skips names that
 # start with `_`, so private helper functions such as `_session_for_url`
 # would not be imported and downloader would crash at runtime.
 __all__ = [
-    "DEFAULT_BLOCKLIST",
     "_mask_sensitive_url",
     "_host",
     "_load_browser_cookie_json",
@@ -61,8 +50,10 @@ __all__ = [
     "_tag_list_from_post",
     "_groups_from_post",
     "_clean_download_tag",
+    "_clean_sidebar_tag",
     "_dedupe_group_dict",
     "_extract_file_url_from_json",
+    "_extract_original_url_from_json",
     "_extract_preview_url_from_json",
     "_post_md5_from_json",
     "_posts_from_json_response",
@@ -162,13 +153,20 @@ def _session_for_url(url, log):
 
 
 def _ext_from_url_or_type(url, content_type):
+    """The extension of a downloaded file: a picture or video type only.  A server may answer
+    ``application/octet-stream`` for «1234.hta»; such a file keeps ``.bin`` (nothing on Windows
+    runs it), never the extension from the address."""
+    from core.media_utils import CARD_FILE_EXTS
+    allowed = CARD_FILE_EXTS | {".zip"}            # .zip: Danbooru's ugoira animations
     path = urlparse(url).path
     ext = Path(path).suffix.lower()
-    if ext and len(ext) <= 8:
+    if ext in allowed:
         return ext
     ct = (content_type or "").split(";")[0].strip().lower()
-    guessed = mimetypes.guess_extension(ct)
-    return guessed or ".bin"
+    guessed = (mimetypes.guess_extension(ct) or "").lower()
+    if guessed == ".jpe":
+        guessed = ".jpg"
+    return guessed if guessed in allowed else ".bin"
 
 
 def _safe_name(name):
@@ -220,17 +218,9 @@ def _media_size_text(path):
 
 
 def _posts_from_xml_response(text):
-    posts = []
-    try:
-        soup = BeautifulSoup(text or "", "xml")
-        for p in soup.find_all("post"):
-            d = dict(p.attrs)
-            # BeautifulSoup XML attrs can be lists sometimes
-            d = {k: (" ".join(v) if isinstance(v, list) else v) for k, v in d.items()}
-            posts.append(d)
-    except Exception:
-        pass
-    return posts
+    # stdlib XML parser: BeautifulSoup's "xml" mode needs lxml, which is not installed
+    from core.parser.util import xml_elements
+    return xml_elements(text, "post")
 
 
 def _tag_list_from_post(post):
@@ -319,24 +309,26 @@ BAD_UI_TAGS = {
 }
 
 
+_SEARCH_METATAGS = ("rating:", "sort:", "order:", "md5:", "id:", "user:", "source:")
+
+
 def _clean_download_tag(tag):
-    tag = unquote(str(tag or "")).strip()
-    # Visible tag sidebars sometimes append site-wide counts (e.g. horse 231k).
-    # Remove those UI counts before normalising spaces; API tag data stays intact.
-    tag = re.sub(r"(?:\s+|_)\d+(?:[.,]\d+)?[kmb]?\s*$", "", tag, flags=re.IGNORECASE)
-    tag = tag.replace(" ", "_")
-    tag = re.sub(r"_+", "_", tag)
-    tag = tag.strip("_")
-    if not tag:
+    """A tag exactly as the site gave it: only whitespace becomes "_" and search metatags are dropped.
+
+    It used to cut a "_<number>" ending (persona_5 -> persona, area_51 -> area, mob_psycho_100 ->
+    mob_psycho) and throw away tags with "/" (fate/grand_order) or words like "video".  That cleanup
+    is meant for the HTML tag sidebar only — see _clean_sidebar_tag.
+    """
+    tag = re.sub(r"\s+", "_", str(tag or "").strip())
+    if not tag or tag.lower().startswith(_SEARCH_METATAGS):
         return ""
-    low = tag.lower()
-    if low in BAD_UI_TAGS:
-        return ""
-    if low.startswith(("rating:", "sort:", "md5:", "id:", "user:", "source:")):
-        return ""
-    if any(ch in tag for ch in "/?=&#"):
-        return ""
-    if re.fullmatch(r"[0-9,]+", tag):
+    return tag
+
+
+def _clean_sidebar_tag(tag):
+    """A tag taken from an HTML tag sidebar link: also drop navigation words and bare numbers."""
+    tag = _clean_download_tag(tag)
+    if not tag or tag.lower() in BAD_UI_TAGS or re.fullmatch(r"[0-9,]+", tag):
         return ""
     return tag
 
@@ -408,6 +400,22 @@ def _extract_file_url_from_json(data):
     return ""
 
 
+
+
+def _extract_original_url_from_json(data):
+    """The original file of a post (what goes to the archive): never large/sample/jpeg/preview —
+    "" when the post offers only those (a small copy saved as «the post» would block the original)."""
+    if isinstance(data, dict) and isinstance(data.get("post"), dict):
+        data = data["post"]
+    if isinstance(data, dict) and isinstance(data.get("posts"), list) and data["posts"]:
+        data = data["posts"][0]
+    if isinstance(data, list) and data:
+        data = data[0]
+    if not isinstance(data, dict):
+        return ""
+    from core.downloader_utils import original_media_urls
+    urls = [u for u in original_media_urls(data) if u.startswith(("http://", "https://"))]
+    return urls[0] if urls else ""
 
 
 def _extract_preview_url_from_json(data):

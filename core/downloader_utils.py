@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from core.file_safety import atomic_write_bytes
 from urllib.parse import urlparse
+from core.net import http_request
 
 try:
     from curl_cffi import requests
@@ -17,9 +19,26 @@ _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
        "Chrome/136.0.0.0 Safari/537.36")
 
 def _safe(s: str) -> str:
-    """Make string safe for filesystem paths."""
+    """Make a string one safe folder name — never «.», «..» or empty: those name the folder itself or the one above
+    (a subscription «..» downloaded beside the other sites' folders, and «Удалить скачанные» took them all)."""
     import re as _re
-    return _re.sub(r'[<>:"/\\|?*]', '_', str(s))[:60]
+    name = _re.sub(r'[<>:"/\\|?*]', '_', str(s))[:60]
+    return name if name.strip(" .") else "_"
+
+
+def _safe_file_name(url_name: str, fallback: str) -> str:
+    """A file name from the last part of a media URL: unsafe characters replaced, the name cut to
+    60 characters **with its extension kept**.  yande.re and konachan name files
+    «yande.re 12345 tag tag … .png»: cutting the whole name lost the extension, and the type fix
+    after the download turned every file into «yande.png» — the second one was «already there»."""
+    import re as _re
+    from urllib.parse import unquote
+    name = _re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", unquote(str(url_name or ""))).strip(" .")
+    stem, dot, ext = name.rpartition(".")
+    if dot and stem and 1 <= len(ext) <= 5 and ext.isalnum():
+        stem = stem[:60].rstrip(" .")
+        return f"{stem}.{ext.lower()}" if stem else fallback
+    return name[:60].rstrip(" .") or fallback
 
 
 _CF_HOSTS = {
@@ -102,13 +121,6 @@ def _atf_solve_challenge(session, url, host, html_text, log):
         return False
 
 
-def _atf_is_pow_page(text):
-    head = (text or "")[:20000].lower()
-    return ("booru.allthefallen.moe | verification" in head
-            or "x-verification-challenge" in head
-            or "powseed" in head)
-
-
 # Magic bytes → correct extension mapping
 _MAGIC = [
     (b"RIFF", b"WEBP", ".webp"),
@@ -176,8 +188,72 @@ def _get_or_create_session(host: str, settings: dict, log=None):
             "Accept": "application/json",
             "Accept-Encoding": "gzip, deflate",
         })
+    # Explicit browser handoff is domain-scoped and DPAPI-protected.  It is
+    # applied after the normal site defaults so the real browser User-Agent and
+    # session cookies win only for the selected domain.
+    try:
+        from core.domain_credentials import load_domain_credentials
+        creds = load_domain_credentials(settings, clean_host)
+        if not creds and clean_host.startswith("www."):
+            creds = load_domain_credentials(settings, clean_host[4:])
+        if creds:
+            if creds.get("user_agent"):
+                s.headers["User-Agent"] = str(creds["user_agent"])
+            for cookie in creds.get("cookies") or []:
+                if not isinstance(cookie, dict) or not cookie.get("name"):
+                    continue
+                kwargs = {"path": str(cookie.get("path") or "/")}
+                if cookie.get("domain"):
+                    kwargs["domain"] = str(cookie.get("domain"))
+                s.cookies.set(str(cookie.get("name")), str(cookie.get("value") or ""), **kwargs)
+    except Exception as exc:
+        if log:
+            log(f"Browser credential handoff warning [{clean_host}]: {type(exc).__name__}")
     _session_cache[host] = s
     return s
+
+
+def _handle_visual_duplicate(settings: dict, dest: Path, file_url: str, log):
+    """A just-downloaded file that looks like a card already in the library (pHash distance <= 3).
+
+    Returns None when it is not a duplicate or the new file is better (keep it), else
+    ``(False, path of the kept card)``: the new file goes to Trash and the caller merges the post's
+    metadata into the kept card.  (The old inline code read ``sqlite3.Row.get`` — no such method —
+    after the file had already been moved to Trash, so the vanished file was registered as a
+    «ghost» card.)
+    """
+    try:
+        similar = _find_similar_in_db(settings, dest, threshold=3)
+    except Exception as exc:  # the similarity index is optional: without it the download is kept
+        log(f"  VISUAL DUPLICATE CHECK SKIPPED: {type(exc).__name__}: {exc}")
+        return None
+    if similar is None:
+        return None
+    similar = dict(similar)
+    kept = Path(str(similar.get("path") or ""))
+    if not str(kept) or not kept.is_file():
+        return None
+    new_size = dest.stat().st_size
+    old_size = int(similar.get("size_bytes") or 0)
+    old_px = int(similar.get("width") or 0) * int(similar.get("height") or 0)
+    try:
+        from PIL import Image as _Img
+        with _Img.open(dest) as _im:
+            new_w, new_h = _im.size
+    except Exception:  # an unreadable image (video, odd format): compare by size
+        new_w = new_h = 0
+    new_px = new_w * new_h
+    new_wins = (new_px > old_px) if (new_px and old_px) else (new_size > old_size)
+    if new_wins:
+        return None
+    from core.library_lifecycle import trash_media_paths, update_url_history
+    trash_media_paths(settings, [dest], reason="subscription_visual_duplicate", make_backup=False)
+    try:
+        update_url_history(settings, file_url, status="duplicate", error="similar existing file kept")
+    except Exception as exc:
+        log(f"  url history: {exc}")
+    log(f"  SKIP DUPE → Удалено (similar exists): {dest.name}")
+    return False, kept
 
 
 def _find_similar_in_db(settings: dict, file_path, threshold: int = 3):
@@ -189,7 +265,7 @@ def _find_similar_in_db(settings: dict, file_path, threshold: int = 3):
     """
     con = None
     try:
-        from core.tagger.engine import file_phash, phash_distance
+        from core.tagger import file_phash, phash_distance
         from core.database.connection import get_connection
         from core.vptree import VPTree
 
@@ -198,9 +274,13 @@ def _find_similar_in_db(settings: dict, file_path, threshold: int = 3):
             return None
 
         con = get_connection(settings)
-        tree = VPTree(con)
-        tree.ensure_fresh_enough()
-        matches = tree.search(ph, max_distance=threshold)
+        from core.derived_cache_db import open_selected_cache
+        with open_selected_cache(
+            settings, "vp_tree", main_connection=con, require_fresh=False, allow_main_fallback=True
+        ) as (tree_con, _cache_info):
+            tree = VPTree(tree_con)
+            tree.ensure_fresh_enough()
+            matches = tree.search(ph, max_distance=threshold)
         if matches:
             ids = [int(mid) for mid, _ in matches[:25]]
             phs = ','.join(['?'] * len(ids))
@@ -211,8 +291,16 @@ def _find_similar_in_db(settings: dict, file_path, threshold: int = 3):
             by_id = {int(r['id']): r for r in rows}
             for mid, _dist in matches:
                 row = by_id.get(int(mid))
-                if row is not None:
-                    return row
+                if row is None:
+                    continue
+                # External generations may be safely searched while stale as a
+                # subset index, but a cached hash is never enough for a positive
+                # match. Revalidate against the current main.db pHash.
+                try:
+                    if phash_distance(ph, str(row['hash_phash'] or '')) <= threshold:
+                        return row
+                except Exception:
+                    continue
 
         # Bounded fallback: compare same leading nybble bucket first. It is not
         # mathematically complete, but avoids full-table scans when the tree is
@@ -251,12 +339,12 @@ def _find_similar_in_db(settings: dict, file_path, threshold: int = 3):
 
 def _rate_limited_get(session, url, settings=None, **kwargs):
     from core.http_rate_limiter import wait_for, apply_retry_after
-    # Parser sessions are globally wrapped in core.tagger.engine.get_session().
+    # Parser sessions come from core.tagger.get_session() (cookies, no global wrapper).
     # Plain fallback sessions still need rate limiting here.
     wrapped = bool(getattr(session, "_local_booru_global_limiter", False))
     if not wrapped:
         wait_for(url, settings or {})
-    r = session.get(url, **kwargs)
+    r = http_request(session, "GET", url, **kwargs)
     if not wrapped:
         apply_retry_after(r, settings or {})
     return r
@@ -266,7 +354,7 @@ def _rate_limited_post(session, url, settings=None, **kwargs):
     wrapped = bool(getattr(session, "_local_booru_global_limiter", False))
     if not wrapped:
         wait_for(url, settings or {})
-    r = session.post(url, **kwargs)
+    r = http_request(session, "POST", url, **kwargs)
     if not wrapped:
         apply_retry_after(r, settings or {})
     return r
@@ -292,7 +380,7 @@ def _smart_get(session, url, host, log, params=None, timeout=30, settings=None, 
 def _session(host: str, settings: dict | None = None, log=None):
     """Build a session with cookies from tagger — identical to parser session."""
     try:
-        from core.tagger.engine import get_session
+        from core.tagger import get_session
         s = get_session(settings=settings or {}, log_func=log, target_host=host)
         return s
     except Exception as e:
@@ -599,35 +687,77 @@ def _post_referrer(site: str, post: dict) -> str:
     return f"https://{host}/posts/{pid}"
 
 
-def _file_url_variants(post: dict, site: str = "") -> list[str]:
-    """Return media URL fallbacks in quality order.
+def _media_url_groups(post: dict, site: str = "") -> tuple[list[str], list[str], list[str]]:
+    """(originals, reduced copies, page candidates) of a post's media URLs.
 
-    Original first, then sample/jpeg, then preview.  Never use the `source`
+    Originals — the file the site stores (``file_url``, e621 ``file.url``, Danbooru's ``original``
+    media asset).  Reduced — ``large_file_url``/sample/jpeg/preview: other bytes, a smaller copy.
+    Page candidates — URLs the browser saw on the post page (the extension).  Never the ``source``
     field: that often points to Pixiv/Twitter/etc. instead of a direct file.
     """
-    urls: list[str] = []
+    seen: set[str] = set()
+    groups: tuple[list[str], list[str], list[str]] = ([], [], [])
 
-    def add(v):
-        if isinstance(v, str) and v.strip():
-            u = _absolute_url(v, site)
-            if u and u not in urls:
-                urls.append(u)
+    def add(group: int, v):
+        if not (isinstance(v, str) and v.strip()):
+            return
+        if v.strip().startswith("/") and not v.strip().startswith("//") and not _host(site):
+            return                      # a site-relative path without the site: no URL
+        u = _absolute_url(v, site)
+        if not u or u in seen:
+            return
+        try:
+            from core.network import is_permanently_disabled_url
+            if is_permanently_disabled_url(u):
+                return
+        except Exception:
+            pass
+        seen.add(u)
+        groups[group].append(u)
 
-    for key in ("file_url", "large_file_url", "source_file_url", "original_url"):
-        add(post.get(key))
+    for key in ("file_url", "source_file_url", "original_url"):
+        add(0, post.get(key))
     f = post.get("file", {})
     if isinstance(f, dict):
-        add(f.get("url"))
-        add(f.get("ext_url"))
+        add(0, f.get("url"))
+        add(0, f.get("ext_url"))
+    media = post.get("media_asset")
+    variants = media.get("variants") if isinstance(media, dict) else None
+    for v in variants if isinstance(variants, list) else []:
+        if isinstance(v, dict) and v.get("type") == "original":
+            add(0, v.get("url"))
+    add(1, post.get("large_file_url"))
     sample = post.get("sample", {})
     if isinstance(sample, dict):
-        add(sample.get("url"))
+        add(1, sample.get("url"))
+    for key in ("sample_url", "sample_file_url", "jpeg_url"):
+        add(1, post.get(key))
     preview = post.get("preview", {})
     if isinstance(preview, dict):
-        add(preview.get("url"))
-    for key in ("sample_url", "jpeg_url", "preview_file_url", "preview_url"):
-        add(post.get(key))
-    return urls
+        add(1, preview.get("url"))
+    for key in ("preview_file_url", "preview_url"):
+        add(1, post.get(key))
+    # Browser candidates are fallback-only.  An official post API original
+    # (including e621's nested file.url) must always stay ahead of page links.
+    for key in ("browser_media_urls", "media_urls", "original_urls"):
+        values = post.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        for value in values:
+            add(2, value)
+    return groups
+
+
+def original_media_urls(post: dict, site: str = "") -> list[str]:
+    """URLs of the file the site stores for the post — never a sample, jpeg or preview copy."""
+    return _media_url_groups(post if isinstance(post, dict) else {}, site)[0]
+
+
+def _file_url_variants(post: dict, site: str = "") -> list[str]:
+    """Return media URL fallbacks in quality order: originals, then sample/jpeg/preview, then
+    the URLs the browser saw on the page."""
+    originals, reduced, page = _media_url_groups(post, site)
+    return originals + reduced + page
 
 
 def _file_url(post: dict, site: str = "") -> str:
@@ -653,6 +783,174 @@ def _valid_media_bytes(data: bytes, content_type: str = "") -> tuple[bool, str |
     return False, None
 
 
+
+def download_media_to_staging(
+    site: str,
+    urls: list[str] | tuple[str, ...],
+    settings: dict,
+    destination,
+    *,
+    referrer: str = "",
+    expected_md5: str = "",
+    log=None,
+    stop_check=None,
+) -> dict:
+    """Download one recorded media candidate into a disposable staging path.
+
+    This is the low-level recovery/download primitive.  It deliberately skips
+    library dedupe and parser persistence, streams bytes instead of buffering a
+    whole video in RAM, validates media magic, respects the shared HTTP/rate
+    limit stack, and only reports success when ``expected_md5`` matches.
+    """
+    import hashlib
+    from itertools import chain
+    from pathlib import Path
+
+    from core.file_safety import atomic_write_chunks
+    from core.network import is_permanently_disabled_url
+    from core.preflight import ensure_space_for_write
+
+    log = log or (lambda _m: None)
+    settings = dict(settings or {})
+    dest = Path(destination)
+    expected = str(expected_md5 or "").strip().lower()
+    max_bytes = max(1, int(float(settings.get("recovery_max_download_mb", 4096) or 4096))) * 1024 * 1024
+    candidates: list[str] = []
+    for value in urls or []:
+        url = str(value or "").strip()
+        if not url or url in candidates or is_permanently_disabled_url(url):
+            continue
+        candidates.append(url)
+    if not candidates:
+        return {"ok": False, "status": "no_source", "error": "no_allowed_media_url"}
+    try:
+        from core.download_policy import require_allowed
+        require_allowed(
+            settings, operation="staged_media_download", source_site=str(site or ""),
+            media_url=str(candidates[0]), post_url=str(referrer or ""),
+            payload={"destination": str(dest), "expected_md5": expected},
+            create_intent=bool(settings.get("download_policy_create_intents", True)),
+        )
+    except Exception as exc:
+        try:
+            from core.download_policy import DownloadBlockedByPolicy
+            if isinstance(exc, DownloadBlockedByPolicy):
+                return {"ok": False, "status": "blocked_by_policy", "error": str(exc), "intent_id": int(exc.decision.intent_id or 0)}
+        except Exception:
+            pass
+        raise
+
+    last_error = ""
+    for url in candidates:
+        if stop_check and stop_check():
+            raise InterruptedError("Recovery download cancelled")
+        host = _host(site or url)
+        session = _get_or_create_session(host, settings, log=log)
+        headers = {
+            "Referer": str(referrer or f"https://{host}/"),
+            "Accept": "image/avif,image/webp,image/apng,image/*,video/*,*/*;q=0.8",
+        }
+        response = None
+        try:
+            response = _rate_limited_get(
+                session,
+                url,
+                settings=settings,
+                timeout=90,
+                headers=headers,
+                allow_redirects=True,
+                stream=True,
+            )
+            if response.status_code in (401, 403):
+                last_error = f"HTTP {response.status_code}: auth/cookie wall"
+                continue
+            if response.status_code in (404, 410):
+                last_error = f"HTTP {response.status_code}: media missing"
+                continue
+            response.raise_for_status()
+            content_type = str(response.headers.get("Content-Type") or "")
+            try:
+                content_length = int(response.headers.get("Content-Length") or 0)
+            except Exception:
+                content_length = 0
+            if content_length > max_bytes:
+                last_error = f"download too large: {content_length} > {max_bytes}"
+                continue
+            space_ok, space_error = ensure_space_for_write(settings, dest, content_length)
+            if not space_ok:
+                return {"ok": False, "status": "failed", "error": space_error, "source_url": url}
+
+            iterator = response.iter_content(chunk_size=1024 * 1024)
+            prefix_parts: list[bytes] = []
+            prefix_size = 0
+            while prefix_size < 4096:
+                try:
+                    part = next(iterator)
+                except StopIteration:
+                    break
+                if part:
+                    prefix_parts.append(bytes(part))
+                    prefix_size += len(part)
+            prefix = b"".join(prefix_parts)
+            media_ok, _extension = _valid_media_bytes(prefix, content_type)
+            if not media_ok:
+                last_error = f"non-media response ({len(prefix)} bytes, {content_type or '?'})"
+                continue
+
+            digest = hashlib.md5()
+            total = 0
+
+            def chunks():
+                nonlocal total
+                for chunk in chain(prefix_parts, iterator):
+                    if stop_check and stop_check():
+                        raise InterruptedError("Recovery download cancelled")
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"download exceeded limit {max_bytes}")
+                    digest.update(chunk)
+                    yield chunk
+
+            atomic_write_chunks(dest, chunks(), should_stop=stop_check)
+            observed = digest.hexdigest().lower()
+            if expected and observed != expected:
+                try:
+                    dest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                last_error = f"downloaded MD5 mismatch: expected={expected} observed={observed}"
+                continue
+            return {
+                "ok": True,
+                "status": "downloaded",
+                "path": str(dest),
+                "source_url": url,
+                "bytes": int(total),
+                "observed_md5": observed,
+                "content_type": content_type,
+            }
+        except InterruptedError:
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            try:
+                dest.unlink(missing_ok=True)
+            except Exception:
+                pass
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+    return {"ok": False, "status": "failed", "error": last_error or "all_media_candidates_failed"}
+
 def fetch_posts_for_query(
     site: str,
     query: str,
@@ -662,8 +960,14 @@ def fetch_posts_for_query(
     blacklist_tags: list | None = None,
     run_mode: str = "all",
     log=None,
+    status: dict | None = None,
+    max_posts: int = 0,
 ) -> tuple[list[dict], int]:
     """Fetch post metadata without downloading. Returns (posts, highest_id_seen).
+
+    ``status`` (optional) receives ``pages_ok`` — pages the site answered — and ``error`` — why it
+    stopped answering — so «the site is down» is not mistaken for «no new posts».
+    ``max_posts`` (> 0): stop after that many posts (the newest; «Скачать тег» with a limit).
 
     run_mode:
       all — candidates from scanned pages, dedup is handled later.
@@ -699,6 +1003,11 @@ def fetch_posts_for_query(
     # rule34.xxx officially allows up to 1000 posts per API page.  Using that
     # limit is both faster for large subscriptions and kinder to its 60 RPM API.
     page_limit = 1000 if host in {"rule34.xxx", "api.rule34.xxx"} else 100
+    max_posts = max(0, int(max_posts or 0))
+    if max_posts:
+        page_limit = min(page_limit, max_posts)
+    status = status if status is not None else {}
+    status.setdefault("pages_ok", 0)
     for page in range(max_pages):
         if stop:
             break
@@ -707,27 +1016,33 @@ def fetch_posts_for_query(
         api_url, base_params = _posts_api_url_bound(site, query, page, limit=page_limit, cursor_id=cursor_id if (page > 0 or run_mode in {"new", "old"}) else 0, run_mode=run_mode)
         if not api_url:
             log(f"  FETCH [{site}]: no verified API endpoint; automatic subscription/tag scan disabled")
+            status["error"] = "no verified API endpoint"
             break
         params = {**base_params, **auth}
         try:
             r = _smart_get(s, api_url, host, log, params=params, timeout=45, settings=settings, headers=request_headers, auth=request_auth)
             if r.status_code in (401, 403):
                 log(f"  FETCH [{site}]: {r.status_code} — нужны cookies/API из парсера")
+                status["error"] = f"HTTP {r.status_code}"
                 break
             r.raise_for_status()
             body = getattr(r, "text", "") or ""
             if not body.strip():
                 log(f"  FETCH [{site}]: пустой ответ")
+                status["error"] = "empty answer"
                 break
             try:
                 data = r.json()
             except Exception:
                 log(f"  FETCH [{site}]: HTML/не JSON вместо API-ответа")
+                status["error"] = "not JSON"
                 break
             raw_posts = _extract_posts(data)
         except Exception as e:
             log(f"  FETCH PAGE ERROR [{site}]: {e}")
+            status["error"] = f"{type(e).__name__}: {e}"
             break
+        status["pages_ok"] += 1
 
         if not raw_posts:
             log(f"  FETCH [{site}] page={page}: 0 постов (status={r.status_code}, size={len(body)})")
@@ -769,6 +1084,9 @@ def fetch_posts_for_query(
                 if isinstance(file_block, dict) and file_block.get("url") is None and not _file_url(post, site):
                     e621_null_file_urls += 1
             posts.append(post)
+            if max_posts and len(posts) >= max_posts:
+                stop = True
+                break
 
         time.sleep(0.25)
 
@@ -787,16 +1105,39 @@ def download_post_file(
     query: str = "",
     session_folder: str = "",
     log=None,
+    operation: str = "post_download",
+    allow_reduced: bool = False,
 ) -> tuple[bool, object]:
-    """Download one post file safely. Returns (success, dest_path|None)."""
+    """Download one post file safely. Returns (success, dest_path|None).
+
+    Only the original is taken unless ``allow_reduced``: a sample or preview saved under the
+    post's MD5 would stand in for the original for good («уже есть», never downloaded again).
+    The browser import allows them (the user pointed at that picture; a better copy found later
+    replaces it through the quality upgrade)."""
     log = log or (lambda m: None)
     host = _host(site)
     s = _get_or_create_session(host, settings, log=log)
 
     from pathlib import Path
-    file_urls = _file_url_variants(post, site)
+    originals, reduced, page_urls = _media_url_groups(post, site)
+    file_urls = originals + (reduced if allow_reduced else []) + page_urls
     if not file_urls:
+        if reduced:
+            log(f"  DL SKIP [{site}]: post {_post_id(post)} has no original file URL (only sample/preview); not saved")
         return False, None
+    # Authoritative process-wide gate. All current Browser Import and
+    # Subscription paths pass through this function; future feature lanes must
+    # do the same or use download_media_to_staging(), which enforces the same policy.
+    from core.download_policy import require_allowed
+    require_allowed(
+        settings,
+        operation=str(operation or query or "post_download"),
+        source_site=str(site or host),
+        media_url=str(file_urls[0]),
+        post_url=_post_referrer(site, post),
+        payload={"post_id": _post_id(post), "query": str(query or "")},
+        create_intent=bool((settings or {}).get("download_policy_create_intents", True)),
+    )
     def _history(url: str, status: str, error: str = ""):
         try:
             from core.library_lifecycle import update_url_history
@@ -847,7 +1188,7 @@ def download_post_file(
         correct_ext = None
         for idx, file_url in enumerate(file_urls):
             url_name = Path(urlparse(file_url).path).name
-            fname = _safe(url_name) or f"{pid}.bin"
+            fname = _safe_file_name(url_name, f"{post_hash or pid}.bin")
             dest = out_dir / fname
 
             if dest.exists():
@@ -915,33 +1256,9 @@ def download_post_file(
         atomic_write_bytes(dest, raw)
         log(f"  DL [{site}]: {fname}")
 
-        try:
-            similar = _find_similar_in_db(settings, dest, threshold=3)
-            if similar:
-                new_size = dest.stat().st_size
-                old_size = similar["size_bytes"] or 0
-                old_w = similar["width"] or 0
-                old_h = similar["height"] or 0
-                try:
-                    from PIL import Image as _Img
-                    with _Img.open(dest) as _im:
-                        new_w, new_h = _im.size
-                except Exception:
-                    new_w = new_h = 0
-                new_px = new_w * new_h
-                old_px = old_w * old_h
-                new_wins = (new_px > old_px) if (new_px and old_px) else (new_size > old_size)
-                if not new_wins:
-                    try:
-                        from core.library_lifecycle import trash_media_paths, update_url_history
-                        trash_media_paths(settings, [dest], reason="subscription_visual_duplicate", make_backup=False)
-                        update_url_history(settings, file_url, status="duplicate", error="similar existing file kept")
-                    except Exception:
-                        pass
-                    log(f"  SKIP DUPE → Удалено (similar exists): {fname}")
-                    return False, Path(str(similar.get("path") or "")) if similar.get("path") else None
-        except Exception:
-            pass
+        duplicate = _handle_visual_duplicate(settings, dest, file_url, log)
+        if duplicate is not None:
+            return duplicate
 
         try:
             from core.library_lifecycle import update_url_history

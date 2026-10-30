@@ -187,7 +187,12 @@ def init_db(con, force=False):
         updated_at INTEGER NOT NULL DEFAULT 0,
         short_remaining INTEGER NOT NULL DEFAULT -1,
         long_remaining INTEGER NOT NULL DEFAULT -1,
-        quota_checked_at INTEGER NOT NULL DEFAULT 0
+        quota_checked_at INTEGER NOT NULL DEFAULT 0,
+        quota_probe_after INTEGER NOT NULL DEFAULT 0,
+        quota_last_admitted_at INTEGER NOT NULL DEFAULT 0,
+        quota_admissions_since_snapshot INTEGER NOT NULL DEFAULT 0,
+        quota_admission_serial INTEGER NOT NULL DEFAULT 0,
+        quota_snapshot_serial INTEGER NOT NULL DEFAULT 0
     );
 
     -- NO_MATCH is library state, not a sidecar marker/cache file.
@@ -356,6 +361,7 @@ def init_db(con, force=False):
     CREATE INDEX IF NOT EXISTS idx_no_match_active ON no_match_items(active, updated_at);
     CREATE INDEX IF NOT EXISTS idx_no_match_reason_active ON no_match_items(active, reason, updated_at);
     CREATE INDEX IF NOT EXISTS idx_no_match_source_host ON no_match_items(active, source_host, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_no_match_media ON no_match_items(media_path);
     CREATE INDEX IF NOT EXISTS idx_delete_log_path ON delete_log(path);
     CREATE INDEX IF NOT EXISTS idx_task_log_status ON task_log(status, task_type);
     CREATE INDEX IF NOT EXISTS idx_operation_journal_status ON operation_journal(status, op_type);

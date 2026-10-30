@@ -1,272 +1,22 @@
-
 from __future__ import annotations
 
-import hashlib
-import os
-import re
 from pathlib import Path
-from collections import defaultdict
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-    QFrame, QCheckBox, QSizePolicy, QMessageBox, QDialog, QSpinBox
+    QFrame, QCheckBox, QMessageBox, QDialog, QSpinBox
 )
 
-from core.tagger import result_output_base
 from core.settings import save_settings
-from core.services.library_service import trash_duplicate_paths, remember_duplicate_relation
-from core.database.connection import db
-
-MEDIA_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
-
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-
-try:
-    import imagehash
-except Exception:
-    imagehash = None
-
-
-def file_md5(path: Path) -> str:
-    h = hashlib.md5()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def image_size(path: Path) -> tuple[int, int]:
-    if Image is None:
-        return (0, 0)
-    try:
-        with Image.open(path) as img:
-            return (int(img.width), int(img.height))
-    except Exception:
-        return (0, 0)
-
-
-def perceptual_hash(path: Path) -> str:
-    if Image is None:
-        return ""
-    try:
-        with Image.open(path) as img:
-            rgb = img.convert("RGB")
-            if imagehash is not None:
-                return str(imagehash.phash(rgb))
-            # Fallback without imagehash: simple 8x8 average hash.
-            small = rgb.resize((8, 8))
-            vals = []
-            for r, g, b in small.getdata():
-                vals.append((r + g + b) // 3)
-            avg = sum(vals) / max(1, len(vals))
-            bits = "".join("1" if v >= avg else "0" for v in vals)
-            return f"{int(bits, 2):016x}"
-    except Exception:
-        return ""
-
-
-def phash_similarity(a: str, b: str) -> float | None:
-    if not a or not b:
-        return None
-    try:
-        d = bin(int(a, 16) ^ int(b, 16)).count("1")
-        return max(0.0, 100.0 * (1.0 - (d / 64.0)))
-    except Exception:
-        return None
-
-
-def base_without_copy_suffix(path_or_stem) -> str:
-    stem = Path(str(path_or_stem)).stem if "." in str(path_or_stem) else str(path_or_stem)
-    return COPY_SUFFIX_RE.sub("", stem).strip().lower()
-
-
-def copy_suffix_number(path: Path) -> int | None:
-    m = COPY_SUFFIX_RE.search(path.stem)
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except Exception:
-        return None
-
-
-
-# Physical duplicate removal is handled by core.services.library_service -> Trash.
-# The UI never unlinks media or legacy sidecars directly.
-
-def collect_media_roots(settings: dict) -> list[Path]:
-    base = result_output_base(settings)
-    roots = [
-        base / "found" / "media",
-        base / "no_match" / "media",
-        base / "downloads" / "found" / "media",
-        base / "downloads" / "no_match" / "media",
-    ]
-    return [r for r in roots if r.exists()]
-
-
-def scan_media(settings: dict) -> list[Path]:
-    files = []
-    for root in collect_media_roots(settings):
-        for p in root.rglob("*"):
-            if p.is_file() and p.suffix.lower() in MEDIA_EXTS:
-                files.append(p)
-    return sorted(set(files), key=lambda x: str(x).lower())
-
-
-def item_info(path: Path) -> dict:
-    try:
-        bytes_size = path.stat().st_size
-    except Exception:
-        bytes_size = 0
-    w, h = image_size(path)
-    md5 = ""
-    try:
-        md5 = file_md5(path)
-    except Exception:
-        pass
-    phash = perceptual_hash(path)
-    return {
-        "path": str(path),
-        "name": path.name,
-        "bytes": bytes_size,
-        "pixels": [w, h],
-        "md5": md5,
-        "phash": phash,
-        "base": base_without_copy_suffix(path),
-        "copy_no": copy_suffix_number(path),
-    }
-
-
-def choose_keep_for_safe_copy(items: list[dict]) -> str:
-    def score(it):
-        p = Path(it["path"])
-        copy_no = it.get("copy_no")
-        # First keep unsuffixed, otherwise smallest suffix, then shortest path.
-        return (copy_no is not None, copy_no if copy_no is not None else -1, len(str(p)), str(p).lower())
-    return sorted(items, key=score)[0]["path"]
-
-
-class DuplicateScanWorker(QThread):
-    progress = Signal(str)
-    finished_groups = Signal(list)
-
-    def __init__(self, settings: dict, visual_threshold: int = 85):
-        super().__init__()
-        self.settings = dict(settings or {})
-        self.visual_threshold = max(50, min(100, int(visual_threshold or 85)))
-
-    def run(self):
-        groups = []
-        try:
-            files = scan_media(self.settings)
-            self.progress.emit(f"SCAN: файлов={len(files)}")
-
-            infos = []
-            for i, p in enumerate(files, 1):
-                if i % 25 == 0:
-                    self.progress.emit(f"SCAN: {i}/{len(files)}")
-                infos.append(item_info(p))
-
-            by_safe = defaultdict(list)
-            for it in infos:
-                px = tuple(it.get("pixels") or [0, 0])
-                if it.get("md5") and it.get("bytes") and px != (0, 0):
-                    by_safe[(it["md5"], it["base"], it["bytes"], px)].append(it)
-
-            for key, xs in by_safe.items():
-                if len(xs) > 1 and any(x.get("copy_no") is not None for x in xs):
-                    keep = choose_keep_for_safe_copy(xs)
-                    groups.append({
-                        "reason": "Безопасный дубль: MD5 + имя без (1)/(2) + размер + пиксели совпадают",
-                        "items": xs,
-                        "safe": True,
-                        "keep_path": keep,
-                    })
-
-            # Exact MD5 duplicates that are not just copy suffixes.
-            by_md5 = defaultdict(list)
-            for it in infos:
-                if it["md5"]:
-                    by_md5[it["md5"]].append(it)
-            for md5, xs in by_md5.items():
-                if len(xs) > 1:
-                    groups.append({"reason": "Точный дубль: одинаковый MD5", "items": xs})
-
-            # Same base name with Windows copy suffix.
-            by_base = defaultdict(list)
-            for it in infos:
-                by_base[it["base"]].append(it)
-            for b, xs in by_base.items():
-                if len(xs) > 1 and any(x.get("copy_no") is not None for x in xs):
-                    groups.append({"reason": "Похожее имя: отличается только (1)/(2)/(3)", "items": xs})
-
-            # Equal width/height alone is not evidence of a duplicate; it caused huge noise.
-            # Dimensions remain visible in comparison cards, while candidates come from MD5/pHash.
-
-            # Visual similarity. Default is strict enough to avoid garbage groups.
-            threshold = float(self.visual_threshold)
-            if True:
-                for i, a in enumerate(infos):
-                    if not a.get("phash"):
-                        continue
-                    local = [a]
-                    best = 0.0
-                    for b in infos[i + 1:]:
-                        sim = phash_similarity(a.get("phash"), b.get("phash"))
-                        if sim is not None and sim >= threshold:
-                            local.append(b)
-                            best = max(best, sim)
-                    if len(local) > 1:
-                        groups.append({
-                            "reason": f"Похожее фото: визуальное совпадение примерно {best:.0f}%+ / порог {threshold:.0f}%",
-                            "items": local,
-                        })
-
-            ignored_pairs = set()
-            try:
-                with db(self.settings, readonly=True) as con:
-                    rows = con.execute(
-                        "SELECT md5_a, md5_b FROM ignored_duplicate_pairs "
-                        "WHERE relation IN ('not_duplicate','alternative')"
-                    ).fetchall()
-                    ignored_pairs = {(str(r[0]), str(r[1])) for r in rows}
-            except Exception:
-                ignored_pairs = set()
-
-            def suppressed_visual_group(group: dict) -> bool:
-                reason = str(group.get("reason", ""))
-                if group.get("safe") or reason.startswith("Точный дубль"):
-                    return False  # MD5 duplicates always win over remembered visual decisions.
-                md5s = sorted({str(x.get("md5") or "") for x in group.get("items", []) if x.get("md5")})
-                if len(md5s) < 2:
-                    return False
-                pairs = {(md5s[i], md5s[j]) for i in range(len(md5s)) for j in range(i + 1, len(md5s))}
-                return bool(pairs) and pairs.issubset(ignored_pairs)
-
-            uniq = []
-            seen = set()
-            for g in groups:
-                paths = tuple(sorted(x["path"] for x in g["items"]))
-                # Keep safe group before generic duplicates.
-                key = (paths, bool(g.get("safe")))
-                if len(paths) < 2 or key in seen or suppressed_visual_group(g):
-                    continue
-                seen.add(key)
-                uniq.append(g)
-
-            uniq.sort(key=lambda g: (not g.get("safe", False), g.get("reason", "")))
-            self.progress.emit(f"DONE: групп={len(uniq)}")
-            self.finished_groups.emit(uniq)
-        except Exception as e:
-            self.progress.emit(f"SCAN ERROR: {type(e).__name__}: {e}")
-            self.finished_groups.emit([])
+from core.services.library_service import (
+    trash_duplicate_paths,
+    trash_duplicate_groups,
+    validate_duplicate_group_plans,
+    remember_duplicate_relation,
+)
+from core.duplicate_scanner import run_duplicate_scan
 
 
 class ImagePreviewDialog(QDialog):
@@ -447,26 +197,48 @@ class DuplicateGroupWidget(QFrame):
         if not checked:
             QMessageBox.information(self, "Дубликаты", "Ничего не отмечено.")
             return
-        enabled = [c for c in self.cards if c.checkbox.isEnabled()]
-        if len(checked) >= len(enabled):
-            ok = QMessageBox.question(self, "Дубликаты", "Отмечены все удаляемые файлы в группе. Переместить их в «Удалено»?")
-            if ok != QMessageBox.Yes:
-                return
-        deleted_paths = [str(c.info.get("path", "")) for c in checked]
-        keep_cards = [c for c in self.cards if c not in checked and Path(str(c.info.get("path", ""))).exists()]
-        keep_path = str(keep_cards[0].info.get("path", "")) if keep_cards else ""
+
+        checked_ids = {id(card) for card in checked}
+        keep_cards = [
+            card for card in self.cards
+            if id(card) not in checked_ids
+            and Path(str(card.info.get("path", ""))).is_file()
+        ]
+        if not keep_cards:
+            QMessageBox.warning(
+                self,
+                "Дубликаты",
+                "Отмечены все файлы группы. Оставьте хотя бы один файл, "
+                "в который будут перенесены теги и источники.",
+            )
+            return
+
+        deleted_paths = [str(card.info.get("path", "")) for card in checked]
+        keep_path = str(keep_cards[0].info.get("path", ""))
+        ok = QMessageBox.question(
+            self,
+            "Дубликаты",
+            f"Переместить отмеченные файлы в «Удалено»?\nФайлов: {len(deleted_paths)}\n\n"
+            "Теги, источники, рейтинг и favorite будут объединены "
+            "с оставленным файлом. Перед операцией будет создана резервная копия базы.",
+        )
+        if ok != QMessageBox.Yes:
+            return
+
+        moved = error_count = 0
         try:
             result = trash_duplicate_paths(self.settings, deleted_paths, keep_path=keep_path)
             moved = int(result.get("deleted_files", 0) or 0)
-            _err_count = int(result.get("errors", 0) or 0)
-            errors = ([f"Ошибок при перемещении в корзину: {_err_count}"] if _err_count else [])
+            error_count = int(result.get("errors", 0) or 0)
         except Exception as exc:
-            moved, errors = 0, [str(exc)]
-        if moved:
+            error_count = 1
+            QMessageBox.warning(self, "Дубликаты", f"Удаление отменено или завершилось ошибкой:\n{exc}")
+
+        if moved and not error_count:
             for card in checked:
                 card.setVisible(False)
-        self.on_deleted(moved, errors)
-        if not errors and moved:
+        self.on_deleted(moved, error_count)
+        if not error_count and moved:
             self.hide()
 
 
@@ -474,7 +246,8 @@ class DuplicatesPage(QWidget):
     def __init__(self, main):
         super().__init__()
         self.main = main
-        self.worker = None
+        self.scan_task = None
+        self.scan_result = {}
         self.group_widgets = []
         self.pending_groups = []
         self.render_index = 0
@@ -504,9 +277,18 @@ class DuplicatesPage(QWidget):
         row.addWidget(self.status, 1)
         root.addLayout(row)
 
-        info = QLabel("Сканируются: found, no_match, downloads/found, downloads/no_match. Клик по фото открывает крупный просмотр.")
+        info = QLabel(
+            "DB-first: используются сохранённые SQLite MD5/pHash/размеры. "
+            "VP-tree выдаёт только пары-кандидаты; файлы библиотеки повторно не хэшируются. "
+            "Управляемые папки дополнительно проверяются только на неиндексированные физические файлы."
+        )
         info.setWordWrap(True)
         root.addWidget(info)
+        self.scan_notice = QLabel("")
+        self.scan_notice.setWordWrap(True)
+        self.scan_notice.setVisible(False)
+        self.scan_notice.setStyleSheet("color:#d9a441;")
+        root.addWidget(self.scan_notice)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -524,6 +306,9 @@ class DuplicatesPage(QWidget):
         pass
 
     def clear_results(self):
+        self.render_timer.stop()
+        self.pending_groups = []
+        self.render_index = 0
         self.group_widgets.clear()
         while self.body_lay.count() > 1:
             item = self.body_lay.takeAt(0)
@@ -531,33 +316,88 @@ class DuplicatesPage(QWidget):
             if w:
                 w.setParent(None)
                 w.deleteLater()
+        self.scan_notice.clear()
+        self.scan_notice.setVisible(False)
         self.status.setText("Список очищен.")
 
     def scan(self):
-        if self.worker and self.worker.isRunning():
-            self.status.setText("Сканирование уже идёт.")
+        current = self.scan_task
+        if current is not None and (current.future is None or not current.future.done()):
+            current.cancel()
+            self.scan_btn.setEnabled(False)
+            self.scan_btn.setText("Остановка...")
+            self.status.setText("Дубликаты: запрошена остановка; старые candidate relations останутся рабочими")
             return
         self.clear_results()
+        self.scan_notice.setVisible(False)
+        self.scan_result = {}
         try:
             self.main.settings["duplicate_visual_threshold"] = int(self.threshold.value())
             save_settings(self.main.settings)
         except Exception:
             pass
-        self.scan_btn.setEnabled(False)
-        self.status.setText("Сканирование...")
-        self.worker = DuplicateScanWorker(self.main.settings, self.threshold.value())
-        self.worker.progress.connect(self.status.setText)
-        self.worker.finished_groups.connect(self.render_groups)
-        self.worker.start()
-
-    def render_groups(self, groups: list):
         self.scan_btn.setEnabled(True)
+        self.scan_btn.setText("Отменить сканирование")
+        self.status.setText("DB-first сканирование: подготовка...")
+        try:
+            self.scan_task = self.main.task_manager.submit(
+                run_duplicate_scan,
+                dict(self.main.settings or {}),
+                int(self.threshold.value()),
+                mode="forced",
+                name="maintenance.duplicate-candidate-scan",
+                on_progress=self.status.setText,
+                on_result=self.render_scan_result,
+                on_error=self.scan_error,
+                on_finished=self.scan_finished,
+            )
+        except Exception as exc:
+            self.scan_task = None
+            self.scan_btn.setEnabled(True)
+            self.scan_btn.setText("Сканировать")
+            self.status.setText(f"SCAN ERROR: {exc}")
+
+    def scan_error(self, error):
+        text = str(error or "")
+        self.status.setText("SCAN ERROR: " + text[-1200:])
+        QMessageBox.warning(self, "Дубликаты", "DB-first сканирование завершилось ошибкой:\n" + text[-3000:])
+
+    def scan_finished(self):
+        task = self.scan_task
+        self.scan_task = None
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText("Сканировать")
+        if task is not None and task.cancelled():
+            self.status.setText("Сканирование остановлено; предыдущий полный набор candidate relations сохранён")
+
+    def render_scan_result(self, result: dict):
+        self.scan_result = dict(result or {})
+        unindexed = int(self.scan_result.get("unindexed_files", 0) or 0)
+        root_issues = list(self.scan_result.get("filesystem_root_issues") or [])
+        notices = []
+        if unindexed:
+            notices.append(
+                f"В управляемых media-папках найдено неиндексированных файлов: {unindexed}. "
+                "Они не хэшировались и не включались в удаляемые группы; сначала требуется переиндексация."
+            )
+        if root_issues:
+            notices.append(f"Filesystem fallback не смог проверить корней: {len(root_issues)}.")
+        self.scan_notice.setText("\n".join(notices))
+        self.scan_notice.setVisible(bool(notices))
+        self.render_groups(
+            list(self.scan_result.get("groups") or []),
+            total_groups=int(self.scan_result.get("total_groups", 0) or 0),
+        )
+
+    def render_groups(self, groups: list, *, total_groups: int | None = None):
+        total = int(total_groups if total_groups is not None else len(groups))
         if not groups:
-            self.status.setText("Дубликаты не найдены.")
+            suffix = f"; неиндексированных файлов: {int(self.scan_result.get('unindexed_files',0) or 0)}" if self.scan_result else ""
+            self.status.setText("Визуальные пары не найдены" + suffix + ".")
             return
         self.pending_groups = list(groups[:250])
         self.render_index = 0
-        self.status.setText(f"Найдено групп: {len(groups)}. Отрисовка списка...")
+        self.status.setText(f"Найдено пар: {total}. Отрисовка списка...")
         self.render_timer.start(1)
 
     def render_next_batch(self):
@@ -573,40 +413,80 @@ class DuplicatesPage(QWidget):
         self.status.setText(f"Отрисовка групп: {self.render_index}/{len(self.pending_groups)}")
         if self.render_index >= len(self.pending_groups):
             self.render_timer.stop()
+            total = int(self.scan_result.get("total_groups", len(self.pending_groups)) or 0)
             extra = ""
-            if len(self.pending_groups) >= 250:
-                extra = " (показаны первые 250 групп)"
-            self.status.setText(f"Готово. Групп: {len(self.pending_groups)}{extra}")
+            if total > len(self.pending_groups):
+                extra = f" (показаны первые {len(self.pending_groups)})"
+            unindexed = int(self.scan_result.get("unindexed_files", 0) or 0)
+            tail = f"; неиндексированных: {unindexed}" if unindexed else ""
+            self.status.setText(f"Готово. Пар: {total}{extra}{tail}")
 
     def delete_all_checked(self):
-        selected = []
-        for w in list(self.group_widgets):
-            if w.isVisible():
-                selected.extend([str(c.info.get("path", "")) for c in w.checked_cards()])
-        selected = list(dict.fromkeys(p for p in selected if p))
-        if not selected:
+        raw_plans = []
+        for group_index, widget in enumerate(list(self.group_widgets), start=1):
+            if not widget.isVisible():
+                continue
+            checked = widget.checked_cards()
+            if not checked:
+                continue
+            checked_ids = {id(card) for card in checked}
+            keep_cards = [
+                card for card in widget.cards
+                if id(card) not in checked_ids
+                and Path(str(card.info.get("path", ""))).is_file()
+            ]
+            raw_plans.append({
+                "group_index": group_index,
+                "group_label": f"Группа {group_index}",
+                "keep_path": str(keep_cards[0].info.get("path", "")) if keep_cards else "",
+                "delete_paths": [str(card.info.get("path", "")) for card in checked],
+            })
+
+        if not raw_plans:
             QMessageBox.information(self, "Дубликаты", "Ничего не отмечено.")
             return
+
+        validation = validate_duplicate_group_plans(raw_plans)
+        if not validation.get("ok"):
+            QMessageBox.warning(
+                self,
+                "Дубликаты",
+                "Операция не выполнена:\n\n" + "\n".join(validation.get("errors") or []),
+            )
+            return
+
+        plans = list(validation.get("plans") or [])
+        if not plans:
+            QMessageBox.information(self, "Дубликаты", "Ничего не отмечено.")
+            return
+
         ok = QMessageBox.question(
-            self, "Дубликаты",
-            f"Переместить отмеченные файлы в «Удалено»?\nФайлов: {len(selected)}\n\n"
-            "Перед операцией будет создана резервная копия базы."
+            self,
+            "Дубликаты",
+            f"Переместить отмеченные файлы в «Удалено»?\n"
+            f"Групп: {int(validation.get('groups', 0) or 0)}\n"
+            f"Файлов: {int(validation.get('files', 0) or 0)}\n\n"
+            "В каждой группе теги, источники, рейтинг и favorite будут объединены "
+            "с оставленным файлом. Будет создана одна резервная копия базы.",
         )
         if ok != QMessageBox.Yes:
             return
+
+        total = error_count = 0
         try:
-            result = trash_duplicate_paths(self.main.settings, selected, keep_path="")
+            result = trash_duplicate_groups(self.main.settings, plans)
             total = int(result.get("deleted_files", 0) or 0)
-            _err_count = int(result.get("errors", 0) or 0)
-            errors = ([f"Ошибок при перемещении в корзину: {_err_count}"] if _err_count else [])
+            error_count = int(result.get("errors", 0) or 0)
         except Exception as exc:
-            total, errors = 0, [str(exc)]
+            error_count = 1
+            QMessageBox.warning(self, "Дубликаты", f"Удаление отменено или завершилось ошибкой:\n{exc}")
+
         if total:
             self.clear_results()
-        self.on_deleted(total, errors)
+        self.on_deleted(total, error_count)
 
-    def on_deleted(self, count: int, errors: list[str]):
-        msg = f"Перемещено в «Удалено»: {count}"
-        if errors:
-            msg += f"; ошибок: {len(errors)}"
+    def on_deleted(self, count: int, error_count: int = 0):
+        msg = f"Перемещено в «Удалено»: {int(count or 0)}"
+        if error_count:
+            msg += f"; ошибок: {int(error_count or 0)}"
         self.status.setText(msg)

@@ -1,0 +1,346 @@
+/* «r34»: the look of rule34.xxx — a light green page, the site name in dark blue over a row of menu links (the open
+   one on a darker green tab), a darker green band of sections, the tag column on the left with «? + − tag count» in
+   the colours of their kinds, thumbnails in a plain grid without frames (a video has a blue one), boxed page numbers
+   with a page field.  A picture's page: a grey box «уменьшено под экран», a grey box with «предыдущая / следующая»,
+   the picture fitted to the window, and in the column — tags, the card's information and its actions as links.
+   classic.css is this file; classic-dark.css adds the night colours (_r34-dark.css); auto.css takes them when
+   Windows is dark.  Everything else of a page (forms, tools, the parser) keeps booru.css / tools.css. */
+
+:root {
+  --bg: #aae5a3;
+  --panel: #bdeeb7;
+  --panel-2: #93c393;
+  --border: #6f9d6b;
+  --text: #000000;
+  --muted: #35552f;
+  --link: #000099;
+  --link-hover: #0000dd;
+  --accent: #000099;
+  --accent-ink: #ffffff;
+  --bar-bg: #aae5a3;
+  --bar-ink: #000099;
+  --bar-active-bg: #7fb17e;
+  --bar-active-ink: #ffffff;
+  --thumb-bg: transparent;
+  --thumb-ring: #000099;
+  --danger: #b00000;
+  --focus: #0000ff;
+  --shadow: 0 6px 20px rgba(0, 40, 0, 0.25);
+
+  --tag-artist: #aa0000;
+  --tag-character: #00aa00;
+  --tag-copyright: #aa00aa;
+  --tag-general: #000099;
+  --tag-meta: #ff8800;
+  --tag-species: #b35900;
+  --tag-lore: #007a6e;
+  --tag-contributor: #c4006a;
+  --tag-invalid: #666666;
+
+  --r34-band: #93c393;            /* the band of sections under the menu */
+  --r34-box: #eeeeee;             /* the grey boxes of a picture's page */
+  --r34-box-line: #666666;
+  --r34-box-ink: #000000;
+  --r34-count: #000000;           /* the number after a tag */
+  --r34-video: #0000ff;           /* the frame of a video's thumbnail */
+  --r34-field: #ffffff;
+  --r34-field-line: #767676;
+  --r34-page-field: #96c882;
+  --r34-button: #efefef;
+  --r34-button-line: #767676;
+
+  --font: Verdana, Geneva, Tahoma, "DejaVu Sans", sans-serif;
+  --font-size: 13px;
+  --font-head: var(--font);
+  --radius: 0;
+  --radius-thumb: 0;
+  --side: 214px;
+  --thumb: 200px;
+  color-scheme: light;
+}
+:root[data-thumb="s"] { --thumb: 150px; }
+:root[data-thumb="l"] { --thumb: 250px; }
+
+body { font: var(--font-size)/1.25 var(--font); }
+a:hover { color: var(--link-hover); text-decoration: underline; }
+
+/* ── header: the name, the menu row, the band of sections ─────────────── */
+.top {
+  align-items: flex-end;
+  gap: 0 4px;
+  padding: 6px 14px 0;
+  background: var(--bar-bg);
+  border-bottom: 0;
+}
+.brand {
+  flex: 0 0 100%;
+  padding: 2px 0 4px;
+  font: bold 27px/1.1 var(--font);
+  letter-spacing: 0;
+  color: var(--bar-ink);
+}
+.brand:hover { color: var(--bar-ink); }
+.main-nav { gap: 0; align-items: flex-end; }
+.main-nav a {
+  padding: 2px 9px 3px;
+  border-radius: 0;
+  font-size: 16px;
+  font-weight: normal;
+  color: var(--bar-ink);
+}
+.main-nav a:hover { background: none; color: var(--link-hover); text-decoration: underline; }
+.main-nav a.active, .main-nav a.active:hover {
+  background: var(--bar-active-bg);
+  color: var(--bar-active-ink);
+  font-weight: bold;
+  text-decoration: none;
+}
+.top-tools { align-self: flex-end; gap: 0; }
+/* «Настройки» and «Оформление»: bold words at the end of the menu row, as rule34 writes «Other Sites» */
+.skin-button, .settings-link.skin-button {
+  padding: 2px 9px 3px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--bar-ink);
+  font-size: 16px;
+  font-weight: bold;
+}
+.skin-button:hover { color: var(--link-hover); text-decoration: underline; }
+.settings-link.active { background: var(--bar-active-bg); color: var(--bar-active-ink); }
+.gear-icon, .skin-icon { display: none; }
+.settings-link .skin-label { display: inline; }
+.skin-list {
+  top: calc(100% + 2px);
+  border-radius: 0;
+  border: 2px solid var(--r34-box-line);
+  background: var(--r34-box);
+  color: var(--r34-box-ink);
+  box-shadow: var(--shadow);
+}
+.skin-item { border-radius: 0; color: var(--r34-box-ink); }
+.skin-item:hover, .skin-item.active { background: #dcdcdc; border-color: transparent; }
+.skin-text small { color: #444444; }
+
+.sections {
+  gap: 0 22px;
+  padding: 3px 14px 4px;
+  background: var(--r34-band);
+  border: 0;
+  font-size: 13px;
+}
+.sections a { color: var(--link); }
+.sections a.active { color: var(--link); font-weight: bold; }
+
+/* ── the page: the column of tags on the left, the pictures to its right ── */
+.layout { padding: 12px 14px 40px; }
+.layout.with-sidebar { gap: 16px; }
+.sidebar h3 { margin: 0 0 3px; font: bold 17px/1.2 var(--font); color: var(--text); }
+.sidebar h4 { margin: 2px 0 0; font: bold 13px/1.3 var(--font); color: var(--text); }
+.sidebar h5 { margin: 4px 0 0; font: bold 12px/1.3 var(--font); color: var(--text); }
+.box { margin: 0 0 14px; }
+
+/* the search: a field and the button under it, the width of the column */
+.search { margin: 0 0 16px; }
+.search-row { flex-direction: column; gap: 3px; }
+.search-row input[type="search"] {
+  width: 100%;
+  padding: 2px 4px;
+  border: 1px solid var(--r34-field-line);
+  border-radius: 2px;
+  background: var(--r34-field);
+  color: #000000;
+  font-size: 13px;
+}
+.search-row button {
+  width: 100%;
+  padding: 1px 4px;
+  border: 1px solid #000000;
+  border-radius: 0;
+  background: #ffffff;
+  color: #000000;
+  font-size: 13px;
+}
+.search-row button:hover { background: #f2f2f2; color: #000000; }
+.search .hint { display: none; }          /* rule34 has nothing there; the field's tip says the same */
+
+/* tag lines: «? + − name count», all in the colour of the tag's kind, the number in black right after the name */
+.tag-list li { display: block; padding: 0; line-height: 1.3; }
+.tag-wiki, .tag-op {
+  display: inline;
+  width: auto;
+  margin-right: 0.38em;
+  color: inherit;
+  text-align: left;
+}
+.tag-op:hover, .tag-wiki:hover { color: var(--link-hover); }
+.tag-name { color: inherit; }
+.tag-count { color: var(--r34-count); font-size: inherit; margin-left: 0.3em; }
+.tag-list li.tag-artist { color: var(--tag-artist); }
+.tag-list li.tag-character { color: var(--tag-character); }
+.tag-list li.tag-copyright { color: var(--tag-copyright); }
+.tag-list li.tag-general { color: var(--tag-general); }
+.tag-list li.tag-meta { color: var(--tag-meta); }
+.tag-list li.tag-species { color: var(--tag-species); }
+.tag-list li.tag-lore { color: var(--tag-lore); }
+.tag-list li.tag-contributor { color: var(--tag-contributor); }
+.tag-list li.tag-invalid { color: var(--tag-invalid); }
+/* a picture's own tags: «? tag count», as on a rule34 post */
+.page-post .tag-op { display: none; }
+.source-tabs { gap: 0 10px; margin: 0 0 2px; font-size: 11px; }
+.source-tabs a { color: var(--link); }
+.source-tabs a.active { color: var(--text); }
+.loose-title { border-top: 0; padding-top: 0; }
+.plain-list li { padding: 0; line-height: 1.3; }
+.plain-list .tag-count { color: var(--r34-count); }
+
+/* ── the pictures: a plain grid of fixed cells, no frames; a video has a blue one ── */
+.result-bar { gap: 2px 14px; margin: 0 0 8px; font-size: 11px; color: var(--muted); }
+.thumb-sizes button.link, .result-bar a, .result-bar button.link { font-size: 11px; }
+.filter-line { color: var(--muted); }
+.thumbs {
+  --cell: calc(var(--thumb) + 10px);
+  gap: 0;
+}
+.thumb img {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.thumb-link:hover img { border-color: transparent; }
+.thumb.is-video img { border: 3px solid var(--r34-video); }
+.thumb.untagged img { border: 2px dashed var(--tag-meta); }
+.thumb.is-video.untagged img { border: 3px solid var(--r34-video); outline: 2px dashed var(--tag-meta); outline-offset: 2px; }
+.badge.kind { display: none; }
+
+/* page numbers: the current one in bold, the others in blue boxes; then a field for a page number */
+.paginator { align-items: center; gap: 0; margin: 24px 0 0; }
+.paginator a, .paginator b, .paginator .gap {
+  min-width: 0;
+  margin: 0 3px;
+  padding: 1px 7px;
+  border-radius: 0;
+  line-height: 1.5;
+}
+.paginator a { border: 1px solid var(--link); color: var(--link); }
+.paginator a:hover { background: none; text-decoration: none; color: var(--link-hover); border-color: var(--link-hover); }
+.paginator b { border: 0; color: var(--text); }
+.paginator .gap { color: var(--text); padding: 1px 2px; }
+.paginator .pg-glyph { display: none; }
+.paginator .pg-first::after { content: "<<"; }
+.paginator .pg-prev::after { content: "<"; }
+.paginator .pg-next::after { content: ">"; }
+.paginator .pg-last::after { content: ">>"; }
+.page-jump { display: inline-flex; gap: 4px; margin-left: 12px; align-items: center; }
+.page-jump input {
+  width: 74px;
+  padding: 2px 5px;
+  border: 2px inset #c8c8c8;
+  border-radius: 0;
+  background: var(--r34-page-field);
+  color: #000000;
+  font: 13px var(--font);
+}
+.page-jump input::placeholder { color: #5d7a55; }
+.page-jump button {
+  padding: 1px 7px;
+  border: 2px outset #d0d0d0;
+  border-radius: 0;
+  background: #aadc96;
+  color: #000000;
+}
+
+/* ── a picture's page ──────────────────────────────────────────────────── */
+.post-view { gap: 0; }
+.resize-note {
+  display: block;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0 0 14px;
+  padding: 9px 14px;
+  border: 2px solid var(--r34-box-line);
+  background: var(--r34-box);
+  color: var(--r34-box-ink);
+}
+.resize-note button.link { color: var(--link); font: inherit; }
+.post-nav {
+  box-sizing: border-box;
+  width: min(838px, 100%);
+  margin: 0 0 14px;
+  padding: 9px 12px;
+  gap: 0;
+  justify-content: space-around;
+  border: 2px solid var(--r34-box-line);
+  background: var(--r34-box);
+  font-size: 15px;
+}
+.post-nav a { color: var(--link); }
+.post-nav .arrow { display: none; }
+.post-nav .nav-prev::before { content: "< "; }
+.post-nav .nav-next::after { content: " >"; }
+.post-nav .nav-text { text-transform: lowercase; }
+.post-nav .nav-back { font-size: 12px; align-self: center; }
+.post-media { background: transparent; }
+.post-stage { overflow: visible; }
+
+/* the card's information and actions: plain lines and links, as «Statistics» and «Options» of a rule34 post */
+table.info, table.info tbody, table.info tr { display: block; }
+table.info th, table.info td { display: inline; padding: 0; color: var(--text); font-weight: normal; white-space: normal; }
+table.info th::after { content: ": "; }
+table.info tr { line-height: 1.3; }
+.md5 { font-size: 11px; overflow-wrap: anywhere; }
+.box > h4 { margin-top: 6px; }
+.actions button, .actions .button {
+  display: block;
+  width: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  line-height: 1.3;
+  text-align: left;
+}
+.actions button:hover, .actions .button:hover { color: var(--link-hover); text-decoration: underline; }
+.actions button.danger { color: var(--danger); }
+.actions button.danger.confirming { background: var(--danger); color: #ffffff; padding: 0 4px; }
+.copy-line { margin: 4px 0 0; color: var(--text); }
+.stars .star { font-size: 14px; color: #6f9d6b; }
+.stars .star.on { color: #ff8800; }
+
+/* forms and buttons of the other pages, in the same plain way */
+button, .button {
+  border-radius: 0;
+  border-color: var(--r34-button-line);
+  background: var(--r34-button);
+  color: #000000;
+}
+button:hover, .button:hover { border-color: #000000; color: #000000; }
+button.link { background: none; color: var(--link); }
+button.link:hover { color: var(--link-hover); }
+button.link.active { color: var(--text); }
+input[type="search"], input[type="text"], input[type="number"], select, textarea {
+  border-radius: 0;
+  border-color: var(--r34-field-line);
+  background: var(--r34-field);
+  color: #000000;
+}
+
+/* the lists of tags as rule34.xxx's «Tags» (webui/tag_lists.py): the form's names in black on the right, the table's
+   head in white on the green of the open menu tab, dotted cells, the row under the mouse lit green, 0.8em hint */
+.r34-tag-search table.form th { color: var(--text); }
+.tag-table th { color: var(--bar-active-ink); background: var(--bar-active-bg); font-weight: bold; border-bottom: 0; }
+.tag-table td { border: 1px dotted var(--r34-cell-line, #eeeeee); }
+.tag-table > tbody > tr:hover > td { background: var(--r34-row-hover, #7fb17e); }
+.taglist-r34 .page-title { display: none; }           /* the site's list has no title: the menu says the page */
+
+@media (max-width: 760px) {
+  :root, :root[data-thumb] { --thumb: 110px; }
+  :root[data-thumb="l"] { --thumb: 150px; }
+  .brand { font-size: 21px; }
+  .main-nav a, .skin-button, .settings-link.skin-button { font-size: 14px; padding: 2px 6px; }
+  .skin-label { display: inline; }
+  .thumbs { --cell: calc(var(--thumb) + 6px); }
+  .post-nav { width: 100%; }
+}

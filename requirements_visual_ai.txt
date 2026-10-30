@@ -1,6 +1,5 @@
-# Local-only NO_MATCH AI classifier.
-# Needed for exe/source builds that should download/use CLIP locally.
-# The model weights may be bundled in models/clip or downloaded on first launch.
+# The old CLIP check of Брак («фото или рисунок», model «CLIP» on «Настройки») — optional and heavy (~2.5 GB).
+# The default check needs only onnxruntime (requirements.txt, install_visual_ai.bat).
 torch
 transformers
 safetensors

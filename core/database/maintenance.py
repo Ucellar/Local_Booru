@@ -3,12 +3,38 @@ from .connection import db, db_path
 from .storage import _safe_ident
 
 
+def _checkpoint_truncate(settings) -> str:
+    """Move the write-ahead log into the database and empty its file.
+
+    Must run outside a transaction: inside ``BEGIN IMMEDIATE`` SQLite refuses it
+    ("database table is locked"), so «Оптимизировать» never shrank the WAL.
+    """
+    import logging
+    import sqlite3
+    path = db_path(settings)
+    if not path.exists():
+        return "skipped: no database file"          # never create one here (missing-database guard)
+    # Its own short-lived connection with a short wait: while TRUNCATE waits for readers it holds
+    # other writers back, so it must give up quickly instead of freezing the parser for a minute.
+    # mode=rw: if the file vanishes in between, SQLite fails instead of creating an empty database.
+    try:
+        con = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=2.0)
+        try:
+            con.execute("PRAGMA busy_timeout=2000")
+            busy, _log_pages, _moved = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            con.close()
+        return "busy" if busy else "ok"
+    except sqlite3.Error as exc:
+        logging.getLogger("local_booru.maintenance").warning("WAL checkpoint failed: %s", exc)
+        return f"error: {exc}"
+
+
 def optimize(settings):
     import time
     before = storage_report(settings)
+    checkpoint = _checkpoint_truncate(settings)
     with db(settings, write=True) as con:
-        try: con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except Exception: pass
         try: con.execute("ANALYZE")
         except Exception: pass
         try: con.execute("PRAGMA optimize")
@@ -16,11 +42,13 @@ def optimize(settings):
         try:
             con.execute(
                 "INSERT INTO maintenance_history(operation,status,before_bytes,after_bytes,reclaimed_bytes,details,created_at) VALUES(?,?,?,?,?,?,?)",
-                ("optimize", "completed", int(before.get("size_bytes",0)), int(before.get("size_bytes",0)), 0, "ANALYZE; PRAGMA optimize", int(time.time())),
+                ("optimize", "completed", int(before.get("size_bytes",0)), int(before.get("size_bytes",0)), 0, f"WAL checkpoint: {checkpoint}; ANALYZE; PRAGMA optimize", int(time.time())),
             )
         except Exception:
             pass
-    return {"db": str(db_path(settings)), "before": before, "after": storage_report(settings)}
+    if checkpoint == "ok":
+        _checkpoint_truncate(settings)              # ANALYZE wrote to the log again
+    return {"db": str(db_path(settings)), "before": before, "after": storage_report(settings), "wal_checkpoint": checkpoint}
 
 
 def stats(settings):
@@ -41,18 +69,52 @@ def repair_e621_tag_metadata(settings):
     deliberately limited to media that has an e621/e926 source.  Exact group
     restoration is performed only when saved raw JSON contains the original
     e621 tag map; otherwise the cleaned base tag keeps its existing category.
+
+    The card's e621 tag set (``image_source_tags``) is repaired with its search index ``image_tags`` (renamed
+    tags, categories): the index is filled from the sets on the next write of the card
+    (``storage._sync_merged_image_tags``), and a fix of the index alone came undone then.  Another site's
+    set keeps its own tags.
     """
     import json
     import re
     from core.tag_utils import normalize_tag
 
+    e621_sources = ("SELECT id FROM sources WHERE REPLACE(LOWER(COALESCE(host,'')),'www.','') "
+                    "IN ('e621.net','e926.net')")
     polluted_suffixes = [
-        re.compile(r"^(?P<base>.+?)_(?:\d+(?:[.,]\d+)?[kmb])$", re.IGNORECASE),
+        # the sidebar's post count — «231k», «1.2k», «2.4m»: thousands and millions only (a tag such as
+        # «yorha_2b» is a real one; no e621 tag has billions of posts)
+        re.compile(r"^(?P<base>.+?)_(?:\d{1,3}(?:[.,]\d)?[km])$", re.IGNORECASE),
         re.compile(r"^(?P<base>.+?)_uploaded_by_the_artist$", re.IGNORECASE),
     ]
     fixed_names = fixed_categories = raw_rows = 0
     affected_images: set[int] = set()
+
+    def raw_tag_maps(con) -> dict:
+        """Saved e621 answers: image id -> [{group: [tags]}, …]."""
+        out: dict = {}
+        for row in con.execute("""
+            SELECT rm.image_id, rm.raw_json FROM raw_metadata rm
+            JOIN images i ON i.id=rm.image_id
+            WHERE LOWER(COALESCE(rm.site,'')) IN ('e621','e621.net','e926','e926.net')
+               OR LOWER(COALESCE(rm.post_url,'')) LIKE '%e621.net/%'
+               OR LOWER(COALESCE(rm.post_url,'')) LIKE '%e926.net/%'
+        """).fetchall():
+            try:
+                data = json.loads(row['raw_json'] or '{}')
+            except Exception:
+                continue
+            post = data.get('post', data) if isinstance(data, dict) else {}
+            tag_map = post.get('tags') if isinstance(post, dict) else None
+            if isinstance(tag_map, dict):
+                out.setdefault(int(row['image_id']), []).append(tag_map)
+        return out
+
     with db(settings, write=True) as con:
+        saved = raw_tag_maps(con)
+        site_names = {image_id: {normalize_tag(str(tag)) for tag_map in maps for tags in tag_map.values()
+                                 if isinstance(tags, list) for tag in tags}
+                      for image_id, maps in saved.items()}
         rows = con.execute("""
             SELECT DISTINCT i.id AS image_id, t.id AS tag_id, t.name, t.category
             FROM images i
@@ -81,38 +143,37 @@ def repair_e621_tag_metadata(settings):
             base = normalize_tag(match.group("base"))
             if not base:
                 continue
+            image_id, old_id = int(row["image_id"]), int(row["tag_id"])
+            if normalize_tag(name) in site_names.get(image_id, ()):
+                continue                    # the site's own answer has this very tag: a real one
+            in_set = "SELECT 1 FROM image_source_tags WHERE image_id=? AND tag_id=? AND source_id {} ({}) LIMIT 1"
+            if con.execute(in_set.format("NOT IN", e621_sources), (image_id, old_id)).fetchone() and \
+                    not con.execute(in_set.format("IN", e621_sources), (image_id, old_id)).fetchone():
+                continue                    # another site's own tag: that site really calls it so
             category = str(row["category"] or "general")
             con.execute("INSERT OR IGNORE INTO tags(name, normalized_name, category) VALUES(?,?,?)", (base, base, category))
             target = con.execute("SELECT id FROM tags WHERE normalized_name=?", (base,)).fetchone()
             if target:
-                con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (int(row["image_id"]), int(target["id"])))
-                con.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (int(row["image_id"]), int(row["tag_id"])))
+                new_id = int(target["id"])
+                con.execute(f"""INSERT OR IGNORE INTO image_source_tags(image_id, source_id, tag_id, category, acquisition, updated_at)
+                                SELECT image_id, source_id, ?, category, acquisition, updated_at FROM image_source_tags
+                                WHERE image_id=? AND tag_id=? AND source_id IN ({e621_sources})""", (new_id, image_id, old_id))
+                con.execute(f"DELETE FROM image_source_tags WHERE image_id=? AND tag_id=? AND source_id IN ({e621_sources})",
+                            (image_id, old_id))
+                con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, new_id))
+                if not con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? AND tag_id=? LIMIT 1",
+                                   (image_id, old_id)).fetchone():       # another site's set may have it as it is
+                    con.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, old_id))
                 fixed_names += 1
-                affected_images.add(int(row["image_id"]))
+                affected_images.add(image_id)
 
-        raw = con.execute("""
-            SELECT rm.image_id, rm.raw_json FROM raw_metadata rm
-            JOIN images i ON i.id=rm.image_id
-            WHERE LOWER(COALESCE(rm.site,'')) IN ('e621','e621.net','e926','e926.net')
-               OR LOWER(COALESCE(rm.post_url,'')) LIKE '%e621.net/%'
-               OR LOWER(COALESCE(rm.post_url,'')) LIKE '%e926.net/%'
-        """).fetchall()
         category_map = {
             'artist': 'artist', 'contributor': 'contributor', 'character': 'character',
             'copyright': 'copyright', 'species': 'species', 'general': 'general',
             'meta': 'meta', 'lore': 'lore', 'invalid': 'invalid'
         }
-        for row in raw:
-            try:
-                data = json.loads(row['raw_json'] or '{}')
-            except Exception:
-                continue
-            post = data.get('post', data) if isinstance(data, dict) else {}
-            tag_map = post.get('tags') if isinstance(post, dict) else None
-            if not isinstance(tag_map, dict):
-                continue
+        for image_id, tag_map in ((i, m) for i, maps in saved.items() for m in maps):
             raw_rows += 1
-            image_id = int(row['image_id'])
             for raw_group, tags in tag_map.items():
                 category = category_map.get(str(raw_group).lower())
                 if not category or not isinstance(tags, list):
@@ -128,6 +189,9 @@ def repair_e621_tag_metadata(settings):
                     if str(tag_row['category'] or '') != category:
                         con.execute("UPDATE tags SET category=? WHERE id=?", (category, int(tag_row['id'])))
                         fixed_categories += 1
+                    # the category in the site's own set too: effective categories are taken from the sets
+                    con.execute(f"UPDATE image_source_tags SET category=? WHERE image_id=? AND tag_id=? AND source_id IN ({e621_sources})",
+                                (category, image_id, int(tag_row['id'])))
                     con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, int(tag_row['id'])))
                     affected_images.add(image_id)
         try:
@@ -136,7 +200,8 @@ def repair_e621_tag_metadata(settings):
                 refresh_effective_tag_categories(con, int(_image_id))
         except Exception:
             pass
-        con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
+        from .repository import cleanup_orphans
+        cleanup_orphans(con)
     return {
         'renamed_links': fixed_names,
         'species_fixed': fixed_categories,
@@ -216,5 +281,9 @@ def vacuum(settings, *, make_backup=True):
             pass
     finally:
         con.close()
+    # In WAL mode the compacted pages are in the journal: the file itself shrinks when it is moved into
+    # the base (it waits for readers only briefly; else at the next checkpoint — closing, idle time).
+    checkpoint = _checkpoint_truncate(settings)
     after = int(path.stat().st_size)
-    return {"db": str(path), "before_bytes": before, "after_bytes": after, "reclaimed_bytes": max(0, before-after), "backup": str(backup or "")}
+    return {"db": str(path), "before_bytes": before, "after_bytes": after, "reclaimed_bytes": max(0, before-after),
+            "backup": str(backup or ""), "wal_checkpoint": checkpoint}

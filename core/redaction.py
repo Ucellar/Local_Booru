@@ -16,18 +16,28 @@ _SECRET_KEYS = (
     "authorization", "auth", "password", "passwd", "pass", "login", "user_id",
     "username", "cookie", "secret", "session_key",
 )
-_KEY_GROUP = "|".join(re.escape(k) for k in _SECRET_KEYS)
+# Cookie and form names of sites that are secrets too, but only as whole names in text
+# (as dict keys, ``is_secret_key`` already catches «pass_hash» by «pass»).
+_TEXT_ONLY_KEYS = ("pass_hash", "cf_clearance", "csrf_token", "csrftoken")
+_KEY_GROUP = "|".join(re.escape(k) for k in _SECRET_KEYS + _TEXT_ONLY_KEYS)
 
 # Query strings, form payloads and plain key=value fragments.
 _QUERY_RE = re.compile(
-    rf"(?i)(?P<prefix>(?<![A-Za-z0-9_])(?:{_KEY_GROUP})\s*(?:=|%3[dD])\s*)(?P<value>[^&\s,;]+)"
+    rf"(?i)(?P<prefix>(?<![A-Za-z0-9_])(?:{_KEY_GROUP})\s*(?:=|%3[dD])\s*)"
+    r"(?!(?:yes|no)(?:[&\s,;]|$))(?P<value>[^&\s,;]+)"     # «api_key=no» (is there a key) stays readable
 )
+# Session cookies of sites: _danbooru2_session=…, PHPSESSID=…, sessionid=….
+_SESSION_RE = re.compile(r"(?i)(?P<prefix>(?<![A-Za-z0-9])[A-Za-z0-9_]*sess(?:ion)?(?:_?id)?\s*=\s*)(?P<value>[^&\s,;]+)")
 # JSON / repr-like output: "api_key": "secret" or 'token': 'secret'.
 _QUOTED_RE = re.compile(
     rf"(?i)(?P<prefix>[\"'](?:{_KEY_GROUP})[\"']\s*:\s*[\"'])(?P<value>.*?)(?P<suffix>[\"'])"
 )
-# Headers are safer removed wholesale.
-_HEADER_RE = re.compile(r"(?im)^(?P<prefix>\s*(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*).*$")
+# A (login, key) pair as Python prints it: auth=('bob', 'key').
+_AUTH_PAIR_RE = re.compile(r"(?i)(?P<prefix>(?<![A-Za-z0-9_])auth\s*=\s*)\([^)]*\)")
+# A login and a password inside an address: https://bob:key@host/…
+_URL_USERINFO_RE = re.compile(r"(?i)(?P<prefix>\b[a-z][a-z0-9+.\-]*://)[^/\s:@]+:[^/\s@]*@")
+# Headers are safer removed wholesale — also when a log line has text before them.
+_HEADER_RE = re.compile(r"(?im)(?P<prefix>(?<![A-Za-z0-9_-])(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*).*$")
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[A-Za-z0-9._~+\-/=]+")
 
 
@@ -41,8 +51,11 @@ def sanitize_text(value: object) -> str:
     text = str(value if value is not None else "")
     text = _HEADER_RE.sub(lambda m: m.group("prefix") + "<removed>", text)
     text = _BEARER_RE.sub(r"\1<removed>", text)
+    text = _URL_USERINFO_RE.sub(lambda m: m.group("prefix") + "<removed>@", text)
+    text = _AUTH_PAIR_RE.sub(lambda m: m.group("prefix") + "<removed>", text)
     text = _QUOTED_RE.sub(lambda m: m.group("prefix") + "<removed>" + m.group("suffix"), text)
     text = _QUERY_RE.sub(lambda m: m.group("prefix") + "<removed>", text)
+    text = _SESSION_RE.sub(lambda m: m.group("prefix") + "<removed>", text)
     return text
 
 

@@ -9,8 +9,10 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 import json
+import logging
 import shutil
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Any
@@ -20,6 +22,8 @@ from core.paths import ERROR_LOG_FILE, LOGS_DIR, SETTINGS_DIR, CACHE_DIR
 from core.source_protection import source_root, output_root, recent_blocked_events
 from core.redaction import sanitize_object, sanitize_text
 from core.media_utils import MEDIA_EXTS
+
+_LOG = logging.getLogger("local_booru.library_diagnostics")
 
 
 AUTO_DELETE_REASONS = {
@@ -182,13 +186,17 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
         "read_only": True,
         "database": {"path": str(db_file), "exists": db_file.exists(), "size_bytes": db_file.stat().st_size if db_file.exists() else 0},
         "library": {},
+        "file_integrity": {},
         "md5": {},
+        "duplicates": {},
         "trash": {},
         "queues": {},
         "site_scan": {},
         "indices": {},
         "errors": {},
         "performance": {},
+        "background_tasks": {},
+        "derived_caches": {},
         "storage": {},
         "source_protection": {},
         "samples": {},
@@ -209,12 +217,16 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
         report["database"]["shm_bytes"] = 0
     try:
         thumbs = Path(CACHE_DIR) / "thumbs"
-        files = list(thumbs.rglob("*")) if thumbs.exists() else []
-        report["storage"]["thumbnail_cache"] = {
-            "path": str(thumbs), "files": sum(1 for x in files if x.is_file()),
-            "size_bytes": sum(x.stat().st_size for x in files if x.is_file()),
-        }
-    except Exception:
+        count = size = 0
+        for seen, entry in enumerate(thumbs.rglob("*") if thumbs.exists() else (), start=1):
+            if seen % 5000 == 0 and stop_check():      # a big cache: «Остановить» works here too
+                report["cancelled"] = True
+                break
+            if entry.is_file():
+                count += 1
+                size += entry.stat().st_size
+        report["storage"]["thumbnail_cache"] = {"path": str(thumbs), "files": count, "size_bytes": size}
+    except OSError:
         report["storage"]["thumbnail_cache"] = {"path": str(Path(CACHE_DIR) / "thumbs"), "files": 0, "size_bytes": 0}
     try:
         from core.performance import recent_slow_operations
@@ -249,6 +261,11 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
         progress("Диагностика: база SQLite не найдена; изменений нет.")
         return report
     progress("Диагностика: чтение SQLite…")
+    try:
+        from core.file_integrity import get_presence_summary
+        report["file_integrity"] = get_presence_summary(settings)
+    except Exception as exc:
+        report["file_integrity"] = {"error": str(exc)}
     with db(settings, readonly=True) as con:
         def scalar(sql: str, args=()) -> int:
             row = con.execute(sql, args).fetchone()
@@ -296,8 +313,8 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
         report["library"] = {
             "live_files": scalar("SELECT COUNT(*) FROM images WHERE deleted=0"),
             "live_bytes": scalar("SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE deleted=0"),
-            "trash_files": scalar("SELECT COUNT(*) FROM images WHERE deleted=1 AND lifecycle='trash'"),
-            "trash_bytes": scalar("SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE deleted=1 AND lifecycle='trash'"),
+            "trash_files": scalar("SELECT COUNT(*) FROM images WHERE deleted=1 AND lifecycle IN ('trash','missing')"),
+            "trash_bytes": scalar("SELECT COALESCE(SUM(size_bytes),0) FROM images WHERE deleted=1 AND lifecycle IN ('trash','missing')"),
             "without_source": scalar("SELECT COUNT(*) FROM images i WHERE i.deleted=0 AND NOT EXISTS (SELECT 1 FROM image_sources x WHERE x.image_id=i.id)"),
             "without_tags": scalar("SELECT COUNT(*) FROM images i WHERE i.deleted=0 AND NOT EXISTS (SELECT 1 FROM image_tags x WHERE x.image_id=i.id)"),
             "tag_count": scalar("SELECT COUNT(*) FROM tags"),
@@ -322,6 +339,31 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
             "duplicate_groups": scalar("SELECT COUNT(*) FROM (SELECT lower(hash_md5) FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>'' GROUP BY lower(hash_md5) HAVING COUNT(*)>1)"),
             "redundant_rows": scalar("SELECT COALESCE(SUM(n-1),0) FROM (SELECT COUNT(*) n FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>'' GROUP BY lower(hash_md5) HAVING COUNT(*)>1)"),
         }
+        try:
+            last_scan = con.execute(
+                """
+                SELECT id,status,threshold_percent,max_distance,source_revision,vp_generation,
+                       total_images,processed_images,candidate_pairs,stored_pairs,ignored_pairs,
+                       stale_removed,unindexed_files,started_at,finished_at,last_error
+                FROM duplicate_scan_runs ORDER BY id DESC LIMIT 1
+                """
+            ).fetchone()
+            report["duplicates"] = {
+                "visual_candidates": scalar(
+                    "SELECT COUNT(*) FROM duplicate_relations WHERE relation='visual_phash' AND status='unreviewed'"
+                ),
+                "reviewed_relations": scalar(
+                    "SELECT COUNT(*) FROM duplicate_relations WHERE relation='visual_phash' AND status<>'unreviewed'"
+                ),
+                "latest_scan": dict(last_scan) if last_scan else {},
+            }
+        except Exception as exc:
+            report["duplicates"] = {
+                "visual_candidates": 0,
+                "reviewed_relations": 0,
+                "latest_scan": {},
+                "error": str(exc),
+            }
         dup_samples = con.execute(
             """SELECT lower(hash_md5) AS md5, COUNT(*) AS files, COALESCE(SUM(size_bytes),0) AS bytes
                FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>''
@@ -344,7 +386,7 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
                  SELECT i.id, COALESCE((SELECT d.reason FROM delete_log d
                      WHERE d.path=CASE WHEN COALESCE(i.original_media_path,'')<>'' THEN i.original_media_path ELSE i.path END
                      ORDER BY d.deleted_at DESC,d.id DESC LIMIT 1),'unknown') AS reason
-                 FROM images i WHERE i.deleted=1 AND i.lifecycle='trash'
+                 FROM images i WHERE i.deleted=1 AND i.lifecycle IN ('trash','missing')
                ) GROUP BY reason ORDER BY files DESC"""
         ).fetchall()
         report["trash"]["by_reason"] = [
@@ -361,7 +403,7 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
             for r in reverse
         ]
         report["queues"]["service_state"] = [dict(r) for r in con.execute(
-            "SELECT service,cooldown_until,reason,updated_at,short_remaining,long_remaining,quota_checked_at FROM service_state ORDER BY service"
+            "SELECT service,cooldown_until,reason,updated_at,short_remaining,long_remaining,quota_checked_at,quota_probe_after,quota_last_admitted_at,quota_admissions_since_snapshot FROM service_state ORDER BY service"
         ).fetchall()]
         report["queues"]["saucenao_retry_events"] = [dict(r) for r in con.execute(
             "SELECT status,message,created_at,updated_at FROM task_log WHERE task_type='saucenao_retry' ORDER BY id DESC LIMIT 20"
@@ -415,17 +457,30 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
         # Windows source count vs site_scan_status vs live gallery rows.
         source_audit = {
             "source_root": str(source_root(settings) or ""),
+            "source_root_status": "unknown",
             "source_files": 0,
             "source_media_files": 0,
             "journal_distinct_paths": int(journal_paths or 0),
             "journal_existing_on_disk": 0,
             "journal_missing_on_disk": 0,
+            "journal_offline_root": 0,
+            "journal_path_error": 0,
             "journal_outside_source": 0,
         }
         try:
+            from core.storage_roots import check_storage_root, probe_media_path
             sr = source_root(settings)
-            if sr and Path(sr).exists():
-                for fp in Path(sr).rglob("*"):
+            root_state = check_storage_root(sr) if sr else None
+            source_audit["source_root_status"] = root_state.status if root_state else "not_configured"
+            if sr and root_state and root_state.available and not report["cancelled"]:
+                progress("Диагностика: считаю файлы исходной папки…")
+                for seen, fp in enumerate(Path(sr).rglob("*"), start=1):
+                    if seen % 2000 == 0:
+                        if stop_check():               # «Остановить»: the numbers so far stay, marked incomplete
+                            report["cancelled"] = True
+                            break
+                        if seen % 50000 == 0:
+                            progress(f"Диагностика: в исходной папке просмотрено {seen} записей…")
                     try:
                         if not fp.is_file():
                             continue
@@ -437,21 +492,39 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
                 sr_resolved = Path(sr).resolve()
             else:
                 sr_resolved = None
-            rows = con.execute("SELECT DISTINCT original_path FROM site_scan_status").fetchall()
-            for r in rows:
+            rows = [] if report["cancelled"] else con.execute("SELECT DISTINCT original_path FROM site_scan_status").fetchall()
+            if rows:
+                progress(f"Диагностика: сверяю журнал сайтов с диском ({len(rows)} путей)…")
+            root_cache = {}
+            for pos, r in enumerate(rows, start=1):
+                if pos % 1000 == 0:
+                    if stop_check():
+                        report["cancelled"] = True
+                        break
+                    if pos % 50000 == 0:
+                        progress(f"Диагностика: журнал сайтов — {pos} из {len(rows)}")
                 try:
-                    op = Path(str(r["original_path"] or ""))
-                    if op.exists():
+                    if (pos - 1) % 250 == 0:
+                        root_cache = {}
+                    raw_path = str(r["original_path"] or "")
+                    op = Path(raw_path)
+                    probe = probe_media_path(settings, raw_path, root_cache=root_cache)
+                    status = str(probe.get("status") or "path_error")
+                    if status == "present":
                         source_audit["journal_existing_on_disk"] += 1
-                    else:
+                    elif status == "missing":
                         source_audit["journal_missing_on_disk"] += 1
+                    elif status == "offline_root":
+                        source_audit["journal_offline_root"] += 1
+                    else:
+                        source_audit["journal_path_error"] += 1
                     if sr_resolved is not None:
                         try:
                             op.resolve().relative_to(sr_resolved)
                         except Exception:
                             source_audit["journal_outside_source"] += 1
                 except Exception:
-                    source_audit["journal_missing_on_disk"] += 1
+                    source_audit["journal_path_error"] += 1
         except Exception as audit_exc:
             source_audit["error"] = str(audit_exc)[:200]
         report["source_journal"] = source_audit
@@ -486,35 +559,85 @@ def audit_library(settings: dict, *, verify_files: bool = False, progress: Calla
     report["md5"]["legacy_json_records"] = len(legacy_rules)
     report["samples"]["obsolete_live_md5"] = all_obsolete[:30]
 
-    if verify_files and not stop_check():
-        progress("Диагностика: проверка наличия файлов на диске…")
+    if verify_files and stop_check():
+        report["cancelled"] = True
+    if verify_files and not report["cancelled"]:
+        progress("Диагностика: проверяю, что файлы библиотеки на месте…")
+        from core.storage_roots import probe_media_path
         with db(settings, readonly=True) as con:
             paths = [(int(r["id"]), str(r["path"] or "")) for r in con.execute("SELECT id,path FROM images WHERE deleted=0 ORDER BY id").fetchall()]
-        missing = []
+        counts = Counter()
+        samples = {"missing": [], "offline_root": [], "path_error": []}
+        checked = 0
         for pos, (image_id, path) in enumerate(paths, start=1):
             if stop_check():
                 report["cancelled"] = True
                 break
-            if not Path(path).is_file():
-                missing.append({"id": image_id, "path": path})
-            if pos % 1000 == 0:
+            checked = pos
+            # Recheck roots per bounded group so disconnecting a drive during a
+            # long audit cannot be hidden by a stale root cache.
+            if (pos - 1) % 250 == 0:
+                root_cache = {}
+            probe = probe_media_path(settings, path, root_cache=root_cache)
+            status = str(probe.get("status") or "path_error")
+            counts[status] += 1
+            if status in samples and len(samples[status]) < 50:
+                samples[status].append({"id": image_id, "path": path, "root_path": probe.get("root_path", ""), "error": probe.get("error", "")})
+            if pos % 5000 == 0:
                 progress(f"Диагностика: проверено файлов на диске {pos}/{len(paths)}")
-        report["library"]["missing_on_disk"] = len(missing)
-        report["samples"]["missing_on_disk"] = missing[:50]
+        report["library"]["checked_on_disk"] = checked
+        report["library"]["missing_on_disk"] = int(counts.get("missing", 0))
+        report["library"]["offline_root_on_disk"] = int(counts.get("offline_root", 0))
+        report["library"]["path_error_on_disk"] = int(counts.get("path_error", 0))
+        report["samples"]["missing_on_disk"] = samples["missing"]
+        report["samples"]["offline_root_on_disk"] = samples["offline_root"]
+        report["samples"]["path_error_on_disk"] = samples["path_error"]
     else:
         report["library"]["missing_on_disk"] = None
+
+    try:
+        from core.derived_maintenance import get_derived_cache_states
+        states = get_derived_cache_states(settings)
+        report["derived_caches"] = {
+            "external_enabled": bool((settings or {}).get("derived_cache_external_enabled", False)),
+            "states": states,
+            "external_bytes": sum(int(row.get("external_bytes") or 0) for row in states),
+            "invalid_external": sum(1 for row in states if row.get("external_valid") is False),
+        }
+    except Exception as exc:
+        report["derived_caches"] = {"external_enabled": bool((settings or {}).get("derived_cache_external_enabled", False)), "states": [], "external_bytes": 0, "invalid_external": 0, "error": str(exc)}
+
+    try:
+        from core.background_tasks import get_background_task_registry
+        registry = get_background_task_registry()
+        current_task_id = registry.current_task_id()
+        active = [row for row in registry.active_snapshot(include_parents=True) if str(row.get("task_id") or "") != current_task_id]
+        recent = [row for row in registry.recent_snapshot(30) if str(row.get("task_id") or "") != current_task_id]
+        stale = [row for row in registry.stale_snapshot(10 * 60.0, leaf_only=True) if str(row.get("task_id") or "") != current_task_id]
+        report["background_tasks"] = {
+            "active": active,
+            "recent": recent,
+            "stale_leaf_tasks": stale,
+            "active_count": len(active),
+            "root_count": sum(1 for row in active if not str(row.get("parent_id") or "")),
+        }
+    except Exception as exc:
+        report["background_tasks"] = {"active": [], "recent": [], "stale_leaf_tasks": [], "active_count": 0, "root_count": 0, "error": str(exc)}
 
     last_errors = _last_error_lines(40)
     report["errors"]["last_lines"] = last_errors
     report["errors"]["line_count_shown"] = len(last_errors)
     report["summary_text"] = format_report_text(report)
-    progress("Диагностика: готово. Данные не изменялись.")
+    progress("Диагностика: остановлена — числа неполные. Данные не изменялись." if report["cancelled"]
+             else "Диагностика: готово. Данные не изменялись.")
     return report
 
 
 def format_report_text(report: dict[str, Any]) -> str:
     lib = report.get("library", {})
     md5 = report.get("md5", {})
+    duplicates = report.get("duplicates", {})
+    duplicate_scan = duplicates.get("latest_scan", {}) or {}
     queues = report.get("queues", {})
     lines = [
         "ДИАГНОСТИКА БИБЛИОТЕКИ — ТОЛЬКО ЧТЕНИЕ",
@@ -534,10 +657,19 @@ def format_report_text(report: dict[str, Any]) -> str:
         f"  В корзине: {lib.get('trash_files',0)}    Размер: {_fmt_bytes(lib.get('trash_bytes',0))}",
         f"  Без source: {lib.get('without_source',0)}    Без тегов: {lib.get('without_tags',0)}    С несколькими source: {lib.get('multi_source_files',0)}",
         "",
+        "Presence integrity (последние сохранённые статусы)",
+        f"  Всего живых: {report.get('file_integrity',{}).get('total',0)}    Проверено по текущему path: {report.get('file_integrity',{}).get('total',0) - report.get('file_integrity',{}).get('unknown',0)}    Не проверено/устарело: {report.get('file_integrity',{}).get('unknown',0)}",
+        f"  present={report.get('file_integrity',{}).get('present',0)}    missing={report.get('file_integrity',{}).get('missing',0)}    offline_root={report.get('file_integrity',{}).get('offline_root',0)}    path_error={report.get('file_integrity',{}).get('path_error',0)}",
+        "",
+        "Hash integrity (canonical MD5 против фактических байтов)",
+        f"  ok={report.get('file_integrity',{}).get('hash_ok',0)}    mismatch={report.get('file_integrity',{}).get('hash_mismatch',0)}    unreadable={report.get('file_integrity',{}).get('hash_unreadable',0)}    deferred={report.get('file_integrity',{}).get('hash_deferred',0)}    unknown/stale={report.get('file_integrity',{}).get('hash_unknown',0)}",
+        f"  Последний recovery: {report.get('file_integrity',{}).get('last_recovery_run',{}).get('status','не запускался')}    recovered={report.get('file_integrity',{}).get('last_recovery_run',{}).get('recovered',0)}    failed={report.get('file_integrity',{}).get('last_recovery_run',{}).get('recovery_failed',0)}",
+        "",
         "Сверка исходника и журнала",
         f"  Файлов в исходной папке: {report.get('source_journal',{}).get('source_files',0)}    Медиа: {report.get('source_journal',{}).get('source_media_files',0)}",
         f"  Уникальных путей в site_scan_status: {report.get('source_journal',{}).get('journal_distinct_paths',0)}",
-        f"  Из них существуют на диске: {report.get('source_journal',{}).get('journal_existing_on_disk',0)}    отсутствуют: {report.get('source_journal',{}).get('journal_missing_on_disk',0)}    вне текущего источника: {report.get('source_journal',{}).get('journal_outside_source',0)}",
+        f"  Статус корня: {report.get('source_journal',{}).get('source_root_status','unknown')}",
+        f"  Из них существуют на диске: {report.get('source_journal',{}).get('journal_existing_on_disk',0)}    отсутствуют: {report.get('source_journal',{}).get('journal_missing_on_disk',0)}    offline_root: {report.get('source_journal',{}).get('journal_offline_root',0)}    path_error: {report.get('source_journal',{}).get('journal_path_error',0)}    вне текущего источника: {report.get('source_journal',{}).get('journal_outside_source',0)}",
         "",
         "Имена файлов / защита от коллизий",
         f"  Одинаковых path в SQLite: {report.get('filename_collisions',{}).get('duplicate_live_paths',0)}",
@@ -549,6 +681,16 @@ def format_report_text(report: dict[str, Any]) -> str:
         f"  Групп точных дублей: {md5.get('duplicate_groups',0)}    Лишних живых копий: {md5.get('redundant_rows',0)}",
         f"  Устаревших запретов для уже живых MD5: {md5.get('obsolete_live_blocks',0)}",
         f"  Автоматических записей истории MD5 (не блокируют): {md5.get('automatic_registry_candidates',0)}",
+        "",
+        "DB-first кандидаты визуальных дубликатов",
+        f"  Активных пар: {duplicates.get('visual_candidates',0)}    Проверенных решений в relation-cache: {duplicates.get('reviewed_relations',0)}",
+        (
+            f"  Последний скан: {duplicate_scan.get('status','не запускался')}    "
+            f"порог={duplicate_scan.get('threshold_percent','—')}%    "
+            f"обработано={duplicate_scan.get('processed_images',0)}/{duplicate_scan.get('total_images',0)}    "
+            f"сохранено пар={duplicate_scan.get('stored_pairs',0)}    "
+            f"неиндексированных файлов={duplicate_scan.get('unindexed_files',0)}"
+        ) if duplicate_scan else "  Последний скан: не запускался",
         "",
         "Корзина по причинам",
     ]
@@ -580,6 +722,40 @@ def format_report_text(report: dict[str, Any]) -> str:
         cache_total = sum(int(r.get("tags", 0) or 0) for r in cache_rows)
         lines.append(f"  Кэш категорий тегов: {cache_total} уникальных site-tag записей")
     lines.append(f"  Незавершённых операций: {len(queues.get('unfinished_operations', []))}")
+    derived = report.get("derived_caches", {}) or {}
+    lines.append("")
+    lines.append("Производные кэши")
+    lines.append(
+        f"  Внешний disposable backend: {'включён' if derived.get('external_enabled') else 'выключен'}    "
+        f"файлы={_fmt_bytes(int(derived.get('external_bytes',0) or 0))}    "
+        f"невалидных external={derived.get('invalid_external',0)}"
+    )
+    for row in list(derived.get("states", []) or []):
+        backend = str(row.get("storage_backend") or "main")
+        valid = ""
+        if backend == "external":
+            valid = " valid" if row.get("external_valid") is True else " INVALID"
+        lines.append(
+            f"  {row.get('cache_name')}: backend={backend}{valid}; generation={row.get('generation',0)}; "
+            f"source_revision={row.get('source_revision',0)}/{row.get('current_source_revision',0)}; "
+            f"rows={row.get('cache_rows',0)}; status={row.get('status','?')}"
+        )
+        if row.get("external_error"):
+            lines.append(f"    external error: {row.get('external_error')}")
+
+    task_info = report.get("background_tasks", {}) or {}
+    lines.append("")
+    lines.append("Фоновые задачи процесса")
+    lines.append(
+        f"  Активных: {task_info.get('active_count',0)}    корневых: {task_info.get('root_count',0)}    "
+        f"stalled leaf: {len(task_info.get('stale_leaf_tasks', []) or [])}"
+    )
+    for row in list(task_info.get("active", []) or [])[:20]:
+        progress_text = str(row.get("progress_text") or "")
+        lines.append(
+            f"  [{row.get('kind','background')}] {row.get('name','?')} — {row.get('state','?')}; "
+            f"{progress_text}; idle={row.get('effective_idle_seconds',0)}с"
+        )
     perf_rows = report.get("performance", {}).get("slow_operations", [])
     lines.append("")
     lines.append("Производительность:")
@@ -597,7 +773,10 @@ def format_report_text(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Индексы SQLite: " + ("OK" if not missing else "отсутствуют: " + ", ".join(missing)))
     if lib.get("missing_on_disk") is not None:
-        lines.append(f"Отсутствующих физических файлов: {lib.get('missing_on_disk',0)}")
+        lines.append(
+            f"Read-only сверка файлов: missing={lib.get('missing_on_disk',0)} "
+            f"offline_root={lib.get('offline_root_on_disk',0)} path_error={lib.get('path_error_on_disk',0)}"
+        )
     if report.get("errors", {}).get("last_lines"):
         lines.append("")
         lines.append("В errors.log есть последние записи; см. вкладку «Ошибки». ")
@@ -626,6 +805,7 @@ def clear_obsolete_live_md5_blocks(settings: dict) -> dict[str, Any]:
         live_md5s = {str(r["hash_md5"] or "").lower() for r in con.execute("SELECT DISTINCT hash_md5 FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>''").fetchall()}
         remaining = int(con.execute("SELECT COUNT(*) FROM deleted_media_rules WHERE active=1 AND manual_delete=1").fetchone()[0] or 0)
     legacy_path = Path(SETTINGS_DIR) / "deleted_files_ignore.json"
+    legacy_error = ""
     if legacy_path.exists():
         try:
             data = json.loads(legacy_path.read_text(encoding="utf-8"))
@@ -637,9 +817,10 @@ def clear_obsolete_live_md5_blocks(settings: dict) -> dict[str, Any]:
                 data["items"] = kept
                 legacy_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                 removed += legacy_removed
-        except Exception:
-            pass
-    return {"removed": removed, "backup": backup, "remaining": remaining}
+        except (OSError, ValueError) as exc:      # the base is done; the old JSON list stays as it was
+            legacy_error = f"{type(exc).__name__}: {exc}"
+            _LOG.warning("old deleted-files list %s not cleaned: %s", legacy_path, legacy_error)
+    return {"removed": removed, "backup": backup, "remaining": remaining, "legacy_error": legacy_error}
 
 
 def requeue_stale_tag_enrichments(settings: dict) -> dict[str, Any]:
@@ -672,6 +853,99 @@ def restore_critical_indices(settings: dict) -> dict[str, Any]:
         after = {str(r["name"]) for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
     missing_after = [x for x in CRITICAL_INDEXES if x not in after]
     return {"restored": [x for x in missing_before if x in after], "missing_before": missing_before, "missing_after": missing_after, "backup": backup}
+
+
+# ── the last report and the repairs, kept for the next start (pages show them) ──
+REPORT_FILES = {"library": "library_audit_last.json",          # audit_library
+                "sources": "source_audit_last.json"}           # source_contamination_audit
+# A big report (every picture of the sources search with every post) is kept whole on disk for the
+# download; the page reads a small copy (``_page_copy``) — on a big archive the whole one is tens of MB.
+PAGE_FILES = {"sources": "source_audit_last.page.json"}
+PAGE_GROUPS = 100
+REPAIRS_FILE = "library_repairs.json"
+REPAIRS_KEEP = 30
+_KEPT_LOCK = threading.Lock()
+_KEPT: dict[str, Any] = {}          # kind -> the last report (its page copy) read or written in this run
+
+
+def _reports_dir() -> Path:
+    from core.paths import REPORTS_DIR
+    return Path(REPORTS_DIR)
+
+
+def report_file(kind: str) -> Path:
+    """The file with the whole last report of ``kind`` (keys and logins already taken out)."""
+    return _reports_dir() / REPORT_FILES[kind]
+
+
+def _page_copy(kind: str, report: dict[str, Any]) -> dict[str, Any]:
+    if kind not in PAGE_FILES:
+        return report
+    groups = [g for g in report.get("groups") or [] if isinstance(g, dict)]
+    page = {k: v for k, v in report.items() if k != "groups"}
+    page["groups"] = [{k: v for k, v in g.items() if k not in ("sources", "aliases_for_same_image_host", "raw_metadata")}
+                      for g in groups[:PAGE_GROUPS]]
+    page["groups_total"] = len(groups)
+    return page
+
+
+def remember_report(report: dict[str, Any], kind: str = "library") -> dict[str, Any]:
+    """Keep ``report`` (keys and logins taken out) as the last one of ``kind``; returns its page copy."""
+    from core.file_safety import write_json_kept
+    clean = sanitize_object(dict(report or {}))
+    clean.setdefault("finished_at", time.time())
+    page = _page_copy(kind, clean)
+    with _KEPT_LOCK:
+        _KEPT[kind] = page
+        try:
+            write_json_kept(report_file(kind), json.dumps(clean, ensure_ascii=False), dict)
+            if kind in PAGE_FILES:
+                write_json_kept(_reports_dir() / PAGE_FILES[kind], json.dumps(page, ensure_ascii=False), dict)
+        except OSError as exc:            # the report stays in memory; the next start has none
+            _LOG.warning("%s report not saved: %s", kind, exc)
+    return page
+
+
+def last_report(kind: str = "library") -> dict[str, Any] | None:
+    """The last report of ``kind`` (for a big one — its page copy) of this or an earlier run, None
+    when there was none yet."""
+    from core.file_safety import read_json_kept
+    with _KEPT_LOCK:
+        if kind not in _KEPT:
+            path = _reports_dir() / PAGE_FILES.get(kind, REPORT_FILES[kind])
+            try:
+                _KEPT[kind] = read_json_kept(path, dict, what=f"{kind} report")
+            except OSError as exc:
+                _LOG.warning("%s report not read: %s", kind, exc)
+                return None
+        return _KEPT[kind]
+
+
+def remember_repair(label: str, lines: list[str], *, ok: bool = True) -> None:
+    """Add a repair (what, when, its result lines) to the short history pages show."""
+    from core.file_safety import read_json_kept, write_json_kept
+    entry = {"at": time.time(), "label": str(label), "ok": bool(ok),
+             "lines": [sanitize_text(str(x)) for x in lines or []][:20]}
+    path = _reports_dir() / REPAIRS_FILE
+    with _KEPT_LOCK:
+        try:
+            history = read_json_kept(path, list, what="repair history") or []
+            history = [h for h in history if isinstance(h, dict)][-(REPAIRS_KEEP - 1):] + [entry]
+            write_json_kept(path, json.dumps(history, ensure_ascii=False), list)
+        except OSError as exc:
+            _LOG.warning("repair history not saved: %s", exc)
+
+
+def repair_history() -> list[dict[str, Any]]:
+    """The repairs remembered, newest first."""
+    from core.file_safety import read_json_kept
+    with _KEPT_LOCK:
+        try:
+            history = read_json_kept(_reports_dir() / REPAIRS_FILE, list, what="repair history") or []
+        except OSError as exc:
+            _LOG.warning("repair history not read: %s", exc)
+            return []
+    return [h for h in reversed(history) if isinstance(h, dict)]
 
 
 def save_audit_json(report: dict[str, Any], destination: str | Path) -> str:

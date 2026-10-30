@@ -1,0 +1,51 @@
+/* Shared by the looks that keep the tag column out of the way: it becomes a drawer at the side,
+   opened by «Теги и фильтры» in the header; the search moves into the header. */
+.drawer-toggle { display: inline-flex; align-items: center; }
+.top-search { display: block; }
+.top-search .search-go { display: none; }
+.sidebar .search { display: none; }
+.layout.with-sidebar { display: block; }
+.sidebar {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: min(340px, 88vw);
+  overflow-y: auto;
+  padding: 54px 20px 28px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  transform: translateX(104%);
+  visibility: hidden;
+  transition: transform 0.24s ease, visibility 0s linear 0.24s;
+}
+.drawer-open .sidebar { transform: none; visibility: visible; transition: transform 0.24s ease; }
+.drawer-close {
+  display: block;
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 22px;
+  line-height: 1;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+}
+.drawer-close:hover { color: var(--text); background: var(--panel-2); }
+.drawer-backdrop { display: block; position: fixed; inset: 0; z-index: 45; background: rgba(0, 0, 0, 0.45); }
+/* the page's tags in one row that scrolls sideways: its height is the same on every page (the number of pictures
+   that fit the window is counted below it, booru.js) */
+.tag-chips { display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.tag-chips .chip { flex: none; }
+
+@media (max-width: 760px) {
+  .layout.with-sidebar .sidebar { display: block; }
+  .tag-chips { flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start; scrollbar-width: none; }
+  .top-search { order: 10; flex: 1 1 100%; max-width: none; margin: 0 0 10px; }
+}

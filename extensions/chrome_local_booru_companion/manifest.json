@@ -1,15 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.1.10",
-  "description": "Скрывает уже скачанные booru-карточки и помогает Local Booru получать e621/Pixiv JSON через обычный браузер без запуска Chrome парсером. Pixiv fetch идёт через service worker с user-id/cookie headers и при 404 явно возвращает результат целевой Pixiv-вкладки без запуска chrome.exe.",
+  "version": "0.8.0",
+  "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
   "permissions": [
     "storage",
     "contextMenus",
     "tabs",
     "scripting",
     "alarms",
-    "cookies"
+    "cookies",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
@@ -23,7 +24,11 @@
     "*://e926.net/*",
     "*://www.pixiv.net/*",
     "*://pixiv.net/*",
-    "*://booru.allthefallen.moe/*"
+    "*://booru.allthefallen.moe/*",
+    "*://tineye.com/*",
+    "*://www.tineye.com/*",
+    "*://ascii2d.net/*",
+    "*://www.ascii2d.net/*"
   ],
   "background": {
     "service_worker": "service_worker.js"
@@ -40,7 +45,11 @@
         "*://e926.net/*",
         "*://www.pixiv.net/*",
         "*://pixiv.net/*",
-        "*://booru.allthefallen.moe/*"
+        "*://booru.allthefallen.moe/*",
+        "*://tineye.com/*",
+        "*://www.tineye.com/*",
+        "*://ascii2d.net/*",
+        "*://www.ascii2d.net/*"
       ],
       "js": [
         "content_script.js"
@@ -53,6 +62,23 @@
   ],
   "action": {
     "default_title": "Local Booru Companion",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "19": "icons/icon19.png",
+      "24": "icons/icon24.png",
+      "32": "icons/icon32.png",
+      "38": "icons/icon38.png"
+    }
+  },
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
   }
 }

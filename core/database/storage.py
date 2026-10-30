@@ -17,6 +17,7 @@ from core.media_utils import (
     host_from_url,
 )
 from core.tag_utils import normalize_tag
+from core.stability import swallow
 
 
 _META_TAG_OVERRIDES = {"artist_request"}
@@ -45,6 +46,11 @@ def _has_column(con, table: str, column: str) -> bool:
     except Exception:
         return False
 
+# The same bytes are back at the place of a «файл пропал» card (an unknown MD5 on the card counts as same).
+_MISSING_FILE_BACK = ("images.lifecycle='missing' AND (COALESCE(images.hash_md5,'')='' "
+                      "OR lower(images.hash_md5)=lower(COALESCE(excluded.hash_md5,'')))")
+
+
 def _ensure_image(con, media_path, status="", original_path="", hash_md5=None, lifecycle=None, inbox_until=0, import_origin=""):
     """Ensure row; lifecycle is only changed when the caller explicitly supplies it."""
     p = Path(media_path)
@@ -52,9 +58,14 @@ def _ensure_image(con, media_path, status="", original_path="", hash_md5=None, l
     width, height = image_size(p) if p.exists() else (0, 0)
     bucket = bucket_for_path(p)
     initial_lifecycle = str(lifecycle or "archive")
+    # A video's length (the gallery leaves the long ones to the tab «Видео»): read with its size from its headers.
+    duration = 0.0
+    if p.suffix.lower() in VIDEO_EXTS or p.suffix.lower() == ".m4v":
+        from core.video_probe import duration_for_db
+        duration = duration_for_db(p) if p.exists() else 0.0
     con.execute("""
-        INSERT INTO images(path, file_name, bucket, size_bytes, width, height, hash_md5, mtime_ns, is_video, indexed_at, lifecycle, inbox_until, import_origin)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        INSERT INTO images(path, file_name, bucket, size_bytes, width, height, hash_md5, mtime_ns, is_video, indexed_at, lifecycle, inbox_until, import_origin, duration)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(path) DO UPDATE SET
             file_name=excluded.file_name,
             bucket=excluded.bucket,
@@ -64,33 +75,67 @@ def _ensure_image(con, media_path, status="", original_path="", hash_md5=None, l
             hash_md5=COALESCE(excluded.hash_md5, images.hash_md5),
             mtime_ns=excluded.mtime_ns,
             is_video=excluded.is_video,
-            indexed_at=excluded.indexed_at
-    """, (str(p), p.name, bucket, size, width, height, hash_md5, mtime_ns, int(p.suffix.lower() in VIDEO_EXTS), int(time.time()), initial_lifecycle, int(inbox_until or 0), str(import_origin or "")))
+            -- a length read now wins; one that could not be read now (the file busy for a moment) keeps the known one
+            duration=CASE WHEN excluded.duration>0 OR COALESCE(images.duration,0)<=0 THEN excluded.duration
+                          ELSE images.duration END,
+            indexed_at=excluded.indexed_at,
+            -- a card marked «файл пропал» whose very file is written back is a live card again
+            deleted=CASE WHEN {back} THEN 0 ELSE images.deleted END,
+            trashed_at=CASE WHEN {back} THEN 0 ELSE images.trashed_at END,
+            original_media_path=CASE WHEN {back} THEN '' ELSE images.original_media_path END,
+            lifecycle=CASE WHEN {back} THEN 'archive' ELSE images.lifecycle END
+    """.format(back=_MISSING_FILE_BACK), (str(p), p.name, bucket, size, width, height, hash_md5, mtime_ns, int(p.suffix.lower() in VIDEO_EXTS), int(time.time()), initial_lifecycle, int(inbox_until or 0), str(import_origin or ""), duration))
     image_id = int(con.execute("SELECT id FROM images WHERE path=?", (str(p),)).fetchone()["id"])
-    try:
+    with swallow("database.storage.ensure_image_original_name"):
         if _has_column(con, "images", "original_file_name"):
             original_name = Path(original_path).name if original_path else p.name
             con.execute(
                 "UPDATE images SET original_file_name=CASE WHEN COALESCE(original_file_name,'')='' THEN ? ELSE original_file_name END, content_name_policy=CASE WHEN COALESCE(content_name_policy,'')='' AND COALESCE(hash_md5,'')<>'' AND file_name LIKE '%__%' THEN 'md5_suffix' ELSE COALESCE(content_name_policy,'') END WHERE id=?",
                 (original_name, image_id),
             )
-    except Exception:
-        pass
     if lifecycle is not None:
         con.execute("UPDATE images SET lifecycle=?, inbox_until=?, import_origin=CASE WHEN ?<>'' THEN ? ELSE import_origin END, deleted=0 WHERE id=?", (str(lifecycle), int(inbox_until or 0), str(import_origin or ""), str(import_origin or ""), image_id))
     if original_path or status:
         op = Path(original_path) if original_path else p
+        # An import without a source file (grabber, browser) never erases the source recorded earlier.
         con.execute("""
             INSERT INTO processed_files(original_path, original_name, media_path, status, bucket, processed_at)
             VALUES(?,?,?,?,?,?)
             ON CONFLICT(media_path) DO UPDATE SET
-                original_path=excluded.original_path,
-                original_name=excluded.original_name,
+                original_path=CASE WHEN excluded.original_path<>'' THEN excluded.original_path ELSE processed_files.original_path END,
+                original_name=CASE WHEN excluded.original_path<>'' THEN excluded.original_name ELSE processed_files.original_name END,
                 status=excluded.status,
                 bucket=excluded.bucket,
                 processed_at=excluded.processed_at
         """, (str(original_path or ""), op.name, str(p), status or "", bucket, int(time.time())))
+    if original_path:
+        remember_source_original(con, original_path, image_id=image_id, media_path=p, status=status or bucket, md5=hash_md5)
     return image_id
+
+
+def rebind_source_originals(con, old_path, new_path, *, new_md5: str = "") -> None:
+    """A card's file moved (relocation, rename, quality upgrade): its source files follow it."""
+    con.execute(
+        "UPDATE source_originals SET media_path=?, md5=COALESCE(NULLIF(?,''), md5) WHERE media_path=?",
+        (str(new_path), str(new_md5 or "").lower(), str(old_path)),
+    )
+
+
+def remember_source_original(con, original_path, *, image_id: int, media_path, status: str, md5=None) -> None:
+    """One row per source file: which library card it became and with what result."""
+    value = str(md5 or "").strip().lower()
+    if not value:
+        row = con.execute("SELECT hash_md5 FROM images WHERE id=?", (int(image_id),)).fetchone()
+        value = str((row["hash_md5"] if row else "") or "").lower()
+    con.execute(
+        """INSERT INTO source_originals(original_path, image_id, md5, status, media_path, processed_at)
+           VALUES(?,?,?,?,?,?)
+           ON CONFLICT(original_path) DO UPDATE SET
+               image_id=excluded.image_id,
+               md5=CASE WHEN excluded.md5<>'' THEN excluded.md5 ELSE source_originals.md5 END,
+               status=excluded.status, media_path=excluded.media_path, processed_at=excluded.processed_at""",
+        (str(Path(original_path)), int(image_id), value, str(status or ""), str(media_path), int(time.time())),
+    )
 
 
 def add_image_tags(con, image_id, groups):
@@ -146,6 +191,90 @@ def _is_navigational_source_url(url: str) -> bool:
         return False
 
 
+
+
+_SOURCE_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+
+def _clean_source_url(value: object) -> str:
+    url = str(value or "").strip().rstrip(".,;:)]}>'\"")
+    if not url.startswith(("http://", "https://")) or _is_navigational_source_url(url):
+        return ""
+    return url
+
+
+def _iter_metadata_source_urls(source_text: str, raw) -> Iterable[tuple[str, str]]:
+    """Yield source URLs with provenance without inventing relationships.
+
+    Only explicit URL-bearing fields and URLs already present in source_text are
+    considered.  This deliberately avoids semantic guesses from titles/captions.
+    """
+    seen: set[str] = set()
+    for match in _SOURCE_URL_RE.finditer(str(source_text or "")):
+        url = _clean_source_url(match.group(0))
+        if url and url not in seen:
+            seen.add(url)
+            yield url, "source_text"
+    if not isinstance(raw, dict):
+        return
+    keys = (
+        "source", "source_url", "source_urls", "original_source", "original_url",
+        "original_urls", "pixiv_url", "twitter_url", "artist_url", "profile_url",
+    )
+    for key in keys:
+        value = raw.get(key)
+        values = value if isinstance(value, (list, tuple, set)) else [value]
+        for item in values:
+            if isinstance(item, dict):
+                item = item.get("url") or item.get("source") or ""
+            url = _clean_source_url(item)
+            if url and url not in seen:
+                seen.add(url)
+                yield url, f"raw:{key}"
+
+
+def _typed_role_for_url(url: str, *, post_url: str = "", file_url: str = "", site: str = "") -> tuple[str, bool]:
+    clean = _clean_source_url(url)
+    if not clean:
+        return "", False
+    from core.typed_sources import classify_source_role
+    return classify_source_role(clean, post_url=post_url, file_url=file_url, site=site)
+
+
+def _sync_typed_sources(con, *, image_id: int, source_text: str, raw, post_url: str, file_url: str, site: str) -> None:
+    """Attach source semantics to the existing additive source history.
+
+    The legacy sources/image_sources rows remain authoritative for compatibility;
+    this function only adds roles.  Multiple original candidates are preserved,
+    while the first explicit non-mirror original becomes preferred.
+    """
+    from core.typed_sources import add_typed_source
+
+    candidates: list[tuple[str, str]] = []
+    if _clean_source_url(post_url):
+        candidates.append((_clean_source_url(post_url), "post_url"))
+    if _clean_source_url(file_url):
+        candidates.append((_clean_source_url(file_url), "file_url"))
+    candidates.extend(_iter_metadata_source_urls(source_text, raw))
+    seen: set[tuple[str, str]] = set()
+    preferred_original_set = bool(con.execute(
+        "SELECT 1 FROM image_source_roles WHERE image_id=? AND role='original_source' AND is_preferred=1 LIMIT 1",
+        (int(image_id),),
+    ).fetchone())
+    for url, provenance in candidates:
+        role, preferred = _typed_role_for_url(url, post_url=post_url, file_url=file_url, site=site)
+        if not role or (url, role) in seen:
+            continue
+        seen.add((url, role))
+        if role == "original_source":
+            preferred = bool(preferred and not preferred_original_set)
+            preferred_original_set = preferred_original_set or preferred
+        add_typed_source(
+            con, image_id=int(image_id), url=url, role=role, preferred=preferred,
+            provenance=f"metadata:{provenance}",
+        )
+
+
 def _ensure_source(con, url: str):
     url = str(url or "").strip()
     if not url.startswith(("http://", "https://")):
@@ -199,24 +328,38 @@ def _iter_source_tag_entries(source_tag_groups):
             yield url, groups, str(entry.get("method") or "")
 
 
-def _sync_merged_image_tags(con, image_id: int) -> None:
-    """Make the fast All/source-search index equal the union of stored site sets."""
-    row = con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (int(image_id),)).fetchone()
-    if not row:
-        return
-    con.execute("DELETE FROM image_tags WHERE image_id=?", (int(image_id),))
+def _sync_merged_image_tags(con, image_id: int, dropped=()) -> None:
+    """Keep the search index ``image_tags`` = union of the card's site sets + tags of no site.
+
+    Tags that belong to no site set (old library tags, manual tags) stay.  A tag leaves
+    ``image_tags`` only when it was dropped from a site set (``dropped``) and no other set of
+    this card still has it.  (Rebuilding the index from the sets alone erased those tags.)
+    """
+    image_id = int(image_id)
     con.execute("""
         INSERT OR IGNORE INTO image_tags(image_id, tag_id)
         SELECT image_id, tag_id FROM image_source_tags WHERE image_id=?
-    """, (int(image_id),))
+    """, (image_id,))
+    for tag_id in {int(t) for t in dropped or ()}:
+        if not con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? AND tag_id=? LIMIT 1",
+                           (image_id, tag_id)).fetchone():
+            con.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
 
 
 def refresh_effective_tag_categories(con, image_id: int | None = None) -> None:
-    """Refresh the compact effective category cache used by gallery facets.
+    """Refresh the selected effective-category backend.
 
-    The table is created by migration v23.  Older databases or readonly test
-    fixtures without the table simply no-op, keeping this safe for mixed builds.
+    External generation files are immutable and are rebuilt by maintenance.
+    Source writes only advance the durable revision trigger, so this function
+    must not recreate a second live copy inside main.db when external storage is
+    selected.
     """
+    try:
+        from core.derived_cache_db import main_cache_writes_enabled
+        if not main_cache_writes_enabled(con, "image_effective_tag_category"):
+            return
+    except Exception:
+        pass
     try:
         con.execute("SELECT 1 FROM image_effective_tag_category LIMIT 1")
     except Exception:
@@ -254,7 +397,7 @@ def refresh_effective_tag_categories(con, image_id: int | None = None) -> None:
     except Exception:
         return
     # Legacy no-provenance links remain visible.
-    try:
+    with swallow("database.storage.refresh_effective_legacy_links"):
         if image_id is not None:
             con.execute("""
                 INSERT OR IGNORE INTO image_effective_tag_category(image_id, tag_id, category, updated_at)
@@ -267,8 +410,6 @@ def refresh_effective_tag_categories(con, image_id: int | None = None) -> None:
                 SELECT it.image_id, it.tag_id, LOWER(COALESCE(NULLIF(t.category, ''), 'general')), ?
                 FROM image_tags it JOIN tags t ON t.id=it.tag_id
             """, (now,))
-    except Exception:
-        pass
 
 
 def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sources=False):
@@ -281,6 +422,7 @@ def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sou
     now = int(time.time())
     stored = 0
     touched_hosts = set()
+    dropped = set()
     for url, groups, method in _iter_source_tag_entries(source_tag_groups):
         source = _ensure_source(con, url)
         if not source:
@@ -291,10 +433,18 @@ def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sou
         # exact MD5 match supersedes an earlier IQDB candidate on the same host,
         # never combine the two posts' metadata.  If a buggy caller submits two
         # candidates for one host in one transaction, the last confirmed set wins.
-        con.execute("""
-            DELETE FROM image_source_tags
-            WHERE image_id=? AND source_id IN (SELECT id FROM sources WHERE host=?)
-        """, (image_id, host))
+        # (The card's own sets of this host — not every source of the host: ``source_id IN (SELECT id FROM sources
+        # WHERE host=?)`` listed all of a site's posts in the library on every save.)
+        same_host = [int(r[0]) for r in con.execute(
+            "SELECT DISTINCT ist.source_id FROM image_source_tags ist JOIN sources s ON s.id=ist.source_id "
+            "WHERE ist.image_id=? AND s.host=?", (image_id, host))]
+        if same_host:
+            marks = ",".join("?" * len(same_host))
+            dropped.update(int(r[0]) for r in con.execute(
+                f"SELECT tag_id FROM image_source_tags WHERE image_id=? AND source_id IN ({marks})",
+                (image_id, *same_host)))
+            con.execute(f"DELETE FROM image_source_tags WHERE image_id=? AND source_id IN ({marks})",
+                        (image_id, *same_host))
         touched_hosts.add(host)
         for category, values in (groups or {}).items():
             for raw in values or []:
@@ -321,9 +471,81 @@ def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sou
                 """, (image_id, source_id, tag_id, cat, method, now))
                 stored += 1
     if touched_hosts:
-        _sync_merged_image_tags(con, image_id)
+        _sync_merged_image_tags(con, image_id, dropped)
         refresh_effective_tag_categories(con, image_id)
+        drop_unused_tags(con, dropped)
     return stored
+
+
+def drop_unused_tags(con, tag_ids) -> None:
+    """The tags of ``tag_ids`` that no card uses any more (no picture, no site set) — only these, by their indexes.
+    (The whole-table ``repository.cleanup_orphans`` read every card's tags: on a big library — on every save.)"""
+    ids = sorted({int(t) for t in tag_ids or ()})
+    for start in range(0, len(ids), 500):
+        part = ids[start:start + 500]
+        con.execute(
+            f"DELETE FROM tags WHERE id IN ({','.join('?' * len(part))}) "
+            "AND NOT EXISTS (SELECT 1 FROM image_tags it WHERE it.tag_id=tags.id) "
+            "AND NOT EXISTS (SELECT 1 FROM image_source_tags ist WHERE ist.tag_id=tags.id)", part)
+
+
+def drop_unused_sources(con, source_ids) -> None:
+    """The sources of ``source_ids`` that no card uses any more (no link, no site set, no role) — only these."""
+    ids = sorted({int(s) for s in source_ids or ()})
+    for start in range(0, len(ids), 500):
+        part = ids[start:start + 500]
+        con.execute(
+            f"DELETE FROM sources WHERE id IN ({','.join('?' * len(part))}) "
+            "AND NOT EXISTS (SELECT 1 FROM image_sources x WHERE x.source_id=sources.id) "
+            "AND NOT EXISTS (SELECT 1 FROM image_source_tags x WHERE x.source_id=sources.id) "
+            "AND NOT EXISTS (SELECT 1 FROM image_source_roles x WHERE x.source_id=sources.id)", part)
+
+
+def merge_card_metadata(con, keep_id: int, other_id: int) -> None:
+    """Move what is known about card ``other_id`` onto ``keep_id`` (duplicate merge, restore).
+
+    One tag set per site: a site set of the other card is copied only when the kept card has no
+    set of that site.  Source links, site-MD5 aliases, tags of no site, rating and favorite are kept.
+    The search index and effective categories of the kept card are rebuilt.
+    """
+    keep_id, other_id = int(keep_id), int(other_id)
+    if keep_id == other_id:
+        return
+    def host_key(sql_host: str) -> str:
+        return f"REPLACE(LOWER({sql_host}),'www.','')"
+    con.execute("INSERT OR IGNORE INTO image_sources(image_id,source_id) SELECT ?,source_id FROM image_sources WHERE image_id=?",
+                (keep_id, other_id))
+    con.execute(f"""
+        INSERT OR IGNORE INTO image_source_tags(image_id,source_id,tag_id,category,acquisition,updated_at)
+        SELECT ?, x.source_id, x.tag_id, x.category, x.acquisition, x.updated_at
+        FROM image_source_tags x JOIN sources s ON s.id=x.source_id
+        WHERE x.image_id=? AND {host_key('s.host')} NOT IN (
+            SELECT {host_key('s2.host')} FROM image_source_tags y JOIN sources s2 ON s2.id=y.source_id WHERE y.image_id=?)
+    """, (keep_id, other_id, keep_id))
+    # Tags of the other card that belong to none of its site sets (old library tags, manual tags).
+    con.execute("""
+        INSERT OR IGNORE INTO image_tags(image_id,tag_id)
+        SELECT ?, it.tag_id FROM image_tags it
+        WHERE it.image_id=? AND it.tag_id NOT IN (SELECT tag_id FROM image_source_tags WHERE image_id=?)
+    """, (keep_id, other_id, other_id))
+    _sync_merged_image_tags(con, keep_id)
+    with swallow("database.storage.merge_card_metadata.aliases"):
+        con.execute("UPDATE OR IGNORE image_site_md5_aliases SET image_id=? WHERE image_id=?", (keep_id, other_id))
+    score = con.execute("SELECT rating,favorite FROM images WHERE id=?", (other_id,)).fetchone()
+    if score:
+        con.execute("UPDATE images SET rating=MAX(COALESCE(rating,0),?), favorite=MAX(COALESCE(favorite,0),?) WHERE id=?",
+                    (int(score["rating"] or 0), int(score["favorite"] or 0), keep_id))
+    with swallow("database.storage.merge_card_metadata.sets"):
+        # what the sites said about the other card's posts, its place in a сборка (when the kept card has none) and
+        # «never put into a сборка by itself» (core/card_sets.py)
+        con.execute("INSERT OR IGNORE INTO site_posts(image_id,site,post_id,parent_id,uploader,source,state,checked_at) "
+                    "SELECT ?,site,post_id,parent_id,uploader,source,state,checked_at FROM site_posts WHERE image_id=?",
+                    (keep_id, other_id))
+        if not con.execute("SELECT 1 FROM card_set_members WHERE image_id=?", (keep_id,)).fetchone():
+            con.execute("UPDATE card_set_members SET image_id=? WHERE image_id=?", (keep_id, other_id))
+        con.execute("INSERT OR IGNORE INTO card_set_optout(image_id,created_at) "
+                    "SELECT ?,created_at FROM card_set_optout WHERE image_id=?", (keep_id, other_id))
+    refresh_effective_tag_categories(con, keep_id)
 
 
 def replace_image_sources(con, image_id, source_text="", extra_sources=None):
@@ -341,7 +563,7 @@ def replace_media_tag_groups(settings, media_path, groups) -> bool:
         if not row:
             return False
         replace_image_tags(con, int(row["id"]), groups or {})
-        con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
+        _cleanup_orphan_rows(con)
     return True
 
 
@@ -373,17 +595,11 @@ def remove_media_tag_link(settings, media_path, tag_name, source_host="all") -> 
                 """, (image_id, tag_id, host))
             else:
                 con.execute("DELETE FROM image_source_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
-            if con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (image_id,)).fetchone():
-                _sync_merged_image_tags(con, image_id)
-            else:
-                con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+            _sync_merged_image_tags(con, image_id, {tag_id})
             refresh_effective_tag_categories(con, image_id)
         else:
             con.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
-        con.execute("""
-            DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)
-                                AND id NOT IN (SELECT DISTINCT tag_id FROM image_source_tags)
-        """)
+        _cleanup_orphan_rows(con)
     return True
 
 
@@ -403,15 +619,16 @@ def remove_media_source_link(settings, media_path, source_url="", source_host=""
             source_ids = [int(r["id"]) for r in con.execute("SELECT id FROM sources WHERE host=?", (host,)).fetchall()]
         else:
             return False
+        dropped = set()
         for source_id in source_ids:
+            dropped.update(int(r[0]) for r in con.execute(
+                "SELECT tag_id FROM image_source_tags WHERE image_id=? AND source_id=?", (image_id, source_id)))
             con.execute("DELETE FROM image_source_tags WHERE image_id=? AND source_id=?", (image_id, source_id))
             con.execute("DELETE FROM image_sources WHERE image_id=? AND source_id=?", (image_id, source_id))
-        if con.execute("SELECT 1 FROM image_source_tags WHERE image_id=? LIMIT 1", (image_id,)).fetchone():
-            _sync_merged_image_tags(con, image_id)
-        else:
-            con.execute("DELETE FROM image_tags WHERE image_id=?", (image_id,))
+        _sync_merged_image_tags(con, image_id, dropped)
         refresh_effective_tag_categories(con, image_id)
-        con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
+        from .repository import cleanup_orphans
+        cleanup_orphans(con)
     return True
 
 def media_path_by_md5(settings, md5: str, *, preferred_bucket: str = "", require_bucket: bool = False, exclude_path: str = "") -> str:
@@ -424,13 +641,16 @@ def media_path_by_md5(settings, md5: str, *, preferred_bucket: str = "", require
     value = str(md5 or "").strip().lower()
     if not value:
         return ""
-    where = ["deleted=0", "lower(COALESCE(hash_md5,''))=?"]
-    params = [value]
+    # by the MD5's index: «+deleted» keeps the planner from walking every live card by ``deleted`` (without
+    # statistics — a base never analysed — it chose that index and read the whole library on every save); MD5s are
+    # kept in lower case, an old one in upper case is found too
+    where = ["+deleted=0", "hash_md5 IN (?,?)"]
+    params = [value, value.upper()]
     if exclude_path:
         where.append("path<>?")
         params.append(str(exclude_path))
     if preferred_bucket and require_bucket:
-        where.append("bucket=?")
+        where.append("+bucket=?")                # (not by the bucket's index: every card of the bucket)
         params.append(str(preferred_bucket))
     order = "indexed_at ASC, id ASC"
     if preferred_bucket and not require_bucket:
@@ -450,6 +670,143 @@ def media_path_by_md5(settings, md5: str, *, preferred_bucket: str = "", require
     return ""
 
 
+def media_path_by_site_md5(settings, site_md5: str, *, exclude_path: str = "") -> str:
+    """Return the local canonical media bound to an authoritative site MD5.
+
+    ``images.hash_md5`` always describes the bytes stored locally.  A booru can
+    publish an original-file MD5 while the browser/download path yields a
+    transformed representation with another local MD5.  Migration v25 stores
+    that explicit remote-to-local association here instead of corrupting the
+    canonical local hash.
+    """
+    value = str(site_md5 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        return ""
+    try:
+        with db(settings, readonly=True) as con:
+            params = [value]
+            extra = ""
+            if exclude_path:
+                extra = " AND i.path<>?"
+                params.append(str(exclude_path))
+            rows = con.execute(
+                f"""SELECT i.path
+                    FROM image_site_md5_aliases a
+                    JOIN images i ON i.id=a.image_id
+                    WHERE lower(a.site_md5)=? AND i.deleted=0{extra}
+                    ORDER BY i.indexed_at ASC, i.id ASC""",
+                params,
+            ).fetchall()
+    except Exception:
+        # Read-only test fixtures and pre-v25 databases may not have the table
+        # yet.  The normal application startup migration creates it.
+        return ""
+    for row in rows:
+        try:
+            if Path(row["path"]).exists():
+                return str(row["path"])
+        except Exception:
+            continue
+    return ""
+
+
+def bind_site_md5_alias(settings, media_path, site_md5: str, *, site: str = "", source_url: str = "") -> dict:
+    """Bind one authoritative remote MD5 to an existing local image.
+
+    The first live binding wins.  A later conflicting import does not silently
+    reassign an exact remote hash to another live image; the caller receives the
+    existing canonical path.  Bindings whose image row is deleted/orphaned or
+    whose physical file is gone are reclaimed atomically.
+    """
+    value = str(site_md5 or "").strip().lower()
+    path = str(Path(media_path)) if media_path else ""
+    if not path or not re.fullmatch(r"[0-9a-f]{32}", value):
+        return {"ok": False, "reason": "invalid_input", "canonical_path": ""}
+    now = int(time.time())
+    try:
+        with db(settings, write=True) as con:
+            image = con.execute(
+                "SELECT id,path,lower(COALESCE(hash_md5,'')) AS local_md5 FROM images WHERE path=? AND deleted=0 LIMIT 1",
+                (path,),
+            ).fetchone()
+            if not image:
+                return {"ok": False, "reason": "image_not_found", "canonical_path": ""}
+            existing = con.execute(
+                """SELECT a.image_id,i.path,i.deleted
+                   FROM image_site_md5_aliases a
+                   LEFT JOIN images i ON i.id=a.image_id
+                   WHERE lower(a.site_md5)=? LIMIT 1""",
+                (value,),
+            ).fetchone()
+            if existing and int(existing["image_id"]) != int(image["id"]):
+                existing_path = str(existing["path"] or "")
+                existing_row_live = existing["deleted"] is not None and int(existing["deleted"] or 0) == 0
+                try:
+                    existing_file_alive = bool(
+                        existing_row_live and existing_path and Path(existing_path).exists()
+                    )
+                except Exception:
+                    # Be conservative when the filesystem cannot be inspected:
+                    # a live binding must never be reassigned merely because
+                    # stat() itself failed.  Deleted/orphan rows are reclaimable.
+                    existing_file_alive = bool(existing_row_live)
+                if existing_file_alive:
+                    return {
+                        "ok": False,
+                        "reason": "already_bound",
+                        "canonical_path": existing_path,
+                        "image_id": int(existing["image_id"]),
+                    }
+
+                # The DB row is still live, but its physical canonical file was
+                # removed outside Local Booru.  Reclaim the alias atomically so
+                # a phantom first binding cannot block a newly downloaded live
+                # canonical forever.
+                con.execute(
+                    """UPDATE image_site_md5_aliases
+                       SET image_id=?,
+                           site=CASE WHEN ?<>'' THEN ? ELSE site END,
+                           source_url=CASE WHEN ?<>'' THEN ? ELSE source_url END,
+                           local_md5=?,
+                           observed_at=?
+                       WHERE lower(site_md5)=?""",
+                    (
+                        int(image["id"]),
+                        str(site or ""), str(site or ""),
+                        str(source_url or ""), str(source_url or ""),
+                        str(image["local_md5"] or ""),
+                        now,
+                        value,
+                    ),
+                )
+                return {
+                    "ok": True,
+                    "reason": "stale_binding_reclaimed",
+                    "canonical_path": str(image["path"] or path),
+                    "image_id": int(image["id"]),
+                    "stale_canonical_path": existing_path,
+                    "stale_image_id": int(existing["image_id"]),
+                }
+            con.execute(
+                """INSERT INTO image_site_md5_aliases(site_md5,image_id,site,source_url,local_md5,observed_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(site_md5) DO UPDATE SET
+                       site=CASE WHEN excluded.site<>'' THEN excluded.site ELSE image_site_md5_aliases.site END,
+                       source_url=CASE WHEN excluded.source_url<>'' THEN excluded.source_url ELSE image_site_md5_aliases.source_url END,
+                       local_md5=CASE WHEN excluded.local_md5<>'' THEN excluded.local_md5 ELSE image_site_md5_aliases.local_md5 END,
+                       observed_at=excluded.observed_at""",
+                (value, int(image["id"]), str(site or ""), str(source_url or ""), str(image["local_md5"] or ""), now),
+            )
+            return {
+                "ok": True,
+                "reason": "bound",
+                "canonical_path": str(image["path"] or path),
+                "image_id": int(image["id"]),
+            }
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}", "canonical_path": ""}
+
+
 def found_media_path_by_md5(settings, md5: str, *, exclude_path: str = "") -> str:
     """Return a live FOUND-like canonical path for identical content."""
     return (
@@ -459,13 +816,20 @@ def found_media_path_by_md5(settings, md5: str, *, exclude_path: str = "") -> st
 
 
 def md5_exists(settings, md5: str) -> bool:
-    """Return True if a file with this MD5 is already in the library."""
-    if not md5:
+    """Return True if a file with this MD5 is already in the library (or its Trash).
+
+    The MD5 may be the bytes' MD5 or one a site published for the post (site-MD5 alias).
+    """
+    value = str(md5 or "").strip().lower()
+    if not value:
         return False
     with db(settings, readonly=True) as con:
-        row = con.execute(
-            "SELECT 1 FROM images WHERE hash_md5 = ? LIMIT 1", (md5.lower(),)
-        ).fetchone()
+        row = con.execute("SELECT 1 FROM images WHERE hash_md5 = ? LIMIT 1", (value,)).fetchone()
+        if row is None:
+            row = con.execute(
+                "SELECT 1 FROM image_site_md5_aliases a JOIN images i ON i.id=a.image_id WHERE a.site_md5=? LIMIT 1",
+                (value,),
+            ).fetchone()
     return row is not None
 
 
@@ -475,19 +839,54 @@ def ensure_image(settings, media_path, status="", original_path="", hash_md5=Non
         return _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5, lifecycle=lifecycle, inbox_until=inbox_until, import_origin=import_origin)
 
 
-def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site="", merge_existing=False, lifecycle=None, inbox_until=0, import_origin="", source_tag_groups=None):
+def _post_set_for_untracked_tags(groups, post_url: str, source_text: str, method: str) -> list:
+    """Tags that came without per-site sets (subscriptions, grabber) belong to the post they came from.
+
+    Without a set they were invisible on the card and the next merge of another site erased them.
+    """
+    if not any(values for values in (groups or {}).values()):
+        return []
+    url = str(post_url or "").strip()
+    if not url:
+        for line in str(source_text or "").splitlines():
+            url = next((part for part in line.split() if part.startswith(("http://", "https://"))), "")
+            if url:
+                break
+    if not url or _is_navigational_source_url(url):
+        return []
+    return [{"url": url, "groups": groups, "method": str(method or "import")}]
+
+
+def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_text="", status="tagged", original_path="", hash_md5=None, raw=None, post_url="", file_url="", site="", merge_existing=False, lifecycle=None, inbox_until=0, import_origin="", source_tag_groups=None, site_posts=None):
+    suffix = Path(media_path).suffix.lower()
+    if suffix in VIDEO_EXTS or suffix == ".m4v":
+        # a video's length and size are read before the base is taken for writing (kept for ``_ensure_image``)
+        from core.video_probe import probe
+        probe(media_path)
     with db(settings, write=True) as con:
         image_id = _ensure_image(con, media_path, status=status, original_path=original_path, hash_md5=hash_md5, lifecycle=lifecycle, inbox_until=inbox_until, import_origin=import_origin)
         if groups is None:
             groups = {"general": list(tags or [])}
+        if not source_tag_groups:
+            source_tag_groups = _post_set_for_untracked_tags(groups, post_url, source_text, import_origin)
         if merge_existing:
             add_image_tags(con, image_id, groups)
             add_image_sources(con, image_id, source_text, [post_url, file_url])
             add_image_source_tag_groups(con, image_id, source_tag_groups, replace_sources=False)
         else:
+            # a tag or a source only this card had goes with what is replaced — only these, not a sweep of the whole
+            # library (``repository.cleanup_orphans``, ``drop_unused_tags``)
+            had_tags = [int(r[0]) for r in con.execute(
+                "SELECT tag_id FROM image_tags WHERE image_id=? "
+                "UNION SELECT tag_id FROM image_source_tags WHERE image_id=?", (image_id, image_id))]
+            had_sources = [int(r[0]) for r in con.execute(
+                "SELECT source_id FROM image_sources WHERE image_id=? "
+                "UNION SELECT source_id FROM image_source_tags WHERE image_id=?", (image_id, image_id))]
             replace_image_tags(con, image_id, groups)
             replace_image_sources(con, image_id, source_text, [post_url, file_url])
             add_image_source_tag_groups(con, image_id, source_tag_groups, replace_sources=True)
+            drop_unused_tags(con, had_tags)
+            drop_unused_sources(con, had_sources)
         safe_post_url = str(post_url or "").strip()
         if _is_navigational_source_url(safe_post_url):
             safe_post_url = ""
@@ -504,6 +903,14 @@ def upsert_media_metadata(settings, media_path, tags=None, groups=None, source_t
                     site=excluded.site, post_url=excluded.post_url, file_url=excluded.file_url,
                     raw_json=excluded.raw_json, updated_at=excluded.updated_at
             """, (image_id, site or host_from_url(safe_post_url or file_url), safe_post_url, file_url or "", raw_json, int(time.time())))
+        _sync_typed_sources(
+            con, image_id=image_id, source_text=source_text, raw=raw,
+            post_url=safe_post_url, file_url=str(file_url or "").strip(), site=str(site or ""),
+        )
+        if site_posts:
+            # what the sites said about the card's posts (parent, uploader): сборки are made of it (core/card_sets.py)
+            from core.site_posts import record as record_site_posts
+            record_site_posts(con, image_id, site_posts)
         return image_id
 
 
@@ -563,20 +970,61 @@ def mark_processed(settings, media_path, status="nomatch", original_path=""):
 
 
 def processed_status(settings, original_path):
+    """Result of the earlier processing of this source file, while that result is still in the library.
+
+    The library card may have moved (restored from Trash, archive relocated): a live card with the
+    same bytes still counts.  A card in Trash or deleted for good does not.
+    """
     p = Path(original_path)
-    with db(settings) as con:
-        rows = con.execute("""
-            SELECT status, media_path FROM processed_files
+    with db(settings, readonly=True) as con:
+        rows = [con.execute(
+            "SELECT status, media_path, md5, image_id FROM source_originals WHERE original_path=?", (str(p),)
+        ).fetchone()]
+        # The older journal still knows sources recorded before source_originals existed.
+        rows.append(con.execute("""
+            SELECT status, media_path, '' AS md5, 0 AS image_id FROM processed_files
             WHERE original_path=?
             ORDER BY processed_at DESC LIMIT 1
-        """, (str(p),)).fetchall()
-    for r in rows:
-        try:
-            if Path(r["media_path"]).exists():
-                return r["status"]
-        except Exception:
-            pass
+        """, (str(p),)).fetchone())
+        for row in rows:
+            if row is None:
+                continue
+            if Path(str(row["media_path"] or "")).exists():
+                return row["status"]
+            # The card moved or its file was replaced by a better version: the card itself counts.
+            candidates = []
+            if int(row["image_id"] or 0):
+                candidates += con.execute("SELECT path FROM images WHERE id=? AND deleted=0",
+                                          (int(row["image_id"]),)).fetchall()
+            md5 = str(row["md5"] or "")
+            if md5:
+                candidates += con.execute("SELECT path FROM images WHERE hash_md5 IN (?,?) AND deleted=0",
+                                          (md5, md5.upper())).fetchall()
+            if any(Path(str(live["path"] or "")).exists() for live in candidates):
+                return row["status"]
     return None
+
+
+def processed_kinds_many(settings, original_paths) -> dict:
+    """The recorded result of each of these source files: {original_path: status} — from ``source_originals``,
+    else from the older ``processed_files`` (its newest row).  Only what was written, not whether the card still
+    lives (``processed_status`` checks that, for one file): for putting the files of a parser run in order
+    (core/parser/runner.py), never for skipping one."""
+    keys = list(dict.fromkeys(str(Path(x)) for x in (original_paths or [])))
+    out: dict = {}
+    if not keys:
+        return out
+    with db(settings, readonly=True) as con:
+        for i in range(0, len(keys), 500):
+            chunk = keys[i:i + 500]
+            marks = ",".join(["?"] * len(chunk))
+            for row in con.execute(f"SELECT original_path, status FROM processed_files WHERE original_path IN ({marks})"
+                                   " ORDER BY processed_at", chunk):
+                out[str(row["original_path"])] = str(row["status"] or "")      # the newest one stays
+            for row in con.execute(f"SELECT original_path, status FROM source_originals WHERE original_path IN ({marks})",
+                                   chunk):
+                out[str(row["original_path"])] = str(row["status"] or "")
+    return out
 
 
 def processed_status_many(settings, original_paths):
@@ -641,25 +1089,108 @@ def processed_records_many(settings, original_paths):
     return result
 
 
-def mark_site_scanned(settings, original_path, site_key, *, engine="", scan_revision=1, outcome="miss", checked_md5="", source_url=""):
-    """Persist one completed exact-MD5 check for a single file/source lane.
+def mark_site_scanned_many(settings, rows):
+    """Persist completed exact-MD5 checks in one SQLite transaction.
 
-    Network failures must not call this function: a failed lane remains pending
-    and will be retried without forcing all successful sites to run again.
+    ``rows`` accepts dictionaries with the same fields as :func:`mark_site_scanned`
+    or positional tuples in the order
+    ``(original_path, site_key, engine, scan_revision, outcome, checked_md5, source_url, checked_at)``.
+    Network failures must never be included because a missing row is the durable
+    representation of a pending/retryable lane.
     """
-    original = str(Path(original_path))
-    key = str(site_key or "").strip().lower()
-    if not original or not key:
-        return
+    normalized = []
+    now = int(time.time())
+    for row in rows or []:
+        if isinstance(row, dict):
+            raw_original = str(row.get("original_path") or "").strip()
+            original = str(Path(raw_original)) if raw_original else ""
+            key = str(row.get("site_key") or "").strip().lower()
+            engine = str(row.get("engine") or "")
+            revision = int(row.get("scan_revision") or 1)
+            outcome = str(row.get("outcome") or "miss")
+            checked_md5 = str(row.get("checked_md5") or "").lower()
+            source_url = str(row.get("source_url") or "")
+            checked_at = int(row.get("checked_at") or now)
+        else:
+            values = list(row or [])
+            values += [None] * max(0, 8 - len(values))
+            raw_original = str(values[0] or "").strip()
+            original = str(Path(raw_original)) if raw_original else ""
+            key = str(values[1] or "").strip().lower()
+            engine = str(values[2] or "")
+            revision = int(values[3] or 1)
+            outcome = str(values[4] or "miss")
+            checked_md5 = str(values[5] or "").lower()
+            source_url = str(values[6] or "")
+            checked_at = int(values[7] or now)
+        if original and key:
+            normalized.append((original, key, engine, revision, outcome, checked_md5, source_url, checked_at))
+    if not normalized:
+        return 0
     with db(settings, write=True) as con:
-        con.execute("""
+        con.executemany("""
             INSERT INTO site_scan_status(original_path, site_key, engine, scan_revision, outcome, checked_md5, source_url, checked_at)
             VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(original_path, site_key, scan_revision) DO UPDATE SET
                 engine=excluded.engine, outcome=excluded.outcome, checked_md5=excluded.checked_md5,
                 source_url=excluded.source_url, checked_at=excluded.checked_at
-        """, (original, key, str(engine or ""), int(scan_revision or 1), str(outcome or "miss"),
-              str(checked_md5 or "").lower(), str(source_url or ""), int(time.time())))
+        """, normalized)
+    return len(normalized)
+
+
+def mark_site_scanned(settings, original_path, site_key, *, engine="", scan_revision=1, outcome="miss", checked_md5="", source_url=""):
+    """Persist one completed exact-MD5 check for a single file/source lane."""
+    return mark_site_scanned_many(settings, [{
+        "original_path": original_path,
+        "site_key": site_key,
+        "engine": engine,
+        "scan_revision": scan_revision,
+        "outcome": outcome,
+        "checked_md5": checked_md5,
+        "source_url": source_url,
+    }])
+
+
+def matched_site_md5_samples(settings, site_key, *, scan_revision=1, limit=2):
+    """Return previously verified exact-MD5 matches for a site capability probe."""
+    key = str(site_key or "").strip().lower()
+    if not key or int(limit or 0) <= 0:
+        return []
+    with db(settings, readonly=True) as con:
+        rows = con.execute("""
+            SELECT DISTINCT checked_md5
+            FROM site_scan_status
+            WHERE site_key=? AND scan_revision=? AND outcome='match'
+              AND length(checked_md5)=32
+            ORDER BY checked_at DESC
+            LIMIT ?
+        """, (key, int(scan_revision or 1), int(limit))).fetchall()
+    return [str(row["checked_md5"] or "").lower() for row in rows if str(row["checked_md5"] or "")]
+
+
+def site_md5_samples(settings, host, *, limit=4):
+    """MD5 that the site is known to have (earlier exact matches of any parser version), newest first.
+
+    The old parser keyed some sites with a revision suffix ("rule34.xxx::…-v6"); a match is a match
+    in every revision."""
+    key = str(host or "").strip().lower().replace("www.", "")
+    if not key or int(limit or 0) <= 0:
+        return []
+    with db(settings, readonly=True) as con:
+        rows = con.execute("""
+            SELECT checked_md5, MAX(checked_at) AS seen FROM site_scan_status
+            WHERE (site_key=? OR site_key LIKE ?) AND outcome='match' AND length(checked_md5)=32
+            GROUP BY checked_md5 ORDER BY seen DESC LIMIT ?
+        """, (key, key + "::%", int(limit))).fetchall()
+    return [str(row["checked_md5"]).lower() for row in rows]
+
+
+def site_scan_hosts(settings, original_path) -> set:
+    """Sites that have answered for this source file (found or not there), in any parser version."""
+    with db(settings, readonly=True) as con:
+        rows = con.execute("SELECT DISTINCT site_key FROM site_scan_status WHERE original_path=?",
+                           (str(Path(str(original_path))),)).fetchall()
+    return {str(row[0]).split("::", 1)[0].strip().lower().replace("www.", "") for row in rows if row[0]}
 
 
 def site_scan_status_many(settings, original_paths, site_keys, *, scan_revision=1):
@@ -887,6 +1418,152 @@ def due_reverse_retry_paths(settings, *, service="saucenao", now=None, limit=100
     return [(Path(r["original_path"]), int(r["retry_after"] or 0), str(r["reason"] or "")) for r in rows]
 
 
+def _reverse_retry_cursor_values(cursor_after):
+    """Normalize a retry keyset cursor to the durable SQL sort tuple."""
+    if not cursor_after:
+        return None
+    if isinstance(cursor_after, dict):
+        values = (
+            cursor_after.get("retry_after", 0),
+            cursor_after.get("queued_at", 0),
+            cursor_after.get("path") or cursor_after.get("original_path") or "",
+            cursor_after.get("service") or "",
+        )
+    else:
+        values = tuple(cursor_after)
+    if len(values) != 4:
+        raise ValueError("reverse retry cursor must contain 4 values")
+    return (
+        int(values[0] or 0),
+        int(values[1] or 0),
+        str(values[2] or ""),
+        str(values[3] or "").strip().lower(),
+    )
+
+
+def _reverse_retry_cursor_clause(cursor):
+    if cursor is None:
+        return "", ()
+    retry_after, queued_at, original_path, service = cursor
+    return (
+        """
+        AND (
+            retry_after > ?
+            OR (retry_after = ? AND queued_at > ?)
+            OR (retry_after = ? AND queued_at = ? AND original_path > ?)
+            OR (retry_after = ? AND queued_at = ? AND original_path = ? AND service > ?)
+        )
+        """,
+        (
+            retry_after,
+            retry_after, queued_at,
+            retry_after, queued_at, original_path,
+            retry_after, queued_at, original_path, service,
+        ),
+    )
+
+
+def _reverse_retry_rows_to_dicts(rows):
+    return [
+        {
+            "path": Path(row["original_path"]),
+            "service": str(row["service"] or "").strip().lower(),
+            "retry_after": int(row["retry_after"] or 0),
+            "reason": str(row["reason"] or ""),
+            "attempts": int(row["attempts"] or 0),
+            "queued_at": int(row["queued_at"] or 0),
+        }
+        for row in rows
+    ]
+
+
+def due_reverse_retry_rows(settings, *, now=None, limit=1000, services=None, cursor_after=None):
+    """Return one keyset page of due durable reverse retries.
+
+    Filtering by service and keyset cursor happens inside SQL before ``LIMIT``.
+    Callers may therefore keep reading pages until they have admitted enough
+    eligible rows or the due set is exhausted; old rows from another parser run
+    can no longer permanently hide a current-run retry behind the first page.
+
+    Rows are not removed here.  The corresponding branch removes its row only
+    after a final non-deferred result, so a process crash cannot lose retries.
+    """
+    stamp = int(time.time() if now is None else now)
+    normalized = []
+    for service in list(services or []):
+        value = str(service or "").strip().lower()
+        if value and value not in normalized:
+            normalized.append(value)
+    cursor = _reverse_retry_cursor_values(cursor_after)
+    cursor_sql, cursor_args = _reverse_retry_cursor_clause(cursor)
+    with db(settings) as con:
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            rows = con.execute(
+                f"""
+                SELECT original_path, service, retry_after, reason, attempts, queued_at
+                FROM reverse_retry_queue
+                WHERE retry_after<=? AND service IN ({placeholders})
+                {cursor_sql}
+                ORDER BY retry_after, queued_at, original_path, service
+                LIMIT ?
+                """,
+                (stamp, *normalized, *cursor_args, int(limit)),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                f"""
+                SELECT original_path, service, retry_after, reason, attempts, queued_at
+                FROM reverse_retry_queue
+                WHERE retry_after<=?
+                {cursor_sql}
+                ORDER BY retry_after, queued_at, original_path, service
+                LIMIT ?
+                """,
+                (stamp, *cursor_args, int(limit)),
+            ).fetchall()
+    return _reverse_retry_rows_to_dicts(rows)
+
+
+def reverse_retry_cursor(row):
+    """Return the stable keyset cursor for a row returned by retry queries."""
+    return (
+        int((row or {}).get("retry_after") or 0),
+        int((row or {}).get("queued_at") or 0),
+        str((row or {}).get("path") or ""),
+        str((row or {}).get("service") or "").strip().lower(),
+    )
+
+
+def remove_reverse_retry_rows(settings, rows):
+    """Delete exact ``(original_path, service)`` pairs in one write transaction."""
+    pairs = []
+    seen = set()
+    for row in list(rows or []):
+        if isinstance(row, dict):
+            original = str(Path(row.get("path") or row.get("original_path") or ""))
+            service = str(row.get("service") or "").strip().lower()
+        else:
+            original, service = row
+            original = str(Path(original))
+            service = str(service or "").strip().lower()
+        token = (original, service)
+        if original and service and token not in seen:
+            seen.add(token)
+            pairs.append(token)
+    if not pairs:
+        return 0
+    removed = 0
+    with db(settings, write=True) as con:
+        for original, service in pairs:
+            cur = con.execute(
+                "DELETE FROM reverse_retry_queue WHERE original_path=? AND service=?",
+                (original, service),
+            )
+            removed += max(0, int(cur.rowcount or 0))
+    return removed
+
+
 def pending_reverse_retry_paths(settings, *, service="saucenao", limit=100000):
     """Return every durable retry row, including entries still in cooldown.
 
@@ -902,6 +1579,44 @@ def pending_reverse_retry_paths(settings, *, service="saucenao", limit=100000):
             ORDER BY retry_after, queued_at LIMIT ?
         """, (svc, int(limit))).fetchall()
     return [(Path(r["original_path"]), int(r["retry_after"] or 0), str(r["reason"] or "")) for r in rows]
+
+
+def pending_reverse_retry_rows(settings, *, services=None, limit=1000000, cursor_after=None):
+    """Return one keyset page of future and due durable reverse retries."""
+    normalized = []
+    for service in list(services or []):
+        value = str(service or "").strip().lower()
+        if value and value not in normalized:
+            normalized.append(value)
+    cursor = _reverse_retry_cursor_values(cursor_after)
+    cursor_sql, cursor_args = _reverse_retry_cursor_clause(cursor)
+    with db(settings) as con:
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            rows = con.execute(
+                f"""
+                SELECT original_path, service, retry_after, reason, attempts, queued_at
+                FROM reverse_retry_queue
+                WHERE service IN ({placeholders})
+                {cursor_sql}
+                ORDER BY retry_after, queued_at, original_path, service
+                LIMIT ?
+                """,
+                (*normalized, *cursor_args, int(limit)),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                f"""
+                SELECT original_path, service, retry_after, reason, attempts, queued_at
+                FROM reverse_retry_queue
+                WHERE 1=1
+                {cursor_sql}
+                ORDER BY retry_after, queued_at, original_path, service
+                LIMIT ?
+                """,
+                (*cursor_args, int(limit)),
+            ).fetchall()
+    return _reverse_retry_rows_to_dicts(rows)
 
 
 def pending_reverse_retry_info(settings, *, service="saucenao"):
@@ -945,13 +1660,72 @@ def get_nomatches_for_tineye(settings) -> list:
         return []
 
 
-def cleanup_missing(settings):
+class TooManyMissing(RuntimeError):
+    """Most of the cards looked at have no file: a library folder emptied or replaced (a drive letter taken
+    by another disk, an output/ recreated empty by something) — not losses to delete."""
+
+    def __init__(self, missing: int, total: int):
+        super().__init__(f"файлов нет у {missing} карточек из {total} — больше половины: похоже, папку библиотеки "
+                         "подменили или очистили; ничего не удалено")
+        self.missing, self.total = int(missing), int(total)
+
+
+MASS_MISSING_SHARE = 0.5          # above this share of «gone» files nothing is deleted (from 20 cards on)
+
+
+def delete_missing_rows(settings, *, within=None, stop_check=None) -> int:
+    """Delete gallery rows whose file is confirmed missing on an available drive.
+
+    A row on an offline/unmounted root or with an unclear path is never deleted:
+    a disconnected drive must not wipe the library (docs/map, trap 10).  ``within`` — only rows under
+    these folders (the index judges the library's own folders, not a card pointing elsewhere).
+
+    The files are probed before the base is locked (on a big library that is minutes) and probed once
+    more right before each delete; «Остановить» before the deletes deletes nothing.  When most of them
+    are «gone» (``MASS_MISSING_SHARE``), nothing is deleted: :class:`TooManyMissing`.
+
+    Cards in the trash are left alone, file or not: they hold their pictures out of the library (rule 12),
+    and only emptying the trash (``purge_trash``) turns that into a lasting «do not import again».
+    """
+    from core.storage_roots import path_is_within_root, probe_media_path
+
+    with db(settings, readonly=True) as con:
+        rows = [(int(r["id"]), str(r["path"] or "")) for r in con.execute(
+            "SELECT id, path FROM images WHERE COALESCE(lifecycle,'')<>'trash' ORDER BY id")]
+    if within is not None:
+        roots = [str(root) for root in within]
+        rows = [(i, path) for i, path in rows if any(path_is_within_root(path, root) for root in roots)]
+    missing = []
+    root_cache = {}
+    for pos, (image_id, path) in enumerate(rows, start=1):
+        if stop_check and stop_check():
+            return 0
+        if (pos - 1) % 250 == 0:
+            root_cache = {}
+        if probe_media_path(settings, path, root_cache=root_cache).get("status") == "missing":
+            missing.append((image_id, path))
+    if len(rows) >= 20 and len(missing) > MASS_MISSING_SHARE * len(rows):
+        raise TooManyMissing(len(missing), len(rows))
     removed = 0
+    for start in range(0, len(missing), 500):
+        with db(settings, write=True) as con:
+            for image_id, path in missing[start:start + 500]:
+                if probe_media_path(settings, path).get("status") != "missing":     # back meanwhile
+                    continue
+                cur = con.execute("DELETE FROM images WHERE id=? AND path=? AND COALESCE(lifecycle,'')<>'trash'",
+                                  (image_id, path))
+                removed += max(cur.rowcount or 0, 0)
+    return removed
+
+
+def cleanup_missing(settings, *, stop_check=None):
+    """Delete only confirmed missing rows; never treat an offline root as missing.
+
+    None — «Остановить» came before anything was deleted (``delete_missing_rows`` probes the files first)."""
+    removed = delete_missing_rows(settings, stop_check=stop_check)
+    if stop_check is not None and not removed and stop_check():
+        return None
     with db(settings, write=True) as con:
-        for row in con.execute("SELECT id, path FROM images").fetchall():
-            if not Path(row["path"]).exists():
-                con.execute("DELETE FROM images WHERE id=?", (row["id"],))
-                removed += 1
         con.execute("DELETE FROM processed_files WHERE media_path NOT IN (SELECT path FROM images)")
         _cleanup_orphan_rows(con)
     return removed
@@ -1052,10 +1826,8 @@ def delete_images(settings, image_rows, delete_files=True):
         for p in paths:
             try:
                 if p.exists() and p.is_file():
-                    try:
+                    with swallow("database.storage.mark_deleted_registry"):
                         mark_deleted(p, reason="sqlite_delete", settings=settings, manual_delete=True)
-                    except Exception:
-                        pass
                     if unlink_managed(settings, p, operation="storage.delete_images"):
                         deleted_files += 1
             except Exception:
@@ -1071,8 +1843,8 @@ def delete_images(settings, image_rows, delete_files=True):
 
 
 def _cleanup_orphan_rows(con):
-    con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
-    con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
+    from core.database.repository import cleanup_orphans
+    cleanup_orphans(con)
 
 # --- v27 compatibility aliases -------------------------------------------------
 def cleanup_orphan_rows(settings):

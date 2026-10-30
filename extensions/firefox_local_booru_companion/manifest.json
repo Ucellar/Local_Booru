@@ -1,0 +1,97 @@
+{
+  "manifest_version": 3,
+  "name": "Local Booru Companion",
+  "version": "0.8.0",
+  "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "tabs",
+    "scripting",
+    "alarms",
+    "cookies",
+    "unlimitedStorage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://rule34.xxx/*",
+    "*://*.rule34.xxx/*",
+    "*://gelbooru.com/*",
+    "*://*.gelbooru.com/*",
+    "*://danbooru.donmai.us/*",
+    "*://e621.net/*",
+    "*://e926.net/*",
+    "*://www.pixiv.net/*",
+    "*://pixiv.net/*",
+    "*://booru.allthefallen.moe/*",
+    "*://tineye.com/*",
+    "*://www.tineye.com/*",
+    "*://ascii2d.net/*",
+    "*://www.ascii2d.net/*"
+  ],
+  "background": {
+    "scripts": [
+      "background.js"
+    ]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://rule34.xxx/*",
+        "*://*.rule34.xxx/*",
+        "*://gelbooru.com/*",
+        "*://*.gelbooru.com/*",
+        "*://danbooru.donmai.us/*",
+        "*://e621.net/*",
+        "*://e926.net/*",
+        "*://www.pixiv.net/*",
+        "*://pixiv.net/*",
+        "*://booru.allthefallen.moe/*",
+        "*://tineye.com/*",
+        "*://www.tineye.com/*",
+        "*://ascii2d.net/*",
+        "*://www.ascii2d.net/*"
+      ],
+      "js": [
+        "content_script.js"
+      ],
+      "css": [
+        "content_styles.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Local Booru Companion",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "19": "icons/icon19.png",
+      "24": "icons/icon24.png",
+      "32": "icons/icon32.png",
+      "38": "icons/icon38.png"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "local-booru-companion@localbooru.local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

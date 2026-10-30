@@ -37,16 +37,6 @@ except Exception:
     imagehash = None
 
 
-DEFAULT_BLOCKLIST = (
-    "obese, obesity, overweight, weight_gain, "
-    "inflation, inflation_fetish, expansion, expansion_fetish, "
-    "pregnant, pregnancy, mpreg, bloated, belly_inflation, "
-    "nipple_expansion, huge_nipples, giant_nipples, "
-    "cyst, cysts, cystitis, "
-    "ai_generated, ai-assisted, ai_assisted, "
-    "scat, coprophagia, poop, feces, "
-    "necrophilia, corpse, guro, gore, vomit, fart, farting"
-)
 
 
 GRABBER_GROUP_ORDER = [
@@ -73,7 +63,9 @@ GRABBER_GROUP_PRIORITY = {
 
 from ui.downloader.helpers import *
 from ui.downloader.worker import DownloaderWorker
-from ui.duplicates_page import image_size as _duplicate_image_size
+from core.media_utils import image_size as _duplicate_image_size
+from core.net import http_request
+from core.lru import LRUCache
 
 class _FullImageLoader(QThread):
     """Downloads the full-quality image in background, then updates post_page."""
@@ -82,6 +74,11 @@ class _FullImageLoader(QThread):
 
     def __init__(self, item, owner):
         super().__init__()
+        try:
+            from core.shutdown import register_qthread
+            register_qthread(self, "FullImageLoader")
+        except Exception:
+            pass
         self._item = dict(item or {})
         self._owner = owner
 
@@ -190,6 +187,9 @@ class DownloaderPage(QWidget):
     def __init__(self, main):
         super().__init__()
         self.main = main
+        # Keep a direct settings alias for helpers/caches that historically use
+        # ``self.settings``.  It must exist before any cache is constructed.
+        self.settings = self.main.settings
         self.log_requested.connect(self._append_log_direct)
 
         lay = QVBoxLayout(self)
@@ -443,7 +443,7 @@ class DownloaderPage(QWidget):
         self._preview_last_visible_keys = ()
         self._md5_ram_index = None
         self._md5_ram_index_lock = threading.RLock()
-        self._grabber_exact_md5_cache = {}
+        self._grabber_exact_md5_cache = LRUCache(int(self.settings.get("cache_grabber_exact_md5", 4096) or 4096), name="grabber_exact_md5")
         self._grabber_exact_md5_lock = threading.RLock()
         self._grabber_existing_merge_lock = threading.RLock()
         self._grabber_existing_merge_seen = set()
@@ -687,11 +687,13 @@ class DownloaderPage(QWidget):
 
 
     def _grabber_subscription_blocklist_text(self):
+        """The user's blocklist, shared with the subscriptions; empty — nothing is blocked (there was a
+        built-in list used when it was empty: a filter nobody saw)."""
         s = self.main.settings if hasattr(self, "main") else {}
         return str(
             s.get("grabber_subscriptions_blocklist")
             or s.get("downloader_blocklist")
-            or DEFAULT_BLOCKLIST
+            or ""
         )
 
     def _enabled_parser_sites(self):
@@ -1477,6 +1479,10 @@ class DownloaderPage(QWidget):
         if not p:
             return None
         md5 = self._normalize_md5_hex(remote_md5)
+        if not md5 and str(reason or "").startswith(("same name:", "copy-suffix duplicate:")):
+            # Only the name matches («123.jpg» is post 123 of any site): its tags must not go onto it.
+            self.append_log(f"DUPLICATE BY NAME ONLY: {p.name}; скачиваю и сверяю по содержимому")
+            return False
         if md5:
             try:
                 actual = _file_md5(p).lower()
@@ -1508,7 +1514,7 @@ class DownloaderPage(QWidget):
         dirs = self.status_dirs("found")
         remote_md5 = ""
         if isinstance(post, dict):
-            remote_md5 = str(post.get("md5") or "")
+            remote_md5 = str(_post_md5_from_json(post) or "")       # rule34 calls it "hash"
         if post is not None and not self._wait_for_sqlite_writes_ready("перед скачиванием оригинала", max_seconds=900):
             return None
         # Same exact bytes from another source are not a skipped post: attach
@@ -1543,10 +1549,9 @@ class DownloaderPage(QWidget):
             )
             if merged:
                 return Path(merged)
-            if merged is False and remote_md5:
-                # A stale/orphan file had the expected MD5-shaped name but not
-                # the expected content.  Do not let name-only fallback block the
-                # real download; the output naming loop below will suffix it.
+            if merged is False:
+                # A file with the expected name but other (or unknown) content: download as a
+                # new file; the exact-MD5 check after the download merges a real copy.
                 dup = False
             if dup:
                 self.append_log(f"SKIP DUPLICATE: {reason}")
@@ -1557,6 +1562,20 @@ class DownloaderPage(QWidget):
                     pass
                 return None
 
+        try:
+            from core.download_policy import require_allowed
+            require_allowed(
+                self.main.settings, operation="grabber_download",
+                source_site=_host(post_url or file_url), media_url=file_url, post_url=post_url,
+                payload={"stem_hint": str(stem_hint or "")},
+                create_intent=bool(self.main.settings.get("download_policy_create_intents", True)),
+            )
+        except Exception as exc:
+            from core.download_policy import DownloadBlockedByPolicy
+            if isinstance(exc, DownloadBlockedByPolicy):
+                self.append_log(f"DOWNLOAD BLOCKED BY SESSION POLICY: intent={exc.decision.intent_id or 0} {file_url}")
+                return None
+            raise
         r = self._stream_media_get(session, file_url, post_url, timeout=60)
         self.append_log(f"FILE STATUS: {r.status_code} {r.headers.get('content-type', '')}")
 
@@ -1605,6 +1624,11 @@ class DownloaderPage(QWidget):
         except Exception:
             actual_md5 = ""
         if actual_md5:
+            try:  # the import reads the MD5 from this cache instead of hashing the file a second time
+                from core.file_hash_cache import upsert as _remember_md5
+                _remember_md5(self.main.settings, out, hash_md5=actual_md5)
+            except Exception as exc:
+                self.append_log(f"MD5 cache: {type(exc).__name__}: {exc}")
             try:
                 from core.services.metadata_service import found_media_path_by_md5
                 canonical = self._md5_ram_lookup(actual_md5)
@@ -1741,11 +1765,8 @@ class DownloaderPage(QWidget):
             elif data.get("name"):
                 rows = [data]
         if not rows:
-            try:
-                soup = BeautifulSoup(response.text or "", "xml")
-                rows = [dict(node.attrs) for node in soup.find_all("tag")]
-            except Exception:
-                rows = []
+            from core.parser.util import xml_elements
+            rows = xml_elements(response.text or "", "tag")
         return [row for row in rows if isinstance(row, dict)]
 
     def _cached_tag_categories_for_grabber(self, host, tags):
@@ -1796,19 +1817,21 @@ class DownloaderPage(QWidget):
         auth = _apt_auth_query(self._runtime_settings(), session_host)
         if auth:
             url += auth
+        # Returns None when the site did not answer (HTTP error, network, limit): such tags must not
+        # be remembered as "general" — the parser trusts this cache.
         try:
             self.append_log(f"PREVIEW TAG CATEGORY TRY [{host}]: {_mask_sensitive_url(url)}")
             r = self._preview_http_get(session, f"https://{session_host}/", url, timeout=30)
             self.append_log(f"PREVIEW TAG CATEGORY STATUS [{host}]: {r.status_code} {r.headers.get('content-type','')}")
             if r.status_code >= 400:
-                return []
+                return None
             return self._grabber_parse_dapi_tag_rows(r)
         except Exception as e:
             try:
                 self.append_log(f"PREVIEW TAG CATEGORY ERROR [{host}]: {type(e).__name__}: {e}")
             except Exception:
                 pass
-            return []
+            return None
 
     def _categorize_flat_tags_for_grabber(self, site, tags, session=None):
         """Classify flat Gelbooru-family tag strings for grabber previews.
@@ -1860,9 +1883,11 @@ class DownloaderPage(QWidget):
             return changed
 
         names = [t for t in clean if t in remaining]
+        answered = set()           # tags the site's catalogue really answered for (found or not)
+        site_failed = False
         for i in range(0, len(names), 50):
             chunk = [t for t in names[i:i + 50] if t in remaining]
-            if not chunk:
+            if not chunk or site_failed:
                 continue
             # Gelbooru-family docs use names=<space separated tags>, but some
             # rule34 mirrors behave inconsistently.  Try the documented bulk
@@ -1873,6 +1898,9 @@ class DownloaderPage(QWidget):
                 {"page": "dapi", "s": "tag", "q": "index", "json": "1", "names": " ".join(chunk)},
                 host=host,
             )
+            if rows is None:
+                site_failed = True         # error or limit: no single-tag storm, nothing cached
+                continue
             consume_rows(rows)
             for tag in list(chunk):
                 if tag not in remaining:
@@ -1885,14 +1913,17 @@ class DownloaderPage(QWidget):
                     {"page": "dapi", "s": "tag", "q": "index", "json": "1", "name": tag},
                     host=host,
                 )
+                if rows is None:
+                    site_failed = True
+                    break
                 consume_rows(rows)
+                answered.add(tag)
 
-        # Mark still-unknown tags as verified general only after the v242 lookup
-        # had a chance to ask the remote catalogue.  This prevents old stale
-        # general rows from blocking classification while still avoiding endless
-        # rechecks for truly general tags.
+        # A tag the catalogue answered for without a category is really general; a tag whose
+        # lookup failed stays unknown (it used to be cached as "general" and poisoned the parser too).
         for name in list(remaining):
-            updates.setdefault(name, "general")
+            if name in answered:
+                updates.setdefault(name, "general")
         try:
             if updates:
                 from core.database.storage import upsert_tag_category_cache
@@ -1983,7 +2014,7 @@ class DownloaderPage(QWidget):
                 return post, dapi_groups
 
             self.append_log(f"HTML GROUPS TRY: {post_url}")
-            r = session.get(post_url, timeout=30)
+            r = http_request(session, "GET", post_url, timeout=30)
             self.append_log(f"HTML GROUPS STATUS: {r.status_code} {r.headers.get('content-type', '')}")
 
             if r.status_code >= 400:
@@ -2033,10 +2064,12 @@ class DownloaderPage(QWidget):
                 posts = _posts_from_json_response(r)
                 if posts:
                     post = posts[0]
-                    file_url = _extract_file_url_from_json(post)
+                    file_url = _extract_original_url_from_json(post)
                     if file_url:
                         merged_post, _merged_groups = self._merge_html_groups_into_post(session, post_url, post)
                         return merged_post, file_url
+                    if _extract_file_url_from_json(post):
+                        self.append_log("API: у поста только уменьшенная копия (sample/preview), оригинала нет")
             except Exception as e:
                 self.append_log(f"API ERROR: {type(e).__name__}: {e}")
 
@@ -2044,7 +2077,7 @@ class DownloaderPage(QWidget):
             raise RuntimeError("Official JSON API did not return usable post data; HTML tag fallback disabled to avoid polluted tags or protection pages")
 
         self.append_log(f"HTML TRY: {post_url}")
-        r = session.get(post_url, timeout=30)
+        r = http_request(session, "GET", post_url, timeout=30)
         self.append_log(f"HTML STATUS: {r.status_code} {r.headers.get('content-type', '')}")
         if r.status_code >= 400:
             raise RuntimeError(f"post page status {r.status_code}")
@@ -2125,7 +2158,7 @@ class DownloaderPage(QWidget):
                 for sel in selectors:
                     for a in soup.select(sel):
                         for raw in candidates_from_link(a):
-                            tag = _clean_download_tag(raw)
+                            tag = _clean_sidebar_tag(raw)
                             if tag:
                                 groups[group].append(tag)
 
@@ -2133,7 +2166,7 @@ class DownloaderPage(QWidget):
             if not any(groups.values()):
                 for a in soup.select("#tag-sidebar a[href*='tags='], #tag-list a[href*='tags=']"):
                     for raw in candidates_from_link(a):
-                        tag = _clean_download_tag(raw)
+                        tag = _clean_sidebar_tag(raw)
                         if tag:
                             groups["general"].append(tag)
 
@@ -3067,6 +3100,12 @@ class DownloaderPage(QWidget):
         if not preview_url:
             return ""
         try:
+            from core.download_policy import downloads_enabled
+            if not downloads_enabled(self._runtime_settings()):
+                return ""
+        except Exception:
+            pass
+        try:
             cache = self._grabber_cache_dir("preview")
             ext = Path(urlparse(preview_url).path).suffix.lower()
             if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
@@ -3076,7 +3115,7 @@ class DownloaderPage(QWidget):
             if out.exists() and out.stat().st_size > 0:
                 return str(out)
             headers = {"Referer": referer or preview_url}
-            r = session.get(preview_url, timeout=25, stream=True, headers=headers)
+            r = http_request(session, "GET", preview_url, timeout=25, stream=True, headers=headers)
             if r.status_code >= 400:
                 return ""
             tmp = out.with_name(out.name + f".{time.time_ns()}.tmp")
@@ -3395,36 +3434,9 @@ class DownloaderPage(QWidget):
         """Return one best original/full media URL for actual archive download.
 
         Preview/sample URLs are acceptable for UI cache, but archive download
-        must not silently save thumbnails.
+        must not silently save thumbnails ("" when the post has no original).
         """
-        def abs_url(v):
-            return self._preview_abs_url(v)
-        if isinstance(post, dict) and isinstance(post.get("post"), dict):
-            post = post.get("post") or {}
-        if not isinstance(post, dict):
-            return ""
-        for key in ("file_url", "source_file_url", "original_url"):
-            u = abs_url(post.get(key))
-            if u:
-                return u
-        f = post.get("file")
-        if isinstance(f, dict):
-            for key in ("url", "file_url", "ext_url"):
-                u = abs_url(f.get(key))
-                if u:
-                    return u
-        media = post.get("media_asset")
-        if isinstance(media, dict):
-            variants = media.get("variants") or []
-            if isinstance(variants, list):
-                for v in variants:
-                    if isinstance(v, dict) and v.get("type") == "original":
-                        u = abs_url(v.get("url"))
-                        if u:
-                            return u
-        # No verified original/full URL in JSON.  Returning sample/preview here
-        # would make the archive save a small image, so fail explicitly.
-        return ""
+        return _extract_original_url_from_json(post)
 
     def _preview_media_urls_from_post(self, post, file_url="", preview_url=""):
         """Media URLs for opening one online card, ordered by configured quality.
@@ -3610,7 +3622,7 @@ class DownloaderPage(QWidget):
         # gelbooru/rule34/danbooru/e621 не ломаются из-за лишнего универсального
         # обходчика. PoW-ветка нужна только ATF.
         if "allthefallen" not in host:
-            return session.get(url, timeout=timeout)
+            return http_request(session, "GET", url, timeout=timeout)
         lock = self._grabber_session_lock_for_host(host)
         try:
             from core.downloader_utils import _smart_get
@@ -3618,7 +3630,7 @@ class DownloaderPage(QWidget):
                 return _smart_get(session, url, host, self.append_log, timeout=timeout, settings=self._runtime_settings())
         except Exception:
             with lock:
-                return session.get(url, timeout=timeout)
+                return http_request(session, "GET", url, timeout=timeout)
 
 
     def _preview_count_for_site(self, site, tags, session=None):
@@ -3710,6 +3722,12 @@ class DownloaderPage(QWidget):
         second network download.
         """
         item = item or {}
+        try:
+            from core.download_policy import downloads_enabled
+            if not downloads_enabled(self._runtime_settings()):
+                return ""
+        except Exception:
+            pass
         cached = str(item.get("cached_original_path") or "")
         if cached and Path(cached).exists() and Path(cached).stat().st_size > 0:
             return cached
@@ -4816,6 +4834,12 @@ class DownloaderPage(QWidget):
 
     def _download_preview_full_image(self, item):
         item = item or {}
+        try:
+            from core.download_policy import downloads_enabled
+            if not downloads_enabled(self._runtime_settings()):
+                return ""
+        except Exception:
+            pass
         # Просмотр может подгружать только реальные media/original URL.  Превью
         # не добавляем даже как fallback, чтобы оно никогда не попало в поле
         # full_path и потом не было принято за оригинал при сохранении.
@@ -5113,10 +5137,8 @@ class DownloaderPage(QWidget):
         def open_url():
             url = (urls or [""])[0]
             if url:
-                try:
-                    import webbrowser
-                    webbrowser.open(url)
-                except Exception:
+                from core.external_browser import open_external_browser_url
+                if not open_external_browser_url(url, self.main.settings):   # not a web address, or no browser
                     QApplication.clipboard().setText(url)
 
         def context_menu(pos):
@@ -5537,7 +5559,7 @@ class DownloaderPage(QWidget):
                 return
 
             self.append_log(f"FILE URL: {file_url}")
-            stem = str(post.get("md5") or post.get("id") or Path(urlparse(file_url).path).stem or "download")
+            stem = str(_post_md5_from_json(post) or post.get("id") or Path(urlparse(file_url).path).stem or "download")
             self._download_file(session, file_url, post_url, stem, post, _groups_from_post(post))
 
         except Exception as e:
@@ -5661,13 +5683,14 @@ class DownloaderPage(QWidget):
                         self.append_log(f"SKIP BLOCKED: post={post.get('id')}")
                         continue
 
-                    file_url = _extract_file_url_from_json(post)
+                    file_url = _extract_original_url_from_json(post)
                     if not file_url:
-                        self.append_log(f"SKIP NO FILE_URL: post={post.get('id')}")
+                        why = "только уменьшенная копия" if _extract_file_url_from_json(post) else "нет файла"
+                        self.append_log(f"SKIP NO ORIGINAL ({why}): post={post.get('id')}")
                         continue
 
                     post_url = self._post_url_from_post(site, post)
-                    stem = str(post.get("md5") or post.get("id") or Path(urlparse(file_url).path).stem or "download")
+                    stem = str(_post_md5_from_json(post) or post.get("id") or Path(urlparse(file_url).path).stem or "download")
 
                     try:
                         self.append_log(f"DOWNLOAD {got + 1}/{limit_total}: {post_url}")

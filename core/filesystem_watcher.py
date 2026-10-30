@@ -73,9 +73,17 @@ class LibraryWatcher:
             return
         try:
             from core.database.indexer import index_library
-            self.log("WATCHER: incremental index start")
-            index_library(self.settings, force=False, stop_check=self._stop.is_set)
-            self.log("WATCHER: incremental index done")
+            from core.background_tasks import get_background_task_registry
+            registry = get_background_task_registry()
+            with registry.task(
+                "Индексатор файлового наблюдателя",
+                kind="watcher.index",
+                detail="incremental index",
+                cancellable=False,
+            ):
+                self.log("WATCHER: incremental index start")
+                index_library(self.settings, force=False, stop_check=self._stop.is_set)
+                self.log("WATCHER: incremental index done")
         except Exception as e:
             self.log(f"WATCHER ERROR: {e}")
         finally:

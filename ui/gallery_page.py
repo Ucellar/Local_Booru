@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QLabel,
     QScrollArea, QGridLayout, QFrame, QComboBox, QCheckBox, QSplitter,
     QListWidget, QSizePolicy, QListWidgetItem, QSpinBox, QListView, QColorDialog,
-    QAbstractItemView, QStyledItemDelegate, QStyle, QMenu, QApplication, QMessageBox,
+    QAbstractItemView, QStyledItemDelegate, QStyle, QMenu, QApplication, QMessageBox, QFileDialog,
 )
 from PySide6.QtCore import Qt, QSize, QTimer, QStringListModel, QAbstractListModel, QModelIndex, QRect, QMimeData, QUrl, QEvent
 from PySide6.QtGui import QPixmap, QColor, QBrush, QIcon, QPainter, QPen, QDrag
@@ -18,11 +18,14 @@ from core.library import sort_tag_items
 from core.tag_utils import normalize_tag, tag_display_color
 from core.search.human_query_parser import parse_query, to_sql_conditions as _num_to_sql
 from core.stability import safe_call as _safe_call
-from core.database.repository import (
+from core.services.library_service import (
     count_search_items, search_items, enrich_items,
     candidate_tags, candidate_sources, counts, source_unique_image_count,
 )
-from core.thumb_service import ThumbnailService
+from core.thumb_service import (
+    ThumbnailService, PRIORITY_VISIBLE, PRIORITY_CURRENT_PAGE, PRIORITY_PREFETCH,
+)
+from core.lru import LRUCache
 
 GROUP_ORDER = ["artist", "contributor", "character", "copyright", "species", "general", "meta", "lore", "invalid",
                "parody", "language", "category", "pages"]
@@ -39,7 +42,7 @@ def _global_tag_groups_worker(settings, source="all", progress=None, stop_check=
         progress("Галерея: загрузка общего счётчика тегов…")
     if stop_check and stop_check():
         return None
-    from core.database.repository import tag_group_counts
+    from core.services.library_service import tag_group_counts
     return tag_group_counts(settings, source=source)
 
 def _gallery_facets_worker(settings, progress=None, stop_check=None):
@@ -54,19 +57,33 @@ def _gallery_facets_worker(settings, progress=None, stop_check=None):
     source_total = source_unique_image_count(settings)
     return {"tags": tags, "sources": sources, "source_counts": source_counts, "source_total": source_total}
 
-_PH_CACHE: dict[tuple, QPixmap] = {}
-_TAG_GROUP_COUNT_CACHE: dict[tuple, tuple[float, object]] = {}
 
+def _gallery_enrich_worker(settings, batch, display_source="all", progress=None, stop_check=None):
+    """Enrich one visible gallery page outside the Qt event loop.
 
-def _cap_placeholder_cache(max_items: int = 256) -> None:
-    try:
-        while len(_PH_CACHE) > int(max_items):
-            _PH_CACHE.pop(next(iter(_PH_CACHE)))
-    except Exception:
-        pass
+    The worker owns shallow copies of the page rows. ``enrich_items`` replaces
+    all nested tag/source fields, so it never mutates the model's live rows from
+    the background thread. A stale result is discarded by the page generation
+    guard in ``GalleryPage._render_page_tags``.
+    """
+    if progress:
+        progress("Галерея: загрузка тегов текущей страницы…")
+    if stop_check and stop_check():
+        return None
+    rows = [dict(item) for item in (batch or [])]
+    enrich_items(settings, rows, tag_source=display_source)
+    if stop_check and stop_check():
+        return None
+    return rows
+
+_PH_CACHE = LRUCache(512, name="gallery_phash")
+_TAG_GROUP_COUNT_CACHE = LRUCache(256, name="gallery_tag_group_count")
 
 
 def _parser_running(main) -> bool:
+    from core.parser.jobs import is_running
+    if is_running():                    # any run: the parser page, the web page, a «Брак» retry
+        return True
     try:
         settings = getattr(main, "settings", {}) or {}
         if isinstance(settings, dict) and bool(settings.get("_parser_running", False)):
@@ -81,9 +98,15 @@ def _parser_running(main) -> bool:
 
 
 def _gallery_heavy_tasks_blocked(main) -> bool:
-    """True while the parser is active and gallery must not run global SQL/previews."""
+    """True while the local parser is active and local gallery should yield SQLite.
+
+    Booru Corpus is a separate read-only database owned by Corpus Builder, so a
+    Local Booru parser run must not suppress its facets.
+    """
     try:
         settings = getattr(main, "settings", {}) or {}
+        if str(settings.get("gallery_data_source") or "local").lower() == "corpus":
+            return False
         return bool(_parser_running(main) and settings.get("gallery_block_heavy_tasks_while_parser", True))
     except Exception:
         return False
@@ -131,13 +154,13 @@ def _placeholder(w: int, h: int) -> QPixmap:
         painter.drawText(p.rect(), Qt.AlignCenter, "…")
         painter.end()
         _PH_CACHE[key] = p
-        _cap_placeholder_cache()
     return _PH_CACHE[key]
 
 
-def _missing_placeholder(w: int, h: int, file_name: str = "") -> QPixmap:
+def _missing_placeholder(w: int, h: int, file_name: str = "", status: str = "missing") -> QPixmap:
     theme = _current_theme_name()
-    key = ("missing", w, h, theme, file_name[:32])
+    status = str(status or "missing")
+    key = ("missing", status, w, h, theme, file_name[:32])
     if key not in _PH_CACHE:
         p = QPixmap(w, h)
         bg, fg = _gallery_item_colors(theme)
@@ -147,13 +170,16 @@ def _missing_placeholder(w: int, h: int, file_name: str = "") -> QPixmap:
         painter.setPen(QPen(QColor(border), 2))
         painter.drawRect(1, 1, max(0, w - 3), max(0, h - 3))
         painter.setPen(QColor(border))
-        text = "Файл отсутствует"
+        text = {
+            "missing": "Файл отсутствует",
+            "offline_root": "Корень хранения недоступен",
+            "path_error": "Ошибка пути к файлу",
+        }.get(status, "Файл недоступен")
         if file_name:
             text += "\n" + file_name[:32]
         painter.drawText(p.rect().adjusted(8, 8, -8, -8), Qt.AlignCenter | Qt.TextWordWrap, text)
         painter.end()
         _PH_CACHE[key] = p
-        _cap_placeholder_cache()
     return _PH_CACHE[key]
 
 
@@ -266,6 +292,19 @@ class GalleryListModel(QAbstractListModel):
         self._pix_cache_max = 500
         self._requested: set[str] = set()
         self._path_to_rows: dict[str, list[int]] = {}
+        self._thumb_owner: str | None = None
+        self._thumb_generation = None
+
+    def set_request_context(self, owner: str | None, generation) -> None:
+        self._thumb_owner = str(owner or "") or None
+        self._thumb_generation = generation
+
+    def request_size(self) -> tuple[int, int]:
+        quality = max(1, min(3, int(getattr(self, "quality_scale", 2) or 2)))
+        return (
+            min(768, max(self.thumb_w, self.thumb_w * quality)),
+            min(768, max(self.thumb_h, self.thumb_h * quality)),
+        )
 
     def set_items(self, items: list[dict], thumb_w: int, thumb_h: int) -> None:
         self.beginResetModel()
@@ -321,17 +360,30 @@ class GalleryListModel(QAbstractListModel):
             return row
         if role == Qt.UserRole + 1:
             return item
-        file_missing = bool(path and not Path(path).exists())
+        presence = str(item.get("presence_status") or "unknown")
+        unavailable = presence in {"missing", "offline_root", "path_error"}
         if role == Qt.ToolTipRole:
-            return ("Файл отсутствует:\n" + path) if file_missing else path
+            if presence == "missing":
+                return "Файл отсутствует:\n" + path
+            if presence == "offline_root":
+                root = str(item.get("presence_root_path") or "")
+                return "Корень хранения недоступен:\n" + root + "\n\n" + path
+            if presence == "path_error":
+                detail = str(item.get("presence_error") or "")
+                return "Ошибка пути к файлу:\n" + path + (("\n\n" + detail) if detail else "")
+            return path
         if role == Qt.DisplayRole:
             # Keep labels extremely short; full path is in tooltip/opened post.
-            if file_missing:
+            if presence == "missing":
                 return "Файл отсутствует"
+            if presence == "offline_root":
+                return "Хранилище недоступно"
+            if presence == "path_error":
+                return "Ошибка пути"
             return "▶" if item.get("is_video") else ""
         if role == Qt.DecorationRole:
-            if file_missing:
-                return _missing_placeholder(self.thumb_w, self.thumb_h, Path(path).name)
+            if unavailable:
+                return _missing_placeholder(self.thumb_w, self.thumb_h, Path(path).name, presence)
             pix = self._cached_pix(path)
             if pix is not None and not pix.isNull():
                 return pix
@@ -340,10 +392,13 @@ class GalleryListModel(QAbstractListModel):
                 svc = ThumbnailService.instance()
                 # Generate a larger cached thumbnail and draw it down to the tile.
                 # This prevents the blurred look on high-DPI / wide displays.
-                quality = max(1, min(3, int(getattr(self, "quality_scale", 2) or 2)))
-                req_w = min(768, max(self.thumb_w, self.thumb_w * quality))
-                req_h = min(768, max(self.thumb_h, self.thumb_h * quality))
-                got = svc.request(path, req_w, req_h, self._on_thumb)
+                req_w, req_h = self.request_size()
+                got = svc.request(
+                    path, req_w, req_h, self._on_thumb,
+                    owner=self._thumb_owner,
+                    generation=self._thumb_generation,
+                    priority=PRIORITY_VISIBLE,
+                )
                 if got is not None and not got.isNull():
                     self._store_pix(path, got)
                     return self._cached_pix(path)
@@ -605,8 +660,17 @@ class GalleryPage(QWidget):
         self._global_tag_task = None
         self._global_tag_generation = 0
         self._prefetch_task = None
+        self._prefetch_task_generation = None
+        self._thumb_owner = f"gallery:{id(self):x}"
         self._facets_task = None
         self._facets_generation = 0
+        # Visible-page tag/source enrichment is single-flight. A running SQL
+        # task may finish after navigation, but generation guards prevent its
+        # stale result from touching the new page and no second enrich task is
+        # launched in parallel.
+        self._page_enrich_task = None
+        self._page_enrich_generation = 0
+        self._page_enrich_applied_key = None
         self._source_hosts: list[str] = []
         self._build_ui()
         self.retranslate()
@@ -624,6 +688,18 @@ class GalleryPage(QWidget):
         self.clear_btn = QPushButton("×")
         self.clear_btn.setFixedWidth(36)
         self.clear_btn.clicked.connect(lambda: self.search.clear())
+
+        # v471: the same Gallery can read Local Booru or a live Booru Corpus
+        # Builder database.  Corpus is never imported/copied and stays read-only.
+        self.library_source = QComboBox()
+        self.library_source.setMinimumWidth(145)
+        self.library_source.addItem("Local Booru", "local")
+        self.library_source.addItem("Booru Corpus", "corpus")
+        _backend = str(self.main.settings.get("gallery_data_source") or "local").lower()
+        _idx = self.library_source.findData(_backend)
+        self.library_source.setCurrentIndex(_idx if _idx >= 0 else 0)
+        self.corpus_connect_btn = QPushButton("Corpus…")
+        self.corpus_connect_btn.setToolTip("Подключить корневую папку Booru Corpus Builder")
 
         self.file_filter = QComboBox()
         for lbl, dat in [("Все","all"),("Новые","inbox"),("Архив","archive"),("Удалено","trash"),("Найденные","found"),("Не найд.","no_match"),("Скачанные","downloaded")]:
@@ -667,6 +743,8 @@ class GalleryPage(QWidget):
 
         row.addWidget(self.search, 4)
         row.addWidget(self.clear_btn)
+        row.addWidget(self.library_source)
+        row.addWidget(self.corpus_connect_btn)
         row.addWidget(self.file_filter)
         row.addWidget(self.sort_label)
         row.addWidget(self.gallery_sort)
@@ -798,6 +876,8 @@ class GalleryPage(QWidget):
         # libraries every typed character should not rebuild the SQL result.
 
         self.clear_btn.clicked.connect(lambda: (self.search.clear(), self.apply_filter()))
+        self.library_source.currentIndexChanged.connect(self._on_library_source_changed)
+        self.corpus_connect_btn.clicked.connect(self._choose_corpus)
         self.file_filter.currentIndexChanged.connect(self.apply_filter)
         self.source.currentTextChanged.connect(self.apply_filter)
         self.gallery_sort.currentIndexChanged.connect(self.apply_filter)
@@ -809,6 +889,89 @@ class GalleryPage(QWidget):
         self.page_tags.itemClicked.connect(self._tag_single)
         self.page_tags.itemDoubleClicked.connect(self._tag_add)
         self.sources_list.itemClicked.connect(self._source_from_list)
+        self._apply_library_source_ui(initial=True)
+
+    def _is_corpus_mode(self) -> bool:
+        return str(self.library_source.currentData() or "local").lower() == "corpus"
+
+    def _apply_library_source_ui(self, initial=False):
+        corpus = self._is_corpus_mode()
+        # Corpus has no Local-Booru lifecycle/star state. Keep the browsing
+        # surface explicit instead of pretending Inbox/Trash/Favorites exist.
+        if corpus:
+            self.file_filter.blockSignals(True)
+            idx = self.file_filter.findData("all")
+            self.file_filter.setCurrentIndex(max(0, idx))
+            self.file_filter.blockSignals(False)
+            self.file_filter.setEnabled(False)
+            self.fav.blockSignals(True); self.fav.setChecked(False); self.fav.blockSignals(False)
+            self.fav.setEnabled(False)
+            self.rating_op.blockSignals(True); self.rating_op.setCurrentIndex(0); self.rating_op.blockSignals(False)
+            self.rating_stars.blockSignals(True); self.rating_stars.setCurrentIndex(0); self.rating_stars.blockSignals(False)
+            self.rating_op.setEnabled(False); self.rating_stars.setEnabled(False)
+            self.corpus_connect_btn.setText("Corpus ✓" if str(self.main.settings.get("booru_corpus_path") or "").strip() else "Corpus…")
+        else:
+            self.file_filter.setEnabled(True)
+            self.fav.setEnabled(True)
+            self.rating_op.setEnabled(True)
+            self._on_rating_op_changed()
+            self.corpus_connect_btn.setText("Corpus…")
+        if not initial:
+            self._page = 1
+
+    def _on_library_source_changed(self):
+        backend = str(self.library_source.currentData() or "local").lower()
+        if backend == "corpus" and not str(self.main.settings.get("booru_corpus_path") or "").strip():
+            self._choose_corpus()
+            if str(self.main.settings.get("booru_corpus_path") or "").strip():
+                return  # _choose_corpus already switched, saved and refreshed
+            # User cancelled: fall back to the working local catalogue.
+            idx = self.library_source.findData("local")
+            self.library_source.blockSignals(True); self.library_source.setCurrentIndex(max(0, idx)); self.library_source.blockSignals(False)
+            backend = "local"
+        self.main.settings["gallery_data_source"] = backend
+        try:
+            from core.settings import save_settings
+            save_settings(self.main.settings)
+        except Exception:
+            pass
+        self._apply_library_source_ui()
+        self.retranslate()
+        self._global_tag_groups_cache = None
+        self._tag_list = []
+        self._source_hosts = []
+        self.refresh_force()
+
+    def _choose_corpus(self):
+        current = str(self.main.settings.get("booru_corpus_path") or "").strip()
+        start = current if current and Path(current).is_dir() else str(self.main.settings.get("root") or "")
+        chosen = QFileDialog.getExistingDirectory(self, "Выбери папку Booru Corpus Builder / corpus", start)
+        if not chosen:
+            return
+        try:
+            from core.external_corpus import validate_corpus
+            info = validate_corpus(chosen)
+        except Exception as exc:
+            QMessageBox.warning(self, "Booru Corpus", str(exc))
+            return
+        self.main.settings["booru_corpus_path"] = str(chosen)
+        self.main.settings["gallery_data_source"] = "corpus"
+        try:
+            from core.settings import save_settings
+            save_settings(self.main.settings)
+        except Exception:
+            pass
+        idx = self.library_source.findData("corpus")
+        self.library_source.blockSignals(True); self.library_source.setCurrentIndex(max(0, idx)); self.library_source.blockSignals(False)
+        self._apply_library_source_ui()
+        self.refresh_force()
+        QMessageBox.information(
+            self, "Booru Corpus подключён",
+            f"Картинок: {int(info.get('images', 0)):,}\n"
+            f"Постов-источников: {int(info.get('source_posts', 0)):,}\n"
+            f"SQLite (read-only):\n{info.get('db_path','')}\n\n"
+            "Local Booru не копирует и не изменяет canonical-файлы Corpus."
+        )
 
     def eventFilter(self, obj, event):
         try:
@@ -883,6 +1046,7 @@ class GalleryPage(QWidget):
     def retranslate(self):
         t = getattr(self.main, "t", lambda x: x)
         self.search_label.setText(t("Search") + ":")
+        self.library_source.setToolTip("Каталог галереи: локальная база или read-only Booru Corpus")
         self.source_label.setText(t("Source") + ":")
         self.sort_label.setText(t("Image sort") + ":")
         self.go_btn.setText(t("Go"))
@@ -906,8 +1070,12 @@ class GalleryPage(QWidget):
         except Exception:
             pass
         self.sources_title.setText(t("Sources"))
-        self.page_tags_title.setText("Теги на странице (всего)" if getattr(self.main, "settings", {}).get("language", "ru") == "ru" else "Page tags (total)")
-        self.page_tags_title.setToolTip("Показаны теги текущей страницы; число — количество во всей галерее.")
+        if self._is_corpus_mode():
+            self.page_tags_title.setText("Теги на странице" if getattr(self.main, "settings", {}).get("language", "ru") == "ru" else "Page tags")
+            self.page_tags_title.setToolTip("Corpus read-only: число — количество на текущей странице; глобальный поиск тегов работает по всей базе.")
+        else:
+            self.page_tags_title.setText("Теги на странице (всего)" if getattr(self.main, "settings", {}).get("language", "ru") == "ru" else "Page tags (total)")
+            self.page_tags_title.setToolTip("Показаны теги текущей страницы; число — количество во всей галерее.")
         self.prev_btn.setText("← " + t("Prev"))
         self.next_btn.setText(t("Next") + " →")
         self.sources_toggle.setText(t("Show all"))
@@ -966,11 +1134,12 @@ class GalleryPage(QWidget):
         # Explicit refresh must see downloader writes committed by worker
         # threads.  Drop only this UI thread's read-only pooled connection so
         # the next SELECT opens a fresh SQLite/WAL snapshot.
-        try:
-            from core.database.connection import close_thread_pooled_connections
-            close_thread_pooled_connections(self.main.settings, readonly=True)
-        except Exception:
-            pass
+        if not self._is_corpus_mode():
+            try:
+                from core.database.connection import close_thread_pooled_connections
+                close_thread_pooled_connections(self.main.settings, readonly=True)
+            except Exception:
+                pass
         # Render the SQL page immediately, then update expensive facets in a
         # worker.  At ~10k results these GROUP BY queries were visibly freezing
         # the UI before any cards appeared.
@@ -1086,6 +1255,15 @@ class GalleryPage(QWidget):
         except Exception as e:
             import logging
             logging.getLogger("local_booru").error("apply_filter error: %s", e, exc_info=True)
+            try:
+                self._sql_total = 0
+                self._batch = []
+                self.render_warning.setText(str(e))
+                self.render_warning.setVisible(True)
+                self.info.setText("Booru Corpus не подключён" if self._is_corpus_mode() else "Ошибка запроса галереи")
+                self.model.set_items([], self.model.thumb_w, self.model.thumb_h)
+            except Exception:
+                pass
 
     def _apply_filter_impl(self):
         raw_q = self.search.text().strip()
@@ -1118,7 +1296,7 @@ class GalleryPage(QWidget):
 
         _rating_op    = getattr(self, "rating_op", None)
         _rating_stars = getattr(self, "rating_stars", None)
-        if _rating_op and _rating_stars:
+        if _rating_op and _rating_stars and not self._is_corpus_mode():
             op = _rating_op.currentData() or ""
             stars = int(_rating_stars.currentData() or "0")
             if op and stars > 0:
@@ -1129,7 +1307,7 @@ class GalleryPage(QWidget):
         # Favorites-only must be part of the database result set, not a Python
         # filter applied after pagination. Otherwise the selected favorite is
         # visible only on its old physical page and every other page is blank.
-        if self.fav.isChecked():
+        if self.fav.isChecked() and not self._is_corpus_mode():
             _extra_where.append("COALESCE(i.favorite, 0) = 1")
 
         total = count_search_items(self.main.settings, q, src, ff,
@@ -1165,10 +1343,40 @@ class GalleryPage(QWidget):
         rows = int(self.main.settings.get("rows_per_page", 4))
         return max(1, cols * rows)
 
+    def _invalidate_page_enrichment(self):
+        self._page_enrich_generation += 1
+        self._page_enrich_applied_key = None
+        task = getattr(self, "_page_enrich_task", None)
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:
+                pass
+
+    def _cancel_thumbnail_generation(self) -> None:
+        """Drop old visible/warm/prefetch interests before changing pages."""
+        try:
+            ThumbnailService.instance().cancel_owner(self._thumb_owner)
+        except Exception:
+            pass
+        task = getattr(self, "_prefetch_task", None)
+        if task is not None:
+            try:
+                task.cancel()
+            except Exception:
+                pass
+        self._prefetch_task = None
+        self._prefetch_task_generation = None
+
+    def _begin_render_generation(self) -> int:
+        self._cancel_thumbnail_generation()
+        self._render_token += 1
+        return int(self._render_token)
+
     def _render_page(self):
         self._viewer_page_dirty = False
-        self._render_token += 1
-        token = self._render_token
+        self._invalidate_page_enrichment()
+        token = self._begin_render_generation()
 
         per = self._per_page()
         total = self._sql_total
@@ -1206,7 +1414,8 @@ class GalleryPage(QWidget):
         self._batch = batch
 
         t = getattr(self.main, "t", lambda x: x)
-        self.info.setText(f"{t('Images')}: {total}")
+        _catalog = "Booru Corpus" if self._is_corpus_mode() else "Local Booru"
+        self.info.setText(f"{t('Images')}: {total} · {_catalog}")
         self.page_label.setText(f"Page {self._page}/{maxp}")
         self.page_input.setMaximum(maxp)
         self.page_input.blockSignals(True)
@@ -1219,6 +1428,7 @@ class GalleryPage(QWidget):
 
     def adopt_viewer_page(self, page: int, batch: list[dict]):
         """Record page reached in PostPage without painting a hidden gallery."""
+        self._cancel_thumbnail_generation()
         self._page = max(1, int(page))
         self._batch = list(batch or [])
         self._viewer_page_dirty = True
@@ -1228,14 +1438,15 @@ class GalleryPage(QWidget):
         if not self._viewer_page_dirty:
             return
         self._viewer_page_dirty = False
-        self._render_token += 1
-        token = self._render_token
+        self._invalidate_page_enrichment()
+        token = self._begin_render_generation()
         per = self._per_page()
         total = self._sql_total
         maxp = max(1, (total + per - 1) // per)
         self._page = max(1, min(self._page, maxp))
         t = getattr(self.main, "t", lambda x: x)
-        self.info.setText(f"{t('Images')}: {total}")
+        _catalog = "Booru Corpus" if self._is_corpus_mode() else "Local Booru"
+        self.info.setText(f"{t('Images')}: {total} · {_catalog}")
         self.page_label.setText(f"Page {self._page}/{maxp}")
         self.page_input.setMaximum(maxp)
         self.page_input.blockSignals(True)
@@ -1247,6 +1458,7 @@ class GalleryPage(QWidget):
         QTimer.singleShot(0, lambda b=batch, tk=token: self._render_cards(b, tk))
 
     def _clear_grid(self):
+        self._cancel_thumbnail_generation()
         try:
             self.model.set_items([], 220, 200)
         except Exception:
@@ -1273,9 +1485,31 @@ class GalleryPage(QWidget):
         self.view.setIconSize(QSize(tile, tile))
         self.model.quality_scale = max(1, min(3, int(self.main.settings.get("thumb_quality_scale", 2) or 2)))
         self.model._pix_cache_max = max(50, min(2000, int(self.main.settings.get("thumb_memory_items", 400) or 400)))
+        self.model.set_request_context(self._thumb_owner, token)
         self.model.set_items(batch, tile, tile)
+        # data() requests visible indexes at high priority. The delayed warm pass
+        # fills any current-page indexes QListView did not ask for yet.
+        QTimer.singleShot(25, lambda b=list(batch), tk=token: self._warm_current_page_thumbnails(b, tk))
         QTimer.singleShot(30, self._render_page_tags)
         QTimer.singleShot(150, self._prefetch_neighbor_pages)
+
+    def _warm_current_page_thumbnails(self, batch: list[dict], token: int) -> None:
+        if int(token) != int(self._render_token):
+            return
+        svc = ThumbnailService.instance()
+        req_w, req_h = self.model.request_size()
+        for item in batch or []:
+            if int(token) != int(self._render_token):
+                return
+            presence = str((item or {}).get("presence_status") or "unknown")
+            path = str((item or {}).get("path") or "")
+            if not path or presence in {"missing", "offline_root", "path_error"}:
+                continue
+            svc.request(
+                path, req_w, req_h,
+                owner=self._thumb_owner, generation=token,
+                priority=PRIORITY_CURRENT_PAGE,
+            )
 
     def _render_card_batch(self, batch, h, cols, w, token, start, chunk):
         # Compatibility for old calls; QListView/GalleryListModel handles virtual rows now.
@@ -1292,7 +1526,7 @@ class GalleryPage(QWidget):
             # While parser writes, they can grow SQLite temp memory into many GB.
             return
         import time as _time
-        cache_key = (display_source, "live")
+        cache_key = ("corpus" if self._is_corpus_mode() else "local", display_source, "live")
         cached = _TAG_GROUP_COUNT_CACHE.get(cache_key)
         # During active parsing, keep the UI responsive: reuse recent sidebar
         # counts instead of launching another heavy aggregation every few seconds.
@@ -1320,41 +1554,63 @@ class GalleryPage(QWidget):
         )
 
     def _prefetch_neighbor_pages(self):
-        """Warm thumbnail cache for the pages beside the visible one.
-
-        It is intentionally low-impact: database fetch and thumbnail scheduling
-        happen after the visible page was painted, and no metadata is modified.
-        """
+        """Warm adjacent pages at the lowest thumbnail priority."""
         if self._prefetch_task is not None or not bool(self.main.settings.get("thumb_prefetch_pages", True)):
             return
         if _gallery_heavy_tasks_blocked(self.main):
             return
+        generation = int(self._render_token)
         per = self._per_page()
         if per <= 0:
             return
         pages = []
         maxp = max(1, (self._sql_total + per - 1) // per)
-        if self._page > 1: pages.append(self._page - 1)
-        if self._page < maxp: pages.append(self._page + 1)
+        if self._page > 1:
+            pages.append(self._page - 1)
+        if self._page < maxp:
+            pages.append(self._page + 1)
         if not pages:
             return
         settings = dict(self.main.settings or {})
-        filt = dict(self._last_filter); extra_where = list(self._last_extra_where); extra_params = list(self._last_extra_params)
+        filt = dict(self._last_filter)
+        extra_where = list(self._last_extra_where)
+        extra_params = list(self._last_extra_params)
+
         def load_neighbor_paths():
             paths = []
             for page in pages:
-                rows = search_items(settings, query=filt.get("q", ""), source=filt.get("src", "all"), bucket=filt.get("bucket", "all"), limit=per, offset=(page - 1) * per, order=filt.get("order", "path"), extra_where=extra_where, extra_params=extra_params)
+                rows = search_items(
+                    settings, query=filt.get("q", ""), source=filt.get("src", "all"),
+                    bucket=filt.get("bucket", "all"), limit=per, offset=(page - 1) * per,
+                    order=filt.get("order", "path"), extra_where=extra_where, extra_params=extra_params,
+                )
                 paths.extend(str(x.get("path", "")) for x in rows if x.get("path"))
             return paths
+
         def warm(paths):
+            if generation != int(self._render_token):
+                return
             svc = ThumbnailService.instance()
-            tile = max(48, min(int(self.main.settings.get("card_height", 220) or 220), 512))
-            quality = max(1, min(3, int(self.main.settings.get("thumb_quality_scale", 2) or 2)))
+            req_w, req_h = self.model.request_size()
             for path in paths or []:
-                svc.request(path, min(768, tile * quality), min(768, tile * quality))
+                if generation != int(self._render_token):
+                    return
+                svc.request(
+                    path, req_w, req_h,
+                    owner=self._thumb_owner, generation=generation,
+                    priority=PRIORITY_PREFETCH,
+                )
+
         def finished():
-            self._prefetch_task = None
-        self._prefetch_task = self.main.task_manager.submit(load_neighbor_paths, name="gallery-thumb-prefetch", on_result=warm, on_finished=finished)
+            if self._prefetch_task_generation == generation:
+                self._prefetch_task = None
+                self._prefetch_task_generation = None
+
+        self._prefetch_task_generation = generation
+        self._prefetch_task = self.main.task_manager.submit(
+            load_neighbor_paths, name="gallery-thumb-prefetch",
+            on_result=warm, on_finished=finished,
+        )
 
     def _render_page_tags(self):
         batch = list(self._batch)
@@ -1362,16 +1618,116 @@ class GalleryPage(QWidget):
             self.page_tags.clear()
             return
         display_source = str(self.source.currentText() or "all").lower().replace("www.", "")
-        try:
-            enrich_items(self.main.settings, batch, tag_source=display_source)
-        except Exception:
-            pass
+        enrich_key = (int(self._render_token), display_source)
+
+        # QTimer.singleShot only delays a callback; it does not move work off
+        # the GUI thread.  Run enrich_items through the same task-manager and
+        # generation-guard pattern already used by gallery facets. Keep it
+        # single-flight so rapid navigation cannot start multiple expensive
+        # enrich queries at once.
+        if self._page_enrich_applied_key != enrich_key:
+            if self._page_enrich_task is not None:
+                return
+            generation = int(self._page_enrich_generation)
+            settings = dict(self.main.settings or {})
+            work_batch = [dict(item) for item in batch]
+
+            def _still_current():
+                current_source = str(self.source.currentText() or "all").lower().replace("www.", "")
+                return (
+                    generation == self._page_enrich_generation
+                    and int(self._render_token) == enrich_key[0]
+                    and current_source == enrich_key[1]
+                )
+
+            def done(result):
+                if not _still_current() or result is None:
+                    return
+                by_id = {int(item["id"]): item for item in result if item.get("id") is not None}
+                by_path = {str(item.get("path") or ""): item for item in result if item.get("path")}
+                fields = (
+                    "tags", "tag_groups", "tag_groups_by_source",
+                    "tag_groups_raw_by_source", "sources", "source_hosts",
+                )
+                for item in self._batch:
+                    enriched = None
+                    if item.get("id") is not None:
+                        enriched = by_id.get(int(item["id"]))
+                    if enriched is None and item.get("path"):
+                        enriched = by_path.get(str(item.get("path") or ""))
+                    if enriched is None:
+                        continue
+                    for field in fields:
+                        if field in enriched:
+                            item[field] = enriched[field]
+                self._page_enrich_applied_key = enrich_key
+
+            def failed(error):
+                if _still_current():
+                    # Match the former fail-open behavior: cards remain usable
+                    # even if enrichment failed, but do not retry forever on
+                    # every sidebar repaint.
+                    self._page_enrich_applied_key = enrich_key
+                print("GALLERY ENRICH ERROR:", error)
+
+            def finished():
+                self._page_enrich_task = None
+                QTimer.singleShot(0, self._render_page_tags)
+
+            self.page_tags.clear()
+            self.page_tags.addItem("Загрузка тегов текущей страницы…")
+            self._page_enrich_task = self.main.task_manager.submit(
+                _gallery_enrich_worker,
+                settings,
+                work_batch,
+                display_source,
+                name="gallery-page-enrich",
+                on_result=done,
+                on_error=failed,
+                on_finished=finished,
+            )
+            return
+
+        # Corpus Builder intentionally optimises source_post_tags for ingest
+        # (source_post_id-first), not global tag-id aggregation.  A global
+        # ROW_NUMBER/GROUP BY over millions of metadata links would fight the
+        # live Builder for SSD/CPU.  Corpus mode therefore shows exact counts
+        # for the current page; tag search and source filtering remain global.
+        if self._is_corpus_mode():
+            self.page_tags.clear()
+            local_groups = {}
+            for item in batch:
+                groups = item.get("tag_groups") or {"general": item.get("tags", [])}
+                for group, values in groups.items():
+                    bucket = local_groups.setdefault(group, Counter())
+                    for tag in values or []:
+                        nt = normalize_tag(tag)
+                        if nt:
+                            bucket[nt] += 1
+            mode = self.tag_sort.currentData() or "count_desc"
+            group_order = list(self.main.settings.get("tag_group_order") or GROUP_ORDER)
+            for _group in GROUP_ORDER:
+                if _group not in group_order:
+                    group_order.append(_group)
+            for group in group_order:
+                values = local_groups.get(group) or {}
+                if not values:
+                    continue
+                self._add_header(group)
+                for tag, count in sort_tag_items(values.items(), mode)[:500]:
+                    it = QListWidgetItem(f"    {tag}    {count}")
+                    it.setData(Qt.UserRole, tag)
+                    it.setToolTip(f"{group}: {tag} (текущая страница Corpus)")
+                    it.setForeground(QBrush(QColor(tag_display_color(tag, group, self.main.settings, GROUP_COLORS))))
+                    self.page_tags.addItem(it)
+            return
+
         # Load counts for the currently displayed tag provenance: in "all"
         # mode the sidebar is the deduplicated union; with a selected site it
         # shows only that source's tag set.
         cached = getattr(self, "_global_tag_groups_cache", None)
         global_groups = cached[1] if isinstance(cached, tuple) and cached[0] == display_source else None
-        if global_groups is None and _parser_running(self.main) and bool(self.main.settings.get("gallery_defer_sidebar_counts_while_parser", True)):
+        if global_groups is None and (not self._is_corpus_mode()) and _parser_running(self.main) and bool(self.main.settings.get("gallery_defer_sidebar_counts_while_parser", True)):
             # Do not fight the parser for SQLite.  Show page-local tags without
             # global counts and delay the expensive full-sidebar aggregation.
             self.page_tags.clear()
@@ -1546,7 +1902,11 @@ class GalleryPage(QWidget):
         copy_source_action = menu.addAction("Копировать источники")
         copy_tags_action = menu.addAction("Копировать теги")
         menu.addSeparator()
+        menu.addSeparator()
         delete_action = menu.addAction("Удалить (в корзину)")
+        if bool(item.get("_external_corpus")):
+            delete_action.setText("Corpus read-only: удаление недоступно")
+            delete_action.setEnabled(False)
         chosen = menu.exec(self.view.viewport().mapToGlobal(point))
         if chosen is None:
             return

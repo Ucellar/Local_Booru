@@ -96,6 +96,8 @@ def _open_analysis_image(path: Path, size: int = 224):
     except Exception:
         pass
     im = ImageOps.exif_transpose(im)
+    if im.mode in ("LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+        im = im.convert("RGBA")              # transparency goes on white, as the models were taught
     if im.mode not in ("RGB", "RGBA"):
         im = im.convert("RGB")
     if im.mode == "RGBA":
@@ -314,9 +316,13 @@ def _path_fingerprint(p: Path) -> str:
 
 
 def current_visual_model_name(settings: dict | None = None) -> str:
+    """What a Брак entry checked now records as its ``visual_model`` (another name: it is checked again)."""
+    from core import visual_models
     settings = settings or {}
-    backend = str(settings.get("visual_nomatch_backend", "clip_local") or "clip_local").strip().lower()
-    if backend in ("heuristic", "local_heuristic", "v1"):
+    choice = visual_models.chosen(settings)
+    if choice in visual_models.MODEL_CHOICES:
+        return visual_models.model_name(choice)
+    if choice == "heuristic":
         return HEURISTIC_MODEL_NAME
     model_dir = _settings_model_dir(settings)
     return f"{AI_MODEL_PREFIX}:{_path_fingerprint(model_dir)}"
@@ -373,6 +379,10 @@ def _format_bytes(n: int | float | None) -> str:
     return f"{v:.1f} GB"
 
 
+DOWNLOAD_TIMEOUT = 20          # seconds a stalled connection is waited for (the exit waits ~15 s for the duties)
+DOWNLOAD_STEP = 256 * 1024     # bytes between two looks at «stop»
+
+
 def _download_one_file(url: str, dest: Path, *, progress=None, stop_check=None, label: str = "") -> None:
     """Download one model file with a visible temporary .download file.
 
@@ -397,7 +407,21 @@ def _download_one_file(url: str, dest: Path, *, progress=None, stop_check=None, 
     downloaded = existing
     mode = "ab" if existing > 0 else "wb"
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
+        try:
+            response = urllib.request.urlopen(req, timeout=DOWNLOAD_TIMEOUT)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and existing > 0:
+                # «nothing after this byte»: the part may be the whole file (its rename failed last time — an
+                # antivirus held it) or longer than the file; the server says the file's length
+                whole = str(exc.headers.get("Content-Range") or "").rsplit("/", 1)[-1].strip()
+                if whole.isdigit() and int(whole) == existing:
+                    tmp.replace(dest)
+                    return
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"начатая загрузка {dest.name} не подходит к файлу на сервере — "
+                                   "следующая попытка начнёт заново") from exc
+            raise
+        with response:
             status = getattr(response, "status", None) or response.getcode()
             # If the server ignored Range and returned 200, restart cleanly.
             if existing > 0 and int(status or 0) == 200:
@@ -414,13 +438,17 @@ def _download_one_file(url: str, dest: Path, *, progress=None, stop_check=None, 
                 while True:
                     if stop_check and stop_check():
                         raise RuntimeError("download cancelled")
-                    chunk = response.read(1024 * 1024)
+                    chunk = response.read(DOWNLOAD_STEP)
                     if not chunk:
                         break
                     fh.write(chunk)
                     downloaded += len(chunk)
                     if progress:
                         progress(_download_progress_text(label or dest.name, downloaded, total, tmp))
+            # http.client ends a body cut off by the server like a whole one: the length it promised decides
+            if remaining and downloaded - existing < remaining:
+                raise RuntimeError(f"загрузка {dest.name} оборвалась: {_format_bytes(downloaded)} из "
+                                   f"{_format_bytes(existing + remaining)} — следующая попытка продолжит")
         if downloaded <= 0:
             raise RuntimeError(f"empty download: {url}")
         min_size = CLIP_LARGE_FILES.get(dest.name, 1)
@@ -703,14 +731,32 @@ def local_clip_model_state(settings: dict | None = None) -> dict[str, Any]:
 def classify_visual_status(path: str | Path, settings: dict | None = None) -> dict[str, Any]:
     """Return durable NO_MATCH sorting status.
 
-    Backends:
-    - clip_local: local CLIP model from disk, no network; uncertain => unknown.
-    - heuristic: legacy deterministic v1; explicit fallback only.
+    The model is the one chosen on «Настройки → Брак: фото или рисунок» (``visual_models.chosen``):
+    - a deepghs classifier in onnxruntime (``core/visual_models.py``) — the default when onnxruntime is installed;
+    - clip_local: local CLIP model from disk, no network; uncertain => unknown;
+    - heuristic: legacy deterministic v1; explicit choice only.
+    A result with "error" is not stored (the entry is checked again when the model can answer).
     """
+    from core import visual_models
     settings = settings or {}
-    backend = str(settings.get("visual_nomatch_backend", "clip_local") or "clip_local").strip().lower()
-    if backend in ("heuristic", "local_heuristic", "v1"):
+    choice = visual_models.chosen(settings)
+    if choice in visual_models.MODEL_CHOICES:
+        try:
+            return visual_models.classify(settings, choice, path)
+        except visual_models.Unreadable as exc:  # the file, not the model: its entry is marked, not asked again
+            return {"visual_status": UNKNOWN, "visual_confidence": 0.0,
+                    "visual_model": visual_models.model_name(choice) + ":error", "unreadable": True,
+                    "visual_checked_at": int(time.time()), "error": f"файл не открывается как картинка: {exc}"}
+        except Exception as exc:  # no weights yet, a broken model: «не уверен», not stored
+            return {"visual_status": UNKNOWN, "visual_confidence": 0.0,
+                    "visual_model": visual_models.model_name(choice) + ":error",
+                    "visual_checked_at": int(time.time()), "error": f"{type(exc).__name__}: {exc}"}
+    if choice == "heuristic":
         return _heuristic_classify(path, settings)
+    if choice != "clip":
+        return {"visual_status": UNKNOWN, "visual_confidence": 0.0, "visual_model": "none:error",
+                "visual_checked_at": int(time.time()),
+                "error": "нет модели: установите onnxruntime (Настройки → Брак: фото или рисунок)"}
     try:
         return _clip_zero_shot_classify(path, settings)
     except Exception as exc:

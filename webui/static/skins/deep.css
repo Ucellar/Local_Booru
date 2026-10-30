@@ -1,0 +1,167 @@
+/* «Глубина»: deep blue with amber links; every picture is a card with its size, type, rating and
+   favourite under it; the search sits in the header, tags in a rounded panel on the left. */
+:root {
+  --bg: #0b1d38;
+  --panel: #12305a;
+  --panel-2: #1a3d6e;
+  --border: #24497e;
+  --text: #dbe5f2;
+  --muted: #8fa7c7;
+  --link: #f2b233;
+  --link-hover: #ffd47e;
+  --accent: #f2b233;
+  --accent-ink: #1a1405;
+  --bar-bg: #071428;
+  --bar-ink: #dbe5f2;
+  --bar-active-bg: transparent;
+  --bar-active-ink: #ffffff;
+  --thumb-bg: #0e2545;
+  --thumb-ring: #f2b233;
+  --danger: #ff8a7a;
+  --focus: #ffd47e;
+  --shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
+
+  --tag-artist: #f2a33a;
+  --tag-character: #4fd16b;
+  --tag-copyright: #e383e3;
+  --tag-general: #b4c7d9;
+  --tag-meta: #f4f4f4;
+  --tag-species: #ff7a45;
+  --tag-lore: #5fbf8f;
+  --tag-contributor: #b9b9ff;
+  --tag-invalid: #ff6b6b;
+
+  --font: "Segoe UI", Tahoma, Verdana, "DejaVu Sans", sans-serif;
+  --font-size: 14px;
+  --font-head: "Segoe UI Semibold", "Segoe UI", Tahoma, sans-serif;
+  --radius: 5px;
+  --radius-thumb: 4px;
+  --side: 250px;
+  --thumb: 176px;
+  color-scheme: dark;
+}
+:root[data-thumb="s"] { --thumb: 136px; }
+:root[data-thumb="l"] { --thumb: 232px; }
+
+/* header: brand, menu underlined in amber, a round search field in the middle */
+.top { align-items: stretch; min-height: 54px; padding: 0 18px; gap: 4px 18px; border-bottom: 1px solid #16335e; }
+.brand { font-size: 19px; font-weight: 700; letter-spacing: -0.2px; }
+.brand-mark {
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: linear-gradient(140deg, #ffd06a 0%, #f2b233 45%, #d9761e 100%);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.18);
+}
+.main-nav { align-items: stretch; gap: 6px; }
+.main-nav a {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border-radius: 0;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 3px solid transparent;
+  border-top: 3px solid transparent;
+}
+.main-nav a.active { background: none; color: var(--text); border-bottom-color: var(--accent); }
+.main-nav a:hover, .main-nav a.active:hover { background: none; color: var(--text); text-decoration: none; }
+.top-search { display: block; align-self: center; flex: 1 1 200px; max-width: 520px; }   /* wraps only below 200 px */
+.top-search .search-go { display: none; }
+.top .top-search input {
+  width: 100%;
+  padding: 8px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: #0f2749;
+  color: var(--text);
+}
+.top .top-search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(242, 178, 51, 0.18); }
+.top-tools { margin-left: auto; }
+.skin-button { border-color: var(--border); border-radius: 16px; padding: 5px 12px; }
+.sidebar .search { display: none; }
+
+.sections { background: #0e2647; padding: 8px 18px; gap: 4px 18px; border-bottom: 1px solid var(--border); }
+.sections a { color: var(--muted); }
+.sections a.active { color: var(--accent); font-weight: 600; }
+
+.layout { padding: 16px 18px 40px; }
+.layout.with-sidebar { gap: 20px; }
+.sidebar {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 14px 4px;
+}
+.sidebar h3 {
+  font-size: 14px;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+}
+.sidebar h4 { color: var(--muted); font-weight: 600; }
+.tag-list li { padding: 2px 0; }
+.box { margin-bottom: 18px; }
+
+/* cards */
+.result-bar { font-size: 12px; margin-bottom: 12px; }
+.thumbs { --cell: calc(var(--thumb) + 16px); gap: 12px; }
+.thumb {
+  height: auto;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 7px 7px 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.thumb:hover { border-color: var(--accent); transform: translateY(-2px); }
+.thumb-link { height: var(--thumb); display: flex; align-items: center; justify-content: center; }
+.thumb img { max-width: 100%; border: 0; border-radius: var(--radius-thumb); background: transparent; }
+.thumb-link:hover img { border-color: transparent; }
+.thumb.untagged { border-color: #9a6a2c; border-style: dashed; }
+.thumb.untagged img { border: 0; }
+.thumb-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.ti-kind { margin-left: auto; }
+.ti-rating { color: var(--accent); }
+.ti-fav { color: #ff7096; }
+.badges { top: 6px; left: 6px; }
+.badge { background: rgba(7, 20, 40, 0.82); color: var(--accent); }
+.badge.fav { color: #ff7096; }
+
+.paginator a { background: var(--panel); border-color: var(--border); border-radius: 6px; }
+.paginator b { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); border-radius: 6px; }
+
+button, .button { background: var(--panel-2); border-color: var(--border); color: var(--text); border-radius: 6px; }
+button:hover, .button:hover { border-color: var(--accent); color: var(--text); }
+input[type="search"], select { background: #0f2749; border-color: var(--border); color: var(--text); border-radius: 6px; }
+
+/* post page */
+.post-nav { gap: 8px; }
+.post-nav a { padding: 4px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; color: var(--text); }
+.post-nav a:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.post-stage { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+.post-media { background: transparent; border-radius: 4px; }
+.star { color: #2d5891; }
+.star.on { color: var(--accent); }
+.tag-table td { border-bottom-color: var(--border); }
+.skin-list { background: #0f2749; }
+
+@media (max-width: 760px) {
+  :root[data-thumb] { --thumb: 118px; }
+  .thumbs { --cell: calc(var(--thumb) + 16px); gap: 8px; }
+  .top-search { order: 10; flex: 1 1 100%; max-width: none; margin: 0 0 10px; }
+  .sidebar { padding: 0; border: 0; background: none; }
+  .layout.with-sidebar .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+}

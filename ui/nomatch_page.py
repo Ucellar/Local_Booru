@@ -1,8 +1,5 @@
 from pathlib import Path
-import json
 import os
-import shutil
-import time
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QSplitter, QMessageBox, QPlainTextEdit, QComboBox
@@ -10,13 +7,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap, QMovie, QImageReader
 from PySide6.QtCore import Qt, QSize
 
-from core.nomatch_db import (
-    list_nomatches, remove_nomatch, set_manual_url, upsert_nomatch,
-    update_nomatch_media_path, set_visual_status,
-)
-from core.tagger import Tagger, unique_keep_order, filter_numeric_tags, merge_tag_groups, groups_to_tags, promote_manual_match, result_output_base, copy_result_files
+from core.nomatch_db import list_nomatches, remove_nomatch, set_visual_status
+from core.tagger import result_output_base
 from core.image_safe import safe_thumbnail_path
-from core.paths import suggested_settings_storage_dir
 from ui.memory_tools import bounded_append, set_bounded_log
 
 
@@ -134,12 +127,39 @@ class NoMatchPage(QWidget):
         self._update_ai_status_banner()
 
     def _update_ai_status_banner(self):
+        """Why «фото или рисунок» is not answered now (``visual_work.problem`` — the model chosen on «Настройки» of
+        the new window), with «Скачать модель» when only its weights are missing."""
         settings = self.main.settings or {}
-        enabled = bool(settings.get("visual_nomatch_classify_enabled", True))
-        backend = str(settings.get("visual_nomatch_backend", "clip_local") or "clip_local").strip().lower()
-        if not enabled or backend not in ("clip_local", "clip", "ai"):
+        if not bool(settings.get("visual_nomatch_classify_enabled", True)):
             self.ai_status.hide(); self.ai_download_btn.hide(); self.ai_status_help_btn.hide()
             return
+        try:
+            from core import visual_models
+            from core.visual_work import problem
+            why = problem(settings)
+            choice = visual_models.chosen(settings)
+            can_fetch = (choice in visual_models.MODEL_CHOICES and visual_models.runtime()["ok"]
+                         and bool(visual_models.missing(settings, choice)))
+        except Exception as exc:  # the page works without the banner
+            why, choice, can_fetch = f"{type(exc).__name__}: {exc}", "", False
+        if choice == "clip":
+            self._update_clip_banner(settings)
+            return
+        if not why:
+            self.ai_status.hide(); self.ai_download_btn.hide(); self.ai_status_help_btn.hide()
+            return
+        self.ai_status.setText(
+            f"«Фото или рисунок» сейчас не определяется: {why}. Модель работает на этом компьютере, картинки никуда "
+            "не отправляются. Выбор модели и установка onnxruntime — в новом окне: «Настройки → Брак: фото или рисунок» "
+            "(или install_visual_ai.bat).")
+        self.ai_status.show(); self.ai_status_help_btn.show()
+        fetching = bool(getattr(self, "_model_fetch", None))
+        self.ai_download_btn.setVisible(can_fetch or fetching)
+        self.ai_download_btn.setEnabled(can_fetch and not fetching)
+        self.ai_download_btn.setText("Скачивается…" if fetching else "Скачать модель")
+
+    def _update_clip_banner(self, settings):
+        """The old CLIP check, chosen on purpose: its own files and torch."""
         try:
             from core.visual_status import local_clip_model_state
             state = local_clip_model_state(settings)
@@ -148,7 +168,6 @@ class NoMatchPage(QWidget):
         if state.get("available") and state.get("deps_ok", True):
             self.ai_status.hide(); self.ai_download_btn.hide(); self.ai_status_help_btn.hide()
             return
-
         parts = []
         if state.get("download_active"):
             parts.append("скачивается " + str(state.get("download_text") or "AI-модель"))
@@ -158,37 +177,58 @@ class NoMatchPage(QWidget):
             deps = ", ".join(state.get("missing_deps") or ["torch/transformers"])
             parts.append("AI runtime не установлен: " + deps)
         reason = "; ".join(parts) or "локальный AI недоступен"
-        extra = ""
-        if not state.get("deps_ok", True):
-            extra = " Для запуска из исходников установи requirements_visual_ai.txt; для нормальной передачи другу нужен EXE, собранный с AI runtime."
         self.ai_status.setText(
-            "NO_MATCH AI-классификация пока отключена: " + reason + ". "
-            "Файлы архива никуда не отправляются; без готовой модели/рантайма спорные элементы остаются [вид ?]." + extra
+            "Выбран CLIP, но он не работает: " + reason + ". Быстрее и без torch — модели deepghs: "
+            "«Настройки → Брак: фото или рисунок» в новом окне."
         )
         self.ai_status.show(); self.ai_status_help_btn.show()
         self.ai_download_btn.setVisible(not bool(state.get("available")))
         self.ai_download_btn.setEnabled(not bool(state.get("download_active")))
-        self.ai_download_btn.setText("Скачивается…" if state.get("download_active") else "Скачать AI-модель")
+        self.ai_download_btn.setText("Скачивается…" if state.get("download_active") else "Скачать CLIP")
 
     def on_ai_model_download_progress(self, msg):
         try:
             self.ai_status.setText(str(msg))
             self.ai_status.show(); self.ai_status_help_btn.show()
             self.ai_download_btn.show(); self.ai_download_btn.setEnabled(False); self.ai_download_btn.setText("Скачивается…")
-        except Exception:
+        except RuntimeError:  # the page is gone (the window closed meanwhile)
             pass
 
     def start_ai_model_download(self):
+        settings = self.main.settings or {}
         try:
+            from core import visual_models
+            choice = visual_models.chosen(settings)
             self.ai_download_btn.setEnabled(False)
-            self.ai_status.setText("Скачиваю локальную AI-модель CLIP (~600 МБ). Это только загрузка весов; файлы архива никуда не отправляются.")
-            handle = getattr(self.main, "ensure_local_clip_model_download", lambda force=False: None)(force=True)
-            if handle is None:
-                self.ai_download_btn.setEnabled(True)
+            if choice == "clip":
+                self.ai_status.setText("Скачиваю CLIP (~600 МБ). Это только загрузка весов; файлы архива никуда не отправляются.")
+                handle = getattr(self.main, "ensure_local_clip_model_download", lambda force=False: None)(force=True)
+                if handle is None:
+                    self.ai_download_btn.setEnabled(True)
+                    self.update_ai_status()
+                return
+            if choice not in visual_models.MODEL_CHOICES:
                 self.update_ai_status()
-        except Exception as exc:
+                return
+            self.ai_status.setText("Скачиваю модель «фото или рисунок»: только её веса, картинки никуда не отправляются.")
+
+            def finished(_result=None):
+                self._model_fetch = None
+                visual_models.forget_sessions()
+                self.update_ai_status()
+                self.refresh()
+
+            def failed(error):
+                self._model_fetch = None
+                self.update_ai_status()
+                QMessageBox.warning(self, "Модель", f"Не скачалась:\n{error}")
+            self._model_fetch = self.main.task_manager.submit(
+                visual_models.download, dict(settings), choice, name="visual-model-download",
+                on_progress=self.on_ai_model_download_progress, on_result=finished, on_error=failed)
+        except Exception as exc:  # said to the person; the button comes back
+            self._model_fetch = None
             self.ai_download_btn.setEnabled(True)
-            QMessageBox.warning(self, "AI-модель", f"Не удалось начать скачивание:\n{exc}")
+            QMessageBox.warning(self, "Модель", f"Не удалось начать скачивание:\n{exc}")
 
     def show_ai_status_help(self):
         settings = self.main.settings or {}
@@ -291,17 +331,15 @@ class NoMatchPage(QWidget):
         if not bool((settings or {}).get("visual_nomatch_classify_enabled", True)):
             return items
         try:
-            from core.visual_status import classify_nomatch_if_enabled, current_visual_model_name, local_clip_model_state
+            from core.visual_status import classify_nomatch_if_enabled, current_visual_model_name
         except Exception:
             return items
         try:
-            backend = str((settings or {}).get("visual_nomatch_backend", "clip_local") or "clip_local").strip().lower()
-            if backend in ("clip_local", "clip", "ai"):
-                state = local_clip_model_state(settings)
-                # If runtime/model is not ready, do not poison the DB with
-                # unknown 0% rows.  Show the banner and retry after it is fixed.
-                if not (state.get("available") and state.get("deps_ok", True)):
-                    return items
+            # The model chosen on «Настройки → Брак: фото или рисунок» (core/visual_models.py); while it cannot
+            # answer, nothing is written (no «unknown 0%» rows that look checked).
+            from core.visual_work import problem
+            if problem(settings):
+                return items
         except Exception:
             return items
         filled = []
@@ -316,7 +354,10 @@ class NoMatchPage(QWidget):
             # v293/v294 cache entries: CLIP exceptions were saved as
             # "unknown 0%" with the normal model name, so they looked valid
             # forever after torch/model was later installed.
-            valid_statuses = ("real", "booru", "unknown")
+            valid_statuses = ("real", "booru", "unknown", "unreadable")
+            if model == "manual":
+                filled.append(item)            # the person's mark: shown as it is, never asked of a model
+                continue
             conf = float(item.get("visual_confidence") or 0.0)
             model_is_error = model.endswith(":error") or ":error" in model
             stale_unknown_zero = (status == "unknown" and conf <= 0.001 and model.startswith("local_clip_photo_illustration"))
@@ -394,7 +435,7 @@ class NoMatchPage(QWidget):
         all_count = len(items or [])
         real_count = sum(1 for x in items if str(x.get("visual_status") or "").lower() == "real")
         booru_count = sum(1 for x in items if str(x.get("visual_status") or "").lower() == "booru")
-        unknown_count = sum(1 for x in items if str(x.get("visual_status") or "").lower() in ("", "unknown"))
+        unknown_count = sum(1 for x in items if str(x.get("visual_status") or "").lower() in ("", "unknown", "unreadable"))
         try:
             self.summary.setText(f"Показано: {all_count}   real: {real_count}   booru: {booru_count}   ?: {unknown_count}")
         except Exception:
@@ -621,80 +662,36 @@ class NoMatchPage(QWidget):
         )
 
     def apply_manual_url(self):
+        """Tags of the post at the address (core/nomatch_manual — the same as on the page of a Брак card)."""
         if not self.current_path:
             return
         url = self.url.text().strip()
         if not url:
             return
+        from core import nomatch_manual
         try:
-            self.main.settings["skip_existing"] = False
-            tagger = Tagger(self.main.settings, self.append_log)
-            self.append_log(f"URL SEARCH: {url}")
-            tags = tagger.tags_from_url(url)
-            groups = tagger.grouped_tags_from_url(url)
-            if not tags and groups:
-                tags = groups_to_tags(groups)
-            tags = unique_keep_order(filter_numeric_tags(tags, self.main.settings.get("ignore_numeric_tags")))
-            if not tags:
-                self.append_log("ТЕГИ НЕ НАЙДЕНЫ: ссылка не дала поддерживаемые теги. Проверь сайт, ссылку на пост, вход и cookies.")
-                return
-            p = self.current_path
-            if not groups_to_tags(groups):
-                groups = {"artist": [], "character": [], "copyright": [], "general": tags, "meta": []}
-            set_manual_url(p, url, settings=self.main.settings)
-            promote_manual_match(self.main.settings, p, tags, url, groups)
-            self.append_log(f"MANUAL TAGS → FOUND: {len(tags)}")
-            self.refresh()
+            request = nomatch_manual.check_file(self.main.settings, self.current_path, url)
+            result = nomatch_manual.apply(self.main.settings, request, progress=self.append_log)
+        except nomatch_manual.ManualUrlError as exc:
+            self.append_log(f"ТЕГИ ПО ССЫЛКЕ: {exc}")
+            return
         except Exception as e:
             self.append_log(f"URL SEARCH ERROR: {type(e).__name__}: {e}")
             try:
                 from core.tagger import append_error_log
-                append_error_log(f"NO_MATCH URL SEARCH {self.url.text().strip()}: {type(e).__name__}: {e}")
+                append_error_log(f"NO_MATCH URL SEARCH {url}: {type(e).__name__}: {e}")
             except Exception:
                 pass
+            return
+        if result.get("ok"):
+            self.append_log(f"MANUAL TAGS → FOUND: {int(result.get('tags') or 0)} (карточка №{int(result.get('image_id') or 0)})")
+        self.refresh()
 
     def _restore_missing_nomatch_copies(self, only_items=None):
-        """Rebuild missing/old NO_MATCH output copies in the active archive on demand.
-
-        ``only_items`` is important for the NO_MATCH visual filters: if the user
-        has selected ``real`` or ``booru``, repeat search must not silently restore
-        and enqueue the whole no_match folder again.
-        """
-        active_media = result_output_base(self.main.settings) / "no_match" / "media"
-        restored = 0
+        """Rebuild missing/old NO_MATCH copies of the shown rows (core/nomatch_retry.py)."""
+        from core.nomatch_retry import restore_missing_copies
         source_items = list(only_items) if only_items is not None else list_nomatches(self.main.settings.get("root", ""), settings=self.main.settings)
-        for item in source_items:
-            original_raw = str(item.get("original_path", "") or "").strip()
-            visible_raw = str(item.get("path", "") or "").strip()
-            original = Path(original_raw) if original_raw else None
-            visible = Path(visible_raw) if visible_raw else None
-            stored_media = Path(item.get("media_path", "") or "") if item.get("media_path") else None
-            source = original if original is not None and original.exists() else visible
-            if source is None or not source.exists():
-                continue
-            already_active = False
-            if stored_media and stored_media.exists():
-                try:
-                    already_active = stored_media.resolve().is_relative_to(active_media.resolve())
-                except Exception:
-                    already_active = str(stored_media.resolve()).lower().startswith(str(active_media.resolve()).lower())
-            if already_active:
-                continue
-            rebuilt = copy_result_files(self.main.settings, source, "nomatch")
-            if rebuilt and Path(rebuilt).exists():
-                update_nomatch_media_path(original if original is not None else source, rebuilt, settings=self.main.settings)
-                # Keep the in-memory row useful for the queue builder below.
-                try:
-                    item["media_path"] = str(rebuilt)
-                    item["path"] = str(rebuilt)
-                    item["fallback_to_original"] = False
-                    item["file_missing"] = False
-                except Exception:
-                    pass
-                restored += 1
-        if restored:
-            self.append_log(f"Восстановлено копий брака в текущем архиве: {restored}")
-        return restored
+        return restore_missing_copies(self.main.settings, source_items, log=self.append_log)
 
     def _selected_filter_label(self):
         try:
@@ -711,90 +708,10 @@ class NoMatchPage(QWidget):
             visual_label = f"вид: {visual}"
         return f"{reason}; {visual_label}"
 
-    def _retry_source_path_for_item(self, item):
-        """Return a readable file path for one visible NO_MATCH row."""
-        candidates = [
-            item.get("path"),
-            item.get("media_path"),
-            item.get("original_path"),
-        ]
-        for raw in candidates:
-            if not raw:
-                continue
-            try:
-                p = Path(str(raw))
-                if p.exists() and p.is_file():
-                    return p
-            except Exception:
-                continue
-        return None
-
     def _prepare_retry_nomatch_queue(self, items):
-        """Create a temporary root containing exactly the currently displayed rows.
-
-        TaggerWorker accepts a root folder, not an arbitrary list of files, so we
-        stage hardlinks/copies under settings/cache/nomatch_retry_queue.  This
-        makes the Retry button obey the NO_MATCH filters: ``booru`` retries only
-        booru rows, ``real`` retries only real rows, and ``Все`` retries exactly
-        the currently displayed list.
-        """
-        selected = list(items or [])
-        if not selected:
-            return None, 0, []
-        queue_root = suggested_settings_storage_dir(self.main.settings) / "cache" / "nomatch_retry_queue"
-        try:
-            shutil.rmtree(queue_root, ignore_errors=True)
-        except Exception:
-            pass
-        queue_root.mkdir(parents=True, exist_ok=True)
-
-        used_names = set()
-        manifest = []
-        queued = 0
-        skipped = []
-        for item in selected:
-            src = self._retry_source_path_for_item(item)
-            if src is None:
-                skipped.append(str(item.get("name") or item.get("path") or item.get("original_path") or "<unknown>"))
-                continue
-            name = src.name or "file"
-            stem = src.stem or "file"
-            suffix = src.suffix
-            dest_name = name
-            idx = 2
-            while dest_name.lower() in used_names or (queue_root / dest_name).exists():
-                dest_name = f"{stem}__retry{idx}{suffix}"
-                idx += 1
-            used_names.add(dest_name.lower())
-            dst = queue_root / dest_name
-            try:
-                try:
-                    os.link(src, dst)
-                except Exception:
-                    shutil.copy2(src, dst)
-                queued += 1
-                manifest.append({
-                    "queue_file": str(dst),
-                    "source_file": str(src),
-                    "original_path": str(item.get("original_path") or ""),
-                    "media_path": str(item.get("media_path") or ""),
-                    "visual_status": str(item.get("visual_status") or ""),
-                    "visual_confidence": float(item.get("visual_confidence") or 0.0),
-                    "reason": str(item.get("reason") or ""),
-                })
-            except Exception as exc:
-                skipped.append(f"{src}: {type(exc).__name__}: {exc}")
-        try:
-            (queue_root / "_retry_nomatch_manifest.json").write_text(json.dumps({
-                "created_at": int(time.time()),
-                "filter": self._selected_filter_label(),
-                "count": queued,
-                "items": manifest,
-                "skipped": skipped,
-            }, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-        return queue_root, queued, skipped
+        """A queue folder with exactly the shown rows (core/nomatch_retry.py)."""
+        from core.nomatch_retry import prepare_queue
+        return prepare_queue(self.main.settings, items, label=self._selected_filter_label())
 
     def retry_nomatch(self):
         try:
@@ -825,14 +742,8 @@ class NoMatchPage(QWidget):
             # Do NOT overwrite the user's main source folder permanently.
             # Retry uses a temporary worker settings copy only.  The temporary
             # root contains exactly the currently filtered NO_MATCH rows.
-            retry_settings = self.main.settings.copy()
-            retry_settings["root"] = str(queue_root)
-            retry_settings["skip_existing"] = False
-            retry_settings["tag_only_untagged"] = False
-            retry_settings["retry_nomatch"] = True
-            retry_settings["retry_nomatch_filter"] = filter_label
-            retry_settings["retry_nomatch_count"] = queued
-            retry_settings["retry_nomatch_queue_root"] = str(queue_root)
+            from core.nomatch_retry import retry_settings as _retry_settings
+            retry_settings = _retry_settings(self.main.settings, queue_root, label=filter_label, count=queued)
 
             # Booru-only NO_MATCH retry may contain files whose filename starts
             # with a rule34 40-hex image key while the local byte-MD5 is different.

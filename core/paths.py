@@ -182,6 +182,40 @@ def _pointer_settings_root() -> Path | None:
     return None
 
 
+def _pointer_targets() -> list[Path]:
+    """Archive settings folders named by the pointer files, whether reachable or not."""
+    out: list[Path] = []
+    for pointer in (stable_workspace_pointer_file(), workspace_pointer_file()):
+        try:
+            if not pointer.exists():
+                continue
+            data = json.loads(pointer.read_text(encoding="utf-8"))
+            if data.get("format") not in (None, WORKSPACE_POINTER_FORMAT):
+                continue
+            explicit = str(data.get("settings_dir", "") or "").strip()
+            archive = str(data.get("archive_root", "") or "").strip()
+            target = _resolved(explicit) if explicit else (_resolved(archive) / "settings" if archive else None)
+        except (OSError, ValueError):
+            continue
+        if target is not None and target not in out:
+            out.append(target)
+    return out
+
+
+def unavailable_workspace_target() -> Path | None:
+    """The archive chosen by the user when it cannot be reached right now (drive not connected).
+
+    In that state the program must not fall back silently to another place: saving settings
+    there would forget the archive.  app.py asks the user to connect the drive first.
+    """
+    if os.environ.get("LOCAL_BOORU_DATA_DIR", "").strip():
+        return None
+    if _pointer_settings_root() is not None:
+        return None
+    targets = _pointer_targets()
+    return targets[0] if targets else None
+
+
 def _near_program_archive_root() -> Path | None:
     """Open an archive placed beside the program without any external locator."""
     install = app_install_dir()
@@ -212,6 +246,10 @@ def persistent_base_dir() -> Path:
     override = os.environ.get("LOCAL_BOORU_DATA_DIR", "").strip()
     if override:
         return _resolved(override)
+    if unavailable_workspace_target() is not None:
+        # Do not open another archive (or the old one beside the program) instead of the
+        # chosen one: start in the empty Documents place, and app.py stops before any write.
+        return legacy_data_dir()
     configured = _configured_data_dir()
     return configured if configured is not None else legacy_data_dir()
 
@@ -404,6 +442,30 @@ def remove_workspace_pointer() -> None:
             pass
 
 
+_NEXT_ARCHIVE: list = []        # the archive (its settings folder) chosen in this run for the next start
+
+
+def choose_next_archive(target: str | Path | None) -> None:
+    """The archive the next start opens, chosen in this run: the pointer names it now, and saving the settings of the
+    archive open now leaves the pointer alone (``core.settings.save_settings``).  ``None`` — the archive open now again
+    (its pointer back; no pointer at all while the data is in «Документах»).  The running program keeps its own
+    archive either way: its settings, base and folders do not change before the restart."""
+    _NEXT_ARCHIVE.clear()
+    if target is None:
+        if USING_SEPARATE_STORAGE:
+            write_workspace_pointer(DATA_DIR)
+        else:
+            remove_workspace_pointer()
+        return
+    write_workspace_pointer(target)
+    _NEXT_ARCHIVE.append(_resolved(target))
+
+
+def next_archive() -> Path | None:
+    """The archive chosen in this run for the next start (its settings folder), or None."""
+    return _NEXT_ARCHIVE[0] if _NEXT_ARCHIVE else None
+
+
 BASE_DIR = app_base_dir()
 LEGACY_DATA_DIR = legacy_data_dir()
 BOOTSTRAP_SETTINGS_FILE = _bootstrap_settings_file()
@@ -411,6 +473,11 @@ WORKSPACE_POINTER_FILE = workspace_pointer_file()
 STABLE_WORKSPACE_POINTER_FILE = stable_workspace_pointer_file()
 DATA_DIR = persistent_base_dir()
 USING_SEPARATE_STORAGE = DATA_DIR.resolve() != LEGACY_DATA_DIR.resolve()
+# Non-empty when the chosen archive is unreachable (external drive not connected).
+# Settings are never saved in this state, so the pointer to the archive survives.
+_UNAVAILABLE_TARGET = unavailable_workspace_target()
+WORKSPACE_UNAVAILABLE = str(_UNAVAILABLE_TARGET.parent if _UNAVAILABLE_TARGET is not None
+                            and _UNAVAILABLE_TARGET.name.lower() == "settings" else (_UNAVAILABLE_TARGET or ""))
 
 # v135 portable layout: the private branch contains only config/db/cache and
 # one output subtree for logs/runtime/backups/reports. Legacy mode keeps old
@@ -442,9 +509,7 @@ NOMATCH_CACHE_FILE = CACHE_DIR / "nomatch_cache.json"
 MD5_CACHE_FILE = CACHE_DIR / "md5_cache.json"
 ERROR_LOG_FILE = LOGS_DIR / "errors.log"
 
-BROWSER_PROFILE_DIR = RUNTIME_DIR / "browser_profile"
 BROWSER_COOKIES_DIR = RUNTIME_DIR / "browser_cookies"
-BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 BROWSER_COOKIES_DIR.mkdir(parents=True, exist_ok=True)
 APP_ICON_FILE = ASSETS_DIR / "app_icon.ico"
 

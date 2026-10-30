@@ -90,6 +90,29 @@ def process_memory_snapshot():
     }
 
 
+def child_process_memory_snapshot() -> dict:
+    """Return aggregate descendant-process RSS for diagnostics only.
+
+    v453 no longer classifies browser-engine children because Local Booru owns
+    no embedded browser-engine process. External user-browser processes are not
+    descendants of the application and remain outside the RAM-guard scope.
+    """
+    result = {"available": False, "count": 0, "rss_bytes": 0, "errors": 0}
+    try:
+        import psutil  # type: ignore
+        parent = psutil.Process(os.getpid())
+        result["available"] = True
+        for child in list(parent.children(recursive=True)):
+            try:
+                result["count"] += 1
+                result["rss_bytes"] += int(child.memory_info().rss or 0)
+            except Exception:
+                result["errors"] += 1
+    except Exception:
+        pass
+    return result
+
+
 def mb(value: int | float) -> float:
     return float(value or 0) / (1024.0 * 1024.0)
 

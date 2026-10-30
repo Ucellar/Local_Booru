@@ -8,16 +8,15 @@ from ui.tags_page import TagsPage
 from ui.post_page import PostPage
 from ui.settings_page import SettingsPage
 from ui.tagger_page import TaggerPage
-from ui.parser_blueprint_page import ParserBlueprintPage
 from ui.nomatch_page import NoMatchPage
 from ui.manga import MangaPage
 from ui.downloader import DownloaderPage
-from ui.games_page import GamesPage
 from ui.duplicates_page import DuplicatesPage
 from ui.subscription_page import SubscriptionPage
 from ui.trash_page import TrashPage
 from ui.diagnostics_page import DiagnosticsPage
 from ui.overview_page import OverviewPage
+from ui.web_gallery_page import WebGalleryPage, WebMangaShortcut
 
 
 @dataclass(frozen=True)
@@ -36,16 +35,16 @@ class PageSpec:
 PAGE_SPECS: tuple[PageSpec, ...] = (
     # Парсер workspace (был АПТ)
     PageSpec("Tagger",     "tagger_page",     "TaggerTitle", "btn_tagger",     "Парсер",   TaggerPage,     "apt"),
-    PageSpec("ParserBlueprint", "parser_blueprint_page", "ParserBlueprint", "btn_parser_blueprint", "Blueprint", ParserBlueprintPage, "apt", True),
     PageSpec("NO_MATCH",   "nomatch_page",    "NO_MATCH",    "btn_nomatch",    "Брак",     NoMatchPage,    "apt", True),
     # Галерея workspace — overview + content pages
     PageSpec("Overview",   "overview_page",   "Overview",    "btn_overview",   "Обзор",     OverviewPage,   "gallery", True),
-    PageSpec("Gallery",    "gallery_page",    "Gallery",     "btn_gallery",    "Галерея",  GalleryPage,    "gallery", True, True),
+    PageSpec("Booru",      "web_gallery_page", "Gallery",    "btn_booru",      "Галерея",  WebGalleryPage, "gallery", True),
+    PageSpec("Gallery",    "gallery_page",    "Gallery",     "btn_gallery",    "Старая галерея", GalleryPage, "gallery", True, True),
     PageSpec("Trash",      "trash_page",      "Trash",       "btn_trash",      "Удалено",   TrashPage,      "gallery", True),
     PageSpec("Diagnostics", "diagnostics_page", "Diagnostics", "btn_diagnostics", "Диагностика", DiagnosticsPage, "gallery", True),
     PageSpec("Tags",       "tags_page",       "Tags",        "btn_tags",       "Теги",     TagsPage,       "gallery", True),
-    PageSpec("Manga",      "manga_page",      "Manga",       "btn_manga",      "Манга",    MangaPage,      "gallery", True, True),
-    PageSpec("Games",      "games_page",      "Games",       "btn_games",      "Игры",     GamesPage,      "gallery", True),
+    PageSpec("BooruManga", "web_manga_shortcut", "Manga",    "btn_booru_manga", "Манга",   WebMangaShortcut, "gallery", True),
+    PageSpec("Manga",      "manga_page",      "Manga",       "btn_manga",      "Старая манга", MangaPage, "gallery", True, True),
     # Граббер workspace (был АСП)
     PageSpec("DLER",       "downloader_page", "DLER",        "btn_dler",       "Граббер",  DownloaderPage, "adp"),
     PageSpec("Subs",       "subs_page",       "Subs",        "btn_subs",       "Подписки", SubscriptionPage, "adp"),
@@ -59,7 +58,7 @@ PAGE_BY_KEY = {spec.key: spec for spec in PAGE_SPECS}
 
 WORKSPACE_DEFAULT_PAGE = {
     "apt":        "Tagger",
-    "gallery":    "Gallery",
+    "gallery":    "Booru",
     "adp":        "DLER",
     "duplicates": "Duplicates",
 }

@@ -1,6 +1,7 @@
 """Free-space and mass-download preflight helpers."""
 from __future__ import annotations
 
+import math
 import shutil
 from pathlib import Path
 
@@ -33,11 +34,22 @@ def extract_known_size(post: dict) -> int:
     return 0
 
 
+def reserve_gb(settings: dict) -> float:
+    """The free space to keep on a disk, in GB (``disk_free_reserve_gb``): 0 is a choice — no reserve —
+    not «unset»; only a missing or broken value means the default 2 GB."""
+    raw = (settings or {}).get("disk_free_reserve_gb", 2.0)
+    try:
+        value = float(2.0 if raw is None or raw == "" else raw)
+    except (TypeError, ValueError):
+        return 2.0
+    return value if math.isfinite(value) and value >= 0 else 2.0
+
+
 def output_disk_info(settings: dict) -> dict:
     folder = result_output_base(settings)
     folder.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(folder)
-    reserve = int(float(settings.get("disk_free_reserve_gb", 2.0) or 2.0) * 1024 ** 3)
+    reserve = int(reserve_gb(settings) * 1024 ** 3)
     return {"folder": str(folder), "total": int(usage.total), "used": int(usage.used), "free": int(usage.free), "reserve": reserve}
 
 
@@ -45,7 +57,7 @@ def ensure_space_for_write(settings: dict, destination: str | Path, incoming_byt
     p = Path(destination)
     p.parent.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(p.parent)
-    reserve = int(float(settings.get("disk_free_reserve_gb", 2.0) or 2.0) * 1024 ** 3)
+    reserve = int(reserve_gb(settings) * 1024 ** 3)
     need = max(0, int(incoming_bytes or 0)) + reserve
     if int(usage.free) < need:
         return False, f"Недостаточно места: свободно {format_bytes(usage.free)}, требуется минимум {format_bytes(need)} с резервом."

@@ -4,11 +4,6 @@ import json
 from http.cookiejar import MozillaCookieJar
 from urllib.parse import urlparse
 
-try:
-    import browser_cookie3
-except Exception:  # pragma: no cover - optional dependency
-    browser_cookie3 = None
-
 from core.paths import BROWSER_COOKIES_DIR
 
 
@@ -79,33 +74,3 @@ def load_cookie_bundle_for_host(host):
         return _normalize_cookie_records(data), None
     except Exception:
         return [], None
-
-
-def load_system_cookiejar_for_host(host):
-    if browser_cookie3 is None:
-        return None, "browser-cookie3 is not installed"
-
-    host = (host or "").lower().replace("www.", "")
-    domains = [host]
-    if host.startswith("booru."):
-        domains.append(host.replace("booru.", "", 1))
-
-    loaders = [
-        ("edge", getattr(browser_cookie3, "edge", None)),
-        ("chrome", getattr(browser_cookie3, "chrome", None)),
-        ("firefox", getattr(browser_cookie3, "firefox", None)),
-        ("chromium", getattr(browser_cookie3, "chromium", None)),
-    ]
-
-    last_error = None
-    for browser_name, loader in loaders:
-        if loader is None:
-            continue
-        for domain in domains:
-            try:
-                jar = loader(domain_name=domain)
-                if jar:
-                    return jar, browser_name
-            except Exception as e:
-                last_error = e
-    return None, str(last_error) if last_error else "no cookies found"

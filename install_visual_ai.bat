@@ -2,22 +2,18 @@
 chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
-echo Local Booru: установка локального AI runtime для NO_MATCH
-python - <<PY
-import sys
-print('Python:', sys.version)
-if sys.version_info >= (3, 14):
-    print('ОШИБКА: для torch/transformers лучше Python 3.10/3.11/3.12. На Python 3.14 torch может не установиться.')
-    print('Для друга лучше собирать EXE на Python 3.10/3.11 с requirements_visual_ai.txt.')
-    raise SystemExit(2)
-PY
+rem Local Booru: onnxruntime (~15 MB) for the Брак check «фото или рисунок», into the Python that run.bat uses.
+set "PY="
+if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
+if not defined PY set "PY=python"
+echo Python: %PY%
+"%PY%" -m pip install --disable-pip-version-check onnxruntime
 if errorlevel 1 goto end
-python -m pip install --upgrade pip
-python -m pip install -r requirements_visual_ai.txt
-python - <<PY
-import torch, transformers
-print('OK: torch', torch.__version__)
-print('OK: transformers', transformers.__version__)
-PY
+"%PY%" -c "import onnxruntime; print('OK: onnxruntime', onnxruntime.__version__)"
+echo.
+echo Модель (17 МБ) программа скачает сама. То же самое делает кнопка «Установить onnxruntime»
+echo на странице «Настройки» → «Брак: фото или рисунок».
+echo Старая проверка CLIP (torch и transformers, около 2,5 ГБ) больше не нужна; если всё же хотите её:
+echo   "%PY%" -m pip install -r requirements_visual_ai.txt
 :end
 pause

@@ -8,12 +8,12 @@ from PySide6.QtWidgets import QWidget,QVBoxLayout,QHBoxLayout,QPushButton,QLabel
 from PySide6.QtCore import QThread, Signal, Qt, QTimer
 from core.settings import save_settings, DEFAULT_SITES
 from core.tagger import Tagger, MEDIA_EXTS, video_frame_image, output_processed_status, result_output_base, result_paths_for, has_copy_suffix, is_md5, file_md5, file_phash
-from ui.login_browser import LoginBrowserDialog, open_br34, open_br34_multi
+from ui.login_browser import open_br34, open_br34_multi
 from ui.sites_widget import SitesWidget
 from ui.memory_tools import bounded_append, set_bounded_log, soft_gc
+from core.redaction import sanitize_text
 from core.memory_guard import process_memory_snapshot, format_snapshot, soft_trim_memory
 from core.deleted_registry import should_skip_deleted_file, has_deleted_record_for_name
-from core.paths import BROWSER_PROFILE_DIR, BROWSER_COOKIES_DIR
 from ui.tagger.workers import TaggerWorker, BrowserLoginWorker
 
 
@@ -85,7 +85,8 @@ class TaggerPage(QWidget):
         self.sauce_state.setWordWrap(True)
         self.min_sim=QDoubleSpinBox(); self.min_sim.setRange(50,99); self.min_sim.setSingleStep(0.5)
         self.skip=QCheckBox(); self.only_untagged=QCheckBox(); self.skip_copy_suffix=QCheckBox(); self.md5=QCheckBox(); self.sauce=QCheckBox(); self.ascii2d=QCheckBox()
-        self.iqdb=QCheckBox(); self.danbooru_iqdb=QCheckBox(); self.e621_iqdb=QCheckBox(); self.tineye=QCheckBox(); self.low_power=QCheckBox(); self.bg_rule34_categories=QCheckBox()
+        self.recheck_sites=QCheckBox()
+        self.iqdb=QCheckBox(); self.danbooru_iqdb=QCheckBox(); self.e621_iqdb=QCheckBox(); self.tineye=QCheckBox(); self.reverse_upload_downscale=QCheckBox(); self.rule34_foreground_html_locator=QCheckBox(); self.low_power=QCheckBox(); self.bg_rule34_categories=QCheckBox()
         # v204: FuzzySearch/Fluffle removed from active parser UI/queue.
         # Hidden legacy widgets remain only so old layouts/settings code cannot crash.
         self.fuzzysearch=QCheckBox(); self.fluffle=QCheckBox()
@@ -107,8 +108,8 @@ class TaggerPage(QWidget):
         self.conveyor_window=QSpinBox(); self.conveyor_window.setRange(2,128)
         # Keep bare indicators compact, but leave enough room for QSS borders.
         # Old fixedWidth(20) clipped 17px indicators with 2px borders in dark themes.
-        for _cb in [self.skip,self.only_untagged,self.skip_copy_suffix,self.md5,
-                    self.sauce,self.ascii2d,self.iqdb,self.danbooru_iqdb,self.e621_iqdb,self.tineye,self.low_power,self.bg_rule34_categories]:
+        for _cb in [self.skip,self.only_untagged,self.skip_copy_suffix,self.md5,self.recheck_sites,
+                    self.sauce,self.ascii2d,self.iqdb,self.danbooru_iqdb,self.e621_iqdb,self.tineye,self.reverse_upload_downscale,self.rule34_foreground_html_locator,self.low_power,self.bg_rule34_categories]:
             _cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             _cb.setFixedSize(23, 23)
         self.iqdb_min=QDoubleSpinBox(); self.iqdb_min.setRange(50,99); self.iqdb_min.setSingleStep(0.5)
@@ -117,13 +118,9 @@ class TaggerPage(QWidget):
         self.add_tip_row("Folder", row, "tip_root")
         self.add_api_service_row("SauceNAO", self.sauce, self.api, "tip_sauce_service", "saucenao")
         self.add_api_service_row("Danbooru IQDB", self.danbooru_iqdb, None, "tip_danbooru_iqdb", "danbooru_iqdb")
-        self.add_api_service_row("TinEye", self.tineye, None, "tip_tineye", "tineye")
-        # User-facing parser settings are intentionally compact.  Defaults/blueprints own
-        # local throttling, fallback timing and background maintenance.  Hidden legacy
-        # widgets remain only so older settings files and code paths keep working.
-        for label,w,tip in [("SauceNAO состояние",self.sauce_state,"tip_saucenao_state"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("e621 IQDB fallback",self.e621_iqdb,"tip_e621_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Skip existing",self.skip,"tip_skip"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix")]: self.add_tip_row(label,w,tip)
-        # Hidden blueprint-owned settings.  Do not confuse these with the runtime
-        # parser PAUSE button: Start/Stop + Pause/Resume remain user-facing controls.
+        # Compact user-facing parser settings; everything else has sane defaults in core/parser.
+        for label,w,tip in [("SauceNAO состояние",self.sauce_state,"tip_saucenao_state"),("SauceNAO min similarity",self.min_sim,"tip_min_similarity"),("MD5 lookup",self.md5,"tip_md5"),("IQDB fuzzy fallback",self.iqdb,"tip_iqdb"),("e621 IQDB fallback",self.e621_iqdb,"tip_e621_iqdb"),("IQDB min similarity",self.iqdb_min,"tip_iqdb"),("Compact reverse upload (JPEG 512px)",self.reverse_upload_downscale,"tip_reverse_upload"),("Ascii2D fallback",self.ascii2d,"tip_ascii2d"),("Skip existing",self.skip,"tip_skip"),("Check new sites",self.recheck_sites,"tip_recheck_new_sites"),("Skip files ending (1)/(2)",self.skip_copy_suffix,"tip_skip_copy_suffix")]: self.add_tip_row(label,w,tip)
+        # Hidden legacy controls (values still saved for compatibility).
         for _hidden in (self.only_untagged, self.bg_rule34_categories, self.low_power, self.site_interval, self.conveyor_window, self.delay, self.req_timeout, self.sauce_cooldown, self.limit):
             _hidden.setVisible(False)
         split.addWidget(left)
@@ -147,6 +144,9 @@ class TaggerPage(QWidget):
         self._log_channel_meta = {}
         self._active_log_channels = []
         self._active_log_channel_set = set()
+        self._pending_site_activity = {}
+        self._site_activity_last_snapshot = {}
+        self._activity_thumb_last_request = {}
         self.console_panel = self._build_console_panel()
         # Большое одиночное превью в парсере больше не показываем: оно жрало место
         # и дублировало маленькие превью в таблице активных очередей.  Объект
@@ -166,6 +166,17 @@ class TaggerPage(QWidget):
         self._log_flush_timer.setInterval(int(self.main.settings.get("tagger_ui_log_flush_interval_ms", 120) or 120))
         self._log_flush_timer.timeout.connect(self._flush_pending_logs)
         self._log_flush_timer.start()
+        # Worker threads can update many lanes at once.  Keep only the newest
+        # status per lane and repaint the table at a bounded cadence.
+        self._site_activity_flush_timer = QTimer(self)
+        self._site_activity_flush_timer.setInterval(int(self.main.settings.get("tagger_ui_site_activity_flush_interval_ms", 200) or 200))
+        self._site_activity_flush_timer.timeout.connect(self._flush_pending_site_activity)
+        self._site_activity_flush_timer.start()
+        # SauceNAO log bursts must not open SQLite synchronously once per line.
+        self._saucenao_refresh_timer = QTimer(self)
+        self._saucenao_refresh_timer.setSingleShot(True)
+        self._saucenao_refresh_timer.setInterval(int(self.main.settings.get("tagger_ui_saucenao_refresh_debounce_ms", 750) or 750))
+        self._saucenao_refresh_timer.timeout.connect(self.refresh_saucenao_state)
         self.low_power.toggled.connect(self.update_preview_visibility)
         self.load_values(); self.retranslate(); self.update_preview_visibility()
         self._build_drag_overlay()
@@ -441,7 +452,9 @@ class TaggerPage(QWidget):
             if save:
                 self.main.settings["tagger_console_mode"] = index
                 save_settings(self.main.settings)
-            if index == 2:
+            if index == 1:
+                self._refresh_grid_log_views()
+            elif index == 2:
                 self._refresh_single_log_view()
         except Exception:
             pass
@@ -475,12 +488,8 @@ class TaggerPage(QWidget):
             channels.append("Ascii2D")
         if bool(self.main.settings.get("enable_saucenao", True)) and str(self.main.settings.get("saucenao_api_key") or "").strip():
             channels.append("SauceNAO")
-        if bool(self.main.settings.get("enable_tineye", False)):
-            channels.append("TinEye")
-        if any(ch in channels for ch in ("IQDB", "Danbooru IQDB", "e621 IQDB", "Ascii2D", "TinEye", "SauceNAO")):
+        if any(ch in channels for ch in ("IQDB", "Danbooru IQDB", "e621 IQDB", "Ascii2D", "SauceNAO")):
             channels.append("Reverse side queue")
-        channels.append("source→MD5 relay")
-        channels.append("rule34 40hex/SHA1")
         channels.append("Финальная сборка")
         if bool(self.main.settings.get("tagger_background_tag_groups", self.main.settings.get("tagger_background_rule34_categories", True))):
             channels.append("Категории тегов")
@@ -585,6 +594,12 @@ class TaggerPage(QWidget):
         self._site_activity_md5_by_path = {}
         self._site_activity_name_to_sites = {}
         self._site_activity_current_name_by_site = {}
+        self._site_activity_last_snapshot = {}
+        self._activity_thumb_last_request = {}
+        try:
+            self._pending_site_activity.clear()
+        except Exception:
+            pass
 
     def _classify_log_channel(self, text: str):
         text = str(text or "")
@@ -624,16 +639,35 @@ class TaggerPage(QWidget):
             return
         self._ensure_log_channel(channel)
         limit = self._effective_log_line_limit()
+        safe_text = sanitize_text(text)
         buf = self._log_channel_buffers.setdefault(channel, [])
-        buf.append(str(text))
+        buf.append(safe_text)
         if len(buf) > limit:
             del buf[:len(buf)-limit]
+        # Do not repaint hidden QPlainTextEdit documents.  During the normal
+        # "Общий" mode this used to double every log append and starve Qt.
+        mode = self.console_stack.currentIndex()
         meta = self._log_channel_meta.get(channel) or {}
         edit = meta.get("log")
-        if edit is not None:
-            bounded_append(edit, text, limit)
-        if self.console_stack.currentIndex() == 2 and self.single_log_combo.currentText() == channel:
-            bounded_append(self.single_log, text, limit)
+        if mode == 1 and edit is not None:
+            bounded_append(edit, safe_text, limit)
+        if mode == 2 and self.single_log_combo.currentText() == channel:
+            bounded_append(self.single_log, safe_text, limit)
+
+    def _refresh_grid_log_views(self):
+        """Hydrate channel consoles only when the grid is actually visible."""
+        try:
+            limit = self._effective_log_line_limit()
+            for channel in self._active_log_channels:
+                meta = self._log_channel_meta.get(channel) or {}
+                edit = meta.get("log")
+                if edit is None:
+                    continue
+                lines = self._log_channel_buffers.get(channel, [])[-limit:]
+                edit.setPlainText("\n".join(lines))
+                edit.moveCursor(edit.textCursor().End)
+        except Exception:
+            pass
 
     def _refresh_single_log_view(self):
         try:
@@ -777,21 +811,34 @@ class TaggerPage(QWidget):
             self._pending_log_dropped += drop
         self._pending_log_lines.append(str(msg))
 
-    def _flush_pending_logs(self):
+    def _flush_pending_logs(self, force: bool = False):
         if not getattr(self, "_pending_log_lines", None) and not getattr(self, "_pending_log_dropped", 0):
             return
         try:
             max_batch = self._effective_log_flush_batch()
         except Exception:
             max_batch = 250
+        try:
+            budget_ms = float(self.main.settings.get("tagger_ui_log_flush_budget_ms", 6.0) or 6.0)
+        except Exception:
+            budget_ms = 6.0
+        budget_s = max(0.001, min(0.050, budget_ms / 1000.0))
         lines = self._pending_log_lines[:max_batch]
         del self._pending_log_lines[:max_batch]
         dropped = int(getattr(self, "_pending_log_dropped", 0) or 0)
         if dropped:
             self._pending_log_dropped = 0
             lines.insert(0, f"UI LOG THROTTLE: пропущено {dropped} строк, чтобы интерфейс не съел память")
-        for line in lines:
+        started = time.perf_counter()
+        processed = 0
+        for index, line in enumerate(lines):
             self.append_log(line)
+            processed = index + 1
+            if not force and time.perf_counter() - started >= budget_s:
+                break
+        if processed < len(lines):
+            # Put unrendered lines back at the front while preserving order.
+            self._pending_log_lines[0:0] = lines[processed:]
 
     def append_log(self, msg):
         _text = str(msg)
@@ -801,6 +848,15 @@ class TaggerPage(QWidget):
         if channel:
             self._append_channel_log(channel, _text)
         if "SAUCENAO LIMITS:" in _text or "SAUCENAO COOLDOWN" in _text or "SAUCENAO RETRY QUEUED" in _text:
+            self._request_saucenao_state_refresh()
+
+    def _request_saucenao_state_refresh(self):
+        try:
+            timer = self._saucenao_refresh_timer
+            if not timer.isActive():
+                timer.start()
+        except Exception:
+            # Construction-time or shutdown fallback.
             self.refresh_saucenao_state()
 
     def trim_ui_memory(self):
@@ -823,8 +879,8 @@ class TaggerPage(QWidget):
     def bool_item(self, checked):
         it=QTableWidgetItem(); it.setFlags(it.flags()|Qt.ItemIsUserCheckable); it.setCheckState(Qt.Checked if checked else Qt.Unchecked); return it
     def load_values(self):
-        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.api.setText(s.get("saucenao_api_key","")); self.min_sim.setValue(float(s.get("min_similarity",85))); self.skip.setChecked(bool(s.get("skip_existing",True))); self.only_untagged.setChecked(bool(s.get("tag_only_untagged",True))); self.skip_copy_suffix.setChecked(bool(s.get("skip_copy_suffix_files",True))); self.md5.setChecked(bool(s.get("enable_md5_lookup",True))); self.sauce.setChecked(bool(s.get("enable_saucenao",True))); self.ascii2d.setChecked(s.get("enable_ascii2d",False))
-        self.iqdb.setChecked(bool(s.get("enable_iqdb",True))); self.danbooru_iqdb.setChecked(bool(s.get("enable_danbooru_iqdb",False))); self.e621_iqdb.setChecked(bool(s.get("enable_e621_iqdb",True))); self.fuzzysearch.setChecked(False); self.fluffle.setChecked(False); self.tineye.setChecked(bool(s.get("enable_tineye",False))); self.fuzzy_key.setText(""); self.fluffle_key.setText(""); self.fuzzy_endpoint.setText(""); self.fluffle_endpoint.setText(""); self.iqdb_min.setValue(float(s.get("iqdb_min_similarity",75))); self.delay.setValue(float(s.get("delay_seconds",8))); self.req_timeout.setValue(int(float(s.get("request_timeout_seconds",20)))); self.sauce_cooldown.setValue(int(float(s.get("saucenao_cooldown_seconds",3600))/60)); self.limit.setValue(int(s.get("limit_files",0)))
+        s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.api.setText(s.get("saucenao_api_key","")); self.min_sim.setValue(float(s.get("min_similarity",85))); self.skip.setChecked(bool(s.get("skip_existing",True))); self.recheck_sites.setChecked(bool(s.get("parser_recheck_new_sites",False))); self.only_untagged.setChecked(bool(s.get("tag_only_untagged",True))); self.skip_copy_suffix.setChecked(bool(s.get("skip_copy_suffix_files",True))); self.md5.setChecked(bool(s.get("enable_md5_lookup",True))); self.sauce.setChecked(bool(s.get("enable_saucenao",True))); self.ascii2d.setChecked(s.get("enable_ascii2d",False))
+        self.iqdb.setChecked(bool(s.get("enable_iqdb",True))); self.danbooru_iqdb.setChecked(bool(s.get("enable_danbooru_iqdb",False))); self.e621_iqdb.setChecked(bool(s.get("enable_e621_iqdb",True))); self.reverse_upload_downscale.setChecked(bool(s.get("reverse_upload_downscale", True))); self.rule34_foreground_html_locator.setChecked(bool(s.get("rule34_foreground_html_locator_enabled", False))); self.fuzzysearch.setChecked(False); self.fluffle.setChecked(False); self.tineye.setChecked(bool(s.get("enable_tineye",False))); self.fuzzy_key.setText(""); self.fluffle_key.setText(""); self.fuzzy_endpoint.setText(""); self.fluffle_endpoint.setText(""); self.iqdb_min.setValue(float(s.get("iqdb_min_similarity",75))); self.delay.setValue(float(s.get("delay_seconds",8))); self.req_timeout.setValue(int(float(s.get("request_timeout_seconds",20)))); self.sauce_cooldown.setValue(int(float(s.get("saucenao_cooldown_seconds",3600))/60)); self.limit.setValue(int(s.get("limit_files",0)))
         # Hidden defaults owned by the parser blueprint/runtime.
         self.only_untagged.setChecked(True); self.bg_rule34_categories.setChecked(True); self.low_power.setChecked(False); self.site_interval.setValue(1.10); self.conveyor_window.setValue(100); self.delay.setValue(0.0); self.req_timeout.setValue(30); self.sauce_cooldown.setValue(60); self.limit.setValue(0); self.update_preview_visibility()
         self.sites_widget.load(s)
@@ -846,8 +902,12 @@ class TaggerPage(QWidget):
             if long_rem >= 0:
                 counters.append(f"сутки: {long_rem}")
             quota = " · ".join(counters) if counters else "лимит ещё не получен"
+            probe_left = max(0, int(state.get("quota_probe_after", 0) or 0) - now)
+            reserve = int(self.main.settings.get("saucenao_quota_reserve", 10) or 10)
             if left:
                 status = f"пауза ещё {left//60}м {left%60}с"
+            elif probe_left and long_rem >= 0 and long_rem <= reserve:
+                status = f"резерв {reserve}; контрольная проба через {probe_left//60}м {probe_left%60}с"
             else:
                 status = "готов"
             self.sauce_state.setText(f"{quota}; {status}")
@@ -871,7 +931,7 @@ class TaggerPage(QWidget):
                 key_widget.setToolTip(t(tip_key))
     def apply_tips(self):
         t=self.main.t
-        pairs=[(self.root,"tip_root"),(self.api,"tip_sauce_service"),(self.sauce_state,"tip_saucenao_state"),(self.min_sim,"tip_min_similarity"),(self.md5,"tip_md5"),(self.sauce,"tip_sauce_service"),(self.iqdb,"tip_iqdb"),(self.danbooru_iqdb,"tip_danbooru_iqdb"),(self.e621_iqdb,"tip_e621_iqdb"),(self.tineye,"tip_tineye"),(self.tineye_key,"tip_tineye"),(self.delay,"tip_delay"),(self.req_timeout,"tip_delay"),(self.sauce_cooldown,"tip_sauce"),(self.limit,"tip_limit"),(self.skip,"tip_skip"),(self.only_untagged,"tip_only_untagged"),(self.skip_copy_suffix,"tip_skip_copy_suffix"),(self.bg_rule34_categories,"tip_background_groups"),(self.low_power,"tip_low_power"),(self.site_interval,"tip_site_interval"),(self.conveyor_window,"tip_conveyor_window")]
+        pairs=[(self.root,"tip_root"),(self.api,"tip_sauce_service"),(self.sauce_state,"tip_saucenao_state"),(self.min_sim,"tip_min_similarity"),(self.md5,"tip_md5"),(self.sauce,"tip_sauce_service"),(self.iqdb,"tip_iqdb"),(self.danbooru_iqdb,"tip_danbooru_iqdb"),(self.e621_iqdb,"tip_e621_iqdb"),(self.reverse_upload_downscale,"tip_reverse_upload"),(self.rule34_foreground_html_locator,"tip_rule34_foreground_html_locator"),(self.tineye,"tip_tineye"),(self.tineye_key,"tip_tineye"),(self.delay,"tip_delay"),(self.req_timeout,"tip_delay"),(self.sauce_cooldown,"tip_sauce"),(self.limit,"tip_limit"),(self.skip,"tip_skip"),(self.only_untagged,"tip_only_untagged"),(self.skip_copy_suffix,"tip_skip_copy_suffix"),(self.bg_rule34_categories,"tip_background_groups"),(self.low_power,"tip_low_power"),(self.site_interval,"tip_site_interval"),(self.conveyor_window,"tip_conveyor_window")]
         for w,k in pairs: w.setToolTip(t(k))
 
     def _table_clicked(self, *args, **kwargs):
@@ -897,9 +957,9 @@ class TaggerPage(QWidget):
         if not norm:
             self.append_log(f"SKIP INVALID LOGIN URL: {url!r}")
             return
-        self.append_log(f"OPEN APP LOGIN BROWSER: {norm}")
+        self.append_log(f"OPEN EXTERNAL LOGIN BROWSER: {norm}")
         open_br34(norm, self, log_func=self.append_log)
-        self.append_log("br34 OPENED / TAB ADDED")
+        self.append_log("EXTERNAL BROWSER OPENED")
 
     def open_selected_login(self):
         urls = self.selected_login_urls()
@@ -913,9 +973,9 @@ class TaggerPage(QWidget):
             self.append_log("NO VALID LOGIN URLs")
             return
         for u in normed:
-            self.append_log(f"OPEN APP LOGIN BROWSER: {u}")
+            self.append_log(f"OPEN EXTERNAL LOGIN BROWSER: {u}")
         open_br34_multi(normed, parent=self, log_func=self.append_log)
-        self.append_log("br34 OPENED / ALL TABS ADDED")
+        self.append_log("EXTERNAL BROWSER TABS OPENED")
 
     def open_all_logins(self):
         self.sync(show_message=False)
@@ -923,11 +983,11 @@ class TaggerPage(QWidget):
         if not urls:
             self.append_log("NO LOGIN URLS")
             return
-        self.append_log(f"OPENING {len(urls)} LOGIN URLs IN br34 (all as tabs)")
+        self.append_log(f"OPENING {len(urls)} LOGIN URLs IN EXTERNAL BROWSER")
         for i, u in enumerate(urls, 1):
             self.append_log(f"LOGIN URL {i}: {u}")
         open_br34_multi(urls, parent=self, log_func=self.append_log)
-        self.append_log("br34 OPENED / ALL TABS ADDED")
+        self.append_log("EXTERNAL BROWSER TABS OPENED")
 
     def browser_login(self):
         self.open_selected_login()
@@ -968,6 +1028,7 @@ class TaggerPage(QWidget):
         s["saucenao_api_key"] = self.api.text()
         s["min_similarity"] = self.min_sim.value()
         s["skip_existing"] = self.skip.isChecked()
+        s["parser_recheck_new_sites"] = self.recheck_sites.isChecked()
         s["tag_only_untagged"] = self.only_untagged.isChecked()
         s["skip_copy_suffix_files"] = self.skip_copy_suffix.isChecked()
         
@@ -977,6 +1038,8 @@ class TaggerPage(QWidget):
         s["enable_iqdb"] = self.iqdb.isChecked()
         s["enable_danbooru_iqdb"] = self.danbooru_iqdb.isChecked()
         s["enable_e621_iqdb"] = self.e621_iqdb.isChecked()
+        s["reverse_upload_downscale"] = self.reverse_upload_downscale.isChecked()
+        s["rule34_foreground_html_locator_enabled"] = self.rule34_foreground_html_locator.isChecked()
         # v204: Fluffle/FuzzySearch are removed. Purge legacy settings so old
         # configs cannot silently re-enable them.
         for _removed_key in (
@@ -988,8 +1051,7 @@ class TaggerPage(QWidget):
             s.pop(_removed_key, None)
         self.fuzzysearch.setChecked(False)
         self.fluffle.setChecked(False)
-        s["enable_tineye"] = self.tineye.isChecked()
-        # TinEye uses web scraping - no API key needed
+        s["enable_tineye"] = False  # TinEye is not supported by the new parser
         s["enable_ascii2d"] = self.ascii2d.isChecked()
         # ascii2d has no public API
         s.pop("tagger_site_conveyor_enabled", None)  # conveyor is fixed architecture
@@ -1105,7 +1167,7 @@ class TaggerPage(QWidget):
         self.worker.log.connect(self.enqueue_log)
         self.worker.progress.connect(self.on_worker_progress)
         self.worker.current_file.connect(self.show_current_preview)
-        self.worker.site_current.connect(self.update_site_activity)
+        self.worker.site_current.connect(self.enqueue_site_activity)
         self.worker.done.connect(self.on_worker_done)
         self.worker.finished.connect(self._on_worker_thread_finished)
         self.worker.start()
@@ -1191,13 +1253,36 @@ class TaggerPage(QWidget):
         except Exception:
             pass
 
+    def enqueue_site_activity(self, site, status, path):
+        """Cheap slot: coalesce worker bursts to the newest state per lane."""
+        self._pending_site_activity[str(site)] = (str(status), str(path or ""))
+
+    def _flush_pending_site_activity(self):
+        pending = getattr(self, "_pending_site_activity", None)
+        if not pending:
+            return
+        latest = dict(pending)
+        pending.clear()
+        for site, payload in latest.items():
+            try:
+                status, path = payload
+                self.update_site_activity(site, status, path)
+            except Exception:
+                pass
+
     def update_site_activity(self, site, status, path):
         site = str(site); path = str(path or "")
         if site not in getattr(self, "_active_log_channel_set", set()):
             return
-        self._set_log_channel_status(site, str(status), path)
         display_name = Path(path).name if path else "—"
         md5_text = self._md5_from_path_or_cache(path)
+        snapshot = (str(status), path, str(md5_text))
+        if self._site_activity_last_snapshot.get(site) == snapshot:
+            return
+        self._site_activity_last_snapshot[site] = snapshot
+        previous_path = self._site_activity_paths.get(site, "")
+        path_changed = previous_path != path
+        self._set_log_channel_status(site, str(status), path)
         old_name = self._site_activity_current_name_by_site.get(site, "")
         if old_name and old_name != display_name:
             try:
@@ -1239,8 +1324,27 @@ class TaggerPage(QWidget):
         self._site_activity_paths[site] = path
         if not path:
             return
+        labels = self._site_activity_preview_labels.get(site)
+        if path_changed and labels:
+            try:
+                labels[0].clear()
+            except Exception:
+                pass
+        # Status text may change several times for the same file.  Never enqueue
+        # another thumbnail unless the path itself changed.
+        if not path_changed:
+            return
         if bool(self.main.settings.get("tagger_ram_safe_disable_activity_thumbs", False)):
             return
+        now = time.monotonic()
+        try:
+            min_interval = float(self.main.settings.get("tagger_ui_activity_thumb_interval_seconds", 1.0) or 1.0)
+        except Exception:
+            min_interval = 1.0
+        last_request = float(self._activity_thumb_last_request.get(site, 0.0) or 0.0)
+        if now - last_request < max(0.25, min(5.0, min_interval)):
+            return
+        self._activity_thumb_last_request[site] = now
         from core.thumb_service import ThumbnailService
         svc = ThumbnailService.instance()
         cached = svc.request(path, 64, 64, lambda received, pix, key=site: self._on_site_activity_preview(key, received, pix))
@@ -1259,8 +1363,10 @@ class TaggerPage(QWidget):
     def on_worker_progress(self, v, t):
         self.progress.setMaximum(max(1, t))
         self.progress.setValue(v)
-        if v % 100 == 0:
-            self.trim_ui_memory()
+        # Runtime logs and thumbnail caches are already bounded, while the worker
+        # owns the real RAM guard.  Never run QPixmapCache.clear(), cache eviction
+        # and full Python collection from a progress callback in the UI thread.
+        # Heavy UI cleanup is performed only on STOP/DONE.
 
     def _open_external_file(self, path):
         """Open parser preview original file with the OS default app.
@@ -1382,13 +1488,6 @@ class TaggerPage(QWidget):
     def _render_preview(self, path):
         pass  # replaced by ThumbnailService async flow
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        try:
-            pass
-        except Exception:
-            pass
-
     def _clear_parser_runtime_ui_memory(self, *, clear_status: bool = False, clear_logs: bool = False):
         """Release parser-only UI objects that keep QPixmaps/QTextDocuments alive."""
         try:
@@ -1422,6 +1521,8 @@ class TaggerPage(QWidget):
         try:
             self._pending_log_lines.clear()
             self._pending_log_dropped = 0
+            self._pending_site_activity.clear()
+            self._activity_thumb_last_request.clear()
         except Exception:
             pass
         if clear_logs:
@@ -1475,7 +1576,7 @@ class TaggerPage(QWidget):
             for _ in range(20):
                 if not getattr(self, "_pending_log_lines", None) and not getattr(self, "_pending_log_dropped", 0):
                     break
-                self._flush_pending_logs()
+                self._flush_pending_logs(force=True)
         except Exception:
             pass
         if not getattr(self, "_parser_done_signal_seen", False):
@@ -1488,7 +1589,8 @@ class TaggerPage(QWidget):
         try:
             from core.light_backup import checkpoint_sqlite
             if bool(self.main.settings.get("sqlite_checkpoint_on_exit", True)):
-                res = checkpoint_sqlite(self.main.settings, truncate=True, optimize=True)
+                # the window's own thread: a short wait (VACUUM of «Обслуживание» may hold the base for minutes)
+                res = checkpoint_sqlite(self.main.settings, truncate=True, optimize=True, busy_seconds=2.0)
                 if res.get("ok"):
                     self.append_log("SQLite WAL checkpoint TRUNCATE: parser stopped/done")
         except Exception as e:
@@ -1524,7 +1626,7 @@ class TaggerPage(QWidget):
                 except Exception:
                     pass
                 try:
-                    worker.site_current.disconnect(self.update_site_activity)
+                    worker.site_current.disconnect(self.enqueue_site_activity)
                 except Exception:
                     pass
                 try:

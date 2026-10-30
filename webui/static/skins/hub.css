@@ -1,0 +1,275 @@
+@import url("_drawer.css");
+/* «Хаб»: a joke look from the old program — black and orange like the famous video site.
+   The logo puts "Booru" on an orange plate, the menu is a second row, every picture is a 16:9
+   video-style preview with its size in the corner (where a site shows the duration) and a title under it. */
+:root {
+  --bg: #000000;
+  --panel: #1b1b1b;
+  --panel-2: #2c2c2c;
+  --border: #303030;
+  --text: #ffffff;
+  --muted: #a3a3a3;
+  --link: #ffffff;
+  --link-hover: #ff9000;
+  --accent: #ff9000;
+  --accent-ink: #000000;
+  --bar-bg: #000000;
+  --bar-ink: #ffffff;
+  --bar-active-bg: transparent;
+  --bar-active-ink: #ff9000;
+  --thumb-bg: #1b1b1b;
+  --thumb-ring: #ff9000;
+  --danger: #ff6b4a;
+  --focus: #ff9000;
+  --shadow: 0 18px 50px rgba(0, 0, 0, 0.85);
+
+  --tag-artist: #ff9000;
+  --tag-character: #6fd46f;
+  --tag-copyright: #c792ff;
+  --tag-general: #e8e8e8;
+  --tag-meta: #9fb3c8;
+  --tag-species: #ff7b54;
+  --tag-lore: #6fd4c0;
+  --tag-contributor: #ff8fc8;
+  --tag-invalid: #8a8a8a;
+
+  --font: Arial, "Helvetica Neue", Helvetica, "Segoe UI", sans-serif;
+  --font-size: 14px;
+  --font-head: Arial, "Helvetica Neue", Helvetica, sans-serif;
+  --radius: 4px;
+  --radius-thumb: 4px;
+  --thumb: 250px;
+  color-scheme: dark;
+}
+:root[data-thumb="s"] { --thumb: 200px; }
+:root[data-thumb="l"] { --thumb: 330px; }
+
+/* header: logo and search on top, the menu as a second row */
+.top {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 18px;
+  padding: 12px 22px 0;
+  border-bottom: 0;
+}
+.brand { padding: 4px 0 12px; font: bold 27px/1 Arial, "Helvetica Neue", sans-serif; letter-spacing: -1.2px; }
+.bn-1 { color: #ffffff; }
+.bn-2 {
+  margin-left: 2px;
+  padding: 1px 6px 3px;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #000000;
+}
+.top-search { flex: 1 1 360px; max-width: 620px; margin: 0 auto 12px; }
+.top-search .search-row { gap: 0; }
+.top .top-search input {
+  flex: 1;
+  padding: 10px 16px;
+  font-size: 15px;
+  border: 1px solid #3a3a3a;
+  border-right: 0;
+  border-radius: 4px 0 0 4px;
+  background: #1f1f1f;
+  color: #ffffff;
+}
+.top .top-search input:focus { outline: none; border-color: var(--accent); }
+.top-search .search-go {
+  display: block;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 0 4px 4px 0;
+  background: var(--accent);
+  color: #000000;
+  font-weight: bold;
+}
+.top-search .search-go:hover { background: #ffa733; color: #000000; }
+.top-tools { margin: 0 0 12px; }
+.drawer-toggle, .skin-button {
+  padding: 8px 14px;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  background: #1f1f1f;
+  color: #ffffff;
+  font-weight: bold;
+}
+.drawer-toggle:hover, .skin-button:hover { border-color: var(--accent); color: var(--accent); }
+.main-nav {
+  order: 10;
+  flex: 1 1 100%;
+  align-items: stretch;
+  gap: 4px;
+  margin: 0 -22px;
+  padding: 0 22px;
+  background: var(--panel);
+  border-top: 1px solid #2a2a2a;
+}
+.main-nav a {
+  padding: 12px 16px 10px;
+  border-radius: 0;
+  border-bottom: 3px solid transparent;
+  color: #ffffff;
+  font-weight: bold;
+}
+.main-nav a:hover, .main-nav a.active, .main-nav a.active:hover {
+  background: none;
+  color: var(--accent);
+  text-decoration: none;
+}
+.main-nav a.active { border-bottom-color: var(--accent); }
+
+.sections { padding: 16px 22px 6px; gap: 8px; border: 0; }
+.sections a {
+  padding: 6px 14px;
+  border-radius: 4px;
+  background: var(--panel);
+  color: #dddddd;
+  font-weight: bold;
+  font-size: 13px;
+}
+.sections a:hover { color: var(--accent); text-decoration: none; }
+.sections a.active { background: var(--accent); color: #000000; }
+
+.layout { padding: 6px 22px 48px; }
+.tag-chips { gap: 8px; margin: 6px 0 16px; }
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--chip);
+  font-weight: bold;
+  font-size: 13px;
+}
+.chip:hover { text-decoration: none; color: #000000; background: var(--accent); }
+.chip:hover .tag-count { color: #000000; }
+.result-bar { margin-bottom: 14px; font-size: 13px; }
+.result-count { color: #ffffff; font-weight: bold; }
+.thumb-sizes button.link { color: #dddddd; font-weight: bold; }
+.thumb-sizes button.link.active { color: var(--accent); }
+
+/* video-style previews: 16:9, title under the picture, the size in the corner */
+.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--thumb), 1fr)); gap: 24px 14px; }
+.thumb { display: block; height: auto; position: relative; container-type: inline-size; }
+.thumb-link { display: block; position: relative; line-height: 1.3; }
+.thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border: 0;
+  border-radius: var(--radius-thumb);
+  background: var(--thumb-bg);
+  transition: filter 0.2s ease;
+}
+.thumb-link:hover img { border-color: transparent; filter: brightness(1.12); }
+.thumb.untagged img { border: 0; }
+.thumb-caption {
+  display: block;
+  margin-top: 8px;
+  color: #ffffff;
+  font-weight: bold;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.thumb-link:hover .thumb-caption { color: var(--accent); text-decoration: none; }
+.thumb.untagged .thumb-caption { color: var(--muted); font-weight: normal; }
+.badges { top: 7px; left: 7px; }
+.badge { background: rgba(0, 0, 0, 0.78); color: #ffffff; border-radius: 3px; }
+.badge.kind { background: var(--accent); color: #000000; }
+.badge.fav { color: #ff9000; }
+.thumb-info { display: flex; gap: 10px; margin-top: 3px; font-size: 12px; color: var(--muted); }
+.thumb-info .ti-size {
+  position: absolute;
+  top: calc(100cqw * 9 / 16 - 27px);
+  right: 7px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #ffffff;
+  font-weight: bold;
+  font-size: 12px;
+}
+/* a video: its length in that corner, as on a video site */
+.thumb-info .ti-dur {
+  position: absolute;
+  top: calc(100cqw * 9 / 16 - 27px);
+  right: 7px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.82);
+  color: #ffffff;
+  font-weight: bold;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.thumb-info:has(.ti-dur) .ti-size { display: none; }
+.ti-rating { color: var(--accent); }
+.ti-fav { color: var(--accent); }
+
+.paginator { gap: 6px; margin-top: 32px; }
+.paginator a, .paginator b {
+  min-width: 40px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--panel);
+  font-weight: bold;
+}
+.paginator a:hover { background: var(--panel-2); color: var(--accent); }
+.paginator b { background: var(--accent); color: #000000; }
+
+button, .button { background: var(--panel-2); border-color: #3a3a3a; color: #ffffff; font-weight: bold; }
+button:hover, .button:hover { border-color: var(--accent); color: var(--accent); }
+input[type="search"], select { background: #1f1f1f; border-color: #3a3a3a; color: #ffffff; }
+.sidebar h3 { font-size: 16px; }
+.sidebar h4 { color: var(--accent); font-weight: bold; }
+.star { color: #444444; }
+.star.on { color: var(--accent); }
+.tag-table td { border-bottom-color: #262626; }
+
+/* a picture's page: a player-like black stage, its tags and info in a column on the right */
+.page-post .drawer-toggle { display: none; }
+.page-post .layout.with-sidebar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 22px;
+  align-items: start;
+}
+.page-post .sidebar {
+  position: static;
+  z-index: auto;            /* a grid item keeps its z-index even when static: the drawer's 50 would cover
+                              the look menu of the header (30) */
+  order: 2;
+  width: auto;
+  transform: none;
+  visibility: visible;
+  overflow: visible;
+  padding: 16px;
+  border-radius: 6px;
+  box-shadow: none;
+}
+.page-post .drawer-close, .page-post .drawer-backdrop { display: none; }
+.page-post .content { order: 1; }
+.post-view { align-items: stretch; gap: 12px; }
+.post-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 62vh;
+  border-radius: 6px;
+  background: #0b0b0b;
+}
+/* the picture: fitted to the window by booru.js (the base rule) */
+.post-media { background: transparent; }
+.post-nav { gap: 8px; }
+.post-nav a { padding: 8px 14px; border-radius: 4px; background: var(--panel); font-weight: bold; }
+.post-nav a:hover { color: var(--accent); text-decoration: none; }
+.post-nav .nav-back { margin-right: auto; order: -1; }

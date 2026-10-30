@@ -1,18 +1,23 @@
-"""Subscription page UI — per-author auto-download."""
+"""Subscription page UI — per-author auto-download.
+
+Checks run as core jobs (``core/subscription_jobs.py``), one at a time for the whole program; this
+page starts them, shows the journal of whatever check is going (also one started on the web page
+«Подписки») and runs the automatic check once a minute.
+"""
 from __future__ import annotations
 
 import time
-import threading
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QDialog, QFormLayout, QLineEdit, QSpinBox, QCheckBox,
+    QDialog, QFormLayout, QSpinBox, QCheckBox,
     QMessageBox, QPlainTextEdit, QSplitter, QComboBox,
 )
+from core import subscription_jobs
 from core.subscriptions import (
     load_subscriptions, add_subscription, update_subscription,
-    delete_subscription, run_subscription,
+    delete_subscription,
 )
 from core.settings import SITES_BY_ENGINE
 
@@ -22,53 +27,6 @@ def _all_sites() -> list[str]:
     for eng_sites in SITES_BY_ENGINE.values():
         sites.extend(eng_sites.keys())
     return sorted(sites)
-
-
-# ── Worker thread ─────────────────────────────────────────────────────────────
-
-class SubWorker(QThread):
-    log_line   = Signal(str)
-    progress   = Signal(int)
-    finished   = Signal(int)
-    file_ready = Signal(str)   # emitted after each file is downloaded + tagged
-    plan_required = Signal(dict)  # asks UI before a very large download
-
-    def __init__(self, sub: dict, settings: dict, run_mode: str = "all"):
-        super().__init__()
-        self.sub = sub
-        self.settings = settings
-        self.run_mode = run_mode
-        self._stop_requested = False
-        self._plan_event = threading.Event()
-        self._plan_allowed = False
-
-    def request_stop(self):
-        self._stop_requested = True
-        self._plan_allowed = False
-        self._plan_event.set()
-
-    def set_plan_decision(self, allowed: bool):
-        self._plan_allowed = bool(allowed)
-        self._plan_event.set()
-
-    def _confirm_plan(self, plan: dict) -> bool:
-        self._plan_event.clear()
-        self.plan_required.emit(plan)
-        while not self._stop_requested and not self._plan_event.wait(0.2):
-            pass
-        return bool(self._plan_allowed) and not self._stop_requested
-
-    def run(self):
-        total = run_subscription(
-            self.sub, self.settings,
-            log=self.log_line.emit,
-            progress=self.progress.emit,
-            stop_flag=self,
-            on_file_ready=self.file_ready.emit,
-            run_mode=self.run_mode,
-            confirm_plan=self._confirm_plan,
-        )
-        self.finished.emit(total)
 
 
 # ── Add/Edit dialog ───────────────────────────────────────────────────────────
@@ -253,17 +211,28 @@ class SubscriptionPage(QWidget):
     def __init__(self, main):
         super().__init__()
         self.main = main
-        self._worker: SubWorker | None = None
-        self._sub_queue: list = []
+        self._mine: set = set()          # checks started here (this page asks their large-download question)
+        self._shown_job = 0
+        self._log_after = 0
+        self._was_running = False
+        self._plan_box: QMessageBox | None = None
+        self._plan_key: tuple = ()       # (check, question number) already asked here
+        self._gallery_refreshed_at = 0.0
+        self._downloaded_seen = 0
         self._build_ui()
         self._load()
 
-        # Auto-check timer: fires every minute, runs due subscriptions
         from PySide6.QtCore import QTimer
+        # Auto-check timer: fires every minute, runs due subscriptions
         self._auto_timer = QTimer(self)
         self._auto_timer.setInterval(60_000)
         self._auto_timer.timeout.connect(self._auto_check)
         self._auto_timer.start()
+        # The check in progress (from here, the web page or the automatic check): journal and buttons
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(500)
+        self._poll_timer.timeout.connect(self._poll)
+        self._poll_timer.start()
 
     def _build_ui(self):
         lay = QVBoxLayout(self)
@@ -406,16 +375,23 @@ class SubscriptionPage(QWidget):
             update_subscription(sub_id, **d)
             self._load()
 
+    def _busy_with(self, sub_id: str) -> bool:
+        if sub_id in subscription_jobs.running_ids():
+            QMessageBox.information(self, "Подписки", "Эта подписка сейчас проверяется — остановите проверку или дождитесь конца.")
+            return True
+        return False
+
     def _delete(self):
         sub_id = self._selected_sub_id()
-        if not sub_id:
+        if not sub_id or self._busy_with(sub_id):
             return
         row = self.table.currentRow()
         name = self.table.item(row, 0).text() if row >= 0 else "?"
         reply = QMessageBox.question(self, "Удалить",
                     f"Удалить подписку «{name}»?\nСкачанные файлы остаются.",
                     QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        # the automatic check may have taken it while the question was open
+        if reply == QMessageBox.Yes and not self._busy_with(sub_id):
             delete_subscription(sub_id)
             self._load()
 
@@ -431,20 +407,19 @@ class SubscriptionPage(QWidget):
         self.run_all_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
 
-    def _run_sub(self, sub: dict):
-        if self._worker and self._worker.isRunning():
+    def _start(self, subs: list, label: str, kind: str = "check") -> None:
+        try:
+            job = subscription_jobs.start(self.main.settings, subs, label=label, kind=kind)
+        except subscription_jobs.SubscriptionsBusy as exc:
+            QMessageBox.information(self, "Подписки", str(exc))
             return
-        self._set_running(True)
+        self._mine.add(job.id)
+        self._poll()
+
+    def _run_sub(self, sub: dict):
         from core.subscriptions import normalize_sites
         _sites_str = ', '.join(s['site'] for s in normalize_sites(sub))
-        self._log(f"▶ Запуск: {sub['name']} @ {_sites_str}")
-        self._worker = SubWorker(sub, self.main.settings,
-                                  run_mode=sub.get("run_mode", "all"))
-        self._worker.log_line.connect(self._log)
-        self._worker.plan_required.connect(self._confirm_large_plan)
-        self._worker.finished.connect(self._on_done)
-        self._worker.file_ready.connect(self._on_file_ready)
-        self._worker.start()
+        self._start([sub], f"Подписка: {sub.get('name') or sub.get('query')} @ {_sites_str}")
 
     def _run_selected(self):
         sub_id = self._selected_sub_id()
@@ -461,78 +436,89 @@ class SubscriptionPage(QWidget):
         if not subs:
             QMessageBox.information(self, "Подписки", "Нет активных подписок.")
             return
-        # Run sequentially via queue
-        self._sub_queue = subs[:]
-        self._run_next()
+        self._start(subs, "Все подписки")
 
-    def _run_next(self):
-        if not hasattr(self, "_sub_queue") or not self._sub_queue:
-            self._set_running(False)
-            self._log("✓ Все подписки проверены.")
+    def _poll(self):
+        """Show the check in progress: new journal lines, the buttons, its large-download question."""
+        job = subscription_jobs.current()
+        if job is None:
+            self._set_running(subscription_jobs.is_running())
+            return
+        if job.id != self._shown_job:
+            self._shown_job, self._log_after, self._downloaded_seen = job.id, 0, 0
+            self._log(f"▶ {job.label}")
+        snap = job.snapshot(after=self._log_after)
+        for line in snap["log"]:
+            self._log(line["text"])
+        self._log_after = max(self._log_after, snap["last_seq"])
+        running = snap["status"] in {"starting", "running", "waiting", "stopping"}
+        self._set_running(running)
+        if snap["downloaded"] > self._downloaded_seen and time.time() - self._gallery_refreshed_at > 10:
+            self._downloaded_seen = snap["downloaded"]
+            self._on_file_ready("")
+        key = (job.id, snap["plan"].get("seq"))
+        if snap["status"] == "waiting" and snap["plan"] and job.id in self._mine and key != self._plan_key:
+            self._ask_plan(job, snap["plan"], key)
+        elif snap["status"] != "waiting" and self._plan_box is not None:
+            box, self._plan_box = self._plan_box, None
+            box.setProperty("lb_closed_by_page", True)
+            box.close()                       # answered on the web page, or nobody answered in time
+        if self._was_running and not running:
             self._load()
-            return
-        sub = self._sub_queue.pop(0)
-        self._set_running(True)
-        from core.subscriptions import normalize_sites
-        _sites_str = ', '.join(s['site'] for s in normalize_sites(sub))
-        self._log(f"▶ Проверяю: {sub['name']} @ {_sites_str}")
-        self._worker = SubWorker(sub, self.main.settings,
-                                  run_mode=sub.get("run_mode", "all"))
-        self._worker.log_line.connect(self._log)
-        self._worker.plan_required.connect(self._confirm_large_plan)
-        self._worker.finished.connect(self._on_queue_step)
-        self._worker.file_ready.connect(self._on_file_ready)
-        self._worker.start()
+            self._on_file_ready("")
+        self._was_running = running
 
-    def _on_queue_step(self, count: int):
-        self._log(f"  → {count} новых файлов")
-        self._run_next()
-
-    def _confirm_large_plan(self, plan: dict):
+    def _ask_plan(self, job, plan: dict, key: tuple):
         from core.preflight import format_bytes
-        worker = self._worker
-        if not worker:
-            return
-        disk = plan.get("disk", {})
-        known = int(plan.get("known_files", 0) or 0)
+        self._plan_key = key
         text = (
-            f"Найдено файлов для загрузки: {int(plan.get('groups', 0) or 0)}\n"
+            f"Найдено файлов для загрузки: {int(plan.get('files', 0) or 0)}\n"
             f"Известный размер: {format_bytes(plan.get('known_bytes', 0))} "
-            f"для {known} файл(ов)\n"
-            f"Свободно на диске: {format_bytes(disk.get('free', 0))}\n\n"
+            f"для {int(plan.get('known_files', 0) or 0)} файл(ов)\n"
+            f"Свободно на диске: {format_bytes(plan.get('disk_free', 0))}\n\n"
             "Загрузка может занять много времени из-за ограничений сайтов. "
             "При временных ошибках программа будет ждать и продолжать позже."
         )
         if plan.get("not_enough_space"):
             text += "\n\nВНИМАНИЕ: известный размер уже превышает свободное место с резервом."
-        answer = QMessageBox.question(self, "Большая загрузка", text + "\n\nПродолжить?", QMessageBox.Yes | QMessageBox.No)
-        worker.set_plan_decision(answer == QMessageBox.Yes)
+        box = QMessageBox(QMessageBox.Question, "Большая загрузка", text + "\n\nПродолжить?",
+                          QMessageBox.Yes | QMessageBox.No, self)
+        box.setAttribute(Qt.WA_DeleteOnClose)
+
+        def _closed(_result):
+            if self._plan_box is box:
+                self._plan_box = None
+            if box.property("lb_closed_by_page"):
+                return                        # answered elsewhere: nothing to answer from here
+            clicked = box.clickedButton()     # None: closed with × or Alt+F4 — that is «no», as before
+            job.decide(clicked is not None and box.standardButton(clicked) == QMessageBox.Yes,
+                       seq=plan.get("seq"))
+        box.finished.connect(_closed)
+        self._plan_box = box
+        box.open()                            # not exec(): the journal keeps moving while it is open
 
     def _on_file_ready(self, path: str):
-        """Refresh gallery when a new file is ready."""
+        """Refresh the old gallery when new files arrived."""
+        self._gallery_refreshed_at = time.time()
         try:
             gallery = getattr(self.main, "gallery_page", None)
             if gallery and hasattr(gallery, "refresh"):
                 gallery.refresh()
-        except Exception:
-            pass
-
-    def _on_done(self, count: int):
-        self._log(f"✓ Готово: {count} новых файлов.")
-        self._set_running(False)
-        self._load()
+        except Exception as exc:          # the gallery shows the files at its next refresh anyway
+            self._log(f"  галерея не обновилась: {type(exc).__name__}: {exc}")
 
     def _stop(self):
-        if self._worker and self._worker.isRunning():
-            self._worker.request_stop()
+        job = subscription_jobs.current()
+        if job is not None and job.status in {"running", "waiting", "starting"}:
+            job.stop()
             self._log("⏹ Остановка после текущего файла...")
-        self._sub_queue = []
-        self._set_running(False)
 
     def _clear_downloads(self):
         sub_id = self._selected_sub_id()
         if not sub_id:
             QMessageBox.information(self, "Подписки", "Выбери подписку в таблице.")
+            return
+        if self._busy_with(sub_id):
             return
         from core.subscriptions import get_subscription, normalize_sites, update_subscription
         from core.downloader_utils import _safe
@@ -618,7 +604,7 @@ class SubscriptionPage(QWidget):
             f"Удалить {total_files} файлов из {len(to_delete)} сессии(й)?",
             QMessageBox.Yes | QMessageBox.No
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.Yes or self._busy_with(sub_id):     # taken by the automatic check meanwhile
             return
 
         # Never destroy downloaded session media directly: move every media file
@@ -663,25 +649,21 @@ class SubscriptionPage(QWidget):
 
     def _auto_check(self):
         """Called every minute. Runs subscriptions that are past their interval."""
-        if self._worker and self._worker.isRunning():
-            return
-        if getattr(self, "_sub_queue", []):
-            return
         try:
-            from core.subscriptions import due_subscriptions
-            due = due_subscriptions()
-        except Exception:
+            job = subscription_jobs.start_due(self.main.settings)
+        except Exception as exc:          # a broken subscriptions file must not stop the timer
+            self._log(f"Автопроверка не запустилась: {type(exc).__name__}: {exc}")
             return
-        if not due:
-            return
-        self._log(f"\u23f0 \u0410\u0432\u0442\u043e-\u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: {len(due)} \u043f\u043e\u0434\u043f\u0438\u0441\u043e\u043a(\u0438) \u043f\u0440\u043e\u0441\u0440\u043e\u0447\u0435\u043d\u043e")
-        self._sub_queue = list(due)
-        self._run_next()
+        if job is not None:
+            self._mine.add(job.id)
+            self._log(f"⏰ Автопроверка: {len(job.subs)} подписок(и) пора проверить")
 
     def _reset_checkpoint(self):
         sub_id = self._selected_sub_id()
         if not sub_id:
             QMessageBox.information(self, "Подписки", "Выбери подписку.")
+            return
+        if self._busy_with(sub_id):
             return
         from core.subscriptions import get_subscription, update_subscription
         sub = get_subscription(sub_id)
@@ -694,7 +676,7 @@ class SubscriptionPage(QWidget):
             "Следующий запуск пересканирует все посты с нуля.",
             QMessageBox.Yes | QMessageBox.No
         )
-        if reply != QMessageBox.Yes:
+        if reply != QMessageBox.Yes or self._busy_with(sub_id):     # taken by the automatic check meanwhile
             return
         update_subscription(sub_id, last_post_ids={}, oldest_post_ids={}, last_check=0)
         self._log("↺ Checkpoint сброшен.")

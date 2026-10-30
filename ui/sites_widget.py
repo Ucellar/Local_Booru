@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.settings import SITES_BY_ENGINE, ALL_KNOWN_SITES
+from core.net import http_request
 
 C_ENABLED = 0
 C_URL = 1
@@ -41,38 +42,8 @@ ENGINE_COLORS = {
     "e621": "#d06020",
     "Свой": "#808080",
 }
-ENGINE_TYPES = {
-    "Danbooru": "danbooru",
-    "Gelbooru": "gelbooru",
-    "Moebooru": "moebooru",
-    "e621": "e621",
-    "Свой": "custom",
-}
-
-
-def _clean_domain(text: str) -> str:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    if "://" in raw:
-        raw = urlparse(raw).netloc
-    return raw.lower().replace("www.", "").strip("/")
-
-
-def _engine_label(cfg: dict, fallback: str = "Свой") -> str:
-    shown = str(cfg.get("engine_label") or "").strip()
-    if shown in ENGINE_TYPES:
-        return shown
-    raw = str(cfg.get("engine") or cfg.get("type") or fallback).strip().lower()
-    if raw in ("danbooru", "danbooru2", "danbooru_html"):
-        return "Danbooru"
-    if raw in ("gelbooru", "gelbooru_html", "rule34xxx", "rule34.xxx", "dapi", "hypnohub"):
-        return "Gelbooru"
-    if raw in ("moebooru", "rule34us", "rule34.us"):
-        return "Moebooru"
-    if raw in ("e621", "e926"):
-        return "e621"
-    return fallback if fallback in ENGINE_TYPES else "Свой"
+# One definition of the table for this widget and the web page «Сайты» (core/site_table.py).
+from core.site_table import ENGINE_TYPES, clean_domain as _clean_domain, engine_label as _engine_label
 
 
 def _item(text: str = "") -> QTableWidgetItem:
@@ -249,6 +220,11 @@ class _SiteCheckWorker(QThread):
 
     def __init__(self, sites: list[tuple[str, dict]], parent=None):
         super().__init__(parent)
+        try:
+            from core.shutdown import register_qthread
+            register_qthread(self, "SiteCheckWorker")
+        except Exception:
+            pass
         self.sites = sites
 
     @staticmethod
@@ -327,7 +303,7 @@ class _SiteCheckWorker(QThread):
             else:
                 auth_mark = " + auth fields" if cfg.get("api_key") or cfg.get("login") else ""
             try:
-                r = requests.get(url, params=params, headers=headers, auth=auth, timeout=10)
+                r = http_request(requests, "GET", url, params=params, headers=headers, auth=auth, timeout=10)
                 content_type = str(r.headers.get("Content-Type", "")).lower()
                 head = (r.text or "")[:300].replace("\n", " ").replace("\r", " ")
                 low = head.lower()
@@ -451,64 +427,8 @@ class SitesWidget(QWidget):
                 button.setIconSize(QSize(16, 16))
 
     def load(self, settings: dict):
-        self._entries.clear()
-        self._deleted_builtin_sites = set(str(x) for x in settings.get("deleted_builtin_sites", []) if str(x))
-        saved_sites = settings.get("sites", {}) if isinstance(settings.get("sites"), dict) else {}
-        saved_custom = settings.get("custom_sites", []) if isinstance(settings.get("custom_sites"), list) else []
-        used_saved_keys: set[str] = set()
-
-        for engine, sites in SITES_BY_ENGINE.items():
-            for builtin_domain, defaults in sites.items():
-                if builtin_domain in self._deleted_builtin_sites:
-                    continue
-                override_key = None
-                for key, value in saved_sites.items():
-                    if key == builtin_domain or (isinstance(value, dict) and value.get("builtin_id") == builtin_domain):
-                        override_key = key
-                        break
-                saved = saved_sites.get(override_key, {}) if override_key else {}
-                if override_key:
-                    used_saved_keys.add(override_key)
-                cfg = {**defaults, **(saved if isinstance(saved, dict) else {})}
-                cfg.setdefault("domain", _clean_domain(cfg.get("base_url") or builtin_domain) or builtin_domain)
-                cfg.setdefault("base_url", cfg.get("login_url") or f"https://{cfg['domain']}")
-                cfg.setdefault("description", cfg.get("notes", ""))
-                cfg["builtin_id"] = builtin_domain
-                cfg["_custom"] = False
-                cfg["_id"] = f"builtin:{builtin_domain}"
-                cfg.setdefault("engine_label", engine)
-                self._entries[cfg["_id"]] = cfg
-
-        # Retain unrecognised flat configs as user sites instead of silently losing them.
-        for domain, value in saved_sites.items():
-            if domain in used_saved_keys or not isinstance(value, dict):
-                continue
-            if domain in self._deleted_builtin_sites or str(value.get("builtin_id") or "") in self._deleted_builtin_sites:
-                continue
-            cfg = deepcopy(value)
-            cfg.setdefault("domain", domain)
-            cfg.setdefault("base_url", cfg.get("login_url") or f"https://{domain}")
-            cfg.setdefault("description", cfg.get("notes", ""))
-            cfg["_custom"] = True
-            cfg["_id"] = str(cfg.get("site_id") or f"custom:{uuid.uuid4().hex}")
-            cfg["site_id"] = cfg["_id"]
-            self._entries[cfg["_id"]] = cfg
-
-        for value in saved_custom:
-            if not isinstance(value, dict):
-                continue
-            cfg = deepcopy(value)
-            cfg.setdefault("domain", _clean_domain(cfg.get("base_url") or ""))
-            cfg.setdefault("base_url", cfg.get("login_url") or (f"https://{cfg['domain']}" if cfg.get("domain") else ""))
-            cfg.setdefault("description", cfg.get("notes", ""))
-            cfg["_custom"] = True
-            cfg["_id"] = str(cfg.get("site_id") or f"custom:{uuid.uuid4().hex}")
-            cfg["site_id"] = cfg["_id"]
-            self._entries[cfg["_id"]] = cfg
-
-        saved_order = [str(x) for x in settings.get("site_manual_order", []) if str(x) in self._entries]
-        missing = [key for key in self._entries if key not in saved_order]
-        self._manual_order = saved_order + missing
+        from core import site_table
+        self._entries, self._manual_order, self._deleted_builtin_sites = site_table.load(settings)
         self._sort_column = None
         self._sort_desc = False
         self._render()
@@ -754,28 +674,8 @@ class SitesWidget(QWidget):
         answer = QMessageBox.question(self, "Стандартные сайты", "Вернуть удалённые предустановленные сайты в список?")
         if answer != QMessageBox.Yes:
             return
-        previous_deleted = set(self._deleted_builtin_sites)
-        self._deleted_builtin_sites.clear()
-        # Preserve edited/current rows and append only the missing templates.
-        for engine, sites in SITES_BY_ENGINE.items():
-            for builtin_domain, defaults in sites.items():
-                if builtin_domain not in previous_deleted:
-                    continue
-                entry_id = f"builtin:{builtin_domain}"
-                if entry_id in self._entries:
-                    continue
-                cfg = deepcopy(defaults)
-                cfg.update({
-                    "domain": builtin_domain,
-                    "base_url": cfg.get("login_url") or f"https://{builtin_domain}",
-                    "description": cfg.get("notes", ""),
-                    "engine_label": engine,
-                    "builtin_id": builtin_domain,
-                    "_custom": False,
-                    "_id": entry_id,
-                })
-                self._entries[entry_id] = cfg
-                self._manual_order.append(entry_id)
+        from core import site_table
+        site_table.restore_builtins(self._entries, self._manual_order, self._deleted_builtin_sites)
         self._render()
         self.changed.emit()
 
@@ -846,23 +746,8 @@ class SitesWidget(QWidget):
             QApplication.processEvents()
         except Exception:
             pass
-        sites: dict = {}
-        custom: list = []
-        for entry_id in self._manual_order:
-            cfg = deepcopy(self._entries.get(entry_id, {}))
-            if not cfg or not cfg.get("domain"):
-                continue
-            cfg.pop("_id", None)
-            is_custom = bool(cfg.pop("_custom", False))
-            domain = _clean_domain(cfg.get("domain"))
-            cfg["domain"] = domain
-            cfg.setdefault("base_url", cfg.get("login_url") or f"https://{domain}")
-            if is_custom:
-                cfg.setdefault("site_id", entry_id)
-                custom.append(cfg)
-            else:
-                sites[domain] = cfg
-        return sites, custom
+        from core import site_table
+        return site_table.collect(self._entries, self._manual_order)
 
     def deleted_builtin_sites(self) -> list[str]:
         return sorted(self._deleted_builtin_sites)

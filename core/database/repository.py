@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from pathlib import Path
+import logging
 import re
+import sqlite3
 import time
 from functools import wraps
 from core.performance import timed as _perf_timed
 from core.tag_utils import normalize_tag, should_hide_tag
 from .connection import db
+
+_LOG = logging.getLogger(__name__)
 
 
 def _measure(operation):
@@ -53,6 +57,109 @@ def _parse_query(query):
     return plus_groups, minus_groups
 
 
+def _expand_relation_groups(settings, groups, source):
+    """Expand query tokens through the selected site's official aliases.
+
+    Source-specific gallery searches use that site's relation graph. The
+    All-sources union intentionally uses rule34.xxx as the preferred canonical
+    vocabulary, per the archive policy, while keeping original spellings in the
+    option set so unresolved tags remain searchable.
+
+    Returns one ``(names, patterns)`` pair per group: exact tag names (each typed name, its stored
+    spellings in any letter case and their aliases) and LIKE patterns for options with "*".  The
+    patterns are matched by SQL itself, so "tag_*" finds every such tag however many there are
+    (the expanded list used to stop at 2000 names, silently), and a tag whose name really has a
+    "*" in it ("c*ck") is still found by its exact name.
+    """
+    if not groups:
+        return []
+    patterns_of = [[_like_pattern(norm) for norm in (normalize_tag(v) for v in options) if norm and "*" in norm]
+                   for options in groups]
+    try:
+        from core.tag_relations import canonical_site_for_scope
+        site = canonical_site_for_scope(source)
+        expanded = []
+        with db(settings, readonly=True) as con:
+            for options, patterns in zip(groups, patterns_of):
+                seen = {normalize_tag(value) for value in options if normalize_tag(value)}
+                seen |= _stored_spellings(con, options)
+                frontier = set(seen)
+                for _depth in range(16):
+                    if not frontier:
+                        break
+                    ph = ",".join("?" for _ in frontier)
+                    args = [site, *sorted(frontier), *sorted(frontier)]
+                    rows = con.execute(
+                        f"""SELECT source_tag,target_tag FROM tag_relations
+                            WHERE source_site=? AND relation_type='alias' AND status='active'
+                              AND (source_tag IN ({ph}) OR target_tag IN ({ph}))""",
+                        args,
+                    ).fetchall()
+                    sibling_rows = con.execute(
+                        f"""SELECT tag AS source_tag,canonical AS target_tag FROM tag_siblings
+                            WHERE tag IN ({ph}) OR canonical IN ({ph})""",
+                        (*sorted(frontier), *sorted(frontier)),
+                    ).fetchall()
+                    next_frontier = set()
+                    for row in [*rows, *sibling_rows]:
+                        for value in (row["source_tag"], row["target_tag"]):
+                            norm = normalize_tag(value)
+                            if norm and norm not in seen:
+                                seen.add(norm); next_frontier.add(norm)
+                    frontier = next_frontier
+                expanded.append((sorted(seen), patterns))
+        return expanded
+    except sqlite3.Error as exc:   # search still works, only without aliases
+        _LOG.warning("tag aliases for the search are unavailable: %s", exc)
+        return [(list(options), patterns) for options, patterns in zip(groups, patterns_of)]
+
+
+# A wildcard that matches at most this many tags also brings their aliases; a wider one is
+# searched by its pattern alone (its matches are found all the same).
+_WILDCARD_ALIAS_LIMIT = 200
+
+
+def _like_pattern(tag: str) -> str:
+    """LIKE pattern for a typed tag: "*" is any text; "_" and "%" are themselves (tags are full of "_")."""
+    text = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return text.replace("*", "%")
+
+
+def _stored_spellings(con, options) -> set:
+    """Tag names in the library that a typed option means: any letter case; the tags a narrow "*"
+    pattern matches (for their aliases; the pattern itself is searched in SQL)."""
+    out = set()
+    for value in options:
+        norm = normalize_tag(value)
+        if not norm:
+            continue
+        if "*" in norm:
+            rows = con.execute(
+                "SELECT normalized_name FROM tags WHERE normalized_name LIKE ? ESCAPE '\\' LIMIT ?",
+                (_like_pattern(norm), _WILDCARD_ALIAS_LIMIT + 1),
+            ).fetchall()
+            if len(rows) > _WILDCARD_ALIAS_LIMIT:
+                rows = con.execute("SELECT normalized_name FROM tags WHERE normalized_name = ?", (norm,)).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT normalized_name FROM tags WHERE normalized_name = ? COLLATE NOCASE", (norm,)
+            ).fetchall()
+        out.update(str(r[0]) for r in rows if r[0])
+    return out
+
+
+def _tag_condition(names, patterns) -> tuple[str, list]:
+    """SQL condition on ``t.normalized_name`` for one group of options (any of them)."""
+    parts, args = [], []
+    if names:
+        parts.append(f"t.normalized_name IN ({','.join('?' for _ in names)})")
+        args.extend(names)
+    for pattern in patterns:
+        parts.append("t.normalized_name LIKE ? ESCAPE '\\'")
+        args.append(pattern)
+    return ("(" + " OR ".join(parts) + ")" if parts else "0"), args
+
+
 def _bucket_clause(bucket):
     if not bucket or bucket == "all":
         return "", []
@@ -67,12 +174,65 @@ def _bucket_clause(bucket):
     if bucket == "archive":
         return "COALESCE(i.lifecycle,'archive')='archive'", []
     if bucket == "trash":
-        return "i.lifecycle='trash'", []
+        return "i.lifecycle IN ('trash','missing')", []
     return "i.bucket=?", [bucket]
 
 
-def _base_search_sql(query="", source="all", bucket="all", count=False):
+# A сборка of cards (core/card_sets.py) is one tile of the gallery: of its cards found by a search only the first
+# (by its place in the сборка) is listed.  ``hits`` — the cards the search finds (a WITH of the same conditions).
+COLLAPSE_SETS = (
+    "NOT EXISTS (SELECT 1 FROM card_set_members me JOIN card_set_members o ON o.set_id=me.set_id "
+    "WHERE me.image_id=i.id AND (o.position<me.position OR (o.position=me.position AND o.image_id<me.image_id)) "
+    "AND o.image_id IN (SELECT id FROM hits))"
+)
+
+
+def _collapse_sets(settings, sql, args, query, source, bucket, extra_where, extra_params):
+    """``sql`` (a search over ``images i`` with its WHERE) listing one card per сборка."""
+    conditions, cond_args = _search_conditions(settings, query, source, bucket)
+    conditions = conditions + list(extra_where or [])
+    cond_args = list(cond_args) + list(extra_params or [])
+    head = "WITH hits(id) AS (SELECT i.id FROM images i WHERE " + " AND ".join(conditions) + ") "
+    return head + sql + " AND " + COLLAPSE_SETS, cond_args + list(args)
+
+
+def _base_search_sql(settings, query="", source="all", bucket="all", count=False):
+    where, args = _search_conditions(settings, query, source, bucket)
+    if count:
+        select = "COUNT(*) AS c"
+        sql = "SELECT " + select + " FROM images i"
+    else:
+        select = (
+            "i.*, COALESCE(fi.presence_status,'unknown') AS file_presence_status, "
+            "COALESCE(fi.root_status,'unknown') AS file_presence_root_status, "
+            "COALESCE(fi.root_path,'') AS file_presence_root_path, "
+            "COALESCE(fi.last_error,'') AS file_presence_error, "
+            "COALESCE(fi.last_presence_check,0) AS file_presence_checked_at, "
+            "COALESCE(gf.family_id,0) AS family_id, COALESCE(gfi.family_index,0) AS family_index, "
+            "COALESCE(gf.total_items,0) AS family_total, COALESCE(gf.family_type,'') AS family_type, "
+            "COALESCE(gf.family_source,'') AS family_source, COALESCE(gf.title,'') AS family_title, "
+            "COALESCE(gf.completion_status,'unknown') AS family_completion_status, "
+            "COALESCE(gf.sort_anchor,0) AS family_sort_anchor"
+        )
+        sql = (
+            "SELECT " + select + " FROM images i "
+            "LEFT JOIN image_file_integrity fi ON fi.image_id=i.id AND fi.checked_path=i.path "
+            "LEFT JOIN media_family_items gfi ON gfi.image_id=i.id AND gfi.family_id=("
+            " SELECT mfi2.family_id FROM media_family_items mfi2 "
+            " JOIN media_families mf2 ON mf2.family_id=mfi2.family_id "
+            " WHERE mfi2.image_id=i.id ORDER BY mf2.order_confidence DESC,mfi2.family_id LIMIT 1"
+            ") LEFT JOIN media_families gf ON gf.family_id=gfi.family_id"
+        )
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return sql, args
+
+
+def _search_conditions(settings, query="", source="all", bucket="all"):
+    """The WHERE conditions (on ``images i``) and their parameters of a gallery search."""
     plus, minus = _parse_query(query)
+    plus = _expand_relation_groups(settings, plus, source)
+    minus = _expand_relation_groups(settings, minus, source)
     joins = []
     # Trash is intentionally viewable; every other gallery section hides deleted rows.
     where = ["i.deleted=1" if bucket == "trash" else "i.deleted=0"]
@@ -82,41 +242,25 @@ def _base_search_sql(query="", source="all", bucket="all", count=False):
     # Space = intersection. Each slash-group accepts any one option. When a
     # site filter is active, search the selected site's independent tag set,
     # not a tag supplied by another site for the same image.
-    for options in plus:
-        ph = ",".join(["?"] * len(options))
-        if selected_source != "all":
-            where.append(f"""EXISTS (
-                SELECT 1 FROM image_source_tags ist
-                JOIN sources ts ON ts.id=ist.source_id
-                JOIN tags t ON t.id=ist.tag_id
-                WHERE ist.image_id=i.id AND ts.host=? AND t.normalized_name IN ({ph})
-            )""")
-            args.append(selected_source); args.extend(options)
-        else:
-            where.append(f"""EXISTS (
-                SELECT 1 FROM image_tags it
-                JOIN tags t ON t.id=it.tag_id
-                WHERE it.image_id=i.id AND t.normalized_name IN ({ph})
-            )""")
-            args.extend(options)
-
-    for options in minus:
-        ph = ",".join(["?"] * len(options))
-        if selected_source != "all":
-            where.append(f"""NOT EXISTS (
-                SELECT 1 FROM image_source_tags ist
-                JOIN sources ts ON ts.id=ist.source_id
-                JOIN tags t ON t.id=ist.tag_id
-                WHERE ist.image_id=i.id AND ts.host=? AND t.normalized_name IN ({ph})
-            )""")
-            args.append(selected_source); args.extend(options)
-        else:
-            where.append(f"""NOT EXISTS (
-                SELECT 1 FROM image_tags it
-                JOIN tags t ON t.id=it.tag_id
-                WHERE it.image_id=i.id AND t.normalized_name IN ({ph})
-            )""")
-            args.extend(options)
+    for negate, groups in ((False, plus), (True, minus)):
+        exists = "NOT EXISTS" if negate else "EXISTS"
+        for names, patterns in groups:
+            condition, cond_args = _tag_condition(names, patterns)
+            if selected_source != "all":
+                where.append(f"""{exists} (
+                    SELECT 1 FROM image_source_tags ist
+                    JOIN sources ts ON ts.id=ist.source_id
+                    JOIN tags t ON t.id=ist.tag_id
+                    WHERE ist.image_id=i.id AND ts.host=? AND {condition}
+                )""")
+                args.append(selected_source); args.extend(cond_args)
+            else:
+                where.append(f"""{exists} (
+                    SELECT 1 FROM image_tags it
+                    JOIN tags t ON t.id=it.tag_id
+                    WHERE it.image_id=i.id AND {condition}
+                )""")
+                args.extend(cond_args)
 
     if selected_source != "all":
         where.append("""EXISTS (
@@ -129,48 +273,55 @@ def _base_search_sql(query="", source="all", bucket="all", count=False):
     bsql, bargs = _bucket_clause(bucket)
     if bsql:
         where.append(bsql); args.extend(bargs)
-
-    select = "COUNT(*) AS c" if count else "i.*"
-    sql = "SELECT " + select + " FROM images i"
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    return sql, args
+    return where, args
 
 
 @_measure("sql.gallery.count")
 def count_search_items(settings, query="", source="all", bucket="all",
-                       extra_where=None, extra_params=None):
-    sql, args = _base_search_sql(query, source, bucket, count=True)
+                       extra_where=None, extra_params=None, collapse_sets=False):
+    """How many cards a search finds (``collapse_sets`` — a сборка counts once: the gallery's tiles)."""
+    sql, args = _base_search_sql(settings, query, source, bucket, count=True)
     if extra_where:
         for cond in extra_where:
             sql += f" AND {cond}"
         args = list(args) + list(extra_params or [])
+    if collapse_sets:
+        sql, args = _collapse_sets(settings, sql, args, query, source, bucket, extra_where, extra_params)
     with db(settings, readonly=True) as con:
         return int(con.execute(sql, args).fetchone()["c"] or 0)
 
 
 @_measure("sql.gallery.page")
 def search_items(settings, query="", source="all", bucket="all", limit=None, offset=0, order="path",
-                 extra_where=None, extra_params=None):
-    sql, args = _base_search_sql(query, source, bucket, count=False)
+                 extra_where=None, extra_params=None, collapse_sets=False):
+    sql, args = _base_search_sql(settings, query, source, bucket, count=False)
     if extra_where:
         for cond in extra_where:
             sql += f" AND {cond}"
         args = list(args) + list(extra_params or [])
-    order_sql = "i.path COLLATE NOCASE"
+    if collapse_sets:
+        sql, args = _collapse_sets(settings, sql, args, query, source, bucket, extra_where, extra_params)
+    # A discovered family is an atomic gallery block.  ``family_sort_anchor``
+    # selects the block position while ``family_index`` keeps pages contiguous
+    # in canonical order. Non-family rows get an image-specific anchor, so they
+    # retain the requested global order without being grouped together.
+    family_tail = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN gfi.family_index ELSE 0 END ASC, i.id ASC"
     if order == "newest":
-        order_sql = "i.mtime_ns DESC, i.path COLLATE NOCASE"
+        anchor = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN COALESCE(NULLIF(gf.sort_anchor,0),CAST(i.mtime_ns/1000000000 AS INTEGER)) ELSE CAST(i.mtime_ns/1000000000 AS INTEGER) END"
+        order_sql = f"{anchor} DESC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE -i.id END DESC, {family_tail}"
     elif order == "oldest":
-        order_sql = "i.mtime_ns ASC, i.path COLLATE NOCASE"
+        anchor = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN COALESCE(NULLIF(gf.sort_anchor,0),CAST(i.mtime_ns/1000000000 AS INTEGER)) ELSE CAST(i.mtime_ns/1000000000 AS INTEGER) END"
+        order_sql = f"{anchor} ASC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE i.id END ASC, {family_tail}"
     elif order == "parsed_newest":
-        # Gallery bucket "Новые" should mean "last parsed/imported by Local Booru",
-        # not the file's original download/mtime. indexed_at is bumped by the
-        # parser/import metadata upsert path and is cheap to sort by.
-        order_sql = "i.indexed_at DESC, i.id DESC"
+        anchor = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN COALESCE(NULLIF(gf.sort_anchor,0),i.indexed_at) ELSE i.indexed_at END"
+        order_sql = f"{anchor} DESC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE -i.id END DESC, {family_tail}"
     elif order == "parsed_oldest":
-        order_sql = "i.indexed_at ASC, i.id ASC"
+        anchor = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN COALESCE(NULLIF(gf.sort_anchor,0),i.indexed_at) ELSE i.indexed_at END"
+        order_sql = f"{anchor} ASC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE i.id END ASC, {family_tail}"
     elif order == "filename":
-        order_sql = "i.file_name COLLATE NOCASE"
+        order_sql = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN LOWER(COALESCE(NULLIF(gf.title,''),i.file_name)) ELSE LOWER(i.file_name) END ASC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE i.id END ASC, " + family_tail
+    else:
+        order_sql = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN LOWER(COALESCE(NULLIF(gf.title,''),i.path)) ELSE LOWER(i.path) END ASC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE i.id END ASC, " + family_tail
     sql += " ORDER BY " + order_sql
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
@@ -194,10 +345,25 @@ def _item_from_row(row, load_details=False):
         "size_bytes": int(row["size_bytes"] or 0),
         "width": int(row["width"] or 0),
         "height": int(row["height"] or 0),
+        "duration": float(row["duration"] or 0) if "duration" in row.keys() else 0.0,
         "hash_md5": row["hash_md5"],
         "lifecycle": row["lifecycle"] if "lifecycle" in row.keys() else "archive",
         "favorite": bool(row["favorite"]) if "favorite" in row.keys() else False,
+        "rating": int(row["rating"] or 0) if "rating" in row.keys() else 0,
         "trashed_at": int(row["trashed_at"] or 0) if "trashed_at" in row.keys() else 0,
+        "presence_status": str(row["file_presence_status"] or "unknown") if "file_presence_status" in row.keys() else "unknown",
+        "presence_root_status": str(row["file_presence_root_status"] or "unknown") if "file_presence_root_status" in row.keys() else "unknown",
+        "presence_root_path": str(row["file_presence_root_path"] or "") if "file_presence_root_path" in row.keys() else "",
+        "presence_error": str(row["file_presence_error"] or "") if "file_presence_error" in row.keys() else "",
+        "presence_checked_at": int(row["file_presence_checked_at"] or 0) if "file_presence_checked_at" in row.keys() else 0,
+        "family_id": int(row["family_id"] or 0) if "family_id" in row.keys() else 0,
+        "family_index": int(row["family_index"] or 0) if "family_index" in row.keys() else 0,
+        "family_total": int(row["family_total"] or 0) if "family_total" in row.keys() else 0,
+        "family_type": str(row["family_type"] or "") if "family_type" in row.keys() else "",
+        "family_source": str(row["family_source"] or "") if "family_source" in row.keys() else "",
+        "family_title": str(row["family_title"] or "") if "family_title" in row.keys() else "",
+        "family_completion_status": str(row["family_completion_status"] or "unknown") if "family_completion_status" in row.keys() else "unknown",
+        "family_sort_anchor": int(row["family_sort_anchor"] or 0) if "family_sort_anchor" in row.keys() else 0,
     }
 
 
@@ -304,6 +470,14 @@ def enrich_items(settings, items, tag_source="all"):
                 WHERE ist.image_id IN ({ph})
                 ORDER BY s.host COLLATE NOCASE, ist.category, t.name COLLATE NOCASE
             """, chunk).fetchall()
+            # Build the legacy fallback index once per chunk.  The old code
+            # rescanned every legacy row for every item without provenance,
+            # turning page enrichment into O(items * legacy_rows) Python work
+            # while holding the GIL.  Grouping once keeps the fallback linear.
+            legacy_by_image = defaultdict(list)
+            for r in legacy_rows:
+                legacy_by_image[int(r["image_id"])].append(r)
+
             has_provenance = set()
             for r in source_rows:
                 item = by_id.get(int(r["image_id"]))
@@ -325,9 +499,7 @@ def enrich_items(settings, items, tag_source="all"):
                     groups = _merged_source_groups(item.get("tag_groups_by_source", {}), selected_source)
                 elif selected_source == "all":
                     groups = defaultdict(list)
-                    for r in legacy_rows:
-                        if int(r["image_id"]) != int(item["id"]):
-                            continue
+                    for r in legacy_by_image.get(int(item["id"]), ()):
                         cat = str(r["category"] or "general")
                         if not should_hide_tag(r["name"], cat, settings):
                             groups[cat].append(r["name"])
@@ -409,31 +581,50 @@ def tag_group_counts(settings, source="all"):
         # materialized cache instead of the heavy ranked CTE over all provenance
         # rows.  Source-specific facets keep the old exact path.
         try:
-            mat_ready = selected == "all" and str(con.execute("SELECT value FROM meta WHERE key='effective_tag_category_complete'").fetchone()["value"] or "") == "1"
+            marker_row = con.execute("SELECT value FROM meta WHERE key='effective_tag_category_complete'").fetchone()
+            materialized_backend = str(marker_row["value"] or "") if marker_row else ""
         except Exception:
-            mat_ready = False
-        if mat_ready:
+            materialized_backend = ""
+        if selected == "all" and materialized_backend in {"1", "external"}:
+            table_name = "image_effective_tag_category"
+            attached = None
             try:
-                mat_count = int(con.execute("SELECT COUNT(*) AS c FROM image_effective_tag_category").fetchone()["c"] or 0)
+                if materialized_backend == "external":
+                    from core.derived_cache_db import attach_external_cache
+                    attached = attach_external_cache(
+                        con, settings, "image_effective_tag_category",
+                        alias="derived_effective", require_fresh=True,
+                    )
+                    attached.__enter__()
+                    table_name = "derived_effective.image_effective_tag_category"
+                mat_count = int(con.execute(f"SELECT COUNT(*) AS c FROM {table_name}").fetchone()["c"] or 0)
+                if mat_count:
+                    rows = con.execute(f"""
+                        SELECT etc.category AS category, t.normalized_name AS normalized_name,
+                               MIN(t.name) AS name, COUNT(DISTINCT etc.image_id) AS c
+                        FROM {table_name} etc
+                        JOIN tags t ON t.id=etc.tag_id
+                        JOIN images i ON i.id=etc.image_id
+                        WHERE i.deleted=0
+                        GROUP BY etc.category, t.normalized_name
+                        ORDER BY etc.category, c DESC, name COLLATE NOCASE
+                    """).fetchall()
+                    for row in rows:
+                        norm = normalize_tag(row["normalized_name"] or row["name"])
+                        cat = str(row["category"] or "general")
+                        if norm and not should_hide_tag(row["name"], cat, settings):
+                            out[cat][norm] += int(row["c"] or 0)
+                    return out
             except Exception:
-                mat_count = 0
-            if mat_count:
-                rows = con.execute("""
-                    SELECT etc.category AS category, t.normalized_name AS normalized_name,
-                           MIN(t.name) AS name, COUNT(DISTINCT etc.image_id) AS c
-                    FROM image_effective_tag_category etc
-                    JOIN tags t ON t.id=etc.tag_id
-                    JOIN images i ON i.id=etc.image_id
-                    WHERE i.deleted=0
-                    GROUP BY etc.category, t.normalized_name
-                    ORDER BY etc.category, c DESC, name COLLATE NOCASE
-                """).fetchall()
-                for row in rows:
-                    norm = normalize_tag(row["normalized_name"] or row["name"])
-                    cat = str(row["category"] or "general")
-                    if norm and not should_hide_tag(row["name"], cat, settings):
-                        out[cat][norm] += int(row["c"] or 0)
-                return out
+                # Missing/stale/corrupt external cache is disposable.  Fall
+                # through to the exact ranked query over primary tables.
+                pass
+            finally:
+                if attached is not None:
+                    try:
+                        attached.__exit__(None, None, None)
+                    except Exception:
+                        pass
 
         provenance_count = int(con.execute("SELECT COUNT(*) AS c FROM image_source_tags").fetchone()["c"] or 0)
         if provenance_count:
@@ -676,7 +867,20 @@ def delete_images(settings, image_rows, delete_files=True, reason="delete", tag_
 
 
 def cleanup_orphans(con):
-    con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
-    con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
+    """Drop tags and sources that no picture uses any more.
+
+    A tag still used by a site tag set (image_source_tags) or a source still used by a
+    tag set or a source role is not an orphan: deleting it would cascade-delete that
+    provenance through ON DELETE CASCADE (docs/map, trap 6).
+    """
+    con.execute("""
+        DELETE FROM tags WHERE id NOT IN (SELECT tag_id FROM image_tags)
+                           AND id NOT IN (SELECT tag_id FROM image_source_tags)
+    """)
+    con.execute("""
+        DELETE FROM sources WHERE id NOT IN (SELECT source_id FROM image_sources)
+                              AND id NOT IN (SELECT source_id FROM image_source_tags)
+                              AND id NOT IN (SELECT source_id FROM image_source_roles)
+    """)
 
 

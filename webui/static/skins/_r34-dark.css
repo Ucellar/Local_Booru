@@ -1,0 +1,57 @@
+/* «r34, ночь»: the arrangement of _r34.css in dark colours (the green of rule34 turned to night). */
+:root {
+  --bg: #141c16;
+  --panel: #1b261d;
+  --panel-2: #22322a;
+  --border: #3b5240;
+  --text: #dbe7d6;
+  --muted: #93aa8e;
+  --link: #8db7ff;
+  --link-hover: #b9d2ff;
+  --accent: #8db7ff;
+  --accent-ink: #0b1220;
+  --bar-bg: #141c16;
+  --bar-ink: #8db7ff;
+  --bar-active-bg: #2e4a30;
+  --bar-active-ink: #ffffff;
+  --thumb-ring: #8db7ff;
+  --danger: #ff8a80;
+  --focus: #8db7ff;
+  --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  --r34-cell-line: #2f4232;          /* the dotted cells of the tag table (rule34's #eee on its green) */
+  --r34-row-hover: #2e4a30;
+
+  --tag-artist: #ff7b7b;
+  --tag-character: #57d957;
+  --tag-copyright: #e08ae0;
+  --tag-general: #8db7ff;
+  --tag-meta: #ffa64d;
+  --tag-species: #ffb07a;
+  --tag-lore: #4fd2bf;
+  --tag-contributor: #ff86c8;
+  --tag-invalid: #a3a3a3;
+
+  --r34-band: #1f2d22;
+  --r34-box: #1e2620;
+  --r34-box-line: #56695a;
+  --r34-box-ink: #dbe7d6;
+  --r34-count: #dbe7d6;
+  --r34-video: #4f7dff;
+  --r34-field: #0f1511;
+  --r34-field-line: #56695a;
+  --r34-page-field: #24382a;
+  --r34-button: #26332a;
+  --r34-button-line: #56695a;
+  color-scheme: dark;
+}
+.search-row input[type="search"], input[type="search"], input[type="text"], input[type="number"], select, textarea { color: var(--text); }
+.search-row button { border-color: var(--r34-box-line); background: var(--r34-button); color: var(--text); }
+.search-row button:hover { background: var(--panel-2); color: var(--text); }
+button, .button, button:hover, .button:hover { color: var(--text); }
+button:hover, .button:hover { border-color: var(--text); }
+.page-jump input { border: 1px solid var(--r34-box-line); color: var(--text); }
+.page-jump input::placeholder { color: var(--muted); }
+.page-jump button { border: 1px solid var(--r34-box-line); background: var(--r34-button); color: var(--text); }
+.skin-item:hover, .skin-item.active { background: #2a352d; }
+.skin-text small { color: var(--muted); }
+.stars .star { color: #3b5240; }

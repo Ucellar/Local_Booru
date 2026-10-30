@@ -1,20 +1,26 @@
-"""Thumbnail service — QImage in worker thread, QPixmap created in UI thread.
+"""Priority/cancellation-aware thumbnail service.
 
-This is the correct Qt pattern: QPixmap is NOT thread-safe and must only be
-created/used in the main (GUI) thread. Workers produce QImage (thread-safe),
-signal carries QImage bytes, UI thread converts to QPixmap.
+Workers create disk thumbnails off the GUI thread. QPixmap creation and all
+callbacks remain on the GUI thread. Waiting work is owned by a pure-Python
+priority queue, so stale gallery generations can be removed before Qt receives
+a QRunnable.
 """
 from __future__ import annotations
 
 from collections import OrderedDict
-from pathlib import Path
-from typing import Callable
+from typing import Callable, Hashable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, QMutex, QMutexLocker
-from PySide6.QtGui import QPixmap, QImage
+from PySide6.QtGui import QPixmap
 
+from core.thumb_queue import (
+    ThumbnailWorkQueue,
+    PRIORITY_VISIBLE,
+    PRIORITY_CURRENT_PAGE,
+    PRIORITY_PREFETCH,
+    PRIORITY_BACKGROUND,
+)
 
-# ── LRU QPixmap cache — UI thread only ───────────────────────────────────────
 
 class _PixmapCache:
     def __init__(self, maxsize: int = 400):
@@ -24,10 +30,10 @@ class _PixmapCache:
 
     def get(self, key: str) -> QPixmap | None:
         with QMutexLocker(self._lock):
-            v = self._d.get(key)
-            if v is not None:
+            value = self._d.get(key)
+            if value is not None:
                 self._d.move_to_end(key)
-            return v
+            return value
 
     def put(self, key: str, pix: QPixmap) -> None:
         with QMutexLocker(self._lock):
@@ -54,14 +60,9 @@ class _PixmapCache:
 _PIX_CACHE = _PixmapCache(400)
 
 
-# ── Worker signals ────────────────────────────────────────────────────────────
-
 class _Signals(QObject):
-    # Emit disk_path (str) so QPixmap is created in UI thread, not worker
-    done = Signal(str, int, int, str)   # src_path, w, h, disk_cache_path
+    done = Signal(str, int, int, str)  # src_path, w, h, disk_cache_path
 
-
-# ── Worker — only PIL/disk work, no QPixmap ───────────────────────────────────
 
 class _ThumbWorker(QRunnable):
     def __init__(self, path: str, w: int, h: int, signals: _Signals):
@@ -78,29 +79,21 @@ class _ThumbWorker(QRunnable):
             disk = safe_thumbnail_path(self.path, self.w, self.h) or ""
         except Exception:
             disk = ""
-        # Emit disk path — QPixmap will be created in UI thread by the service
         self.signals.done.emit(self.path, self.w, self.h, disk)
 
 
-# ── Service (singleton) ───────────────────────────────────────────────────────
-
 class ThumbnailService(QObject):
-    """Background thumbnail generator.
+    """Background thumbnail generator with owner/generation cancellation."""
 
-    Workers produce thumbnails on disk (PIL, thread-safe).
-    QPixmap is created HERE in the UI thread inside _on_done().
-    """
     _instance: "ThumbnailService | None" = None
-
     thumbnail_ready = Signal(str, int, int, QPixmap)
 
     def __init__(self, max_threads: int = 3, parent: QObject | None = None):
         super().__init__(parent)
         self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 16)))
-        self._pending: set[tuple] = set()
-        self._callbacks: dict[tuple, list[Callable]] = {}
-        self._max_pending = 256
+        self._max_threads = max(1, min(int(max_threads or 3), 16))
+        self._pool.setMaxThreadCount(self._max_threads)
+        self._queue = ThumbnailWorkQueue(max_active=self._max_threads, max_pending=256)
         self._lock = QMutex()
         self._signals = _Signals()
         self._signals.done.connect(self._on_done)
@@ -118,42 +111,64 @@ class ThumbnailService(QObject):
         width: int,
         height: int,
         callback: Callable[[str, QPixmap], None] | None = None,
+        *,
+        owner: str | None = None,
+        generation: Hashable | None = None,
+        priority: int = PRIORITY_BACKGROUND,
     ) -> QPixmap | None:
-        """Return cached QPixmap immediately or enqueue background generation."""
-        cache_key = f"{path}|{width}x{height}"
-        cached = _PIX_CACHE.get(cache_key)
+        path = str(path or "")
+        width = max(1, int(width or 1))
+        height = max(1, int(height or 1))
+        cached = _PIX_CACHE.get(f"{path}|{width}x{height}")
         if cached is not None:
             return cached
 
-        key = (path, width, height)
         with QMutexLocker(self._lock):
-            if key in self._pending:
-                if callback:
-                    self._callbacks.setdefault(key, []).append(callback)
-                return None
-            # Never allow the UI to enqueue an unbounded thumbnail backlog.
-            # Dropping a background warm-up request is safe: placeholders stay
-            # visible and the file can be requested again later.
-            if len(self._pending) >= int(self._max_pending or 256):
-                return None
-            if callback:
-                self._callbacks.setdefault(key, []).append(callback)
-            self._pending.add(key)
-
-        self._pool.start(_ThumbWorker(path, width, height, self._signals))
+            accepted, starts = self._queue.add(
+                (path, width, height), owner=owner, generation=generation,
+                priority=priority, callback=callback,
+            )
+        if accepted:
+            self._start_keys(starts)
         return None
 
+    def cancel(
+        self,
+        path: str,
+        width: int,
+        height: int,
+        *,
+        owner: str | None = None,
+        generation: Hashable | None = None,
+    ) -> int:
+        key = (str(path or ""), max(1, int(width or 1)), max(1, int(height or 1)))
+        with QMutexLocker(self._lock):
+            removed, starts = self._queue.cancel_key(
+                key, owner=owner, generation=generation,
+            )
+        self._start_keys(starts)
+        return removed
+
+    def cancel_owner(self, owner: str, generation: Hashable | None = None) -> int:
+        with QMutexLocker(self._lock):
+            removed, starts = self._queue.cancel_owner(owner, generation)
+        self._start_keys(starts)
+        return removed
+
+    def _start_keys(self, keys: list[tuple[str, int, int]]) -> None:
+        for path, width, height in keys:
+            worker = _ThumbWorker(path, width, height, self._signals)
+            try:
+                self._pool.start(worker)
+            except Exception:
+                try:
+                    self._on_done(path, width, height, "")
+                except Exception:
+                    pass
+
     def _on_done(self, path: str, width: int, height: int, disk_path: str) -> None:
-        """Called in UI thread — safe to create QPixmap here."""
-        key = (path, width, height)
         cache_key = f"{path}|{width}x{height}"
-
-        # Create QPixmap in UI thread ✓
-        if disk_path:
-            pix = QPixmap(disk_path)
-        else:
-            pix = QPixmap()
-
+        pix = QPixmap(disk_path) if disk_path else QPixmap()
         if not pix.isNull():
             _PIX_CACHE.put(cache_key, pix)
         elif path and path not in self._reported_failures:
@@ -165,20 +180,24 @@ class ThumbnailService(QObject):
                 pass
 
         with QMutexLocker(self._lock):
-            self._pending.discard(key)
-            cbs = self._callbacks.pop(key, [])
-
-        self.thumbnail_ready.emit(path, width, height, pix)
-        for cb in cbs:
-            try:
-                cb(path, pix)
-            except Exception:
-                pass
+            callbacks, should_emit, starts = self._queue.complete((path, width, height))
+        # A cancelled running generation may still warm disk/memory cache, but
+        # it must never repaint a newer page or invoke stale callbacks.
+        if should_emit:
+            self.thumbnail_ready.emit(path, width, height, pix)
+            for callback in callbacks:
+                try:
+                    callback(path, pix)
+                except Exception:
+                    pass
+        self._start_keys(starts)
 
     def invalidate(self, path: str) -> None:
-        _PIX_CACHE.clear()  # simple approach
+        _PIX_CACHE.clear()
 
     def stop(self) -> None:
+        with QMutexLocker(self._lock):
+            self._queue.stop_queued()
         self._pool.waitForDone(3000)
 
     def clear_memory_cache(self) -> None:
@@ -186,16 +205,34 @@ class ThumbnailService(QObject):
 
     def pending_count(self) -> int:
         with QMutexLocker(self._lock):
-            return len(self._pending)
+            return self._queue.pending_count()
 
-    def configure(self, *, max_threads: int | None = None, memory_items: int | None = None, max_pending: int | None = None) -> None:
-        """Apply lightweight thumbnail settings without rebuilding the service."""
-        if max_threads is not None:
-            self._pool.setMaxThreadCount(max(1, min(int(max_threads or 3), 16)))
+    def queued_count(self) -> int:
+        with QMutexLocker(self._lock):
+            return self._queue.queued_count()
+
+    def active_count(self) -> int:
+        with QMutexLocker(self._lock):
+            return self._queue.active_count()
+
+    def configure(
+        self,
+        *,
+        max_threads: int | None = None,
+        memory_items: int | None = None,
+        max_pending: int | None = None,
+    ) -> None:
+        with QMutexLocker(self._lock):
+            if max_threads is not None:
+                self._max_threads = max(1, min(int(max_threads or 3), 16))
+                self._pool.setMaxThreadCount(self._max_threads)
+            starts = self._queue.configure(
+                max_active=self._max_threads if max_threads is not None else None,
+                max_pending=max(16, min(int(max_pending or 256), 2000)) if max_pending is not None else None,
+            )
         if memory_items is not None:
             _PIX_CACHE.set_maxsize(int(memory_items or 400))
-        if max_pending is not None:
-            self._max_pending = max(16, min(int(max_pending or 256), 2000))
+        self._start_keys(starts)
 
     def memory_cache_items(self) -> int:
         return _PIX_CACHE.size()

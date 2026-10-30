@@ -253,6 +253,9 @@ def upsert_seed(
         return _row_to_seed(row)
 
 
+POLICY_RETRY_SECONDS = 600
+
+
 def mark_seed(key: str, status: str, *, error: str = "", path: str = "") -> None:
     now = _now()
     retry_count_delta = 1 if status in {"failed", "failed_temp", "auth_required"} else 0
@@ -263,6 +266,12 @@ def mark_seed(key: str, status: str, *, error: str = "", path: str = "") -> None
         retry_count = int(row["retry_count"] or 0) + retry_count_delta
         retry_after = 0
         final_status = "failed_temp" if status == "failed" else status
+        if final_status == "blocked_session_policy":
+            # Downloads are off for this session: the post waits, it is not lost.  (It used to get
+            # a status nothing picks up again, while the subscription's checkpoint moved past it.)
+            final_status = "pending"
+            retry_after = now + POLICY_RETRY_SECONDS
+            error = error or "blocked_session_policy"
         if final_status == "downloading":
             retry_after = now + 3600
         if final_status == "failed_temp":

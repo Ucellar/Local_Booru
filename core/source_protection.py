@@ -2,7 +2,7 @@
 
 The user's source archive is the rebuild seed. Local Booru may read or copy
 bytes from it, but all media moves/deletes/replacements must be restricted to
-the managed output tree returned by :func:`core.paths.result_output_base`.
+the configured managed output tree, resolved without creating unavailable roots.
 """
 from __future__ import annotations
 
@@ -11,9 +11,16 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from core.paths import LOGS_DIR, result_output_base
+from core.paths import LOGS_DIR
+from core.storage_roots import configured_output_root
 
 EVENT_LOG = Path(LOGS_DIR) / "protected_source_actions.jsonl"
+
+
+# The folders the program makes in its output folder for pictures (core/library_reset.FOLDERS + the downloads).
+PROGRAM_FOLDERS = ("found", "partial_match", "no_match", "downloads", "trash", "subscriptions", "pixiv")
+_ROOTS: dict = {}                       # a root folder as written -> (when, resolved): checks come in thousands
+_ROOTS_KEEP = 5.0                       # seconds
 
 
 def _resolved(path: str | Path) -> Path:
@@ -23,13 +30,35 @@ def _resolved(path: str | Path) -> Path:
         return Path(path).expanduser().absolute()
 
 
+def _root(value: str) -> Path:
+    """A root folder resolved, kept for a few seconds (a folder on the network answers slowly)."""
+    now = time.monotonic()
+    known = _ROOTS.get(value)
+    if known is not None and now - known[0] < _ROOTS_KEEP:
+        return known[1]
+    resolved = _resolved(value)
+    if len(_ROOTS) > 32:
+        _ROOTS.clear()
+    _ROOTS[value] = (now, resolved)
+    return resolved
+
+
+def _within(path: Path, root: Path) -> bool:
+    """``path`` inside ``root`` (or the same), both resolved already."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def output_root(settings: dict) -> Path:
-    return _resolved(result_output_base(settings))
+    return _root(str(configured_output_root(settings)))
 
 
 def source_root(settings: dict) -> Path | None:
     value = str((settings or {}).get("root", "") or "").strip()
-    return _resolved(value) if value else None
+    return _root(value) if value else None
 
 
 def is_inside(path: str | Path, root: str | Path) -> bool:
@@ -41,8 +70,22 @@ def is_inside(path: str | Path, root: str | Path) -> bool:
 
 
 def is_managed_media_path(settings: dict, path: str | Path) -> bool:
-    """Return True only for media living inside Local Booru generated output."""
-    return is_inside(path, output_root(settings))
+    """Return True only for media living inside Local Booru generated output.
+
+    When the user's source folder overlaps the output folder, its pictures stay the user's: in the source folder
+    only the program's own folders (``PROGRAM_FOLDERS`` of the output) are the program's.  So the output kept
+    inside the source folder is the program's; the source folder kept in the output folder, or the same folder
+    as the output (an «output» folder of another program as the source with no output folder chosen), is the
+    user's but for found/, trash/…; a source folder that is one of those (the parser re-reading the library)
+    is the program's."""
+    out = output_root(settings)
+    target = _resolved(path)
+    if not _within(target, out):
+        return False
+    source = source_root(settings)
+    if source is None or not _within(target, source) or not _within(source, out):
+        return True
+    return any(_within(target, out / name) for name in PROGRAM_FOLDERS)
 
 
 def is_source_archive_path(settings: dict, path: str | Path) -> bool:

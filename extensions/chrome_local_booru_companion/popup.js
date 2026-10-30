@@ -1,35 +1,18 @@
 'use strict';
-const DEFAULTS = { enabled: true, hideMode: 'hide', showBadge: true, apiBase: 'http://127.0.0.1:47734' };
-const $ = (id) => document.getElementById(id);
-
-async function load() {
-  const data = await chrome.storage.sync.get(DEFAULTS);
-  $('enabled').checked = !!data.enabled;
-  $('showBadge').checked = !!data.showBadge;
-  $('hideMode').value = data.hideMode || 'hide';
-  $('apiBase').value = data.apiBase || DEFAULTS.apiBase;
-}
-
-async function save() {
-  await chrome.storage.sync.set({
-    enabled: $('enabled').checked,
-    showBadge: $('showBadge').checked,
-    hideMode: $('hideMode').value,
-    apiBase: $('apiBase').value.trim() || DEFAULTS.apiBase,
-  });
-  $('out').textContent = 'Сохранено. Обнови страницу booru.';
-}
-
-async function status() {
-  $('out').textContent = 'Проверяю...';
-  try {
-    const r = await chrome.runtime.sendMessage({ type: 'LB_STATUS' });
-    $('out').textContent = r && r.ok ? 'Связь есть: v' + (r.status && r.status.version || '?') : 'Нет связи';
-  } catch (e) {
-    $('out').textContent = 'Нет связи. Открой Local Booru.';
-  }
-}
-
-$('save').addEventListener('click', save);
-$('status').addEventListener('click', status);
-load();
+const DEFAULTS = { enabled:true, hideMode:'hide', showBadge:true, dock:'tab', blocklistMode:'blur', browserResolverEnabled:true, apiBase:'http://127.0.0.1:47734', pairingToken:'', extensionId:'', lastError:'', profiles:[] };
+const $ = id => document.getElementById(id);
+function state(text, kind){const el=$('connection');el.textContent=text;el.className='status'+(kind?' '+kind:'');}
+async function load(){ const data=await chrome.storage.local.get(DEFAULTS); $('enabled').checked=!!data.enabled;$('showBadge').checked=!!data.showBadge;$('browserResolverEnabled').checked=data.browserResolverEnabled!==false;$('hideMode').value=data.hideMode||'hide';$('dock').value=data.dock==='off'?'off':'tab';$('blocklistMode').value=['blur','hide','off'].includes(data.blocklistMode)?data.blocklistMode:'blur';$('apiBase').value=data.apiBase||DEFAULTS.apiBase; state(data.pairingToken?'Сопряжение сохранено':'Требуется сопряжение',data.pairingToken?'':'bad'); if(data.lastError)$('out').textContent='Последняя ошибка: '+data.lastError; status(); }
+async function save(){await chrome.storage.local.set({enabled:$('enabled').checked,showBadge:$('showBadge').checked,browserResolverEnabled:$('browserResolverEnabled').checked,hideMode:$('hideMode').value,dock:$('dock').value,blocklistMode:$('blocklistMode').value,apiBase:$('apiBase').value.trim()||DEFAULTS.apiBase});$('out').textContent='Сохранено';}
+async function send(type,extra={}){const r=await chrome.runtime.sendMessage({type,...extra});if(!r||r.ok===false)throw new Error(r&&r.error||'request_failed');return r;}
+async function status(){try{const r=await send('LB_STATUS');const s=r.status||{}, imp=s.browser_import||{}, eb=s.external_browser||{}, dl=s.download_policy||{};state(`Программа v${s.version||'?'} · ${dl.enabled===false?'скачивание выкл.':'скачивание вкл.'}`,'ok');$('out').textContent=`Import ${Number(imp.queued||0)}/${Number(imp.active||0)} · Resolver ${eb.connected?'подключён':'ожидает'} · профили ${Number((s.site_profiles||{}).count||0)}`;}catch(e){state('Программа не отвечает или нужен код','bad');$('out').textContent=String(e.message||e);}}
+function tagWord(n){n=Number(n||0);const a=n%10,b=n%100;return n+' '+(a===1&&b!==11?'тег':a>=2&&a<=4&&(b<12||b>14)?'тега':'тегов');}
+function when(ms){if(!ms)return 'никогда';const d=new Date(ms);return d.toLocaleDateString()+' '+d.toLocaleTimeString().slice(0,5);}
+async function offline(){try{const r=await send('LB_OFFLINE_STATUS');$('offline').textContent=`Офлайн-список: ${Number(r.index_count||0)} картинок, обновлён ${when(r.index_synced_at)} · в очереди: ${Number(r.queue||0)} · блоклист: ${tagWord(r.blocklist_count)}`;}catch(e){$('offline').textContent='Офлайн-список: '+String(e.message||e);}}
+async function offlineSync(){try{const r=await send('LB_OFFLINE_SYNC');$('out').textContent=`Офлайн-список: ${Number(r.index_count||0)}; отправлено из очереди: ${Number(r.sent||0)}; блоклист: ${tagWord(r.blocklist_count)}`;}catch(e){$('out').textContent='Программа не отвечает — список и очередь обновятся, когда она запустится';}await offline();}
+async function pair(){try{const code=$('pairCode').value.replace(/\D/g,'');const r=await send('LB_PAIR',{code,displayName:'Local Booru Companion'});$('pairCode').value='';$('out').textContent='Сопряжение выполнено: '+String(r.extension_id||'');await status();}catch(e){$('out').textContent='Сопряжение не выполнено: '+String(e.message||e);}}
+async function unpair(){try{await send('LB_UNPAIR');}catch(e){}await chrome.storage.local.set({pairingToken:'',extensionId:''});state('Требуется сопряжение','bad');$('out').textContent='Сопряжение отозвано';}
+async function profiles(){try{const r=await send('LB_REFRESH_PROFILES');$('out').textContent='Профилей загружено: '+Number((r.profiles||[]).length);}catch(e){$('out').textContent=String(e.message||e);}}
+async function permissions(){try{const tabs=await chrome.tabs.query({active:true,currentWindow:true});const r=await send('LB_REQUEST_PERMISSIONS',{tab:tabs[0]||null});$('out').textContent=r.granted?'Разрешения выданы: '+Number((r.origins||[]).length):'Разрешения не выданы';}catch(e){$('out').textContent=String(e.message||e);}}
+async function cookies(){try{const tabs=await chrome.tabs.query({active:true,currentWindow:true});const r=await send('LB_TRANSFER_COOKIES',{tab:tabs[0]||null});$('out').textContent=`Передано cookies: ${Number(r.cookie_count||0)} для ${String(r.domain||'сайта')}`;}catch(e){$('out').textContent=String(e.message||e);}}
+$('save').addEventListener('click',save);$('status').addEventListener('click',status);$('pair').addEventListener('click',pair);$('unpair').addEventListener('click',unpair);$('profiles').addEventListener('click',profiles);$('permissions').addEventListener('click',permissions);$('cookies').addEventListener('click',cookies);$('offlineSync').addEventListener('click',offlineSync);load();offline();

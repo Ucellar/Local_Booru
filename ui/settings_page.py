@@ -6,6 +6,7 @@ from PIL import Image
 from core.settings import save_settings
 from core.tagger import result_output_base
 from core.paths import CACHE_FILE
+from core.preflight import reserve_gb
 import shutil
 import json
 import re
@@ -180,11 +181,12 @@ class SafeModuleList(QListWidget):
 class InterfaceModulesDialog(QDialog):
     """Настройка бокового меню: свободное дерево страниц без жёстких 4 режимов."""
     MODULES = [
-        ("Tagger", "Парсер", "apt"), ("ParserBlueprint", "Blueprint", "apt"), ("NO_MATCH", "Брак", "apt"),
-        ("Overview", "Обзор", "gallery"), ("Gallery", "Галерея", "gallery"),
+        ("Tagger", "Парсер", "apt"), ("NO_MATCH", "Брак", "apt"),
+        ("Overview", "Обзор", "gallery"), ("Booru", "Галерея", "gallery"), ("BooruManga", "Манга", "gallery"),
+        ("Gallery", "Старая галерея", "gallery"),
         ("Trash", "Удалено", "gallery"), ("Diagnostics", "Диагностика", "gallery"),
-        ("Tags", "Теги", "gallery"), ("Manga", "Манга", "gallery"),
-        ("Games", "Игры", "gallery"), ("DLER", "Граббер", "adp"),
+        ("Tags", "Теги", "gallery"), ("Manga", "Старая манга", "gallery"),
+        ("DLER", "Граббер", "adp"),
         ("Subs", "Подписки", "adp"), ("Duplicates", "Дубли", "duplicates"),
     ]
     WORKSPACES = [("apt", "Парсер"), ("gallery", "Галерея"), ("adp", "Граббер"), ("duplicates", "Дубли")]
@@ -202,7 +204,7 @@ class InterfaceModulesDialog(QDialog):
         lay = QVBoxLayout(self)
         info = QLabel(
             "Свободная настройка интерфейса: любая страница может быть корнем или подпунктом любой другой страницы.\n"
-            "Пример: Дубли → внутри Обзора, Граббер → внутри Манги, Blueprint → внутри Парсера. "
+            "Пример: Дубли → внутри Обзора, Граббер → внутри Манги, Брак → внутри Парсера. "
             "Пока родитель свернут, его подпункты в боковом меню не показываются."
         )
         info.setWordWrap(True)
@@ -512,7 +514,6 @@ class SettingsPage(QWidget):
         self.debug_logging.setChecked(False)
 
         self.cols=QSpinBox(); self.cols.setRange(1,24); self.rows=QSpinBox(); self.rows.setRange(1,20); self.card=QSpinBox(); self.card.setRange(100,700); self.ignore_numeric=QCheckBox(); self.show_preview=QCheckBox(); self.error_console=QCheckBox(); self.max_console_lines=QSpinBox(); self.max_console_lines.setRange(200,20000); self.max_console_lines.setSingleStep(100); self.manga_root=QLineEdit(); self.choose_manga=QPushButton("..."); self.choose_manga.clicked.connect(self.choose_manga_root); mrow=QHBoxLayout(); mrow.addWidget(self.manga_root,1); mrow.addWidget(self.choose_manga)
-        self.games_root=QLineEdit(); self.choose_games=QPushButton("..."); self.choose_games.clicked.connect(self.choose_games_root); grow=QHBoxLayout(); grow.addWidget(self.games_root,1); grow.addWidget(self.choose_games)
         # Bare checkbox fields: show only the indicator, never a painted tail.
         for _cb in (self.debug_logging, self.ignore_numeric, self.show_preview, self.error_console):
             _cb.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -549,7 +550,6 @@ class SettingsPage(QWidget):
             ("Console line limit", self.max_console_lines, "tip_console_limit"),
             ("Error console", self.error_console, "tip_error_console"),
             ("Manga folder", mrow, "tip_manga_root"),
-            ("Папка игр", grow, "tip_games_root")
         ]:
             self.add_tip_row(key, w, tip)
         # Wrap form and buttons in scroll area for any screen size
@@ -577,6 +577,35 @@ class SettingsPage(QWidget):
         _advanced_form.setContentsMargins(6, 6, 6, 6)
         _advanced_form.setSpacing(5)
         _advanced_form.addRow("FlareSolverr (Ascii2D / совместимость)", _fs_row)
+        self.external_browser_enabled = QCheckBox("Использовать внешний браузер через Local Booru Companion")
+        self.external_browser_mode = QComboBox()
+        self.external_browser_mode.addItem("Браузер Windows по умолчанию", "default")
+        self.external_browser_mode.addItem("Выбранный браузер", "custom")
+        self.external_browser_executable = QLineEdit()
+        self.external_browser_executable.setPlaceholderText("Путь к browser.exe; пусто = браузер по умолчанию")
+        self.external_browser_choose = QPushButton("...")
+        self.external_browser_choose.clicked.connect(self.choose_external_browser)
+        _browser_path_row = QHBoxLayout(); _browser_path_row.addWidget(self.external_browser_executable, 1); _browser_path_row.addWidget(self.external_browser_choose)
+        self.external_browser_auto_open = QCheckBox("Автоматически открывать challenge/задачу, если extension ещё не подключён")
+        self.external_browser_test = QPushButton("Проверить Companion / открыть тестовую страницу")
+        self.external_browser_test.clicked.connect(self.test_external_browser_resolver)
+        self.external_browser_status = QLabel("")
+        self.external_browser_status.setWordWrap(True)
+        self.companion_pair_button = QPushButton("Создать одноразовый код сопряжения")
+        self.companion_pair_button.clicked.connect(self.create_companion_pairing_code)
+        self.companion_revoke_button = QPushButton("Отозвать все сопряжения")
+        self.companion_revoke_button.clicked.connect(self.revoke_companion_pairings)
+        self.companion_pair_status = QLabel("Код ещё не создан")
+        self.companion_pair_status.setWordWrap(True)
+        _advanced_form.addRow("Защищённые сайты", self.external_browser_enabled)
+        _advanced_form.addRow("Какой браузер открывать", self.external_browser_mode)
+        _advanced_form.addRow("Исполняемый файл браузера", _browser_path_row)
+        _advanced_form.addRow("Автооткрытие", self.external_browser_auto_open)
+        _advanced_form.addRow("Companion extension", self.external_browser_test)
+        _advanced_form.addRow("Сопряжение Companion", self.companion_pair_button)
+        _advanced_form.addRow("Безопасность Companion", self.companion_revoke_button)
+        _advanced_form.addRow("Код / статус сопряжения", self.companion_pair_status)
+        _advanced_form.addRow("Статус browser resolver", self.external_browser_status)
         self.large_download_count = QSpinBox(); self.large_download_count.setRange(1, 1000000); self.large_download_count.setSuffix(" файлов"); self.large_download_count.setMaximumWidth(180)
         self.disk_reserve_gb = QDoubleSpinBox(); self.disk_reserve_gb.setRange(0.0, 1000.0); self.disk_reserve_gb.setDecimals(1); self.disk_reserve_gb.setSuffix(" ГБ резерва"); self.disk_reserve_gb.setMaximumWidth(180)
         _advanced_form.addRow("Предупреждать о большой загрузке от:", self.large_download_count)
@@ -585,6 +614,7 @@ class SettingsPage(QWidget):
         self.advanced_btn.toggled.connect(self.advanced_box.setVisible)
         _ilay.addWidget(self.advanced_btn)
         _ilay.addWidget(self.advanced_box)
+
 
         # Global actions are created here, but inserted into a fixed footer below
         # the scroll area. They must not move together with whichever subsection
@@ -602,9 +632,30 @@ class SettingsPage(QWidget):
         self.rebuild_sql_btn=QPushButton("Пересобрать SQLite-индекс")
         self.rebuild_sql_btn.clicked.connect(self.rebuild_sql_index)
         self.rebuild_vptree_btn = QPushButton("Пересобрать VP-tree")
+        self.rebuild_vptree_btn.setToolTip("Безопасно строит новый VP-tree во временной базе и заменяет старый только после проверки.")
         self.rebuild_vptree_btn.clicked.connect(self._rebuild_vptree)
         _mrow1.addWidget(self.rebuild_sql_btn, 1); _mrow1.addWidget(self.rebuild_vptree_btn, 1)
         _maintenance.addLayout(_mrow1)
+        _mrow1b = QHBoxLayout()
+        self.rebuild_effective_categories_btn = QPushButton("Пересобрать эффективные категории")
+        self.rebuild_effective_categories_btn.setToolTip("Пересобирает производный кэш категорий тегов без backup всей базы; старый кэш сохраняется до атомарной замены.")
+        self.rebuild_effective_categories_btn.clicked.connect(self._rebuild_effective_categories)
+        self.presence_check_btn = QPushButton("Проверить наличие файлов")
+        self.presence_check_btn.setToolTip("Проверяет живые пути пакетами и различает отсутствующий файл, отключённый корень и ошибку пути. Ничего не удаляет.")
+        self.presence_check_btn.clicked.connect(self._toggle_presence_check)
+        _mrow1b.addWidget(self.rebuild_effective_categories_btn, 1)
+        _mrow1b.addWidget(self.presence_check_btn, 1)
+        _maintenance.addLayout(_mrow1b)
+        _mrow1c = QHBoxLayout()
+        self.hash_integrity_btn = QPushButton("Проверить MD5 по байтам")
+        self.hash_integrity_btn.setToolTip("Последовательно читает медиа в idle-чанках и сравнивает байты с canonical MD5. Ничего не удаляет и не меняет hash_md5.")
+        self.hash_integrity_btn.clicked.connect(self._toggle_hash_integrity)
+        self.recovery_btn = QPushButton("Восстановить missing / mismatch")
+        self.recovery_btn.setToolTip("Скачивает только по сохранённым source, проверяет точный canonical MD5 во staging и лишь затем восстанавливает managed output. Исходный архив не изменяется.")
+        self.recovery_btn.clicked.connect(self._toggle_verified_recovery)
+        _mrow1c.addWidget(self.hash_integrity_btn, 1)
+        _mrow1c.addWidget(self.recovery_btn, 1)
+        _maintenance.addLayout(_mrow1c)
         _mrow2 = QHBoxLayout()
         self.sql_optimize_btn=QPushButton("Оптимизировать SQLite")
         self.sql_optimize_btn.clicked.connect(self.optimize_sqlite)
@@ -638,6 +689,22 @@ class SettingsPage(QWidget):
         self.sqlite_checkpoint_exit = QCheckBox("WAL checkpoint при закрытии")
         _mrow4b.addWidget(QLabel("SQLite cache:")); _mrow4b.addWidget(self.sqlite_cache_mb); _mrow4b.addWidget(self.sqlite_checkpoint_exit); _mrow4b.addStretch(1)
         _maintenance.addLayout(_mrow4b)
+        _mrow4bb = QHBoxLayout()
+        self.sqlite_idle_checkpoint = QCheckBox("Idle PASSIVE checkpoint")
+        self.sqlite_idle_checkpoint.setToolTip("Дополняет checkpoint парсера: запускается в простой только когда WAL превысил порог; читателей и писателей не блокирует.")
+        self.sqlite_idle_checkpoint_threshold = QSpinBox(); self.sqlite_idle_checkpoint_threshold.setRange(16, 4096); self.sqlite_idle_checkpoint_threshold.setSuffix(" МБ WAL")
+        self.sqlite_idle_checkpoint_interval = QSpinBox(); self.sqlite_idle_checkpoint_interval.setRange(1, 60); self.sqlite_idle_checkpoint_interval.setSuffix(" мин")
+        _mrow4bb.addWidget(self.sqlite_idle_checkpoint); _mrow4bb.addWidget(self.sqlite_idle_checkpoint_threshold); _mrow4bb.addWidget(self.sqlite_idle_checkpoint_interval); _mrow4bb.addStretch(1)
+        _maintenance.addLayout(_mrow4bb)
+        _mrow4c = QHBoxLayout()
+        self.derived_cache_external = QCheckBox("Производные кэши в отдельной disposable SQLite")
+        self.derived_cache_external.setToolTip(
+            "VP-tree и эффективные категории публикуются как неизменяемые generation-файлы в settings/cache/derived. "
+            "main.db остаётся единственным источником истины. После смены режима нажми «Сохранить» и пересобери оба кэша."
+        )
+        _mrow4c.addWidget(self.derived_cache_external)
+        _mrow4c.addStretch(1)
+        _maintenance.addLayout(_mrow4c)
         _mrow5 = QHBoxLayout()
         self.repair_e621_btn = QPushButton("Исправить загрязнённые e621-теги")
         self.repair_e621_btn.clicked.connect(self.repair_e621_tags)
@@ -646,12 +713,22 @@ class SettingsPage(QWidget):
         _mrow5.addWidget(self.repair_e621_btn, 1); _mrow5.addWidget(self.legacy_sidecars_btn, 1)
         _maintenance.addLayout(_mrow5)
         _mrow6 = QHBoxLayout()
-        self.recheck_general_categories_btn = QPushButton("Переразложить ВСЕ general-only теги")
-        self.recheck_general_categories_btn.setToolTip("Найдёт все уже сохранённые source-наборы Danbooru/Gelbooru/rule34/e621/ATF, где все теги лежат в general, и заново запросит категории у каждого сайта. Лимита 10000 больше нет. Новые теги не добавляются, только исправляются категории существующих тегов.")
+        self.recheck_general_categories_btn = QPushButton("Переразложить general-only / незавершённые теги")
+        self.recheck_general_categories_btn.setToolTip("Найдёт все source-наборы Danbooru/Gelbooru/rule34/e621/ATF, где категории остались general, включая частично исправленные прошлым проходом, и заново запросит только недостающие категории. Лимита 10000 больше нет. Новые теги не добавляются.")
         self.recheck_general_categories_btn.clicked.connect(self.recheck_general_only_categories)
         _mrow6.addWidget(self.recheck_general_categories_btn, 1)
         _mrow6.addStretch(1)
         _maintenance.addLayout(_mrow6)
+        _mrow7 = QHBoxLayout()
+        self.sync_tag_aliases_btn = QPushButton("Синхронизировать синонимы тегов сайтов")
+        self.sync_tag_aliases_btn.setToolTip(
+            "Загружает официальные alias-списки rule34.xxx, Gelbooru, Danbooru, e621 и ATF. "
+            "Связи сохраняются раздельно по сайтам; режим «Все источники» предпочитает rule34.xxx."
+        )
+        self.sync_tag_aliases_btn.clicked.connect(self.sync_tag_aliases)
+        _mrow7.addWidget(self.sync_tag_aliases_btn, 1)
+        _mrow7.addStretch(1)
+        _maintenance.addLayout(_mrow7)
         self.sql_status=QLabel("")
         self.sql_status.setWordWrap(True)
         self.sql_status.setVisible(False)
@@ -891,6 +968,14 @@ class SettingsPage(QWidget):
         self.local_background_workers = _thread_spin(16)
         self.local_preflight_enabled = QCheckBox("Греть локальный hash/pHash-кэш параллельно с парсером")
         self.local_preflight_phash = QCheckBox("В preflight считать pHash/видео-кадр, а не только MD5")
+        self.tagger_provenance_mode = QComboBox()
+        self.tagger_provenance_mode.addItem("Полный provenance — проверять все включённые сайты", "full")
+        self.tagger_provenance_mode.addItem("Быстрый режим — authoritative match завершает MD5 для файла", "fast")
+        self.tagger_provenance_mode.setToolTip(
+            "Полный режим собирает source-specific теги со всех сайтов. Быстрый режим после точного матча "
+            "на Danbooru/e621 пропускает оставшиеся MD5-полосы для этого файла. Пропуски не теряются: "
+            "при возврате в полный режим они снова становятся pending."
+        )
         self.visual_nomatch_classify_enabled = QCheckBox("Во время парсинга присваивать NO_MATCH статус real/booru")
         self.visual_nomatch_classify_enabled.setToolTip("Строго локальная сортировка без API: real = фото/камера, booru = рисунок/3D/рендер. Основной режим — встроенная локальная CLIP-модель из папки программы.")
         self.visual_nomatch_backend = QComboBox()
@@ -913,6 +998,16 @@ class SettingsPage(QWidget):
         self.visual_nomatch_auto_download_model.setToolTip("Скачивает openai/clip-vit-base-patch32 один раз в settings/models/clip. Это только загрузка модели; ваши картинки не отправляются.")
         self.visual_nomatch_workers = _thread_spin(8)
         self.visual_nomatch_real_threshold = QDoubleSpinBox(); self.visual_nomatch_real_threshold.setRange(0.10, 0.90); self.visual_nomatch_real_threshold.setSingleStep(0.01); self.visual_nomatch_real_threshold.setDecimals(2); self.visual_nomatch_real_threshold.setMaximumWidth(190)
+        self.nomatch_local_models_enabled = QCheckBox("Дополнительные маленькие ONNX-модели для NO_MATCH")
+        self.nomatch_local_models_enabled.setToolTip("Полностью локальная боковая очередь: booru/real/mixed/uncertain и области текста. Не удаляет файлы и не подтверждает NO_MATCH.")
+        self.nomatch_compact_classifier_onnx = QLineEdit(); self.nomatch_compact_classifier_onnx.setPlaceholderText("ONNX: booru / real / mixed / uncertain")
+        self.nomatch_text_detector_onnx = QLineEdit(); self.nomatch_text_detector_onnx.setPlaceholderText("ONNX: области текста, выход Nx5 в нормализованных координатах")
+        self.nomatch_compact_classifier_btn = QPushButton("Выбрать")
+        self.nomatch_text_detector_btn = QPushButton("Выбрать")
+        self.nomatch_compact_classifier_btn.clicked.connect(lambda: self._choose_onnx(self.nomatch_compact_classifier_onnx))
+        self.nomatch_text_detector_btn.clicked.connect(lambda: self._choose_onnx(self.nomatch_text_detector_onnx))
+        _compact_model_row = QHBoxLayout(); _compact_model_row.addWidget(self.nomatch_compact_classifier_onnx, 1); _compact_model_row.addWidget(self.nomatch_compact_classifier_btn)
+        _text_model_row = QHBoxLayout(); _text_model_row.addWidget(self.nomatch_text_detector_onnx, 1); _text_model_row.addWidget(self.nomatch_text_detector_btn)
 
         _thread_form = QFormLayout()
         _thread_form.setContentsMargins(0, 0, 0, 0); _thread_form.setSpacing(6)
@@ -926,6 +1021,7 @@ class SettingsPage(QWidget):
         _thread_form.addRow("Превью UI:", self.local_thumb_workers)
         _thread_form.addRow("Предсоздание превью:", self.local_thumb_pregen_workers)
         _thread_form.addRow("Фоновые задачи:", self.local_background_workers)
+        _thread_form.addRow("Режим сбора источников:", self.tagger_provenance_mode)
         _thread_form.addRow("NO_MATCH real/booru:", self.visual_nomatch_workers)
         _thread_form.addRow("Классификатор NO_MATCH:", self.visual_nomatch_backend)
         _thread_form.addRow("Папка CLIP-модели (необязательно):", _clip_row)
@@ -933,12 +1029,15 @@ class SettingsPage(QWidget):
         _thread_form.addRow("AI min confidence:", self.visual_nomatch_ai_min_confidence)
         _thread_form.addRow("AI min margin:", self.visual_nomatch_ai_min_margin)
         _thread_form.addRow("Порог старой эвристики:", self.visual_nomatch_real_threshold)
+        _thread_form.addRow("Компактный ONNX-классификатор:", _compact_model_row)
+        _thread_form.addRow("ONNX-детектор текста:", _text_model_row)
         _threading.addLayout(_thread_form)
         _threading.addWidget(self.local_preflight_enabled)
         _threading.addWidget(self.local_preflight_phash)
         _threading.addWidget(self.visual_nomatch_classify_enabled)
         _threading.addWidget(self.visual_nomatch_auto_download_model)
         _threading.addWidget(self.visual_nomatch_ai_fallback_heuristic)
+        _threading.addWidget(self.nomatch_local_models_enabled)
         _thread_note = QLabel(
             "Важно: общий максимум — это потолок для одной локальной службы, а не сумма всех потоков процесса. "
             "SQLite-запись всё равно остаётся сериализованной, чтобы не ломать БД."
@@ -1188,8 +1287,9 @@ class SettingsPage(QWidget):
         self.danger_box.setVisible(title == "Удаление и сброс")
         self.developer_tools_box.setVisible(title == "Для разработчика")
         is_developer = title == "Для разработчика"
-        self.advanced_btn.setVisible(is_developer)
-        self.advanced_box.setVisible(is_developer and self.advanced_btn.isChecked())
+        show_advanced = title in {"Основные", "Для разработчика"}
+        self.advanced_btn.setVisible(show_advanced)
+        self.advanced_box.setVisible(show_advanced and self.advanced_btn.isChecked())
         # Footer actions remain visible for every subsection without scrolling.
         try:
             self._scroll.verticalScrollBar().setValue(0)
@@ -1315,127 +1415,50 @@ class SettingsPage(QWidget):
         except Exception:
             pass
 
-    def _remove_tree_after_preview_release(self, target, attempts=6):
-        """Remove generated data after Qt/Windows has released preview handles.
-
-        A GIF shown by QMovie can keep its file handle alive for a short moment
-        even after it is removed from the label.  Destructive UI actions should
-        wait and retry transient Windows sharing violations rather than leaving
-        a half-cleared generated library behind.
-        """
-        import time
-        target = Path(target)
-        for attempt in range(max(1, int(attempts))):
-            try:
-                shutil.rmtree(target)
-                return
-            except OSError as exc:
-                transient = getattr(exc, "winerror", None) in (32, 33) or getattr(exc, "errno", None) in (13,)
-                if not transient or attempt >= attempts - 1:
-                    raise
-                self._release_open_media_before_delete()
-                QApplication.processEvents()
-                time.sleep(0.08 * (attempt + 1))
-
     def _nuke_everything(self):
+        """«Удалить всё» — the same as on the web page «Удаление и сброс» (core/library_reset.py): ordered now,
+        done at the next start of the program after one more question (now its files are held open)."""
         include_subs = self.nuke_subs_check.isChecked()
         extra = " и папку подписок" if include_subs else ""
         msg = ("Это удалит ВСЮ РАБОЧУЮ галерею, теги, источники, кэш и базу данных" + extra + "."
                + chr(10) + "Исходный архив не будет изменён: из него Local Booru может только читать и копировать."
-               + chr(10) + chr(10) + "Это действие НЕОБРАТИМО для рабочей выдачи. Продолжить?")
+               + chr(10) + "Удаление выполнится при следующем запуске программы — перед этим она спросит ещё раз;"
+               + " копия базы останется в резервных копиях." + chr(10) + chr(10) + "Заказать сброс?")
         reply = QMessageBox.question(
             self, "ВЫ ТОЧНО УВЕРЕНЫ?", msg,
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply != QMessageBox.Yes:
             return
-
-        self._release_open_media_before_delete()
-        import shutil
-        from pathlib import Path
-        from core.paths import result_output_base
-        from core.database.connection import db_path
-
-        settings = self.main.settings
-        from core.paths import result_output_base as _rob
-        from core.source_protection import require_managed_media_mutation
-        out = _rob(settings)
-        deleted = []
-        errors = []
-
-        # Generated output is disposable; original archive is not. Never use a
-        # raw setting path as a deletion fallback because it may be the source.
-        for bucket in ("found", "partial_match", "no_match", "downloads", "trash"):
-            target = out / bucket
-            if target.exists():
-                try:
-                    if not require_managed_media_mutation(settings, target, "reset_generated_library"):
-                        errors.append(str(target) + ": заблокировано защитой исходного архива")
-                        continue
-                    self._remove_tree_after_preview_release(target)
-                    deleted.append(str(target))
-                except Exception as e:
-                    errors.append(str(target) + ": " + str(e))
-
-        if include_subs:
-            subs_dir = out / "subscriptions"
-            if subs_dir.exists():
-                try:
-                    self._remove_tree_after_preview_release(subs_dir)
-                    deleted.append(str(subs_dir))
-                except Exception as e:
-                    errors.append(str(e))
-            try:
-                from core.subscriptions import SUBS_FILE
-                from core.subscription_engine.seed_cache import SEED_CACHE_DB, OLD_JSON_FILE
-                for state_file in (SUBS_FILE, SEED_CACHE_DB, Path(str(SEED_CACHE_DB) + "-wal"), Path(str(SEED_CACHE_DB) + "-shm"), OLD_JSON_FILE):
-                    if Path(state_file).exists():
-                        Path(state_file).unlink()
-                        deleted.append(str(state_file))
-            except Exception as e:
-                errors.append("Подписки: " + str(e))
-
-        # SQLite in WAL mode can keep the database locked on Windows. Close
-        # pooled handles first and remove WAL/SHM sidecars with the main DB.
+        from core.library_reset import request_reset
         try:
-            from core.database import connection as _dbc
-            _dbc.close_pooled_connections()
-            db = Path(db_path(settings))
-            for db_file in (db, Path(str(db) + "-wal"), Path(str(db) + "-shm")):
-                if db_file.exists():
-                    db_file.unlink()
-                    deleted.append(str(db_file))
-            _dbc._INIT_DONE.clear()
-        except Exception as e:
-            errors.append("БД: " + str(e))
-
-        # The button says that cache is deleted, so also remove the persistent
-        # thumbnail/parser cache rather than only per-bucket sidecars.
-        try:
-            from core.paths import CACHE_DIR
-            if Path(CACHE_DIR).exists():
-                self._remove_tree_after_preview_release(CACHE_DIR)
-                Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
-                deleted.append(str(CACHE_DIR))
-        except Exception as e:
-            errors.append("Кэш: " + str(e))
+            request_reset(self.main.settings, include_subscriptions=include_subs)
+        except OSError as e:
+            QMessageBox.warning(self, "Ошибка", "Сброс не заказан: " + str(e))
+            return
         self.nuke_confirm_input.clear()
-        summary = "Удалено " + str(len(deleted)) + " объектов."
-        if errors:
-            summary += chr(10) + "Ошибки:" + chr(10) + chr(10).join(errors)
-        QMessageBox.information(self, "Готово", summary)
-
-        try:
-            gallery = getattr(self.main, "gallery_page", None)
-            if gallery and hasattr(gallery, "refresh"):
-                gallery.refresh()
-        except Exception:
-            pass
+        QMessageBox.information(
+            self, "Сброс заказан",
+            "Закройте программу и откройте снова: при запуске она спросит ещё раз и удалит всё."
+            + chr(10) + "Отменить можно в «Диагностика → Удаление и сброс».")
 
 
     def load_values(self):
         s=self.main.settings; self.root.setText(s.get("root","C:/Local_Booru_Input")); self.title.setText(s.get("theme_title","Local Booru")); self.logo.setText(s.get("logo_path","")); self.cols.setValue(int(s.get("columns",8))); self.rows.setValue(int(s.get("rows_per_page",4))); self.card.setValue(int(s.get("card_height",220))); self.ignore_numeric.setChecked(bool(s.get("ignore_numeric_tags",False))); self.show_preview.setChecked(bool(s.get("show_search_preview", True))); self.error_console.setChecked(bool(s.get("enable_error_console", True))); self.max_console_lines.setValue(int(s.get("max_console_lines",2500))); self.manga_root.setText(s.get("manga_root",""))
-        self.flaresolverr_url.setText(s.get("flaresolverr_url","")); self.games_root.setText(s.get("games_root","")); self.output_dir.setText(s.get("output_dir",""))
+        self.flaresolverr_url.setText(s.get("flaresolverr_url","")); self.output_dir.setText(s.get("output_dir",""))
+        self.external_browser_enabled.setChecked(bool(s.get("external_browser_resolver_enabled", True)))
+        self.external_browser_mode.setCurrentIndex(max(0, self.external_browser_mode.findData(str(s.get("external_browser_mode", "default") or "default"))))
+        self.external_browser_executable.setText(str(s.get("external_browser_executable", "") or ""))
+        self.external_browser_auto_open.setChecked(bool(s.get("external_browser_auto_open", True)))
+        try:
+            from core.browser_companion_api import external_browser_bridge_status
+            _eb = external_browser_bridge_status()
+            self.external_browser_status.setText(
+                ("Подключено" if _eb.get("connected") else "Не подключено") +
+                f"; браузер={_eb.get('browser') or '—'}; pending={_eb.get('pending', 0)}; inflight={_eb.get('inflight', 0)}"
+            )
+        except Exception:
+            self.external_browser_status.setText("Статус недоступен")
         self.separate_settings.setChecked(bool(s.get("separate_settings_storage", False))); self.settings_storage_dir.setText(str(s.get("settings_storage_dir", "") or ""))
         try:
             from core.paths import USING_SEPARATE_STORAGE
@@ -1448,13 +1471,17 @@ class SettingsPage(QWidget):
                 self.separate_settings.setToolTip("")
         except Exception:
             pass
-        self.large_download_count.setValue(int(s.get("large_download_warning_count", 1000) or 1000)); self.disk_reserve_gb.setValue(float(s.get("disk_free_reserve_gb", 2.0) or 2.0))
+        self.large_download_count.setValue(int(s.get("large_download_warning_count", 1000) or 1000)); self.disk_reserve_gb.setValue(reserve_gb(s))
         self.lang.setCurrentIndex(max(0,self.lang.findData(s.get("language","ru")))); self.appearance.setCurrentIndex(max(0,self.appearance.findData(s.get("appearance","dark")))); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData(s.get("logo_fit","crop"))))
         self.imports_to_inbox.setChecked(bool(s.get("imports_to_inbox", True))); self.inbox_hours.setValue(int(s.get("inbox_auto_archive_hours", 24) or 24)); self.thumb_cleanup_exit.setChecked(bool(s.get("thumb_cleanup_on_exit", True))); self.thumb_keep_recent.setValue(int(s.get("thumb_keep_recent", 500) or 500))
         self.thumb_quality.setCurrentIndex(max(0, self.thumb_quality.findData(int(s.get("thumb_quality_scale", 2) or 2))))
         self.thumb_memory_items.setValue(int(s.get("thumb_memory_items", 400) or 400)); self.thumb_threads.setValue(int(s.get("thumb_threads", s.get("local_thumb_workers", 4)) or 4)); self.thumb_prefetch.setChecked(bool(s.get("thumb_prefetch_pages", True))); self.performance_slow_ms.setValue(int(s.get("performance_slow_ms", 100) or 100)); self.developer_preload_md5_index.setChecked(bool(s.get("developer_preload_md5_index", True))); self.developer_grabber_md5_cache_enabled.setChecked(bool(s.get("grabber_disk_metadata_cache_enabled", s.get("developer_grabber_md5_cache_enabled", True)))); self.grabber_exact_md5_fanout.setChecked(bool(s.get("grabber_exact_md5_fanout", True))); self.grabber_visual_hash_merge.setChecked(bool(s.get("grabber_visual_hash_merge", False))); self.grabber_visual_hash_distance.setValue(int(s.get("grabber_visual_hash_distance", 3) or 3)); self.developer_filesystem_duplicate_fallback.setChecked(bool(s.get("developer_filesystem_duplicate_fallback", False)))
-        self.local_total_workers.setValue(8); self.local_scan_workers.setValue(2); self.local_hash_workers.setValue(4); self.local_image_workers.setValue(4); self.local_video_workers.setValue(2); self.local_db_read_workers.setValue(2); self.local_tagger_workers.setValue(4); self.local_thumb_workers.setValue(4); self.local_thumb_pregen_workers.setValue(1); self.local_background_workers.setValue(4); self.visual_nomatch_workers.setValue(2); self.visual_nomatch_real_threshold.setValue(float(s.get("visual_nomatch_real_threshold", 0.34) or 0.34)); self.visual_nomatch_classify_enabled.setChecked(bool(s.get("visual_nomatch_classify_enabled", True))); self.visual_nomatch_backend.setCurrentIndex(max(0, self.visual_nomatch_backend.findData(str(s.get("visual_nomatch_backend", "clip_local") or "clip_local")))); self.visual_nomatch_clip_model_dir.setText(str(s.get("visual_nomatch_clip_model_dir", "") or "")); self.visual_nomatch_auto_download_model.setChecked(bool(s.get("visual_nomatch_auto_download_model", True))); self.visual_nomatch_device.setCurrentIndex(max(0, self.visual_nomatch_device.findData(str(s.get("visual_nomatch_device", "auto") or "auto")))); self.visual_nomatch_ai_min_confidence.setValue(float(s.get("visual_nomatch_ai_min_confidence", 0.62) or 0.62)); self.visual_nomatch_ai_min_margin.setValue(float(s.get("visual_nomatch_ai_min_margin", 0.12) or 0.12)); self.visual_nomatch_ai_fallback_heuristic.setChecked(bool(s.get("visual_nomatch_ai_fallback_heuristic", False))); self.local_preflight_enabled.setChecked(bool(s.get("local_preflight_enabled", True))); self.local_preflight_phash.setChecked(bool(s.get("local_preflight_phash", True)))
-        self.sqlite_cache_mb.setValue(int(s.get("sqlite_cache_mb", 40) or 40)); self.sqlite_checkpoint_exit.setChecked(bool(s.get("sqlite_checkpoint_on_exit", True)))
+        self.local_total_workers.setValue(8); self.local_scan_workers.setValue(2); self.local_hash_workers.setValue(4); self.local_image_workers.setValue(4); self.local_video_workers.setValue(2); self.local_db_read_workers.setValue(2); self.local_tagger_workers.setValue(4); self.local_thumb_workers.setValue(4); self.local_thumb_pregen_workers.setValue(1); self.local_background_workers.setValue(4); self.visual_nomatch_workers.setValue(2); self.visual_nomatch_real_threshold.setValue(float(s.get("visual_nomatch_real_threshold", 0.34) or 0.34)); self.visual_nomatch_classify_enabled.setChecked(bool(s.get("visual_nomatch_classify_enabled", True))); self.visual_nomatch_backend.setCurrentIndex(max(0, self.visual_nomatch_backend.findData(str(s.get("visual_nomatch_backend", "clip_local") or "clip_local")))); self.visual_nomatch_clip_model_dir.setText(str(s.get("visual_nomatch_clip_model_dir", "") or "")); self.visual_nomatch_auto_download_model.setChecked(bool(s.get("visual_nomatch_auto_download_model", True))); self.visual_nomatch_device.setCurrentIndex(max(0, self.visual_nomatch_device.findData(str(s.get("visual_nomatch_device", "auto") or "auto")))); self.visual_nomatch_ai_min_confidence.setValue(float(s.get("visual_nomatch_ai_min_confidence", 0.62) or 0.62)); self.visual_nomatch_ai_min_margin.setValue(float(s.get("visual_nomatch_ai_min_margin", 0.12) or 0.12)); self.visual_nomatch_ai_fallback_heuristic.setChecked(bool(s.get("visual_nomatch_ai_fallback_heuristic", False))); self.local_preflight_enabled.setChecked(bool(s.get("local_preflight_enabled", True))); self.local_preflight_phash.setChecked(bool(s.get("local_preflight_phash", True))); self.tagger_provenance_mode.setCurrentIndex(max(0, self.tagger_provenance_mode.findData(str(s.get("tagger_provenance_mode", "full") or "full"))))
+        self.nomatch_local_models_enabled.setChecked(bool(s.get("nomatch_local_models_enabled", False)))
+        self.nomatch_compact_classifier_onnx.setText(str(s.get("nomatch_compact_classifier_onnx", "") or ""))
+        self.nomatch_text_detector_onnx.setText(str(s.get("nomatch_text_detector_onnx", "") or ""))
+        self.sqlite_cache_mb.setValue(int(s.get("sqlite_cache_mb", 40) or 40)); self.sqlite_checkpoint_exit.setChecked(bool(s.get("sqlite_checkpoint_on_exit", True))); self.derived_cache_external.setChecked(bool(s.get("derived_cache_external_enabled", False)))
+        self.sqlite_idle_checkpoint.setChecked(bool(s.get("sqlite_idle_checkpoint_enabled", True))); self.sqlite_idle_checkpoint_threshold.setValue(int(s.get("sqlite_idle_checkpoint_threshold_mb", 64) or 64)); self.sqlite_idle_checkpoint_interval.setValue(max(1, int((s.get("sqlite_idle_checkpoint_interval_seconds", 300) or 300) / 60)))
         self.light_backup_enabled.setChecked(bool(s.get("light_backup_enabled", False))); self.light_backup_on_exit.setChecked(bool(s.get("light_backup_on_exit", True)))
         self.light_backup_interval.setValue(int(s.get("light_backup_interval_hours", 24) or 24)); self.light_backup_keep.setValue(int(s.get("light_backup_keep_last", 10) or 10))
         self.light_backup_dir.setText(str(s.get("light_backup_dir", "") or "")); self.light_backup_include_cookies.setChecked(bool(s.get("light_backup_include_cookies", False)))
@@ -1478,29 +1505,21 @@ class SettingsPage(QWidget):
         if f: self.manga_root.setText(f)
 
     def _connect_detected_archive(self, archive_root):
-        from core.paths import connect_existing_archive
-        target = connect_existing_archive(archive_root)
-        if target is None:
+        """The archive opens at the next start (``core.archive_switch``, the same as the new window); this run keeps
+        its own archive and folders — the fields of this page keep showing them."""
+        from core import archive_switch
+        result = archive_switch.connect(archive_root)
+        if not result.get("ok"):
             return False
-        self.separate_settings.setChecked(True)
-        self.settings_storage_dir.setText(str(target))
-        self.output_dir.setText(str(target.parent / "output"))
-        try:
-            self.main.settings["_workspace_switch_pending"] = True
-            self.main.settings["separate_settings_storage"] = True
-            self.main.settings["settings_storage_dir"] = str(target)
-            self.main.settings["output_dir"] = str(target.parent / "output")
-        except Exception:
-            pass
+        if result.get("stayed"):
+            QMessageBox.information(self, "Архив", "Это архив, который сейчас открыт: при следующем запуске откроется он же.")
+            return True
         QMessageBox.information(
             self,
             "Архив подключён",
-            "Найдены существующие настройки Local Booru:\n"
-            f"{target / 'config' / 'app_settings.json'}\n\n"
-            "Указатель архива уже переключён. Даже если нажать «Сохранить» "
-            "до перезапуска, путь больше не откатится к старому архиву.\n\n"
-            "Перезапусти программу — после запуска будут загружены настройки, "
-            "база и кэш этого архива.",
+            f"При следующем запуске откроется архив:\n{result['archive']}\n\n"
+            "Перезапусти программу — загрузятся его настройки, база и кэш. До этого программа работает с открытым "
+            "сейчас архивом и сохраняет всё в него; подключённый архив не меняется.",
         )
         return True
 
@@ -1566,9 +1585,72 @@ class SettingsPage(QWidget):
         if f:
             self.visual_nomatch_clip_model_dir.setText(str(Path(f)))
 
-    def choose_games_root(self):
-        f=QFileDialog.getExistingDirectory(self,self.main.t("Choose"),self.games_root.text() or self.root.text())
-        if f: self.games_root.setText(f)
+    def choose_external_browser(self):
+        current = self.external_browser_executable.text().strip()
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Выбрать браузер", current, "Browser executable (*.exe);;All files (*)"
+        )
+        if f:
+            self.external_browser_executable.setText(f)
+            self.external_browser_mode.setCurrentIndex(max(0, self.external_browser_mode.findData("custom")))
+
+    def create_companion_pairing_code(self):
+        try:
+            from core.browser_pairing import create_pairing_code, list_extensions
+            ttl = int(self.main.settings.get("browser_companion_pairing_ttl_seconds", 600) or 600)
+            code = create_pairing_code(self.main.settings, ttl_seconds=ttl)
+            active = [row for row in list_extensions(self.main.settings) if not int(row.get("revoked_at") or 0)]
+            self.companion_pair_status.setText(f"Код: {code} · действует {max(1, ttl // 60)} мин · подключено: {len(active)}")
+            QMessageBox.information(
+                self, "Сопряжение Local Booru Companion",
+                f"Введи этот код в popup расширения:\n\n{code}\n\nКод одноразовый и действует {max(1, ttl // 60)} минут.",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Сопряжение", f"Не удалось создать код: {type(exc).__name__}: {exc}")
+
+
+    def revoke_companion_pairings(self):
+        answer = QMessageBox.question(
+            self, "Companion", "Отозвать все токены браузерных расширений? Их придётся сопрягать заново.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            from core.browser_pairing import revoke_all
+            count = revoke_all(self.main.settings)
+            self.companion_pair_status.setText(f"Все сопряжения отозваны: {count}")
+            QMessageBox.information(self, "Companion", f"Отозвано сопряжений: {count}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Companion", f"Не удалось отозвать токены: {type(exc).__name__}: {exc}")
+
+    def test_external_browser_resolver(self):
+        from core.browser_companion_api import external_browser_bridge_status
+        from core.external_browser import open_external_browser_url
+        status = external_browser_bridge_status()
+        temp = dict(self.main.settings or {})
+        temp.update({
+            "external_browser_mode": self.external_browser_mode.currentData() or "default",
+            "external_browser_executable": self.external_browser_executable.text().strip(),
+        })
+        if not status.get("connected"):
+            open_external_browser_url("https://rule34.xxx/", temp)
+        status = external_browser_bridge_status()
+        text = (
+            ("Companion подключён" if status.get("connected") else "Companion пока не отвечает")
+            + f"\nБраузер: {status.get('browser') or 'не определён'}"
+            + f"\nPending/inflight: {status.get('pending', 0)}/{status.get('inflight', 0)}"
+            + "\n\nРасширение должно быть установлено именно в открытом браузере. "
+            + "Local Booru не запускает и не встраивает Chromium."
+        )
+        self.external_browser_status.setText(text.replace("\n", " | "))
+        QMessageBox.information(self, "External Browser Resolver", text)
+
+    def _choose_onnx(self, target):
+        start = target.text().strip() or self.settings_storage_dir.text().strip() or self.root.text()
+        file_name, _ = QFileDialog.getOpenFileName(self, "Выбрать локальную ONNX-модель", start, "ONNX models (*.onnx);;All files (*)")
+        if file_name:
+            target.setText(file_name)
 
     def choose_logo(self):
         f,_=QFileDialog.getOpenFileName(self,self.main.t("Choose"),self.logo.text(),"Images (*.png *.jpg *.jpeg *.webp)")
@@ -1581,15 +1663,24 @@ class SettingsPage(QWidget):
             self.logo.setText(dlg.save_crop()); self.logo_fit.setCurrentIndex(max(0,self.logo_fit.findData("crop")))
     def save(self):
         s=self.main.settings; old_separate = bool(s.get("separate_settings_storage", False)); old_dir = str(s.get("settings_storage_dir", "") or "")
-        s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["games_root"]=self.games_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["imports_to_inbox"]=self.imports_to_inbox.isChecked(); s["inbox_auto_archive_hours"]=self.inbox_hours.value(); s["thumb_cleanup_on_exit"]=self.thumb_cleanup_exit.isChecked(); s["thumb_keep_recent"]=self.thumb_keep_recent.value(); s["deleted_reimport_policy"]=self.deleted_reimport.currentData(); s["trash_auto_purge_days"]=int(self.trash_days.currentData() or 0); s["hide_single_char_tags"]=self.hide_single_char_tags.isChecked(); s["hide_technical_tags"]=self.hide_technical_tags.isChecked(); s["hide_meta_tags"]=self.hide_meta_tags.isChecked(); s["hide_rating_tags"]=self.hide_rating_tags.isChecked()
+        s["root"]=self.root.text(); s["language"]=self.lang.currentData(); s["appearance"]=self.appearance.currentData(); s["theme_title"]=self.title.text(); s["logo_path"]=self.logo.text(); s["logo_fit"]=self.logo_fit.currentData(); s["columns"]=self.cols.value(); s["rows_per_page"]=self.rows.value(); s["items_per_page"]=self.cols.value()*self.rows.value(); s["card_height"]=self.card.value(); s["ignore_numeric_tags"]=self.ignore_numeric.isChecked(); s["show_search_preview"]=self.show_preview.isChecked(); s["enable_error_console"]=self.error_console.isChecked(); s["max_console_lines"]=self.max_console_lines.value(); s["manga_root"]=self.manga_root.text(); s["output_dir"]=self.output_dir.text(); s["flaresolverr_url"]=self.flaresolverr_url.text().strip(); s["imports_to_inbox"]=self.imports_to_inbox.isChecked(); s["inbox_auto_archive_hours"]=self.inbox_hours.value(); s["thumb_cleanup_on_exit"]=self.thumb_cleanup_exit.isChecked(); s["thumb_keep_recent"]=self.thumb_keep_recent.value(); s["deleted_reimport_policy"]=self.deleted_reimport.currentData(); s["trash_auto_purge_days"]=int(self.trash_days.currentData() or 0); s["hide_single_char_tags"]=self.hide_single_char_tags.isChecked(); s["hide_technical_tags"]=self.hide_technical_tags.isChecked(); s["hide_meta_tags"]=self.hide_meta_tags.isChecked(); s["hide_rating_tags"]=self.hide_rating_tags.isChecked()
+        s["external_browser_resolver_enabled"] = self.external_browser_enabled.isChecked()
+        s["external_browser_mode"] = self.external_browser_mode.currentData() or "default"
+        s["external_browser_executable"] = self.external_browser_executable.text().strip()
+        s["external_browser_auto_open"] = self.external_browser_auto_open.isChecked()
+        s["parser_disable_companion_browser_fetch"] = not self.external_browser_enabled.isChecked()
         s["separate_settings_storage"] = True; s["settings_storage_dir"] = self.settings_storage_dir.text().strip(); s["large_download_warning_count"] = self.large_download_count.value(); s["disk_free_reserve_gb"] = self.disk_reserve_gb.value()
         s["grabber_preview_hide_existing"] = self.grabber_hide_existing.isChecked(); s["grabber_preview_prefetch_originals"] = self.grabber_prefetch_originals.isChecked(); s["grabber_include_protected_sites"] = self.grabber_include_protected_sites.isChecked(); s["grabber_preview_stream_cards"] = self.grabber_stream_cards.isChecked(); s["grabber_cache_limit_mb"] = self.grabber_cache_limit.value(); s["grabber_open_quality"] = self.grabber_open_quality.currentData() or "medium_50"; s["grabber_metadata_ram_cache_mb"] = self.grabber_metadata_ram_cache.value(); s["grabber_image_ram_cache_mb"] = self.grabber_image_ram_cache.value(); s["grabber_subscriptions_blocklist"] = self.grabber_blocklist.toPlainText().strip(); s["downloader_blocklist"] = s["grabber_subscriptions_blocklist"]
         s["thumb_quality_scale"] = int(self.thumb_quality.currentData() or 2); s["thumb_memory_items"] = self.thumb_memory_items.value(); s["thumb_threads"] = self.thumb_threads.value(); s["thumb_prefetch_pages"] = self.thumb_prefetch.isChecked(); s["performance_slow_ms"] = self.performance_slow_ms.value(); s["developer_preload_md5_index"] = self.developer_preload_md5_index.isChecked(); s["developer_grabber_md5_cache_enabled"] = self.developer_grabber_md5_cache_enabled.isChecked(); s["grabber_disk_metadata_cache_enabled"] = self.developer_grabber_md5_cache_enabled.isChecked(); s["grabber_exact_md5_fanout"] = self.grabber_exact_md5_fanout.isChecked(); s["grabber_visual_hash_merge"] = self.grabber_visual_hash_merge.isChecked(); s["grabber_visual_hash_distance"] = self.grabber_visual_hash_distance.value(); s["developer_filesystem_duplicate_fallback"] = self.developer_filesystem_duplicate_fallback.isChecked()
         # Fixed mid-PC local worker defaults; no user-facing thread tuning.
         fixed_workers = {"local_total_workers": 8, "local_scan_workers": 2, "local_hash_workers": 4, "local_image_workers": 4, "local_video_workers": 2, "local_db_read_workers": 2, "local_tagger_workers": 4, "local_thumb_workers": 4, "local_thumb_pregen_workers": 1, "local_background_workers": 4, "visual_nomatch_workers": 2}
         s.update(fixed_workers)
-        s["visual_nomatch_backend"] = self.visual_nomatch_backend.currentData() or "clip_local"; s["visual_nomatch_clip_model_dir"] = self.visual_nomatch_clip_model_dir.text().strip(); s["visual_nomatch_auto_download_model"] = self.visual_nomatch_auto_download_model.isChecked(); s["visual_nomatch_device"] = self.visual_nomatch_device.currentData() or "auto"; s["visual_nomatch_ai_min_confidence"] = float(self.visual_nomatch_ai_min_confidence.value()); s["visual_nomatch_ai_min_margin"] = float(self.visual_nomatch_ai_min_margin.value()); s["visual_nomatch_ai_fallback_heuristic"] = self.visual_nomatch_ai_fallback_heuristic.isChecked(); s["visual_nomatch_real_threshold"] = float(self.visual_nomatch_real_threshold.value()); s["visual_nomatch_classify_enabled"] = self.visual_nomatch_classify_enabled.isChecked(); s["local_preflight_enabled"] = True; s["local_preflight_phash"] = True; s["tagger_parallel_workers"] = fixed_workers["local_tagger_workers"]; s["thumb_threads"] = fixed_workers["local_thumb_workers"]; s["thumb_pregen_workers"] = fixed_workers["local_thumb_pregen_workers"]; s["task_max_workers"] = fixed_workers["local_background_workers"]
-        s["sqlite_cache_mb"] = self.sqlite_cache_mb.value(); s.setdefault("sqlite_wal_limit_mb", 512); s["sqlite_temp_store"] = str(s.get("sqlite_temp_store") or "FILE"); s["sqlite_checkpoint_on_exit"] = self.sqlite_checkpoint_exit.isChecked()
+        s["visual_nomatch_backend"] = self.visual_nomatch_backend.currentData() or "clip_local"; s["visual_nomatch_clip_model_dir"] = self.visual_nomatch_clip_model_dir.text().strip(); s["visual_nomatch_auto_download_model"] = self.visual_nomatch_auto_download_model.isChecked(); s["visual_nomatch_device"] = self.visual_nomatch_device.currentData() or "auto"; s["visual_nomatch_ai_min_confidence"] = float(self.visual_nomatch_ai_min_confidence.value()); s["visual_nomatch_ai_min_margin"] = float(self.visual_nomatch_ai_min_margin.value()); s["visual_nomatch_ai_fallback_heuristic"] = self.visual_nomatch_ai_fallback_heuristic.isChecked(); s["visual_nomatch_real_threshold"] = float(self.visual_nomatch_real_threshold.value()); s["visual_nomatch_classify_enabled"] = self.visual_nomatch_classify_enabled.isChecked(); s["local_preflight_enabled"] = self.local_preflight_enabled.isChecked(); s["local_preflight_phash"] = self.local_preflight_phash.isChecked(); s["tagger_provenance_mode"] = self.tagger_provenance_mode.currentData() or "full"; s["tagger_parallel_workers"] = fixed_workers["local_tagger_workers"]; s["thumb_threads"] = fixed_workers["local_thumb_workers"]; s["thumb_pregen_workers"] = fixed_workers["local_thumb_pregen_workers"]; s["task_max_workers"] = fixed_workers["local_background_workers"]
+        s["nomatch_local_models_enabled"] = self.nomatch_local_models_enabled.isChecked()
+        s["nomatch_compact_classifier_onnx"] = self.nomatch_compact_classifier_onnx.text().strip()
+        s["nomatch_text_detector_onnx"] = self.nomatch_text_detector_onnx.text().strip()
+        s["sqlite_cache_mb"] = self.sqlite_cache_mb.value(); s.setdefault("sqlite_wal_limit_mb", 512); s["sqlite_temp_store"] = str(s.get("sqlite_temp_store") or "FILE"); s["sqlite_checkpoint_on_exit"] = self.sqlite_checkpoint_exit.isChecked(); s["derived_cache_external_enabled"] = self.derived_cache_external.isChecked()
+        s["sqlite_idle_checkpoint_enabled"] = self.sqlite_idle_checkpoint.isChecked(); s["sqlite_idle_checkpoint_threshold_mb"] = self.sqlite_idle_checkpoint_threshold.value(); s["sqlite_idle_checkpoint_interval_seconds"] = self.sqlite_idle_checkpoint_interval.value() * 60; s.setdefault("sqlite_idle_checkpoint_min_idle_seconds", 15)
         s["light_backup_enabled"] = self.light_backup_enabled.isChecked(); s["light_backup_dir"] = self.light_backup_dir.text().strip(); s["light_backup_on_exit"] = self.light_backup_on_exit.isChecked(); s["light_backup_interval_hours"] = self.light_backup_interval.value(); s["light_backup_keep_last"] = self.light_backup_keep.value(); s["light_backup_include_cookies"] = self.light_backup_include_cookies.isChecked()
         if s["separate_settings_storage"]:
             from core.paths import suggested_settings_storage_dir
@@ -1609,8 +1700,9 @@ class SettingsPage(QWidget):
             pass
         self.main.gallery_page.items=[]; self.main.tags_page.items=[]; self.main.apply_theme(); self.main.retranslate()
         msg = self.main.t("Settings saved")
-        if bool(s.get("_workspace_switch_pending", False)):
-            msg += "\n\nАктивный архив переключён в указателе пути. Перезапусти программу, чтобы загрузились SQLite, настройки, кэш и cookies нового архива. Текущий старый архив не перезаписан."
+        from core.paths import next_archive
+        if next_archive() is not None or bool(s.get("_workspace_switch_pending", False)):
+            msg += "\n\nПри следующем запуске откроется другой архив. Перезапусти программу, чтобы загрузились его база, настройки, кэш и cookies. Подключённый архив не перезаписан."
         elif old_separate != s["separate_settings_storage"] or old_dir != s["settings_storage_dir"]:
             msg += "\n\nПосле перезапуска будут использоваться Local_Booru_Archive/output и Local_Booru_Archive/settings. Старые данные скопированы безопасно; полная конфигурация в Documents больше не создаётся."
         QMessageBox.information(self,self.main.t("Saved"),msg)
@@ -1701,7 +1793,7 @@ class SettingsPage(QWidget):
         try:
             from core.settings_bundle import import_profile
             result = import_profile(path, self.main.settings, apply=True)
-            self.main.settings.clear(); self.main.settings.update(result["settings"])
+            self.main.settings.update(result["settings"])   # in place: it keeps every current key (web pages read it)
             self.load_values(); self.main.apply_theme(); self.main.retranslate()
             QMessageBox.information(self, "Импорт настроек", f"Профиль применён.\nBackup предыдущих настроек:\n{result.get('backup','')}\n\nЕсли менялась папка хранения базы/кэша, перезапусти приложение.")
         except Exception as exc:
@@ -1774,6 +1866,9 @@ class SettingsPage(QWidget):
         try:
             from core.library_lifecycle import relocate_missing_library_paths
             preview = relocate_missing_library_paths(self.main.settings, chosen, apply=False)
+            if preview.get("error"):
+                QMessageBox.warning(self, "Перенос архива", str(preview["error"]))
+                return
             if not preview.get("found"):
                 QMessageBox.information(self, "Перенос архива", "Совпадающие потерянные файлы в выбранной папке не найдены.")
                 return
@@ -1798,9 +1893,9 @@ class SettingsPage(QWidget):
     def recheck_general_only_categories(self):
         if QMessageBox.question(
             self,
-            "Переразложить general-only теги",
-            "Найти ВСЕ уже сохранённые Danbooru/Gelbooru/rule34/e621/ATF source-наборы, где все теги записаны как general, и заново запросить категории у сайтов?\n\n"
-            "Старого лимита 10000 больше нет: операция пойдёт по всем найденным general-only наборам.\n"
+            "Переразложить категории тегов",
+            "Найти source-наборы Danbooru/Gelbooru/rule34/e621/ATF, где категории остались general, включая незавершённые частичные исправления, и заново запросить недостающие категории?\n\n"
+            "Старого лимита 10000 больше нет: операция пойдёт по всем найденным незавершённым наборам.\n"
             "Оригинальные файлы не трогаются. Новые теги не добавляются. Будет создан backup SQLite.\n"
             "На большой базе это может идти долго, потому что часть запросов сетевые.",
             QMessageBox.Yes | QMessageBox.No,
@@ -1808,7 +1903,7 @@ class SettingsPage(QWidget):
         ) != QMessageBox.Yes:
             return
         self.sql_status.setVisible(True)
-        self.sql_status.setText("Поиск general-only тегов для перераскладки...")
+        self.sql_status.setText("Поиск general-only и незавершённых тегов для перераскладки...")
         self.recheck_general_categories_btn.setEnabled(False)
         try:
             from core.maintenance_tasks import recheck_general_only_tag_categories
@@ -1862,6 +1957,54 @@ class SettingsPage(QWidget):
         self.recheck_general_categories_btn.setEnabled(True)
         self.sql_status.setText("Ошибка перераскладки категорий: " + str(error))
         QMessageBox.warning(self, "Категории тегов", str(error))
+
+    def sync_tag_aliases(self):
+        if QMessageBox.question(
+            self,
+            "Синонимы тегов",
+            "Загрузить официальные alias-списки rule34.xxx, Gelbooru, Danbooru, e621 и ATF?\n\n"
+            "Операция сетевая, restart-safe и может идти долго. Синонимы не придумываются: "
+            "в базу попадут только связи, опубликованные самими сайтами.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        self.sync_tag_aliases_btn.setEnabled(False)
+        self.sql_status.setVisible(True)
+        self.sql_status.setText("Синхронизация официальных синонимов тегов...")
+        try:
+            from core.tag_relations import sync_all_alias_sources
+            self._tag_alias_task = self.main.task_manager.submit(
+                sync_all_alias_sources,
+                dict(self.main.settings or {}),
+                name="maintenance.tag_aliases",
+                on_progress=lambda msg: self.sql_status.setText(str(msg)),
+                on_result=lambda result: self._sync_tag_aliases_done(result),
+                on_error=lambda err: self._sync_tag_aliases_error(err),
+            )
+        except Exception as exc:
+            self.sync_tag_aliases_btn.setEnabled(True)
+            QMessageBox.warning(self, "Синонимы тегов", str(exc))
+
+    def _sync_tag_aliases_done(self, result):
+        self.sync_tag_aliases_btn.setEnabled(True)
+        result = dict(result or {})
+        lines = [
+            "Синонимы тегов синхронизированы.",
+            f"Получено строк: {result.get('seen', 0)}",
+            f"Записано/обновлено: {result.get('written', 0)}",
+            f"Ошибок сайтов: {result.get('errors', 0)}",
+        ]
+        for site, row in (result.get("sites") or {}).items():
+            lines.append(f"{site}: {row.get('status')} pages={row.get('pages',0)} rows={row.get('seen',0)}")
+        message = "\n".join(lines)
+        self.sql_status.setText("  |  ".join(lines))
+        QMessageBox.information(self, "Синонимы тегов", message)
+
+    def _sync_tag_aliases_error(self, error):
+        self.sync_tag_aliases_btn.setEnabled(True)
+        self.sql_status.setText("Ошибка синхронизации синонимов: " + str(error))
+        QMessageBox.warning(self, "Синонимы тегов", str(error))
 
     def repair_e621_tags(self):
         if QMessageBox.question(self, "Исправить e621-теги", "Исправить сохранённые e621-теги вида horse_231k / canine_3.0k / yourumi_Uploaded_by_the_artist и восстановить категории из сохранённых JSON-данных?\n\nРезервная копия базы будет создана автоматически.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
@@ -1927,8 +2070,10 @@ class SettingsPage(QWidget):
         def _log(m): log_lines.append(m)
         stats = run_file_maintenance(self.main.settings, log=_log, max_check=99999)
         msg = (f"Проверено: {stats['checked']} файлов\n"
-               f"Отсутствует: {stats['missing']} (помечены удалёнными)\n"
-               f"Ошибок: {stats['errors']}")
+               f"Отсутствует: {stats['missing']}\n"
+               f"Корень недоступен: {stats.get('offline_root', 0)}\n"
+               f"Ошибок пути: {stats['errors']}\n\n"
+               "Записи SQLite и файлы не изменялись.")
         QMessageBox.information(self, "File Maintenance", msg)
 
     def _test_flaresolverr(self):
@@ -1959,22 +2104,290 @@ class SettingsPage(QWidget):
             QMessageBox.information(self, "Резервная копия",
                 "Бэкап уже создавался в последние 24 часа.\nДля принудительного — удали файлы в Local_Booru_Archive/settings/output/backups/db/")
 
+    def _toggle_presence_check(self):
+        current = getattr(self, "_presence_check_task", None)
+        if current is not None and (current.future is None or not current.future.done()):
+            current.cancel()
+            self.presence_check_btn.setEnabled(False)
+            self.presence_check_btn.setText("Остановка...")
+            self.sql_status.setVisible(True)
+            self.sql_status.setText("Presence: запрошена остановка; уже записанные статусы останутся доступны")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Проверка наличия файлов",
+            "Проверить все живые пути библиотеки?\n\n"
+            "Проверка работает пакетами и различает отсутствующий файл, отключённый "
+            "корень хранения и ошибку доступа. Файлы не перемещаются, записи images.deleted "
+            "не изменяются, backup SQLite не создаётся.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.presence_check_btn.setEnabled(True)
+        self.presence_check_btn.setText("Отменить проверку наличия")
+        self.sql_status.setVisible(True)
+        self.sql_status.setText("Presence: подготовка...")
+        try:
+            from core.file_integrity import run_presence_check
+            self._presence_check_task = self.main.task_manager.submit(
+                run_presence_check,
+                dict(self.main.settings or {}),
+                mode="forced",
+                name="maintenance.integrity_presence",
+                on_progress=lambda msg: self.sql_status.setText(str(msg)),
+                on_result=self._presence_check_done,
+                on_error=self._presence_check_error,
+                on_finished=self._presence_check_finished,
+            )
+        except Exception as exc:
+            self.presence_check_btn.setEnabled(True)
+            self.presence_check_btn.setText("Проверить наличие файлов")
+            self.sql_status.setText("Presence ERROR: " + str(exc))
+
+    def _presence_check_done(self, result):
+        if result.get("cancelled"):
+            self.sql_status.setText(
+                f"Presence остановлена: проверено={result.get('checked',0)}/{result.get('total',0)}; "
+                f"missing={result.get('missing',0)}; offline_root={result.get('offline_root',0)}; "
+                f"path_error={result.get('path_error',0)}"
+            )
+            return
+        self.sql_status.setText(
+            f"Presence готова: проверено={result.get('checked',0)}/{result.get('total',0)}; "
+            f"present={result.get('present',0)}; missing={result.get('missing',0)}; "
+            f"offline_root={result.get('offline_root',0)}; path_error={result.get('path_error',0)}; "
+            f"stale={result.get('stale_skipped',0)}; time={result.get('duration_seconds',0)}s"
+        )
+
+    def _presence_check_error(self, error):
+        self.sql_status.setText("Presence ERROR:\n" + str(error)[-3000:])
+
+    def _presence_check_finished(self):
+        task = getattr(self, "_presence_check_task", None)
+        self._presence_check_task = None
+        self.presence_check_btn.setEnabled(True)
+        self.presence_check_btn.setText("Проверить наличие файлов")
+        if task is not None and task.cancelled():
+            self.sql_status.setText("Presence: остановлена; медиа и images.deleted не изменялись, частичные статусы сохранены")
+
+    def _toggle_hash_integrity(self):
+        current = getattr(self, "_hash_integrity_task", None)
+        if current is not None and (current.future is None or not current.future.done()):
+            current.cancel()
+            self.hash_integrity_btn.setEnabled(False)
+            self.hash_integrity_btn.setText("Остановка...")
+            self.sql_status.setVisible(True)
+            self.sql_status.setText("Hash integrity: запрошена остановка; уже проверенные результаты сохранятся")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Проверка MD5 по байтам",
+            "Прочитать все живые медиа и сравнить фактический MD5 с canonical MD5 в SQLite?\n\n"
+            "Операция может читать десятки гигабайт. Она работает только idle-чанками, "
+            "уступает парсеру и активности пользователя, поддерживает отмену и ничего не удаляет. "
+            "При несовпадении hash_md5 автоматически не исправляется.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.hash_integrity_btn.setText("Отменить проверку MD5")
+        self.sql_status.setVisible(True)
+        self.sql_status.setText("Hash integrity: ожидание idle...")
+        try:
+            from core.file_integrity import run_hash_verification
+            self._hash_integrity_task = self.main.task_manager.submit(
+                run_hash_verification,
+                dict(self.main.settings or {}),
+                mode="idle",
+                name="maintenance.integrity_hash",
+                on_progress=lambda msg: self.sql_status.setText(str(msg)),
+                on_result=self._hash_integrity_done,
+                on_error=lambda error: self.sql_status.setText("Hash integrity ERROR:\n" + str(error)[-3000:]),
+                on_finished=self._hash_integrity_finished,
+            )
+        except Exception as exc:
+            self.hash_integrity_btn.setText("Проверить MD5 по байтам")
+            self.sql_status.setText("Hash integrity ERROR: " + str(exc))
+
+    def _hash_integrity_done(self, result):
+        if result.get("cancelled"):
+            self.sql_status.setText(
+                f"Hash integrity остановлена: checked={result.get('checked',0)}/{result.get('total',0)}; "
+                f"ok={result.get('hash_ok',0)} mismatch={result.get('hash_mismatch',0)} "
+                f"unreadable={result.get('hash_unreadable',0)} deferred={result.get('hash_deferred',0)}"
+            )
+            return
+        self.sql_status.setText(
+            f"Hash integrity готова: checked={result.get('checked',0)}/{result.get('total',0)}; "
+            f"ok={result.get('hash_ok',0)} mismatch={result.get('hash_mismatch',0)} "
+            f"unreadable={result.get('hash_unreadable',0)} deferred={result.get('hash_deferred',0)}; "
+            f"stale={result.get('stale_skipped',0)} bytes={result.get('bytes_read',0)} "
+            f"time={result.get('duration_seconds',0)}s"
+        )
+
+    def _hash_integrity_finished(self):
+        task = getattr(self, "_hash_integrity_task", None)
+        self._hash_integrity_task = None
+        self.hash_integrity_btn.setEnabled(True)
+        self.hash_integrity_btn.setText("Проверить MD5 по байтам")
+        if task is not None and task.cancelled():
+            self.sql_status.setText("Hash integrity: остановлена; canonical MD5 и медиа не изменялись")
+
+    def _toggle_verified_recovery(self):
+        current = getattr(self, "_verified_recovery_task", None)
+        if current is not None and (current.future is None or not current.future.done()):
+            current.cancel()
+            self.recovery_btn.setEnabled(False)
+            self.recovery_btn.setText("Остановка...")
+            self.sql_status.setVisible(True)
+            self.sql_status.setText("Recovery: запрошена остановка; установленный ранее файл останется восстановленным")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Проверенное восстановление файлов",
+            "Попытаться восстановить подтверждённые missing и MD5 mismatch файлы?\n\n"
+            "Используются только сохранённые source URL. Загрузка идёт во staging и принимается "
+            "только при точном совпадении canonical MD5. Повреждённый managed-файл сначала "
+            "перемещается в recovery_quarantine; исходный архив никогда не изменяется.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.recovery_btn.setText("Отменить recovery")
+        self.sql_status.setVisible(True)
+        self.sql_status.setText("Recovery: ожидание idle...")
+        try:
+            from core.file_integrity import run_verified_recovery
+            self._verified_recovery_task = self.main.task_manager.submit(
+                run_verified_recovery,
+                dict(self.main.settings or {}),
+                mode="idle",
+                name="maintenance.integrity_recovery",
+                on_progress=lambda msg: self.sql_status.setText(str(msg)),
+                on_result=self._verified_recovery_done,
+                on_error=lambda error: self.sql_status.setText("Recovery ERROR:\n" + str(error)[-3000:]),
+                on_finished=self._verified_recovery_finished,
+            )
+        except Exception as exc:
+            self.recovery_btn.setText("Восстановить missing / mismatch")
+            self.sql_status.setText("Recovery ERROR: " + str(exc))
+
+    def _verified_recovery_done(self, result):
+        if result.get("cancelled"):
+            self.sql_status.setText(
+                f"Recovery остановлена: checked={result.get('checked',0)}/{result.get('total',0)}; "
+                f"recovered={result.get('recovered',0)} failed={result.get('recovery_failed',0)}"
+            )
+            return
+        self.sql_status.setText(
+            f"Recovery готова: checked={result.get('checked',0)}/{result.get('total',0)}; "
+            f"recovered={result.get('recovered',0)} failed={result.get('recovery_failed',0)}; "
+            f"blocked={result.get('blocked',0)} no_source={result.get('no_source',0)}; "
+            f"time={result.get('duration_seconds',0)}s"
+        )
+
+    def _verified_recovery_finished(self):
+        task = getattr(self, "_verified_recovery_task", None)
+        self._verified_recovery_task = None
+        self.recovery_btn.setEnabled(True)
+        self.recovery_btn.setText("Восстановить missing / mismatch")
+        if task is not None and task.cancelled():
+            self.sql_status.setText("Recovery: остановлена; непроверенные staging-файлы не устанавливаются")
+
     def _rebuild_vptree(self):
-        from core.database.connection import get_connection
-        from core.vptree import VPTree
-        from PySide6.QtWidgets import QProgressDialog, QApplication
-        conn = get_connection(self.main.settings)
-        dlg = QProgressDialog("Пересборка VP-tree...", "Отмена", 0, 100, self)
-        dlg.setWindowTitle("VP-tree")
-        dlg.setMinimumDuration(0)
-        dlg.show()
-        def progress(done, total):
-            if total > 0:
-                dlg.setValue(int(100 * done / total))
-            QApplication.processEvents()
-        count = VPTree(conn).rebuild(progress_cb=progress)
-        dlg.setValue(100)
-        QMessageBox.information(self, "VP-tree", f"Готово! Проиндексировано: {count} файлов.")
+        self._toggle_derived_rebuild("vp_tree", self.rebuild_vptree_btn, "VP-tree")
+
+    def _rebuild_effective_categories(self):
+        self._toggle_derived_rebuild(
+            "image_effective_tag_category",
+            self.rebuild_effective_categories_btn,
+            "Эффективные категории",
+        )
+
+    def _toggle_derived_rebuild(self, cache_name, button, title):
+        tasks = getattr(self, "_derived_rebuild_tasks", {})
+        current = tasks.get(cache_name)
+        if current is not None and (current.future is None or not current.future.done()):
+            current.cancel()
+            button.setEnabled(False)
+            button.setText("Остановка...")
+            self.sql_status.setText(f"{title}: запрошена остановка; старый кэш будет сохранён")
+            return
+        self._start_derived_rebuild(cache_name, button, title)
+
+    def _start_derived_rebuild(self, cache_name, button, title):
+        answer = QMessageBox.question(
+            self,
+            title,
+            "Пересобрать производный кэш?\n\n"
+            "Новый кэш будет построен отдельно и проверен. Старый рабочий кэш "
+            "останется нетронутым до атомарной замены. Полный backup SQLite не создаётся, "
+            "потому что первичные теги и медиа не изменяются.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        original_text = button.text()
+        button.setEnabled(True)
+        button.setText(f"Отменить: {title}")
+        self.sql_status.setVisible(True)
+        self.sql_status.setText(f"{title}: подготовка...")
+        try:
+            from core.derived_maintenance import rebuild_derived_cache
+            task = self.main.task_manager.submit(
+                rebuild_derived_cache,
+                dict(self.main.settings or {}),
+                cache_name,
+                mode="forced",
+                name=f"maintenance.rebuild.{cache_name}",
+                on_progress=lambda msg, _title=title: self.sql_status.setText(f"{_title}: {msg}"),
+                on_result=lambda result, _title=title: self._derived_rebuild_done(_title, result),
+                on_error=lambda error, _title=title: self._derived_rebuild_error(_title, error),
+                on_finished=lambda _cache=cache_name, _button=button, _text=original_text, _title=title:
+                    self._derived_rebuild_finished(_cache, _button, _text, _title),
+            )
+            if not hasattr(self, "_derived_rebuild_tasks"):
+                self._derived_rebuild_tasks = {}
+            self._derived_rebuild_tasks[cache_name] = task
+        except Exception as exc:
+            button.setEnabled(True)
+            button.setText(original_text)
+            self.sql_status.setText(f"{title} ERROR: {exc}")
+
+    def _derived_rebuild_finished(self, cache_name, button, original_text, title):
+        task = getattr(self, "_derived_rebuild_tasks", {}).pop(cache_name, None)
+        button.setEnabled(True)
+        button.setText(original_text)
+        if task is not None and task.cancelled():
+            self.sql_status.setText(f"{title}: отменено; старый кэш сохранён")
+
+    def _derived_rebuild_done(self, title, result):
+        if not result.get("ok"):
+            if result.get("cancelled"):
+                self.sql_status.setText(f"{title}: отменено; старый кэш сохранён")
+            else:
+                self.sql_status.setText(f"{title}: не выполнено — {result.get('error', 'unknown')}")
+            return
+        self.sql_status.setText(
+            f"{title} готов: backend={result.get('storage_backend', 'main')} generation={result.get('generation', 0)} "
+            f"source={result.get('source_rows', 0)} rows={result.get('cache_rows', 0)} "
+            f"skipped={result.get('skipped_invalid', 0)} "
+            f"time={result.get('duration_seconds', 0)}s"
+        )
+        try:
+            if str(result.get("cache") or "") == "image_effective_tag_category":
+                self.main.gallery_page.items = []
+                self.main.gallery_page.refresh_force()
+        except Exception:
+            pass
+
+    def _derived_rebuild_error(self, title, error):
+        self.sql_status.setText(f"{title} ERROR:\n" + str(error)[-3000:])
 
     def rebuild_sql_index(self):
         self.rebuild_sql_btn.setEnabled(False)

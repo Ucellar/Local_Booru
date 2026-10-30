@@ -1,0 +1,33 @@
+/* The extension's window (v5.31): the program's mark and its state on top, then what it does on the sites, the link
+   with the program, the work without it, the rest under «Ещё». */
+:root { color-scheme: dark; --bg: #15171d; --panel: #1d2028; --line: #2f3442; --text: #eef0f4; --muted: #9aa3b5;
+  --accent: #0a84ff; --good: #3fb950; --bad: #ff6b6b; }
+* { box-sizing: border-box; }
+body { width: 300px; margin: 0; padding: 12px; font: 13px/1.4 system-ui, "Segoe UI", Arial, sans-serif; background: var(--bg); color: var(--text); }
+.top { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; }
+.logo { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px; background: var(--accent); color: #fff;
+  font-weight: 800; letter-spacing: 0.04em; }
+.title { flex: 1; min-width: 0; }
+h1 { margin: 0; font-size: 15px; }
+.status { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.status.ok { color: var(--good); }
+.status.bad { color: var(--bad); }
+.out { min-height: 16px; margin: 0 0 6px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+section, details.more { margin: 0 0 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+h2 { margin: 0 0 6px; font-size: 11px; font-weight: 700; color: var(--muted); }
+label { display: block; margin: 6px 0; }
+.switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.switch input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.row input, .row select { flex: 1; max-width: 62%; }
+input[type="text"], select { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: #252935; color: var(--text); font: inherit; }
+input[type="text"]:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+button { width: 100%; margin: 6px 0 0; padding: 7px 8px; border: 1px solid #3a4050; border-radius: 7px; background: #2a2f3b; color: var(--text);
+  font: inherit; cursor: pointer; }
+button:hover { background: #343a48; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+button.icon { width: 30px; height: 30px; margin: 0; padding: 0; font-size: 15px; }
+.buttons { display: flex; gap: 6px; }
+details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+details.more summary { font-weight: 700; color: var(--text); }

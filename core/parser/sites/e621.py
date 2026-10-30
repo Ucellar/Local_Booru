@@ -1,0 +1,95 @@
+"""e621 / e926 JSON API (tags already grouped by category)."""
+from __future__ import annotations
+
+from core.parser.models import Post
+from core.parser.sites.base import Site
+from core.parser.util import norm_md5, post_dicts
+from core.site_posts import fields as post_fields
+from core.tagger.tag_groups import add_tags_to_groups, empty_tag_groups
+
+_GROUPS = {
+    "general": "general", "artist": "artist", "contributor": "contributor", "copyright": "copyright",
+    "character": "character", "species": "species", "meta": "meta", "lore": "lore", "invalid": "invalid",
+}
+
+
+class E621Site(Site):
+    engine = "e621"
+    post_path = "/posts/{id}"
+    md5_batch_limit = 50
+
+    def _headers(self) -> dict:
+        return {"Accept": "application/json", "User-Agent": self.api_user_agent()}
+
+    def _auth(self):
+        return (self.login, self.api_key) if self.login and self.api_key else None
+
+
+    def search_md5(self, md5: str) -> Post | None:
+        data = self.get_json(f"{self.root}/posts.json", params={"tags": f"md5:{md5}", "limit": 1},
+                             headers=self._headers(), auth=self._auth())
+        for raw in post_dicts(data, keys=("posts",)):
+            if norm_md5((raw.get("file") or {}).get("md5")) == md5:
+                return self.parse(raw)
+        return None
+
+    def search_md5_many(self, md5s: list, style: str = "", probe: bool = False) -> tuple[dict, bool]:
+        data = self.get_json(f"{self.root}/posts.json", params={"tags": "md5:" + ",".join(md5s), "limit": len(md5s)},
+                             headers=self._headers(), auth=self._auth())
+        return self._map_md5_answer(post_dicts(data, keys=("posts",)), md5s,
+                                    lambda raw: (raw.get("file") or {}).get("md5"), self.parse)
+
+    def fetch_post(self, post_id: str) -> Post | None:
+        if not str(post_id).isdigit():
+            return None
+        data = self.get_json(f"{self.root}/posts/{post_id}.json", headers=self._headers(), auth=self._auth())
+        raw = data.get("post") if isinstance(data, dict) else None
+        return self.parse(raw) if isinstance(raw, dict) else None
+
+    id_batch_limit = 100
+
+    def id_batch_styles(self) -> tuple:
+        return ("list",)
+
+    def posts_by_ids(self, ids: list, style: str = "") -> list:
+        data = self.get_json(f"{self.root}/posts.json",
+                             params={"tags": "id:" + ",".join(str(i) for i in ids), "limit": max(1, len(ids))},
+                             headers=self._headers(), auth=self._auth(), soft=len(ids) > 1)
+        return post_dicts(data, keys=("posts",))
+
+    def search_query(self, query: str, limit: int = 3) -> list:
+        # soft: a relay query the site rejects (wildcards) must not switch the whole site off
+        data = self.get_json(f"{self.root}/posts.json", params={"tags": query, "limit": max(1, min(20, limit))},
+                             headers=self._headers(), auth=self._auth(), soft=True)
+        return [p for p in (self.parse(raw) for raw in post_dicts(data, keys=("posts",))) if p and p.tags]
+
+    tag_page_max = 320
+    can_search_tags = True
+
+    def search_tags(self, query: str, page: int = 0, limit: int = 40) -> list:
+        data = self.get_json(f"{self.root}/posts.json",
+                             params={"tags": query, "limit": max(1, min(self.tag_page_max, limit)), "page": int(page) + 1},
+                             headers=self._headers(), auth=self._auth())
+        return [(post, raw) for raw in post_dicts(data, keys=("posts",)) for post in [self.parse(raw)] if post]
+
+    def parse(self, raw: dict) -> Post | None:
+        if not isinstance(raw, dict) or not raw.get("id"):
+            return None
+        groups = empty_tag_groups()
+        tag_map = raw.get("tags")
+        if isinstance(tag_map, dict):
+            for key, values in tag_map.items():
+                if isinstance(values, list):
+                    add_tags_to_groups(groups, _GROUPS.get(str(key).lower(), "general"), values)
+        if not self.has_tags(groups):
+            return None
+        post_id = str(raw.get("id"))
+        file_info = raw.get("file") or {}
+        preview = (raw.get("preview") or {}).get("url") or (raw.get("sample") or {}).get("url") or ""
+        return Post(
+            site=self.host, label=self.label, post_id=post_id, url=self.post_url(post_id),
+            md5=norm_md5(file_info.get("md5")), groups=groups, rating=str(raw.get("rating") or ""),
+            sources=[s for s in raw.get("sources") or [] if isinstance(s, str) and s.startswith("http")],
+            preview_url=str(preview or ""), file_url=str(file_info.get("url") or ""),
+            meta=post_fields(raw, self.engine),
+        )

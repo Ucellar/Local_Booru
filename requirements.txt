@@ -3,16 +3,15 @@ Pillow
 imagehash
 requests
 beautifulsoup4
-playwright
 opencv-python
-browser-cookie3
 PySide6-Addons
 PyMuPDF
 
 curl_cffi
 python-mpv
 cloudscraper
-patchright
-DrissionPage
 
 watchdog
+
+# Брак, «фото или рисунок» (core/visual_models.py): small models on the processor
+onnxruntime

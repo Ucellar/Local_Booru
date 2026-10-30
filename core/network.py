@@ -11,6 +11,52 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 TRANSIENT_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+class PermanentlyDisabledHostError(RuntimeError):
+    """Raised before network I/O for hosts forbidden by local policy."""
+
+
+def _clean_host(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    try:
+        parsed = urlparse(raw if "://" in raw else "//" + raw)
+        host = parsed.hostname or raw
+    except Exception:
+        host = raw
+    return str(host or "").strip(".").lower()
+
+
+def is_permanently_disabled_host(value: object) -> bool:
+    """Return True for the globally forbidden Yandex network namespace.
+
+    This is deliberately not a cooldown or a user-retry condition.  The user
+    requires Local Booru to make no connection attempts to Yandex-owned host
+    namespaces, even when a page accidentally exposes a reverse-search URL as
+    if it were an original media URL.
+    """
+    host = _clean_host(value)
+    if not host:
+        return False
+    if host == "ya.ru" or host.endswith(".ya.ru"):
+        return True
+    for label in host.split("."):
+        if label.startswith("yandex") or label == "yastatic":
+            return True
+    return False
+
+
+def is_permanently_disabled_url(url: object) -> bool:
+    return is_permanently_disabled_host(url)
+
+
+def assert_url_allowed(url: object) -> None:
+    if not is_permanently_disabled_url(url):
+        return
+    host = _clean_host(url) or "disabled-host"
+    raise PermanentlyDisabledHostError(
+        f"SKIP DISABLED HOST [{host}]: permanently blocked by Local Booru policy"
+    )
+
+
 TRANSIENT_ERROR_MARKERS = (
     "read timed out", "connect timed out", "connection timed out", "timeouterror",
     "timeout error", "connection aborted", "connection reset", "failed to resolve",
@@ -68,17 +114,85 @@ def timeout_tuple(settings: dict | None, timeout=None):
         return (connect, default_read)
 
 
-def _retry_after_seconds(response) -> float:
+def retry_after_seconds(source, *, fallback: float = 0.0, minimum: float = 0.0, maximum: float = 3600.0) -> float:
+    """Return a bounded Retry-After delay from a response or HTTP exception.
+
+    ``Retry-After`` may be an integer/decimal number of seconds or an HTTP-date.
+    ``source`` may be a response itself or an exception exposing ``.response``.
+    The fallback is used only when the header is absent or invalid.
+    """
+    response = getattr(source, "response", None)
+    if response is None:
+        response = source
+    raw = ""
     try:
-        raw = str(response.headers.get("Retry-After", "") or "").strip()
-        if not raw:
-            return 0.0
-        if raw.isdigit():
-            return float(raw)
-        dt = parsedate_to_datetime(raw)
-        return max(0.0, dt.timestamp() - time.time())
+        headers = getattr(response, "headers", {}) or {}
+        raw = str(headers.get("Retry-After", headers.get("retry-after", "")) or "").strip()
     except Exception:
+        raw = ""
+
+    wait = 0.0
+    if raw:
+        try:
+            wait = float(raw)
+        except Exception:
+            try:
+                wait = max(0.0, parsedate_to_datetime(raw).timestamp() - time.time())
+            except Exception:
+                wait = 0.0
+    if wait <= 0:
+        try:
+            wait = float(fallback or 0.0)
+        except Exception:
+            wait = 0.0
+    if wait <= 0:
         return 0.0
+    try:
+        low = max(0.0, float(minimum or 0.0))
+    except Exception:
+        low = 0.0
+    try:
+        high = max(low, float(maximum or 3600.0))
+    except Exception:
+        high = max(low, 3600.0)
+    return max(low, min(high, wait))
+
+
+def _retry_after_seconds(response) -> float:
+    """Compatibility wrapper for the pre-v455 private helper."""
+    return retry_after_seconds(response)
+
+
+def adaptive_retry_delay(reported_delay, fallback_delay, previous_delay=0, *, repeated_failure=False, minimum=60, maximum=3600) -> int:
+    """Choose one bounded retry delay with exponential growth after a failed probe.
+
+    A valid service-provided delay wins over the configured fallback. When the
+    post-cooldown canary fails, the previous delay doubles up to ``maximum``.
+    """
+    try:
+        low = max(0, int(minimum or 0))
+    except Exception:
+        low = 0
+    try:
+        high = max(low, int(maximum or 3600))
+    except Exception:
+        high = max(low, 3600)
+    try:
+        fallback = max(low, min(high, int(fallback_delay or low)))
+    except Exception:
+        fallback = low
+    try:
+        reported = max(0, int(reported_delay or 0))
+    except Exception:
+        reported = 0
+    try:
+        previous = max(0, int(previous_delay or 0))
+    except Exception:
+        previous = 0
+    chosen = reported or fallback
+    if repeated_failure and previous > 0:
+        chosen = max(chosen, min(high, previous * 2))
+    return max(low, min(high, int(chosen)))
 
 
 def _safe_log(log_func, message: str) -> None:
@@ -89,14 +203,27 @@ def _safe_log(log_func, message: str) -> None:
             pass
 
 
-def request_with_retries(raw_call, method: str, url: str, *, settings: dict | None = None, log_func=None, cancel_callback=None, **kwargs):
+def request_with_retries(raw_call, method: str, url: str, *, settings: dict | None = None, log_func=None, cancel_callback=None, max_attempts: int | None = None, **kwargs):
     """Run one HTTP request with timeout + retry/backoff.
 
     All temporary network failures are raised after the retry budget is exhausted.
     Callers must treat that as pending/deferred, not as a normal miss.
+    Permanently disabled hosts are rejected before any socket/DNS activity and
+    are never classified as transient network failures.
     """
     settings = settings or {}
-    attempts = _setting_int(settings, "network_retry_attempts", 3, 1, 8)
+    try:
+        assert_url_allowed(url)
+    except PermanentlyDisabledHostError as exc:
+        _safe_log(log_func, str(exc))
+        raise
+    if max_attempts is None:
+        attempts = _setting_int(settings, "network_retry_attempts", 3, 1, 8)
+    else:
+        try:
+            attempts = max(1, min(8, int(max_attempts)))
+        except Exception:
+            attempts = 1
     base = _setting_float(settings, "network_retry_base_delay_seconds", 1.0, 0.0, 60.0)
     max_delay = _setting_float(settings, "network_retry_max_delay_seconds", 4.0, 0.0, 300.0)
     host = host_from_url(url)
@@ -178,10 +305,18 @@ def install_safe_session(session, settings: dict | None = None, log_func=None, c
     orig_post = session.post
 
     def safe_get(url, **kwargs):
-        return request_with_retries(orig_get, "GET", url, settings=settings, log_func=log_func, cancel_callback=cancel_callback, **kwargs)
+        call_attempts = kwargs.pop("_local_booru_max_attempts", None)
+        return request_with_retries(
+            orig_get, "GET", url, settings=settings, log_func=log_func,
+            cancel_callback=cancel_callback, max_attempts=call_attempts, **kwargs
+        )
 
     def safe_post(url, **kwargs):
-        return request_with_retries(orig_post, "POST", url, settings=settings, log_func=log_func, cancel_callback=cancel_callback, **kwargs)
+        call_attempts = kwargs.pop("_local_booru_max_attempts", None)
+        return request_with_retries(
+            orig_post, "POST", url, settings=settings, log_func=log_func,
+            cancel_callback=cancel_callback, max_attempts=call_attempts, **kwargs
+        )
 
     session.get = safe_get
     session.post = safe_post

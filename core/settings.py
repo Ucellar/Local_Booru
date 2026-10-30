@@ -1,10 +1,14 @@
 import json
 from pathlib import Path
 from core.paths import (
-    SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE, DATA_DIR, USING_SEPARATE_STORAGE,
-    prepare_separate_storage, write_workspace_pointer, remove_workspace_pointer,
+    SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE, DATA_DIR, USING_SEPARATE_STORAGE, WORKSPACE_UNAVAILABLE,
+    prepare_separate_storage, write_workspace_pointer, next_archive, choose_next_archive,
     activate_portable_workspace, normalize_archive_settings_root, OUTPUT_FOLDER_NAME,
 )
+import logging
+import time
+
+_LOG = logging.getLogger("local_booru.settings")
 
 
 # All known sites grouped by engine type
@@ -63,7 +67,17 @@ DEFAULT_SETTINGS = {
     "tagger_ui_log_summary_interval_seconds": 5.0,
     "tagger_ui_log_flush_interval_ms": 120,
     "tagger_ui_log_flush_batch": 250,
+    "tagger_ui_log_flush_budget_ms": 6.0,
     "tagger_ui_log_queue_cap": 5000,
+    "parser_orchestration_log_enabled": True,
+    "parser_orchestration_log_queue_size": 20000,
+    "parser_orchestration_log_max_mb": 20,
+    "parser_orchestration_log_backups": 5,
+    "parser_orchestration_log_close_timeout_seconds": 5,
+    "background_task_waiting_stall_minutes": 60,
+    "tagger_ui_site_activity_flush_interval_ms": 200,
+    "tagger_ui_activity_thumb_interval_seconds": 1.0,
+    "tagger_ui_saucenao_refresh_debounce_ms": 750,
     # v375: emergency RAM guard for mass parser runs.  If a leak/regression
     # starts eating the system, stop parser queues before Windows falls over.
     "tagger_ram_safe_mode": True,
@@ -81,6 +95,10 @@ DEFAULT_SETTINGS = {
     "tagger_ram_safe_disable_activity_thumbs": False,
     "tagger_ram_safe_disable_parser_preview": False,
     "gallery_block_heavy_tasks_while_parser": True,
+    # v471: Gallery can switch to a live Booru Corpus Builder database without
+    # importing or duplicating canonical files. Corpus access is always read-only.
+    "gallery_data_source": "local",
+    "booru_corpus_path": "",
     "enable_error_console": True,
     "developer_preload_md5_index": True,
     "grabber_exact_md5_fanout": True,
@@ -98,13 +116,16 @@ DEFAULT_SETTINGS = {
     # Parser/tagger exact lookup must trust real file bytes, not filenames.
     # The byte MD5 is cached by path+size+mtime under settings/cache.
     "parser_real_file_hash_cache_enabled": True,
-    "parser_blueprint_enabled": True,
-    "parser_blueprint_full_access": True,
-    "parser_blueprint_auto_add_sites": True,
-    "parser_blueprint_respect_site_enabled": True,
-    "parser_blueprint_warn_invalid": True,
-    "parser_blueprint_v321_default_attached": True,
     "parser_trust_filename_md5_only_if_matches_real": True,
+    # New parser (core/parser). See core/parser/engine.py for the algorithm.
+    "parser_workers": 3,                          # files processed at the same time
+    "parser_visual_max_distance": 10,             # pHash distance for "same picture"
+    "parser_local_visual_match": True,            # reuse tags of a visually identical gallery image
+    "parser_local_visual_distance": 4,
+    "parser_trust_unverified_filename_md5": True, # booru MD5 in the file name, preview unavailable
+    "parser_tag_categories_enabled": True,        # Gelbooru-like sites: ask the tag API for categories
+    "parser_tag_category_single_lookups": 30,
+    "e621_iqdb_min_similarity": 80.0,
     # Developer thread menu: global ceiling and per-service local/offline queues.
     # Network site lanes still use their own rate limits and are not counted here.
     "local_total_workers": 8,
@@ -115,9 +136,65 @@ DEFAULT_SETTINGS = {
     "local_db_read_workers": 2,
     "local_preflight_enabled": True,
     "local_preflight_phash": True,
+    # Decode guards for pHash/video-frame preflight. Header dimensions are
+    # checked before full Pillow decode; huge GIFs use their first frame.
+    "local_preflight_max_file_mb": 64,
+    "local_preflight_max_megapixels": 64,
+    "local_preflight_max_gif_frames": 300,
     # Parser performance profile is resolved at runtime from detected RAM.
     # auto: <=18GB low_memory, <=36GB balanced, otherwise performance.
     "tagger_performance_profile": "auto",
+    # Network-efficiency controls. Full provenance preserves every enabled
+    # source bundle; fast mode lets an authoritative Danbooru/e621 hit stop
+    # later MD5 requests for that file while keeping skipped rows replayable.
+    "tagger_provenance_mode": "full",
+    "tagger_fast_authoritative_hosts": ["danbooru.donmai.us", "e621.net"],
+    "tagger_md5_batch_enabled": True,
+    "tagger_md5_batch_size": 50,
+    # v5.2 parser: batched MD5 (core/parser/batch.py), reverse-search workers, retry of deferred files
+    # in the same run, «добор» of new sites for processed files (site journal).
+    "parser_md5_batch_enabled": True,
+    "parser_md5_batch_size": 40,
+    "parser_reverse_workers": 2,
+    "parser_retry_deferred_minutes": 15,
+    "parser_recheck_new_sites": False,
+    "parser_recheck_nomatch_only": False,       # «добор» only for the files in Брак (the found ones are left alone)
+    # rule34.xxx exact-MD5 foreground lane uses the official DAPI only by
+    # default. The much slower HTML locator remains opt-in; image-key/SHA1
+    # already run in their isolated side queue.
+    "rule34_foreground_html_locator_enabled": False,
+    "tagger_site_journal_batch_size": 100,
+    "tagger_site_journal_flush_seconds": 30.0,
+    # Reverse upload optimization: perceptual services receive a cached compact
+    # JPEG instead of the original multi-megabyte PNG/GIF/frame.
+    "reverse_upload_downscale": True,
+    "reverse_upload_max_edge": 512,
+    "reverse_upload_jpeg_quality": 85,
+    "reverse_upload_reuse_small_jpeg_kb": 256,
+    "reverse_upload_cache_max_files": 5000,
+    "reverse_upload_cache_max_age_days": 30,
+    "tagger_local_phash_match_enabled": True,
+    "tagger_local_phash_max_distance": 4,
+    "tagger_local_phash_min_similarity": 93.75,
+    "tagger_reverse_retry_drain_enabled": True,
+    # Keep a parser run alive while relevant durable retries are cooling down;
+    # the nearest service branch is resumed automatically at retry_after.
+    "tagger_reverse_retry_wait_enabled": True,
+    "tagger_reverse_retry_drain_interval_seconds": 600,
+    "tagger_reverse_retry_drain_limit": 200,
+    "tagger_reverse_retry_scan_page_size": 500,
+    # Safety net when a due deadline wakes the scheduler but no row can be
+    # admitted. Prevents a zero-delay WAKE/drain CPU spin and log flood.
+    "tagger_reverse_retry_empty_wake_backoff_seconds": 5,
+    # SauceNAO searches every current/future index by default (`db=999`).
+    # Advanced users may explicitly narrow the request with `saucenao_dbs`
+    # (serialized as the documented `dbs[]`) or `saucenao_dbmask`.
+    "saucenao_dbs": [],
+    "saucenao_dbmask": "",
+    "saucenao_db": 999,
+    "saucenao_dedupe": 1,
+    "saucenao_hide": 0,
+    "tagger_reverse_staged_scheduler_enabled": True,
     "tagger_reverse_admit_window_files": 64,
     "local_preflight_low_memory_skip_threshold": 5000,
     "tagger_db_startup_lock_wait_seconds": 90,
@@ -125,7 +202,15 @@ DEFAULT_SETTINGS = {
     "local_thumb_workers": 4,
     "local_thumb_pregen_workers": 1,
     "local_background_workers": 4,
+    "maintenance_idle_seconds": 5,
+    # Optional v439 backend for large disposable derived caches. main.db remains authoritative.
+    "derived_cache_external_enabled": False,
     "visual_nomatch_classify_enabled": True,
+    # Брак, «фото или рисунок» (core/visual_models.py): auto | anime_real_fast | anime_real_precise |
+    # anime_class_fast | both_fast | clip | heuristic; «auto» — the fast deepghs model when onnxruntime is installed.
+    "visual_nomatch_model": "auto",
+    "visual_nomatch_min_confidence": 75,
+    "visual_nomatch_threads": 2,
     "visual_nomatch_backend": "clip_local",
     "visual_nomatch_clip_model_dir": "",
     "visual_nomatch_auto_download_model": True,
@@ -137,21 +222,24 @@ DEFAULT_SETTINGS = {
     "visual_nomatch_workers": 2,
     "rule34_sha1_async_locator_enabled": True,
     "rule34_sha1_async_locator_workers": 4,
+    "rule34_sha1_branch_cooldown_seconds": 900,
+    "rule34_sha1_network_defer_seconds": 300,
     "rule34_variant_locator_side_queue_enabled": True,
     "rule34_image_key_locator_mode": "hotlink_only",
     "rule34_image_key_hotlink_redirect_enabled": True,
     "rule34_image_key_hotlink_extensions": "png",
     "rule34_image_key_hotlink_request_timeout": 4.0,
-    "rule34_image_key_hotlink_playwright_fallback": True,
-    "rule34_image_key_hotlink_playwright_headless": False,
-    "rule34_image_key_hotlink_playwright_timeout": 25.0,
-    "rule34_image_key_hotlink_playwright_supervisor": True,
-    "rule34_image_key_hotlink_playwright_retries": 1,
-    "rule34_image_key_hotlink_playwright_ephemeral": True,
-    "browser_fallback_disable_gpu": True,
-    "parser_never_touch_system_chrome": True,
-    "parser_disable_companion_chrome_fetch": False,
-    "browser_fallback_launch_watchdog_seconds": 18.0,
+    # v453: Cloudflare/browser work is delegated to the user's ordinary browser
+    # through the localhost companion extension. Local Booru owns no Chromium.
+    "external_browser_resolver_enabled": True,
+    "external_browser_mode": "default",
+    "external_browser_executable": "",
+    "external_browser_arguments": "",
+    "external_browser_auto_open": True,
+    "external_browser_resolver_timeout_seconds": 120,
+    "external_browser_retry_seconds": 300,
+    "external_browser_upload_max_mb": 12,
+    "parser_disable_companion_browser_fetch": False,
     "rule34_image_key_bucket_probe_enabled": False,
     "rule34_image_key_bucket_probe_sequence": "",
     "rule34_image_key_bucket_probe_max": 9999,
@@ -194,14 +282,44 @@ DEFAULT_SETTINGS = {
     "grabber_preview_hide_existing": True,
     "grabber_preview_merge_existing_sources": True,
     "grabber_preview_manual_exclusions": True,
-    # Browser extension companion: localhost-only API used by the Chrome/Chromium
-    # extension to hide already-downloaded booru cards visually. Parser/tagger are
+    # Browser extension companion: localhost-only API used by the extension in
+    # the user's normal browser to hide already-downloaded cards visually. Parser/tagger are
     # not affected by this API or its manual hide list.
+    # Per-process master gate selected at startup. This is not a cloud or
+    # account preference: it controls whether this Local Booru process may
+    # fetch any new media bytes. Metadata-only operations remain available.
+    "session_media_downloads_prompt": False,    # (v5.28) the question at every start — off: asked in «Настройки»
+    "session_media_downloads_default": True,
+    "download_policy_create_intents": True,
+    "background_lane_page_size": 500,
+    "background_lane_empty_backoff_seconds": 5,
+    "background_lane_stale_running_seconds": 3600,
+    "tag_alias_sync_page_delay_seconds": 1.10,
+    "tag_alias_sync_max_pages_per_run": 0,
+    "upgrade_verification_max_samples": 7,
+    "upgrade_verification_ram_reserve_mb": 2048,
+    "upgrade_verification_job_cap_mb": 1024,
     "browser_companion_api_enabled": True,
     "browser_companion_api_host": "127.0.0.1",
     "browser_companion_api_port": 47734,
     "browser_companion_use_grabber_hides": True,
     "browser_companion_max_batch": 250,
+    "browser_companion_pairing_required": True,
+    "browser_companion_pairing_ttl_seconds": 600,
+    "browser_companion_event_wait_seconds": 20,
+    "browser_companion_profiles_enabled": True,
+    "browser_companion_cookie_handoff_enabled": True,
+    "automatic_quality_upgrade_enabled": True,
+    "automatic_family_detection_enabled": True,
+    "automatic_family_completion_enabled": True,
+    "family_completion_max_items": 100,
+    "nomatch_local_models_enabled": False,
+    "nomatch_compact_classifier_onnx": "",
+    "nomatch_text_detector_onnx": "",
+    "nomatch_compact_input_size": 224,
+    "nomatch_text_input_size": 640,
+    "nomatch_compact_min_confidence": 0.60,
+    "nomatch_text_min_confidence": 0.55,
     "grabber_subscriptions_blocklist": "",
     "grabber_tag_download_limit": 500,
     "skip_existing": True,
@@ -234,32 +352,47 @@ DEFAULT_SETTINGS = {
     "network_retry_attempts": 3,
     "network_retry_base_delay_seconds": 1.0,
     "network_retry_max_delay_seconds": 4.0,
+    # A reverse IQDB hit must not monopolize the single e621 branch while
+    # fetching its post JSON. The endpoint is only metadata verification; a
+    # failed bounded fetch is deferred through the durable reverse retry queue.
+    "e621_iqdb_post_timeout_seconds": 15,
+    "e621_iqdb_post_max_attempts": 1,
     "network_retry_delay_seconds": 10,
     "sqlite_passive_checkpoint_every": 500,
+    # Supplement the parser's every-N-site-check PASSIVE checkpoint for all
+    # other writers. It runs only while idle and only above the WAL threshold.
+    "sqlite_idle_checkpoint_enabled": True,
+    "sqlite_idle_checkpoint_interval_seconds": 300,
+    "sqlite_idle_checkpoint_threshold_mb": 64,
+    "sqlite_idle_checkpoint_min_idle_seconds": 15,
     "saucenao_cooldown_seconds": 3600,
+    "saucenao_transient_error_cooldown_seconds": 300,
+    # v441: persistent long-quota admission. The fixed 4/minute host limit
+    # still applies; this gate spreads scarce daily budget and reserves probes.
+    "saucenao_quota_governor_enabled": True,
+    "saucenao_quota_reserve": 10,
+    "saucenao_quota_spread_seconds": 3600,
+    "saucenao_quota_probe_interval_seconds": 3600,
     "limit_files": 0,
     "enable_md5_lookup": True,
     "enable_saucenao": True,
     "enable_iqdb": True,
+    "reverse_saucenao_first": True,         # reverse search: SauceNAO first, iqdb.org last (core/parser/reverse)
     "enable_danbooru_iqdb": False,
     "enable_e621_iqdb": True,
     "e621_browser_api_fallback": True,
-    "e621_browser_api_headless": False,
     "e621_browser_api_verify_timeout_seconds": 120,
     "e621_browser_api_backend": "companion_extension",
     "e621_browser_api_companion_timeout_seconds": 120,
     "e621_companion_v342_default_attached": True,
-    "e621_browser_api_allow_external_chrome_cdp": False,
-    "e621_browser_api_cdp_port": 9222,
-    "e621_browser_api_launch_external_chrome": False,
     "e621_iqdb_max_results": 5,
-    # Branch-local cooldown only. 429 from e621 IQDB must not stop the whole parser.
+    # Branch-local fallback only. A valid server Retry-After overrides it;
+    # repeated failed canaries double the previous delay up to one hour.
     "e621_iqdb_branch_cooldown_seconds": 300,
     "enable_tineye": False,
     "tineye_delay_min": 30,
     "tineye_delay_max": 90,
     "tineye_browser_fallback": True,
-    "tineye_browser_headless": False,
     "tineye_browser_timeout_seconds": 60,
     "tineye_api_docs_url": "https://api.tineye.com/",
     "tineye_max_results": 10,
@@ -276,7 +409,15 @@ DEFAULT_SETTINGS = {
     "media_muted": True,
     "media_volume": 50,
     "manga_root": "",
-    "games_root": "",
+    "video_root": "",                   # the folder of series for the tab «Видео» ("" — «video» in the archive)
+    "video_tab_seconds": 60,            # a video card longer than this is on the tab «Видео», not in the gallery
+    "video_source_aniliberty": True,    # «Скачать с сайта»: a title without video of its own (YummyAnime) — on AniLiberty
+    "aniliberty_url": "https://aniliberty.top",   # its address (core/video_sources; anilibria.top is its mirror)
+    "post_sets_enabled": True,          # the сборка over a card's picture (webui/pages/post_sets.py)
+    "card_sets_tiles": True,            # a сборка is one tile of the gallery (core/card_sets.py)
+    "card_sets_auto": True,             # the program puts сборки together by itself
+    "card_sets_ask_sites": True,        # the sites asked once about the posts of the cards from before (core/site_posts.py)
+    "card_sets_remote": True,           # (v5.30) a parent post's сборка shows its parts the library has not («api»)
     "show_reaction_counter": False,
     "manga_url_tags_enabled": True,
     "manga_columns": 5,
@@ -351,12 +492,26 @@ DEFAULT_SETTINGS = {
     # disabled; by default v326 lets the user put any page inside any page.
     "interface_free_navigation": True,
     "interface_modules": {},
+    # The program window: "web" — the web pages in the whole window (ui/web_shell.py), "classic" — the old
+    # window with the sidebar of Qt pages (ui/main_window.py).  Read at start (app._make_window).
+    "ui_shell": "web",
+    "window_maximized": True,               # (v5.28) the new window opens maximized unless the person left it smaller
+    # How the window's built-in browser (Qt WebEngine) draws: "auto" — with the graphics card, "off" — without it
+    # (Chromium's --disable-gpu; for drivers that leave half-drawn frames).  Read at start, before the application
+    # object (ui/program_window.browser_flags).
+    "webview_gpu": "auto",
+    # New web gallery (webui): 0 = any free port on 127.0.0.1; pictures per page.
+    "webui_port": 0,
+    "webui_posts_per_page": 0,          # 0: as many as fit the window (counted by the page)
     "interface_module_order": [],
     "interface_extra_collapsed": True,
     # Per-page nested navigation collapsed state.  Key = parent page key,
     # value True means its child pages are hidden until expanded.
     "interface_page_collapsed": {},
     "auto_hide_single_workspace": True,
+    # Database copy before deletions: reused for this many minutes, only the newest N kept.
+    "backup_operation_min_interval_minutes": 10,
+    "backup_operation_keep": 5,
     # Lightweight backup: copies SQLite/config/manual metadata only, never media/cache.
     "light_backup_enabled": False,
     "light_backup_dir": "",
@@ -409,6 +564,16 @@ _RETIRED_LIVE_SETTINGS = {
     "copy_results_enabled", "copy_mode", "tags_suffix", "sources_suffix", "output_suffix",
     "mark_no_match", "tagger_site_conveyor_enabled", "use_browser_auth",
     "use_system_browser_cookies", "browser_auth_url", "browser_auth_wait_seconds",
+    # removed in 5.0: node editor, games page, Huihui integration
+    "parser_blueprint_enabled", "parser_blueprint_full_access", "parser_blueprint_auto_add_sites",
+    "parser_blueprint_respect_site_enabled", "parser_blueprint_warn_invalid",
+    "parser_blueprint_v321_default_attached", "games_root",
+    "huihui_integration_enabled", "huihui_gateway_url", "huihui_model_id",
+    "huihui_request_timeout_seconds", "huihui_generation_timeout_seconds",
+    "huihui_auto_import_results", "huihui_ui_url", "huihui_allow_remote_gateway",
+    "huihui_bridge_api_enabled", "huihui_bridge_api_token", "huihui_database_timeout_seconds",
+    "huihui_min_schema_version", "huihui_reference_limit", "huihui_reference_min_side",
+    "huihui_expand_threshold", "huihui_expand_exclude_categories",
 }
 
 def deep_merge(base, data):
@@ -517,15 +682,28 @@ def _drop_removed_reverse_services(settings):
         fixed.pop(key, None)
     return fixed
 
+def _read_settings_file(path: Path):
+    """Parsed settings dict, or None.  A damaged file is kept aside, never overwritten.
+
+    When the main file cannot be parsed (power cut while writing, disk error), it is
+    renamed to ``app_settings.json.broken-<time>`` and the last good copy
+    (``app_settings.json.bak``, written on every save) is used instead, so API keys
+    and site settings survive.  Old behaviour: silently start with defaults and
+    overwrite the damaged file on the next save.
+    """
+    from core.file_safety import read_json_kept
+    return read_json_kept(path, dict, what="Settings file")
+
+
 def load_settings():
     # SETTINGS_FILE points at Local_Booru_Archive/settings/config whenever a
     # portable workspace is configured.  A pre-v135 Documents copy is read
     # only as a migration fallback and is retired after the portable config is
     # confirmed to exist.
     for candidate in (SETTINGS_FILE, BOOTSTRAP_SETTINGS_FILE):
-        if candidate.exists():
+        raw_loaded = _read_settings_file(candidate)
+        if raw_loaded is not None:
             try:
-                raw_loaded = json.loads(candidate.read_text(encoding="utf-8"))
                 loaded = deep_merge(DEFAULT_SETTINGS, raw_loaded)
                 loaded = _drop_removed_reverse_services(_lock_to_active_portable_workspace(loaded))
                 # v160: switch the default gallery/grabber page shape from the
@@ -540,40 +718,106 @@ def load_settings():
                     except Exception:
                         pass
                     loaded["gallery_layout_v160_initialized"] = True
-                # v321: the parser blueprint is the normal/default parser plan.
-                # Existing settings from v319/v320 may contain False because the
-                # editor was experimental there; turn it on once, then respect
-                # later manual toggles.
-                if not loaded.get("parser_blueprint_v321_default_attached"):
-                    loaded["parser_blueprint_enabled"] = True
-                    loaded["parser_blueprint_full_access"] = True
-                    loaded["parser_blueprint_auto_add_sites"] = True
-                    loaded["parser_blueprint_respect_site_enabled"] = True
-                    loaded["parser_blueprint_v321_default_attached"] = True
-                # v342: v341 overcorrected and forced e621 away from the
-                # companion extension.  Restore the intended mode: use the
-                # already-open Chrome/e621 tab through the companion bridge,
-                # but keep auto-launch/CDP control of system Chrome disabled.
+                # v5.17: pictures per page of the web gallery — as many as fit the window instead of the old fixed 42.
+                if not loaded.get("webui_posts_per_page_v517"):
+                    try:
+                        if int(loaded.get("webui_posts_per_page") or 0) == 42:
+                            loaded["webui_posts_per_page"] = 0
+                    except (TypeError, ValueError):
+                        loaded["webui_posts_per_page"] = 0
+                    loaded["webui_posts_per_page_v517"] = True
+                # v5.25: SauceNAO's daily quota was spread over a whole day (an account with ~4000 searches left made
+                # one search in ~20 s, and the whole reverse search waited for it): over an hour now — such an
+                # account goes at its 30-second limit, a small one still lasts the hour.  Only the old default.
+                if not loaded.get("saucenao_spread_v525"):
+                    try:
+                        if int(loaded.get("saucenao_quota_spread_seconds") or 0) == 86400:
+                            loaded["saucenao_quota_spread_seconds"] = 3600
+                    except (TypeError, ValueError):
+                        loaded["saucenao_quota_spread_seconds"] = 3600
+                    loaded["saucenao_spread_v525"] = True
+                # v5.28: «Разрешить скачивание новых медиа в этой сессии?» at every start — the person asked it gone:
+                # once off; the switch is in «Настройки» (downloads stay allowed, as the question's default was).
+                if not loaded.get("session_downloads_prompt_v528"):
+                    loaded["session_media_downloads_prompt"] = False
+                    loaded["session_downloads_prompt_v528"] = True
+                # v5.1: the new gallery and manga go into the menu right before the old ones.
+                if not loaded.get("webui_menu_v51_placed"):
+                    order = list(loaded.get("interface_module_order") or [])
+                    for new_key, old_key in (("Booru", "Gallery"), ("BooruManga", "Manga")):
+                        if order and new_key not in order:
+                            order.insert(order.index(old_key) if old_key in order else 0, new_key)
+                    if order:
+                        loaded["interface_module_order"] = order
+                    loaded["webui_menu_v51_placed"] = True
+                # v342: keep e621 JSON fallback on the companion extension.
                 if not (isinstance(raw_loaded, dict) and raw_loaded.get("e621_companion_v342_default_attached")):
                     loaded["e621_browser_api_backend"] = "companion_extension"
-                    loaded["parser_disable_companion_chrome_fetch"] = False
-                    loaded["e621_browser_api_allow_external_chrome_cdp"] = False
-                    loaded["e621_browser_api_launch_external_chrome"] = False
                     loaded["e621_companion_v342_default_attached"] = True
+                # v453: retire every embedded-browser/CDP setting. The ordinary
+                # user browser is selected only for opening a task URL; all
+                # page interaction is performed by the companion extension.
+                retired_browser_keys = {
+                    "rule34_image_key_hotlink_playwright_fallback",
+                    "rule34_image_key_hotlink_playwright_headless",
+                    "rule34_image_key_hotlink_playwright_timeout",
+                    "rule34_image_key_hotlink_playwright_supervisor",
+                    "rule34_image_key_hotlink_playwright_retries",
+                    "rule34_image_key_hotlink_playwright_ephemeral",
+                    "browser_fallback_disable_gpu",
+                    "browser_fallback_launch_watchdog_seconds",
+                    "parser_never_touch_system_chrome",
+                    "e621_browser_api_headless",
+                    "e621_browser_api_allow_external_chrome_cdp",
+                    "e621_browser_api_launch_external_chrome",
+                    "e621_browser_api_cdp_port",
+                    "tineye_browser_headless",
+                }
+                if "parser_disable_companion_chrome_fetch" in loaded:
+                    loaded["parser_disable_companion_browser_fetch"] = bool(
+                        loaded.get("parser_disable_companion_chrome_fetch")
+                    )
+                    retired_browser_keys.add("parser_disable_companion_chrome_fetch")
+                for _key in retired_browser_keys:
+                    loaded.pop(_key, None)
+                loaded["e621_browser_api_backend"] = "companion_extension"
+                loaded["external_browser_v453_migrated"] = True
                 if candidate == SETTINGS_FILE:
                     activate_portable_workspace()
                 return loaded
-            except Exception:
-                pass
+            except Exception as exc:  # a bug in the migrations above must be visible, not lose settings
+                _LOG.exception("Settings post-processing failed for %s: %s", candidate, exc)
+                return deep_merge(DEFAULT_SETTINGS, raw_loaded)
     return _drop_removed_reverse_services(_lock_to_active_portable_workspace(DEFAULT_SETTINGS.copy()))
 
 def _atomic_write_settings(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(data, encoding="utf-8")
-    tmp.replace(path)
+    """Write settings atomically and keep the previous good version as ``.bak``."""
+    from core.file_safety import write_json_kept
+    write_json_kept(path, data, dict)
+
+
+def _settings_json(settings) -> str:
+    """Settings as written to disk: runtime keys ("_parser_running", callbacks…) never are."""
+    return json.dumps({k: v for k, v in settings.items() if not str(k).startswith("_")},
+                      ensure_ascii=False, indent=2)
+
+
+def _existing_archive_settings_root(settings):
+    """settings/ of an existing archive the user asked to switch to, or None for a new location."""
+    explicit = str((settings or {}).get("settings_storage_dir", "") or "").strip()
+    target = normalize_archive_settings_root(explicit) if explicit else None
+    if target is None:
+        return None
+    if (target / "config" / "app_settings.json").is_file() or (target / "db" / "local_booru_index.sqlite3").is_file():
+        return target
+    return None
 
 def save_settings(settings):
+    # The archive chosen by the user is unreachable (drive not connected): nothing is
+    # written, so the pointer to it and its settings survive (app.py asks to connect it).
+    if WORKSPACE_UNAVAILABLE:
+        _LOG.warning("Settings not saved: the archive %s is not available", WORKSPACE_UNAVAILABLE)
+        return
     # Keep a reference to the caller-owned dict.  Some UI/tests rely on
     # save_settings() normalizing paths back into the same object.
     _original_settings_ref = settings if isinstance(settings, dict) else None
@@ -588,13 +832,19 @@ def save_settings(settings):
     # must not snap the workspace pointer back to the old DATA_DIR.
     switch_target = _requested_existing_workspace(settings)
     if switch_target is not None:
-        normalized = _canonicalize_new_portable_workspace(settings, switch_target)
-        normalized["_workspace_switch_pending"] = True
-        settings.update(normalized)
-        # Only update the locators.  The target archive already has its own
-        # app_settings.json/database/cookies and must not be overwritten by the
-        # old currently-loaded settings.  Restart will load the target config.
-        write_workspace_pointer(switch_target)
+        # Another existing archive named by these settings (the old settings page): it opens at the next start
+        # (the pointer; its own settings, base and cookies are never written over).  This run keeps its archive:
+        # the branch below puts the open archive's folders back into these settings and saves them to it — with the
+        # other archive's folders in the live settings, the rest of the run downloaded and trashed into it.
+        choose_next_archive(switch_target)
+        settings["_workspace_switch_pending"] = True
+    if not USING_SEPARATE_STORAGE and bool(settings.get("separate_settings_storage", False)) \
+            and _existing_archive_settings_root(settings) is not None:
+        # Legacy (Documents) process + «Подключить существующий архив»: the archive keeps its
+        # own database and config.  Only the pointer is written; the restart opens the archive.
+        # (Old behaviour copied the Documents database and settings over the archive.)
+        choose_next_archive(_existing_archive_settings_root(settings))
+        settings["_workspace_switch_pending"] = True
     else:
         portable_requested = USING_SEPARATE_STORAGE or bool(settings.get("separate_settings_storage", False))
         if portable_requested:
@@ -607,12 +857,14 @@ def save_settings(settings):
                     raise OSError("Не удалось определить Local_Booru_Archive/settings")
                 normalized = _canonicalize_new_portable_workspace(settings, target)
             settings.update(normalized)
-            data = json.dumps(settings, ensure_ascii=False, indent=2)
+            data = _settings_json(settings)
             canonical = target / "config" / "app_settings.json"
             _atomic_write_settings(canonical, data)
             # The locator contains only paths.  Never mirror API keys, cookies or
             # user configuration into Documents when a portable archive is active.
-            write_workspace_pointer(target)
+            # Another archive chosen in this run for the next start keeps the pointer (core.archive_switch).
+            if next_archive() is None:
+                write_workspace_pointer(target)
             # Once the active process itself is portable, safely remove any obsolete
             # full settings copy from Documents.
             try:
@@ -622,11 +874,12 @@ def save_settings(settings):
                 pass
         else:
             # Legacy mode is retained only until the user selects/creates a portable
-            # Local_Booru_Archive.  A connected archive cannot fall back here.
-            data = json.dumps(settings, ensure_ascii=False, indent=2)
-            remove_workspace_pointer()
-            _atomic_write_settings(BOOTSTRAP_SETTINGS_FILE, data)
+            # Local_Booru_Archive.  Saving never deletes the pointer files: forgetting an
+            # archive is an explicit user action (core.paths.remove_workspace_pointer).
+            _atomic_write_settings(BOOTSTRAP_SETTINGS_FILE, _settings_json(settings))
 
     if _original_settings_ref is not None and _original_settings_ref is not settings:
-        _original_settings_ref.clear()
+        # In place, never empty for a moment: the web server's threads read the window's settings meanwhile.
+        for key in [k for k in _original_settings_ref if k not in settings]:
+            _original_settings_ref.pop(key, None)
         _original_settings_ref.update(settings)

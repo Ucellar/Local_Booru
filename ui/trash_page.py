@@ -15,25 +15,7 @@ from core.services.library_service import enrich_items
 from core.image_safe import safe_thumbnail_path
 from core.tag_utils import tag_display_color
 
-_REASON_LABELS = {
-    "gallery_context_delete": "удалено вручную из галереи",
-    "post_context_delete": "удалено вручную из просмотра",
-    "duplicate_delete": "удалено в окне дубликатов",
-    "subscription_visual_duplicate": "авто: похожий дубликат подписки",
-    "subscription_session_cleanup": "очистка сессии подписки",
-    "downloader_exact_duplicate": "авто: точный дубликат загрузчика",
-    "reimport_deleted_rejected": "авто: повторно скачанный удалённый файл",
-    "restore_exact_duplicate_cleanup": "авто: убрана точная копия после восстановления",
-    "exact_md5_auto_normalized": "авто: склеена точная MD5-копия",
-    "delete_by_tag": "удалено по тегу",
-    "delete_by_source": "удалено по источнику",
-    "delete_by_buckets": "очистка результатов",
-    "unknown": "неизвестно / старая сборка",
-}
-
-def _reason_text(value):
-    key = str(value or "unknown")
-    return _REASON_LABELS.get(key, key)
+from core.trash_tools import label as _reason_text      # the same words as the section «Корзина» of the new window
 
 _GROUP_COLORS = {
     "artist": "#ff3838", "contributor": "#e67e22", "character": "#00a000", "copyright": "#ff54a7",

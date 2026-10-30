@@ -4,7 +4,7 @@ Provides:
   1. Global exception handler — catches all uncaught exceptions, logs to file
   2. DB integrity check — verifies DB on startup, auto-repairs if possible
   3. DB auto-backup — daily backup of the SQLite file
-  4. File maintenance — marks missing files as deleted in DB
+  4. File maintenance — records non-destructive presence status
   5. Network retry — exponential backoff for HTTP requests
 """
 from __future__ import annotations
@@ -157,10 +157,11 @@ def safe_call(fn: Callable, *args, default=None, label: str = "", **kwargs):
 def _check_existing_database(settings: dict, pragma: str) -> tuple[bool, str]:
     """Validate an existing SQLite file without initialising or migrating it."""
     import sqlite3
-    from core.database.connection import db_path
+    from core.database.connection import db_path, missing_database_message
     path = db_path(settings)
     if not path.exists():
-        return True, "NEW_DATABASE"
+        missing = missing_database_message(settings, path)
+        return (False, missing) if missing else (True, "NEW_DATABASE")
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
         try:
@@ -199,10 +200,11 @@ def check_db_smoke(settings: dict) -> tuple[bool, str]:
     background health check after the window is visible.
     """
     import sqlite3
-    from core.database.connection import db_path
+    from core.database.connection import db_path, missing_database_message
     path = db_path(settings)
     if not path.exists():
-        return True, "NEW_DATABASE"
+        missing = missing_database_message(settings, path)
+        return (False, missing) if missing else (True, "NEW_DATABASE")
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
         try:
@@ -270,48 +272,24 @@ def maybe_backup_db(settings: dict, max_backups: int = 5) -> str | None:
 
 def run_file_maintenance(settings: dict, log: Callable | None = None,
                          max_check: int = 5000) -> dict:
-    """Check that indexed files still exist on disk.
+    """Compatibility wrapper for the non-destructive presence scanner.
 
-    Files that no longer exist are marked deleted=1 in DB.
-    Returns {"checked": N, "missing": N, "errors": N}
+    Older builds marked every absent path deleted.  That was unsafe when an
+    archive drive was offline.  v435 records present/missing/offline_root/
+    path_error and never changes ``images.deleted``.
     """
     log = log or _log.info
-    stats = {"checked": 0, "missing": 0, "errors": 0}
-
-    try:
-        from core.database.connection import db
-        with db(settings) as con:
-            rows = con.execute(
-                "SELECT id, path FROM images WHERE deleted=0 ORDER BY id LIMIT ?",
-                (max_check,)
-            ).fetchall()
-
-            missing_ids = []
-            for row in rows:
-                stats["checked"] += 1
-                try:
-                    if not Path(row["path"]).exists():
-                        missing_ids.append(int(row["id"]))
-                        stats["missing"] += 1
-                except Exception:
-                    stats["errors"] += 1
-
-            if missing_ids:
-                ph = ",".join("?" * len(missing_ids))
-                con.execute(
-                    f"UPDATE images SET deleted=1 WHERE id IN ({ph})",
-                    missing_ids,
-                )
-                con.commit()
-                log(f"FILE MAINTENANCE: {stats['missing']} missing files marked deleted "
-                    f"(out of {stats['checked']} checked)")
-            else:
-                log(f"FILE MAINTENANCE: all {stats['checked']} files OK")
-    except Exception as e:
-        _log.error("File maintenance error: %s", e)
-        stats["errors"] += 1
-
-    return stats
+    from core.file_integrity import run_presence_check
+    result = run_presence_check(
+        settings, mode="forced", max_files=max(0, int(max_check or 0)), progress=log
+    )
+    return {
+        "checked": int(result.get("checked") or 0),
+        "missing": int(result.get("missing") or 0),
+        "offline_root": int(result.get("offline_root") or 0),
+        "errors": int(result.get("path_error") or 0),
+        "cancelled": bool(result.get("cancelled")),
+    }
 
 
 def check_recent_media_after_crash(settings: dict, log: Callable | None = None, limit: int = 250) -> dict:
@@ -421,6 +399,33 @@ def sample_live_media_paths(settings: dict, log: Callable | None = None, limit: 
 
 T = TypeVar("T")
 
+MAX_RETRY_AFTER_SLEEP = 60.0
+_RETRY_SLEEP_SLICE = 1.0
+
+
+def _shutdown_requested() -> bool:
+    try:
+        from core.shutdown import is_shutting_down
+        return bool(is_shutting_down())
+    except Exception:
+        return False
+
+
+def _interruptible_retry_sleep(seconds: float) -> None:
+    """Sleep in short slices so application shutdown cannot be blocked by retry waits."""
+    remaining = max(0.0, float(seconds or 0.0))
+    while remaining > 0:
+        if _shutdown_requested():
+            raise InterruptedError("application is shutting down during HTTP retry wait")
+        step = min(_RETRY_SLEEP_SLICE, remaining)
+        started = time.monotonic()
+        time.sleep(step)
+        elapsed = max(0.0, time.monotonic() - started)
+        remaining -= elapsed if elapsed > 0 else step
+    if _shutdown_requested():
+        raise InterruptedError("application is shutting down during HTTP retry wait")
+
+
 def with_retry(
     fn: Callable[[], T],
     max_attempts: int = 3,
@@ -429,42 +434,90 @@ def with_retry(
 ) -> T:
     """Call fn() with exponential backoff retry on failure.
 
-    Raises the last exception if all attempts fail.
+    Raises the last exception if all attempts fail. Backoff sleeps are sliced
+    so graceful shutdown is not held hostage by a sleeping network worker.
     """
+    attempts = max(1, int(max_attempts or 1))
     last_exc: Exception | None = None
-    for attempt in range(max_attempts):
+    for attempt in range(attempts):
+        if _shutdown_requested():
+            raise InterruptedError("application is shutting down before HTTP retry")
         try:
             return fn()
+        except InterruptedError:
+            raise
         except Exception as e:
             last_exc = e
-            if attempt < max_attempts - 1:
+            if attempt < attempts - 1:
                 delay = base_delay * (2 ** attempt)
                 _log.warning(
                     "Retry %s [%d/%d] after %.1fs: %s",
-                    label or fn.__name__, attempt + 1, max_attempts, delay, e
+                    label or fn.__name__, attempt + 1, attempts, delay, e
                 )
-                time.sleep(delay)
+                _interruptible_retry_sleep(delay)
     raise last_exc  # type: ignore
 
 
 def retry_request(session, method: str, url: str, max_attempts: int = 3,
                   **kwargs):
-    """HTTP request with automatic retry on connection/timeout errors."""
+    """HTTP request with bounded, shutdown-aware retries.
+
+    Retry-After values above MAX_RETRY_AFTER_SLEEP are returned to the caller
+    unchanged so branch-local cooldown logic can schedule the retry. The final
+    attempt also returns HTTP 429 instead of sleeping and masking the response.
+    """
     import requests as _requests
 
+    attempts = max(1, int(max_attempts or 1))
+    call_number = 0
+
     def _do():
+        nonlocal call_number
+        call_number += 1
         resp = getattr(session, method.lower())(url, **kwargs)
-        # Retry on 429 (rate limit) and 5xx
+        # Retry short 429 waits only while another attempt is actually available.
         if resp.status_code == 429:
-            retry_after = int(resp.headers.get("Retry-After", 5))
-            _log.warning("Rate limited by %s, waiting %ds", url, retry_after)
-            time.sleep(retry_after)
+            try:
+                retry_after = max(0.0, float(resp.headers.get("Retry-After", 5)))
+            except (TypeError, ValueError):
+                retry_after = 5.0
+            final_attempt = call_number >= attempts
+            if retry_after > MAX_RETRY_AFTER_SLEEP or final_attempt:
+                reason = "too long" if retry_after > MAX_RETRY_AFTER_SLEEP else "final attempt"
+                _log.warning(
+                    "Rate limited by %s; returning HTTP 429 to caller (%s, Retry-After=%.1fs)",
+                    url, reason, retry_after,
+                )
+                return resp
+            _log.warning("Rate limited by %s, waiting %.1fs before retry", url, retry_after)
+            _interruptible_retry_sleep(retry_after)
             raise _requests.RequestException(f"429 Rate Limited: {url}")
         if resp.status_code >= 500:
             raise _requests.RequestException(f"HTTP {resp.status_code}: {url}")
         return resp
 
-    return with_retry(_do, max_attempts=max_attempts, label=f"{method} {url}")
+    return with_retry(_do, max_attempts=attempts, label=f"{method} {url}")
+
+
+
+
+from contextlib import contextmanager
+
+@contextmanager
+def swallow(label: str):
+    """Log-and-swallow helper for non-critical cleanup paths.
+
+    Do not use bare `except: pass` on write/file-safety paths; wrap expected
+    best-effort cleanup in `with swallow("component.action"):` so diagnostics
+    still explain what failed.
+    """
+    try:
+        yield
+    except Exception as exc:
+        try:
+            _log.warning("Swallowed non-critical error [%s]: %s", label, exc, exc_info=True)
+        except Exception:
+            pass
 
 
 # ── Startup checks ────────────────────────────────────────────────────────────
@@ -506,6 +559,16 @@ def run_startup_checks(settings: dict, log: Callable | None = None) -> dict:
         log("[Stability] WARNING: Last shutdown was bad (crash). Heavy DB check will run after the window is visible.")
         results["bad_shutdown"] = True
     write_shutdown_flag(settings, bad=True)  # assume bad until clean exit
+
+    # A database that existed before and is now missing (moved, deleted, drive unplugged)
+    # is reported to the user; nothing below may open it, because opening creates it.
+    from core.database.connection import db_path, missing_database_message
+    missing = missing_database_message(settings, db_path(settings))
+    if missing:
+        log(f"[Stability] DB MISSING: {missing}")
+        results["db_ok"] = False
+        results["db_missing"] = missing
+        return results
 
     mode = str(settings.get("startup_db_check_mode", "fast") or "fast").strip().lower()
     if mode in {"quick", "full", "blocking"}:

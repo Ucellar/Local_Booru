@@ -48,8 +48,22 @@ class VPTree:
     def _fetch(self, sql, params=()):
         return self._execute(sql, params).fetchone()
 
+    def _main_writes_enabled(self) -> bool:
+        try:
+            from core.derived_cache_db import main_cache_writes_enabled
+            return bool(main_cache_writes_enabled(self.conn, "vp_tree"))
+        except Exception:
+            return True
+
     def insert(self, image_id: int, phash: str) -> None:
-        """Add image to VP-tree. Idempotent."""
+        """Add image to the legacy main-DB tree when that backend is selected.
+
+        External generation files are immutable.  Primary writes only advance
+        ``derived_source_revision``; the next maintenance rebuild publishes a
+        new generation instead of mutating cache.db inside the primary txn.
+        """
+        if not self._main_writes_enabled():
+            return
         if not phash or len(phash) != 16:
             return
         existing = self._fetch("SELECT node_id, phash FROM vp_tree WHERE image_id=?", (image_id,))
@@ -113,38 +127,54 @@ class VPTree:
                 node_id = int(outer_id)
 
     def search(self, phash: str, max_distance: int = 10) -> list[tuple[int, int]]:
-        """Return [(image_id, distance)] within max_distance, sorted by distance."""
+        """Return ``[(image_id, distance)]`` without recursive Python calls.
+
+        A sequentially built VP-tree can become deep for adversarially ordered
+        hashes.  Candidate scans may traverse thousands of nodes, so an explicit
+        stack avoids ``RecursionError`` while preserving the same pruning rules.
+        """
         if not phash or len(phash) != 16:
             return []
         root = self._fetch("SELECT node_id FROM vp_tree WHERE parent_id IS NULL LIMIT 1")
         if root is None:
             return []
+        max_dist = max(0, min(64, int(max_distance)))
         results: list[tuple[int, int]] = []
-        self._search_node(int(root[0]), phash, int(max_distance), results)
-        results.sort(key=lambda x: x[1])
+        stack = [int(root[0])]
+        visited: set[int] = set()
+        while stack:
+            node_id = int(stack.pop())
+            if node_id in visited:
+                # Structural validation should prevent loops, but never let a
+                # damaged cache hang a foreground lookup or maintenance scan.
+                continue
+            visited.add(node_id)
+            row = self._fetch(
+                "SELECT image_id, phash, radius, inner_id, outer_id FROM vp_tree WHERE node_id=?",
+                (node_id,),
+            )
+            if row is None:
+                continue
+            img_id, node_phash, radius, inner_id, outer_id = row
+            dist = hamming(phash, node_phash)
+            if dist <= max_dist:
+                results.append((int(img_id), int(dist)))
+            if radius is None:
+                continue
+            radius = float(radius)
+            # Push outer first so inner is visited first, matching the old
+            # recursive traversal. Final sorting makes result order deterministic.
+            if outer_id is not None and dist >= radius - max_dist:
+                stack.append(int(outer_id))
+            if inner_id is not None and dist <= radius + max_dist:
+                stack.append(int(inner_id))
+        results.sort(key=lambda x: (x[1], x[0]))
         return results
 
-    def _search_node(self, node_id: int, phash: str, max_dist: int, results: list[tuple[int, int]]) -> None:
-        row = self._fetch(
-            "SELECT image_id, phash, radius, inner_id, outer_id FROM vp_tree WHERE node_id=?",
-            (node_id,),
-        )
-        if row is None:
-            return
-        img_id, node_phash, radius, inner_id, outer_id = row
-        dist = hamming(phash, node_phash)
-        if dist <= max_dist:
-            results.append((int(img_id), int(dist)))
-        if radius is None:
-            return
-        radius = float(radius)
-        if inner_id is not None and dist <= radius + max_dist:
-            self._search_node(int(inner_id), phash, max_dist, results)
-        if outer_id is not None and dist >= radius - max_dist:
-            self._search_node(int(outer_id), phash, max_dist, results)
-
     def rebuild(self, progress_cb=None) -> int:
-        """Rebuild tree from all images with phash. Returns count."""
+        """Rebuild the legacy main-DB tree when its backend is selected."""
+        if not self._main_writes_enabled():
+            return 0
         self._execute("DELETE FROM vp_tree")
         rows = self._execute(
             "SELECT id, hash_phash FROM images WHERE deleted=0 AND hash_phash IS NOT NULL AND hash_phash != ''"
@@ -156,7 +186,9 @@ class VPTree:
         return len(rows)
 
     def ensure_fresh_enough(self) -> None:
-        """Cheap self-heal: rebuild when tree is empty or far behind images."""
+        """Cheap self-heal for the legacy main-DB backend only."""
+        if not self._main_writes_enabled():
+            return
         try:
             img_count = int(self._fetch("SELECT COUNT(*) FROM images WHERE deleted=0 AND hash_phash IS NOT NULL AND hash_phash != ''")[0] or 0)
             tree_count = int(self._fetch("SELECT COUNT(*) FROM vp_tree")[0] or 0)

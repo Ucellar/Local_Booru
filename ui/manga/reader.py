@@ -50,6 +50,7 @@ GROUP_ALIASES = {
 
 
 from ui.manga.helpers import *
+from ui.manga.widgets import MangaCard
 
 class MangaReader(QWidget):
     def __init__(self, main, item, all_items, owner):

@@ -1,0 +1,330 @@
+/* Manga pages, laid out like nhentai: a wall of covers with the title over their lower edge, a title
+   page with the cover on the left and rows of tags on the right, a reader with the page in the middle.
+   Colours come from the chosen look (variables of booru.css and skins/*.css). */
+
+.manga-index, .manga-gallery { max-width: 1320px; margin: 0 auto; }
+
+.manga-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 20px;
+  margin: 6px 0 16px;
+}
+.manga-head h1 { margin: 0; font: bold 20px/1.25 var(--font-head); }
+.manga-sorts { display: flex; flex-wrap: wrap; gap: 4px; }
+.manga-sorts a {
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+}
+.manga-sorts a:hover { text-decoration: none; background: var(--panel-2); }
+.manga-sorts a.active { background: var(--accent); color: var(--accent-ink); }
+
+/* covers */
+.covers {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 18px 12px;
+}
+.cover {
+  position: relative;
+  display: block;
+  aspect-ratio: 7 / 10;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--thumb-bg);
+  color: #ffffff;
+}
+.cover:hover { text-decoration: none; color: #ffffff; }
+.cover img { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform 0.3s ease; }
+.cover:hover img { transform: scale(1.035); }
+.cover-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 8px 10px;
+  max-height: calc(1.35em * 2 + 16px);
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: center;
+  background: rgba(0, 0, 0, 0.74);
+  transition: max-height 0.25s ease;
+}
+.cover:hover .cover-caption, .cover:focus-visible .cover-caption { max-height: 75%; }
+.mbadges { position: absolute; top: 6px; left: 6px; display: flex; gap: 4px; }
+.mbadge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #ffffff;
+  font: bold 11px/1.6 "Segoe UI", Tahoma, sans-serif;
+}
+.mbadge.lang { background: var(--accent); color: var(--accent-ink); }
+
+/* a title */
+.manga-info {
+  display: grid;
+  grid-template-columns: minmax(200px, 340px) minmax(0, 1fr);
+  gap: 26px;
+  padding: 20px;
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.manga-cover img { display: block; width: 100%; border-radius: var(--radius); background: var(--thumb-bg); }
+.manga-back { margin: 0 0 6px; font-size: 13px; }
+.manga-meta h1 { margin: 0 0 4px; font: bold 22px/1.3 var(--font-head); overflow-wrap: anywhere; }
+.manga-meta h2 { margin: 0 0 14px; font: 16px/1.35 var(--font); color: var(--muted); }
+.tag-row { display: flex; gap: 10px; align-items: baseline; margin: 0 0 9px; }
+.tr-name { flex: none; width: 104px; color: var(--muted); }
+.tr-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.mtag {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 9px;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+}
+.mtag:hover { text-decoration: none; background: var(--accent); color: var(--accent-ink); }
+.mtag:hover .mcount { color: inherit; }
+.mtag.plain:hover { background: var(--panel-2); color: var(--text); }
+.mcount { color: var(--muted); font-size: 11px; }
+.manga-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 20px; }
+.mbutton {
+  display: inline-block;
+  padding: 9px 20px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: bold;
+  cursor: pointer;
+}
+.mbutton:hover { text-decoration: none; color: var(--text); filter: brightness(1.15); }
+.mbutton.primary { background: var(--accent); color: var(--accent-ink); }
+.manga-buttons .action-status { margin: 0 0 0 8px; }
+.manga-sub { margin: 26px 0 12px; font: bold 17px/1.3 var(--font-head); }
+.page-thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 22px;
+}
+.page-thumb img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 7 / 10;
+  object-fit: cover;
+  border-radius: var(--radius);
+  background: var(--thumb-bg);
+}
+.page-thumb:hover img { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* the reader */
+.reader { text-align: center; }
+.reader-nav { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 6px; margin: 8px 0; }
+.reader-nav a {
+  min-width: 42px;
+  padding: 5px 12px;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.3;
+}
+.reader-nav a:hover { text-decoration: none; background: var(--accent); color: var(--accent-ink); }
+.reader-nav .reader-home { margin-left: 14px; font-size: 13px; }
+.reader-count { display: inline-flex; align-items: center; gap: 6px; padding: 0 6px; color: var(--muted); }
+.reader-count select { padding: 3px 4px; }
+.reader-title { margin: 0 0 8px; font: 13px/1.3 var(--font); color: var(--muted); }
+.reader-stage { display: flex; justify-content: center; cursor: pointer; user-select: none; }
+.reader-image { display: block; max-width: 100%; max-height: calc(100vh - 175px); height: auto; }
+.reader.fit-width .reader-image { max-height: none; }
+
+/* the strip of page thumbnails: under the page or at its side */
+.page-strip {
+  position: relative;
+  display: flex;
+  justify-content: safe center;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 8px 2px;
+  margin: 8px 0 0;
+  scrollbar-width: thin;
+}
+.strip-page { position: relative; flex: none; display: block; opacity: 0.62; }
+.strip-page:hover, .strip-page.current { opacity: 1; text-decoration: none; }
+.strip-page img { display: block; width: 84px; height: 120px; object-fit: cover; border-radius: var(--radius); background: var(--thumb-bg); }
+.strip-page.current img { outline: 2px solid var(--accent); outline-offset: 1px; }
+.strip-page span {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #ffffff;
+  font-size: 10px;
+}
+.reader.strip-side .reader-body { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 12px; align-items: start; }
+.reader.strip-side .page-strip {
+  display: grid;
+  grid-template-columns: repeat(2, 84px);
+  max-height: calc(100vh - 175px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin: 0;
+  padding: 2px;
+}
+.strip-places { display: flex; justify-content: center; gap: 10px; margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.strip-places button.link { font-size: 12px; }
+
+/* «Скачать с nhentai» (/manga/get): links or numbers (chips of what the field names under it), then a line for each
+   gallery of the download with its cover and pages, the whole of it in the bar, the journal under «Подробности».
+   --ok — «done» (the look's green of character tags). */
+.mget { max-width: 960px; margin: 0 auto; --ok: var(--tag-character, #3f9d4a); --mr: calc(var(--radius) + 4px); }
+.mget > section { margin: 0 0 16px; padding: 24px 26px; border-radius: var(--mr); background: var(--panel); }
+.mh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.mget h1 { margin: 0; font: bold 26px/1.2 var(--font-head); color: var(--text); }
+.mget-lead { margin: 6px 0 18px; max-width: 70ch; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.mget textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 92px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--mr);
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 var(--font);
+  resize: vertical;
+}
+.mget textarea::placeholder { color: var(--muted); }
+.mget textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.mget-parsed { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.mget-parsed[hidden], .mget-parsed:empty { display: none; }
+.mchip { padding: 3px 10px; border-radius: 999px; background: var(--panel-2); font-size: 12px;
+  font-variant-numeric: tabular-nums; }
+.mchip.bad { background: none; border: 1px solid var(--danger); color: var(--danger); }
+.mchip.more { color: var(--muted); }
+.mget-go { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 14px; }
+.mget .mbutton { border: 0; font: inherit; font-weight: bold; cursor: pointer; }
+.mget-go .mbutton { padding: 11px 26px; font-size: 15px; }
+.mget .mbutton:disabled { opacity: 0.55; cursor: default; filter: none; }
+.mnote { margin: 0 0 12px; padding: 8px 12px; border-left: 3px solid var(--danger); background: var(--panel-2); }
+
+/* the download */
+.mget .mget-run { padding: 18px 26px 20px; border: 0; }
+.mget-run .job-head { gap: 6px 10px; margin: 0; }
+.mget-run .job-title { font-size: 14px; }
+.mget-run .job-status { margin: 0; }
+.mget-run .job-head .mbutton { margin-left: auto; }
+.mspin {
+  display: none;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--panel-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: mspin 0.8s linear infinite;
+}
+.job[data-status="starting"] .mspin, .job[data-status="running"] .mspin, .job[data-status="stopping"] .mspin {
+  display: inline-block;
+}
+@keyframes mspin { to { transform: rotate(360deg); } }
+.mmeter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 12px 0 0; }
+.mmeter progress { flex: 1 1 320px; height: 10px; accent-color: var(--accent); }
+.mmeter-text { font-size: 13px; font-variant-numeric: tabular-nums; }
+.mget-items { display: flex; flex-direction: column; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }
+.mget-items[hidden], .mget-items:empty { display: none; }
+.mget-item {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) minmax(0, 260px);
+  align-items: center;
+  gap: 14px;
+  padding: 10px 12px;
+  border-left: 3px solid transparent;
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.mget-item[data-state="pages"], .mget-item[data-state="reading"] { border-left-color: var(--accent); }
+.mget-item[data-state="done"], .mget-item[data-state="had"] { border-left-color: var(--ok); }
+.mget-item[data-state="failed"] { border-left-color: var(--danger); }
+.mget-cover {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  aspect-ratio: 7 / 10;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: bold;
+}
+.mget-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.mget-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.mget-title { overflow: hidden; font-weight: bold; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+a.mget-title:hover { color: var(--accent); }
+.mget-facts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.mget-state { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 0; font-size: 12px;
+  text-align: right; }
+.mget-said { color: var(--muted); overflow-wrap: anywhere; }
+.mget-item[data-state="done"] .mget-said, .mget-item[data-state="had"] .mget-said { color: var(--ok); font-weight: bold; }
+.mget-item[data-state="failed"] .mget-said { color: var(--danger); }
+.mget-item[data-state="pages"] .mget-said { color: var(--text); font-variant-numeric: tabular-nums; }
+.mget-bar { display: block; width: 100%; max-width: 220px; height: 5px; overflow: hidden; border-radius: 3px;
+  background: var(--panel); }
+.mget-bar i { display: block; height: 100%; background: var(--accent); transition: width 0.4s; }
+.mget-state .mbutton { padding: 5px 14px; background: var(--panel); font-size: 12px; }
+.mget-state .mbutton:hover { background: var(--accent); color: var(--accent-ink); filter: none; }
+.mget-end { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.mget-end:has(> :not([hidden])) { margin-top: 16px; }
+.mget-result { margin: 0; font-weight: bold; overflow-wrap: anywhere; }
+.mget-result.ok { color: var(--ok); }
+.mget-result.part { color: var(--accent); }
+.mget-result.bad { color: var(--danger); }
+.mget-open { margin: 0; }
+.mlog { margin-top: 14px; font-size: 12px; }
+.mlog summary { width: fit-content; color: var(--muted); cursor: pointer; }
+.mlog summary:hover { color: var(--text); }
+.mget .mlog .job-log { height: auto; min-height: 0; max-height: 40vh; margin-top: 8px; font-size: 12px; }
+
+/* the lists of the folder's tags, artists, characters and parodies — booru.css (webui/tag_lists.py); here the field
+   «Найти среди» over nhentai's chips (manga.js) */
+.tag-find { margin: 0 0 14px; }
+.tag-filter {
+  width: min(420px, 100%);
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+}
+.tag-filter:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+@media (max-width: 760px) {
+  .mget > section { padding: 18px 16px; }
+  .mget h1 { font-size: 22px; }
+  .mget-item { grid-template-columns: 44px minmax(0, 1fr); }
+  .mget-cover { width: 44px; }
+  .mget-state { grid-column: 1 / -1; align-items: flex-start; text-align: left; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mspin { animation: none; }
+  .mget-bar i { transition: none; }
+}
+
+@media (max-width: 760px) {
+  .manga-info { grid-template-columns: minmax(0, 1fr); }
+  .covers { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+}

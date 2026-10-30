@@ -1,7 +1,9 @@
 """Main window — sidebar navigation, clean layout."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+import time
 
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QColor, QPainter, QFont
@@ -19,18 +21,20 @@ from ui.modules.registry import PAGE_BY_KEY, PAGE_SPECS, WORKSPACE_DEFAULT_PAGE,
 from ui.styles.themes import stylesheet_for
 from ui.visual_polish import apply_visual_polish
 
+_LOG = logging.getLogger("local_booru.ui")
+
 # Icons: emoji fallback — looks fine with Segoe UI Emoji on Windows
 NAV_ICONS = {
     "Tagger":     ("🔍", "parser"),
-    "ParserBlueprint": ("🧩", "parser"),
     "Tags":       ("🏷", "tags"),
     "Trash":      ("", "action_delete"),
     "Diagnostics": ("", "diagnostics"),
     "NO_MATCH":   ("❓", "nomatch"),
     "Overview":   ("📊", "home"),
+    "Booru":      ("🖼", "gallery"),
+    "BooruManga": ("📖", "manga"),
     "Gallery":    ("🖼", "gallery"),
     "Manga":      ("📖", "manga"),
-    "Games":      ("🎮", "games"),
     "DLER":       ("⬇", "grabber"),
     "Subs":       ("🔄", "subs"),
     "Duplicates": ("♊", "dupes"),
@@ -107,6 +111,11 @@ class MainWindow(QMainWindow):
         except Exception:
             _task_workers = int(self.settings.get("task_max_workers", 4) or 4)
         self.task_manager = TaskManager(self, max_workers=_task_workers)
+        try:
+            from core.maintenance_coordinator import install_qt_activity_filter
+            install_qt_activity_filter()
+        except Exception:
+            pass
         self.pages: dict = {}
         self.page_buttons: dict = {}
         self.setWindowTitle("Local Booru")
@@ -267,6 +276,19 @@ class MainWindow(QMainWindow):
         self._task_status_timer.setInterval(1000)
         self._task_status_timer.timeout.connect(self._update_task_status_strip)
         self._task_status_timer.start()
+        self._background_task_timer = QTimer(self)
+        self._background_task_timer.setInterval(60 * 1000)
+        self._background_task_timer.timeout.connect(self._check_background_tasks)
+        self._background_task_timer.start()
+        self._idle_checkpoint_task = None
+        self._idle_checkpoint_last_submit = 0.0
+        self._idle_checkpoint_timer = QTimer(self)
+        # The configurable cadence is enforced in the callback. A one-minute
+        # tick also picks up settings changes without restarting the app.
+        self._idle_checkpoint_timer.setInterval(60 * 1000)
+        self._idle_checkpoint_timer.timeout.connect(self._maybe_schedule_idle_wal_checkpoint)
+        self._idle_checkpoint_timer.start()
+        QTimer.singleShot(30 * 1000, self._maybe_schedule_idle_wal_checkpoint)
         self._update_task_status_strip()
         QTimer.singleShot(2500, self.ensure_local_clip_model_download)
 
@@ -280,8 +302,10 @@ class MainWindow(QMainWindow):
             settings = self.settings or {}
             if not bool(settings.get("visual_nomatch_classify_enabled", True)):
                 return None
-            backend = str(settings.get("visual_nomatch_backend", "clip_local") or "clip_local").strip().lower()
-            if backend not in ("clip_local", "clip", "ai"):
+            # Only when CLIP is the model chosen on «Настройки → Брак: фото или рисунок»: the default model
+            # (core/visual_models.py, 17 MB) is downloaded by itself and needs no CLIP.
+            from core.visual_models import chosen
+            if chosen(settings) != "clip" and not force:       # the old page «Брак»: «Скачать AI-модель»
                 return None
             if not force and not bool(settings.get("visual_nomatch_auto_download_model", True)):
                 return None
@@ -360,12 +384,74 @@ class MainWindow(QMainWindow):
     def _update_task_status_strip(self):
         try:
             tasks = self.task_manager.active_snapshot()
-            self._status_tasks.setText(f"Фоновые задачи: {len(tasks)}")
-            if tasks:
-                current = tasks[0]
-                self._status_tasks.setToolTip(f"{current.get('name', '')}: {current.get('progress', '')}")
+            roots = [row for row in tasks if not str(row.get("parent_id") or "")]
+            shown = roots or tasks
+            self._status_tasks.setText(f"Фоновые задачи: {len(shown)}")
+            if shown:
+                current = shown[0]
+                progress = current.get("progress_text", current.get("progress", ""))
+                self._status_tasks.setToolTip(
+                    f"[{current.get('kind', 'background')}] {current.get('name', '')}: {progress}"
+                )
             else:
                 self._status_tasks.setToolTip("")
+        except Exception:
+            pass
+
+    def _check_background_tasks(self):
+        """Diagnose stalled leaf tasks without treating a live child as a dead parent."""
+        try:
+            import logging
+            from core.background_tasks import get_background_task_registry
+            registry = get_background_task_registry()
+            try:
+                threshold_minutes = max(2.0, float(self.settings.get("background_task_stall_minutes", 10) or 10))
+            except Exception:
+                threshold_minutes = 10.0
+            try:
+                waiting_threshold_minutes = max(
+                    threshold_minutes,
+                    float(self.settings.get("background_task_waiting_stall_minutes", 60) or 60),
+                )
+            except Exception:
+                waiting_threshold_minutes = max(threshold_minutes, 60.0)
+            active = registry.active_snapshot(include_parents=True)
+            stale = registry.stale_snapshot(
+                threshold_minutes * 60.0,
+                leaf_only=True,
+                waiting_threshold_seconds=waiting_threshold_minutes * 60.0,
+            )
+            dumped = getattr(self, "_background_task_dumped_at", {})
+            active_ids = {str(row.get("task_id") or "") for row in active}
+            for old_id in list(dumped):
+                if old_id not in active_ids:
+                    dumped.pop(old_id, None)
+            self._background_task_dumped_at = dumped
+            if not stale:
+                return
+            log = logging.getLogger("local_booru.diagnostics")
+            for row in stale:
+                task_id = str(row.get("task_id") or "")
+                activity_key = float(row.get("last_activity_at") or 0)
+                log.warning(
+                    "BACKGROUND TASK STALL: id=%s kind=%s name=%s no activity for %.1f min; "
+                    "thread=%s/%s; detail=%s",
+                    task_id,
+                    row.get("kind", "background"),
+                    row.get("name", "?"),
+                    float(row.get("effective_idle_seconds") or 0) / 60.0,
+                    row.get("thread_name", "?"),
+                    row.get("thread_id", 0),
+                    row.get("detail", ""),
+                )
+                dumped[task_id] = activity_key
+            try:
+                top = stale[0]
+                self._status_hint.setText(
+                    f"⚠ Задача без активности: {top.get('name')} {float(top.get('effective_idle_seconds') or 0)/60.0:.1f} мин"
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -889,7 +975,7 @@ class MainWindow(QMainWindow):
             btn = self.page_buttons.get(spec.key)
             if btn:
                 em, ico = NAV_ICONS.get(spec.key, ("•",""))
-                label = self.t(spec.key) if spec.key in ("Overview","Tagger","Gallery","Manga","Games","Duplicates","DLER","Tags") else spec.button_text
+                label = self.t(spec.key) if spec.key in ("Overview","Tagger","Duplicates","DLER","Tags") else spec.button_text
                 icon = _load_icon(ico, _is_light_theme(self.settings.get("appearance", "dark")))
                 if icon:
                     btn.setIcon(icon); btn.setIconSize(QSize(18,18)); btn.setText(f"  {label}")
@@ -973,6 +1059,10 @@ class MainWindow(QMainWindow):
             if current is getattr(self, "manga_page", None):
                 self.manga_page.open_random_manga()
                 return
+            if current is getattr(self, "web_gallery_page", None):
+                on_manga = self.web_gallery_page.current_path().startswith("/manga")
+                self.web_gallery_page.open_path("/manga/random" if on_manga else "/random")
+                return
             # Gallery or post — both use gallery SQL random
             self.gallery_page.random_post()
         except Exception as e:
@@ -982,14 +1072,19 @@ class MainWindow(QMainWindow):
 
     def release_open_media_handles(self):
         """Detach active GIF/video readers before a file operation on Windows."""
-        try:
-            page = getattr(self, "post_page", None)
-            if page is not None and hasattr(page, "release_media_handles"):
-                page.release_media_handles()
-            elif page is not None:
-                page.stop_video()
-        except Exception:
-            pass
+        for name in ("post_page", "web_gallery_page"):
+            page = getattr(self, name, None)
+            if page is None:
+                continue
+            try:
+                if hasattr(page, "release_media_handles"):
+                    page.release_media_handles()
+                elif hasattr(page, "release_media"):
+                    page.release_media()
+                elif hasattr(page, "stop_video"):
+                    page.stop_video()
+            except Exception as exc:  # a viewer failing to let go must not stop the file operation
+                _LOG.warning("%s could not release its media: %s", name, exc)
 
     def open_post(self, index, context=None, tag_source=None):
         self.post_page.set_post(index, context, tag_source=tag_source)
@@ -1068,11 +1163,55 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _maybe_schedule_idle_wal_checkpoint(self):
+        """Submit at most one thresholded PASSIVE checkpoint while truly idle."""
+        try:
+            settings = self.settings or {}
+            if not bool(settings.get("sqlite_idle_checkpoint_enabled", True)):
+                return
+            if self._idle_checkpoint_task is not None:
+                return
+            interval = max(60, int(settings.get("sqlite_idle_checkpoint_interval_seconds", 300) or 300))
+            now = time.monotonic()
+            if now - float(self._idle_checkpoint_last_submit or 0.0) < interval:
+                return
+            from core.idle_wal_checkpoint import wal_checkpoint_probe, run_idle_passive_checkpoint
+            probe = wal_checkpoint_probe(settings)
+            if not probe.get("needed"):
+                return
+            from core.maintenance_coordinator import get_maintenance_coordinator
+            coordinator = get_maintenance_coordinator()
+            if coordinator.active_maintenance_job():
+                return
+            min_idle = max(0.0, float(settings.get("sqlite_idle_checkpoint_min_idle_seconds", 15) or 15))
+            decision = coordinator.can_run(
+                settings, mode="idle", min_idle_seconds=min_idle,
+            )
+            if not decision.allowed:
+                return
+            self._idle_checkpoint_last_submit = now
+            token = object()
+            self._idle_checkpoint_task_token = token
+
+            def finished():
+                if getattr(self, "_idle_checkpoint_task_token", None) is token:
+                    self._idle_checkpoint_task = None
+                    self._idle_checkpoint_task_token = None
+
+            self._idle_checkpoint_task = self.task_manager.submit(
+                run_idle_passive_checkpoint, dict(settings),
+                name="sqlite-idle-passive-checkpoint",
+                on_finished=finished,
+            )
+        except Exception:
+            self._idle_checkpoint_task = None
+
     def _run_lifecycle_maintenance(self):
         try:
             from core.library_lifecycle import archive_expired_inbox, purge_expired_trash
             archived = int(archive_expired_inbox(self.settings) or 0)
-            purged = purge_expired_trash(self.settings)
+            from webui.server import FILE_STREAMS          # a file the gallery is sending cannot be deleted on Windows
+            purged = purge_expired_trash(self.settings, hold=lambda paths: FILE_STREAMS.holding(*paths))
             removed = int((purged or {}).get("removed_records", 0) or 0)
             if archived or removed:
                 gallery = getattr(self, "gallery_page", None)

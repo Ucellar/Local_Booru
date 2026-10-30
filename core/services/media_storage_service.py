@@ -6,6 +6,10 @@ operations on generated output so future UI/service code does not call
 """
 from __future__ import annotations
 
+import contextlib
+import errno
+import glob
+import os
 import re
 import shutil
 import time
@@ -13,6 +17,7 @@ from pathlib import Path
 from core.source_protection import require_managed_media_mutation, is_managed_media_path
 from core.file_safety import atomic_copy2
 from core.media_utils import file_md5
+from core.stability import swallow
 
 
 _MD5_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -113,6 +118,44 @@ def _retry_windows_lock(action, *, attempts: int = 6):
         raise last_error
 
 
+def _cross_device(exc: OSError) -> bool:
+    return getattr(exc, "errno", None) == errno.EXDEV or getattr(exc, "winerror", None) == 17   # ERROR_NOT_SAME_DEVICE
+
+
+def move_file(src: Path, dest: Path) -> None:
+    """Move one file and never leave two copies of it.
+
+    ``shutil.move`` copies and then deletes whenever the rename fails — also when it fails because
+    the file is open (Windows: a viewer, the gallery sending it).  Then the copy succeeds, the delete
+    fails, and every retry left one more full copy in the trash or the library.  Here the rename is
+    the move; only a move to another drive copies, and a copy whose source cannot be deleted is
+    removed again.  An existing destination is never overwritten.
+    """
+    src, dest = Path(src), Path(dest)
+    if dest.exists():
+        raise FileExistsError(errno.EEXIST, "the destination already exists", str(dest))
+    try:
+        os.rename(src, dest)
+        return
+    except OSError as exc:
+        if not _cross_device(exc):
+            raise                 # a locked file: the caller retries; nothing was copied
+    tmp = dest.with_name(f"{dest.name}.{os.getpid()}.moving")
+    try:
+        shutil.copy2(src, tmp)
+        os.rename(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+    try:
+        os.unlink(src)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(dest)        # the source stays where it was: one copy, as before the move
+        raise
+
+
 def unlink_managed(settings: dict, path: str | Path, *, operation: str) -> bool:
     p = Path(path)
     if not can_mutate(settings, p, operation):
@@ -130,7 +173,7 @@ def move_managed(settings: dict, source: str | Path, destination: str | Path, *,
         require_managed_media_mutation(settings, dest, operation + '.destination')
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
-    _retry_windows_lock(lambda: shutil.move(str(src), str(dest)))
+    _retry_windows_lock(lambda: move_file(src, dest))
     return True
 
 
@@ -153,13 +196,14 @@ def copy_into_managed(settings: dict, source: str | Path, destination: str | Pat
     if md5:
         dest = content_addressed_path(dest, md5, original_name=src.name)
     if dest.exists():
-        try:
+        matched_existing = False
+        with swallow("media_storage.verify_existing_destination_md5"):
             if md5 and _path_md5(dest) == md5:
-                return dest
-            if not md5 and file_md5(src).lower() == file_md5(dest).lower():
-                return dest
-        except Exception:
-            pass
+                matched_existing = True
+            elif not md5 and file_md5(src).lower() == file_md5(dest).lower():
+                matched_existing = True
+        if matched_existing:
+            return dest
         if md5:
             dest = _first_free_variant(dest, md5)
         else:
@@ -168,16 +212,22 @@ def copy_into_managed(settings: dict, source: str | Path, destination: str | Pat
             while dest.exists():
                 candidate = dest.with_name(f"{base}_{n}{ext}")
                 if candidate.exists():
-                    try:
-                        if file_md5(src).lower() == file_md5(candidate).lower():
-                            return candidate
-                    except Exception:
-                        pass
+                    matched_candidate = False
+                    with swallow("media_storage.verify_collision_candidate_md5"):
+                        matched_candidate = file_md5(src).lower() == file_md5(candidate).lower()
+                    if matched_candidate:
+                        return candidate
                     n += 1
                     continue
                 dest = candidate
                 break
-    return atomic_copy2(src, dest)
+    copied = atomic_copy2(src, dest)
+    if md5:
+        # The copy has the source's bytes: remember its MD5 so the import does not read it again.
+        with swallow("media_storage.remember_copy_md5"):
+            from core.file_hash_cache import upsert as _remember_md5
+            _remember_md5(settings, copied, hash_md5=md5)
+    return copied
 
 
 def normalize_managed_content_name(settings: dict, path: str | Path, md5: str, *, operation: str = 'normalize_content_filename', original_name: str | None = None) -> Path:
@@ -206,7 +256,7 @@ def normalize_managed_content_name(settings: dict, path: str | Path, md5: str, *
         # transient duplicate inside managed output, so discard it.
         _retry_windows_lock(lambda: src.unlink(missing_ok=True))
         return target
-    _retry_windows_lock(lambda: shutil.move(str(src), str(target)))
+    _retry_windows_lock(lambda: move_file(src, target))
     return target
 
 def delete_bucket_artifacts(settings: dict, media_path: str | Path, *, operation: str = 'delete_side_artifacts') -> int:
@@ -219,7 +269,9 @@ def delete_bucket_artifacts(settings: dict, media_path: str | Path, *, operation
         d = bucket / sub
         if not d.exists():
             continue
-        for item in d.glob(p.stem + '*'):
+        # Exactly this file's sidecars: "<stem>.tags.txt", "<stem>.searched.json"...
+        # (a bare "<stem>*" also matched other files: "1.jpg" -> "10.json").
+        for item in d.glob(glob.escape(p.stem) + '.*'):
             if item.is_file() and is_managed_media_path(settings, item):
                 item.unlink(missing_ok=True)
                 removed += 1

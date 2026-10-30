@@ -1,0 +1,475 @@
+"""What the web pages read from the library (read-only; changes go through core functions)."""
+from __future__ import annotations
+
+import logging
+import sqlite3
+import threading
+import time
+from collections import defaultdict
+from pathlib import Path
+
+from core import trash_tools
+from core.database.connection import db
+from core.tag_utils import normalize_tag, should_hide_tag
+
+_LOG = logging.getLogger("local_booru.webui")
+
+ORDERS = {"newest": "Сначала новые", "oldest": "Сначала старые", "parsed_newest": "Недавно добавленные",
+          "filename": "По имени файла"}
+
+
+LONG_VIDEO = "COALESCE(i.duration,0) > ?"           # a video card longer than the tab «Видео» takes (data.video_limit)
+NOT_LONG_VIDEO = "COALESCE(i.duration,0) <= ?"
+VIDEO_SECTION = "videos"                             # the tab «Видео»: the long videos of the library
+# Sections that show every card whatever its length: what is in the trash or in Брак is looked at to be dealt with.
+ALL_LENGTHS = {"trash", "no_match"}
+
+
+def video_limit(settings: dict | None) -> int:
+    """Seconds: a video card longer than this is on the tab «Видео», not in the gallery (0 — every video is in the
+    gallery).  «Настройки → Вкладка «Видео»»."""
+    try:
+        return max(0, int((settings or {}).get("video_tab_seconds", 60)))
+    except (TypeError, ValueError):
+        return 60
+
+
+def section_filter(section: str, settings: dict | None = None) -> tuple[str, list[str], list]:
+    """(bucket for repository search, extra WHERE, its params) for a gallery section.  The gallery leaves out the
+    videos longer than ``video_limit`` (they are on the tab «Видео»: section ``videos``), except in the trash and in
+    Брак."""
+    section = str(section or "all")
+    limit = video_limit(settings)
+    if section == VIDEO_SECTION:
+        return "all", [LONG_VIDEO], [limit if limit > 0 else 10 ** 9]
+    length = ([NOT_LONG_VIDEO], [limit]) if limit > 0 and section not in ALL_LENGTHS else ([], [])
+    if section == "favorites":
+        return "all", ["i.favorite=1", *length[0]], length[1]
+    if section in {"inbox", "found", "downloaded", "no_match", "trash", "archive"}:
+        return section, length[0], length[1]
+    return "all", length[0], length[1]
+
+
+_VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v")
+
+# The words of the section «Брак» (links above its pictures, webui/pages/nomatch.py): word -> (the Брак entries
+# that are meant, whether the card is one of them or not, the label).  A card is matched by its file (the Брак
+# copy) or the input file of its entry; cards without an entry count as «не найдено» and «вид не определён».
+BRAK_WORDS = {
+    "брак:ненайдено": ("reason='source_only'", False, "Брак: не найдено"),
+    "брак:источник": ("reason='source_only'", True, "Брак: источник без тегов"),
+    "брак:фото": ("visual_status='real'", True, "Брак: похоже на фото"),
+    "брак:рисунок": ("visual_status='booru'", True, "Брак: похоже на рисунок"),
+    "брак:неясно": ("visual_status IN ('real','booru')", False, "Брак: вид не определён"),
+}
+
+
+def brak_condition(word: str) -> tuple[str, list]:
+    """SQL condition on ``images i`` for a word of :data:`BRAK_WORDS`."""
+    entries, inside, _label = BRAK_WORDS[word]
+    paths = (f"SELECT media_path FROM no_match_items WHERE active=1 AND {entries} "
+             f"UNION SELECT original_path FROM no_match_items WHERE active=1 AND {entries}")
+    return (f"(i.bucket IN ('no_match','downloaded_no_match') AND i.path {'IN' if inside else 'NOT IN'} ({paths}))", [])
+
+
+def split_query(query: str) -> tuple[str, list[str], list, list[str]]:
+    """Tags of a search and its non-tag conditions.
+
+    Returns (tags, SQL conditions, their parameters, labels for the page).  Understood besides tags:
+    ``md5:<hash>``, ``id:<number>``, ``type:video|gif|image``, the words of the section «Брак» (``брак:фото`` …),
+    why a card is in the trash (``корзина:<code of core.trash_tools.LABELS>``) and the size/rating shorthands of
+    the old gallery (``size:+5mb``, ``width:1920``, ``height:-1080``, ``rating:4``, ``tags:0`` …).
+    """
+    words, where, params, labels = [], [], [], []
+    for word in str(query or "").split():
+        low = word.lower()
+        if low.startswith("md5:") and len(low) > 4:
+            where.append("(i.hash_md5=? OR EXISTS(SELECT 1 FROM image_site_md5_aliases a WHERE a.image_id=i.id AND a.site_md5=?))")
+            params += [low[4:], low[4:]]
+            labels.append(f"MD5 {low[4:]}")
+        elif low.startswith("id:") and low[3:].isascii() and low[3:].isdigit():
+            where.append("i.id=?")
+            params.append(min(int(low[3:]), 2 ** 63 - 1))     # SQLite numbers are 64-bit
+            labels.append(f"номер {low[3:]}")
+        elif low in BRAK_WORDS:
+            condition, more = brak_condition(low)
+            where.append(condition)
+            params += more
+            labels.append(BRAK_WORDS[low][2])
+        elif low.startswith(trash_tools.WORD) and len(low) > len(trash_tools.WORD):
+            code = low[len(trash_tools.WORD):]
+            condition, more = trash_tools.condition(code)
+            where.append(condition)
+            params += more
+            labels.append(f"в корзине: {trash_tools.label(code)}")
+        elif low in {"type:video", "type:gif", "type:image"}:
+            kind = low[5:]
+            if kind == "video":
+                where.append("(i.is_video=1 OR " + " OR ".join("LOWER(i.path) LIKE ?" for _ in _VIDEO_EXTS) + ")")
+                params += ["%" + ext for ext in _VIDEO_EXTS]
+                labels.append("только видео")
+            elif kind == "gif":
+                where.append("LOWER(i.path) LIKE ?")
+                params.append("%.gif")
+                labels.append("только GIF")
+            else:
+                where.append("COALESCE(i.is_video,0)=0 AND " + " AND ".join("LOWER(i.path) NOT LIKE ?" for _ in (*_VIDEO_EXTS, ".gif")))
+                params += ["%" + ext for ext in (*_VIDEO_EXTS, ".gif")]
+                labels.append("только картинки")
+        else:
+            words.append(word)
+    rest = " ".join(words)
+    if ":" in rest or any("а" <= ch.lower() <= "я" for ch in rest):
+        from core.search.human_query_parser import parse_query, to_sql_conditions
+        parsed = parse_query(rest)
+        if parsed.filters:
+            more_where, more_params = to_sql_conditions(parsed.filters)
+            where += more_where
+            params += more_params
+            labels += [f.to_display() for f in parsed.filters]
+            rest = " ".join([*parsed.tags, *parsed.unknown_tokens])
+    return rest, where, params, labels
+
+
+def _filters(settings: dict, query: str, section: str) -> tuple[str, str, list[str], list]:
+    tags, where, params, _labels = split_query(query)
+    bucket, extra, extra_params = section_filter(section, settings)
+    return tags, bucket, [*extra, *where], [*extra_params, *params]
+
+
+def long_videos_found(settings: dict, query: str, *, source: str = "all") -> int:
+    """How many videos of a gallery search are on the tab «Видео» instead (0 when the tab takes none)."""
+    if video_limit(settings) <= 0 or not str(query or "").strip():
+        return 0
+    from core.database.repository import count_search_items
+    tags, bucket, extra, params = _filters(settings, query, VIDEO_SECTION)
+    return count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params)
+
+
+def collapses(settings: dict | None, section: str) -> bool:
+    """Whether a сборка of cards (core/card_sets.py) is one tile in this section: everywhere in the gallery but the
+    trash and Брак (cards there are dealt with one by one), unless switched off in «Настройки»."""
+    from core.card_sets import tiles_enabled
+    return tiles_enabled(settings or {}) and str(section or "all") not in ALL_LENGTHS and section != VIDEO_SECTION
+
+
+def mark_tiles(settings: dict, items: list) -> list:
+    """Give the cards that stand for a сборка its number and size (``set_id``, ``set_count``)."""
+    from core.card_sets import tile_counts
+    try:
+        tiles = tile_counts(settings, [int(it["id"]) for it in items])
+    except sqlite3.Error as exc:                     # an old base: the tiles without counts
+        _LOG.debug("tiles of the page: %s", exc)
+        tiles = {}
+    for item in items:
+        set_id, count = tiles.get(int(item["id"]), (0, 0))
+        item["set_id"], item["set_count"] = set_id, count
+    return items
+
+
+def search_page(settings: dict, query: str, *, section: str = "all", source: str = "all", order: str = "newest",
+                page: int = 1, per_page: int = 42) -> tuple[list, int]:
+    from core.database.repository import count_search_items, enrich_items, search_items
+    tags, bucket, extra, params = _filters(settings, query, section)
+    collapse = collapses(settings, section)
+    total = count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params,
+                               collapse_sets=collapse)
+    offset = max(0, (page - 1) * per_page)
+    items = search_items(settings, tags, source, bucket, limit=per_page, offset=offset,
+                         order=order if order in ORDERS else "newest", extra_where=extra, extra_params=params,
+                         collapse_sets=collapse)
+    enrich_items(settings, items, tag_source=source or "all")
+    if collapse:
+        mark_tiles(settings, items)
+    return items, total
+
+
+def item_at(settings: dict, query: str, *, section: str, source: str, order: str, index: int) -> dict | None:
+    """The card at position ``index`` (0-based) of a search — for «previous / next» on the post page (a сборка is one
+    place: its card the gallery shows)."""
+    if index < 0:
+        return None
+    from core.database.repository import search_items
+    tags, bucket, extra, params = _filters(settings, query, section)
+    rows = search_items(settings, tags, source, bucket, limit=1, offset=index,
+                        order=order if order in ORDERS else "newest", extra_where=extra, extra_params=params,
+                        collapse_sets=collapses(settings, section))
+    return rows[0] if rows else None
+
+
+class TagCounts:
+    """How many live cards carry each tag.
+
+    Counted once (about 0.25 s for 100 thousand pictures with 2.4 million tag links) and then kept;
+    when the copy is older than ``ttl`` the pages get the old numbers at once while a background
+    thread counts again, so no page waits for the count after the first one.
+    """
+
+    def __init__(self, ttl: float = 60.0):
+        self.ttl = ttl
+        self._lock = threading.Lock()
+        self._load_lock = threading.Lock()
+        self._loaded_at = 0.0
+        self._db = ""
+        self._refreshing = False
+        self._generation = 0                  # +1 on every change of the library (invalidate)
+        self._by_name: dict[str, tuple[str, str, int]] = {}   # norm -> (display name, category, count)
+
+    def get(self, settings: dict) -> dict:
+        from core.database.connection import db_path
+        key = str(db_path(settings))
+        with self._lock:
+            if self._db == key and self._loaded_at:
+                if time.time() - self._loaded_at >= self.ttl and not self._refreshing:
+                    self._refreshing = True
+                    threading.Thread(target=self._refresh, args=(dict(settings), key, self._generation),
+                                     name="webui-tag-counts", daemon=True).start()
+                return self._by_name
+        with self._load_lock:                     # the first count: one thread counts, the others wait
+            with self._lock:
+                if self._db == key and self._loaded_at:
+                    return self._by_name
+                generation = self._generation
+            data = self._load(settings)
+            with self._lock:
+                self._by_name, self._db = data, key
+                self._loaded_at = time.time() if generation == self._generation else 1.0
+            return data
+
+    def _refresh(self, settings: dict, key: str, generation: int) -> None:
+        data = None
+        try:
+            data = self._load(settings)
+        except Exception as exc:  # archive drive gone for a moment, a locked base: keep the old numbers
+            _LOG.warning("tag counts not refreshed: %s", exc)
+        finally:
+            with self._lock:
+                self._refreshing = False
+                if data is not None and self._db == key:
+                    self._by_name = data
+                    # Changed while counting (a card trashed meanwhile): these numbers are already old.
+                    self._loaded_at = time.time() if generation == self._generation else 1.0
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._generation += 1
+            if self._loaded_at:
+                self._loaded_at = 1.0          # stale: the next page starts a recount
+
+    @staticmethod
+    def _load(settings: dict) -> dict:
+        with db(settings, readonly=True) as con:
+            # Count over the (tag_id, image_id) index without touching images, then take away the cards
+            # in the trash (few): ten times faster than joining every link with its card.
+            totals = dict(con.execute("SELECT tag_id, COUNT(*) FROM image_tags GROUP BY tag_id").fetchall())
+            dead = dict(con.execute("""
+                SELECT it.tag_id, COUNT(*) FROM images i JOIN image_tags it ON it.image_id=i.id
+                WHERE i.deleted=1 GROUP BY it.tag_id
+            """).fetchall())
+            rows = con.execute("SELECT id, normalized_name, name, COALESCE(NULLIF(category,''),'general') FROM tags").fetchall()
+        out = {}
+        for tag_id, norm, name, category in rows:
+            count = int(totals.get(tag_id, 0)) - int(dead.get(tag_id, 0))
+            if count > 0:
+                out[str(norm)] = (str(name), str(category).lower(), count)
+        return out
+
+
+TAG_COUNTS = TagCounts()
+
+
+def sidebar_tags(settings: dict, items: list, limit: int = 60) -> dict[str, list[tuple[str, int]]]:
+    """Tags of the cards on this page with their library-wide counts, grouped by category."""
+    counts = TAG_COUNTS.get(settings)
+    seen: dict[str, str] = {}
+    for item in items:
+        for category, names in (item.get("tag_groups") or {}).items():
+            for name in names:
+                norm = normalize_tag(name)
+                if norm and norm not in seen:
+                    seen[norm] = str(category or "general").lower()
+    ranked = []
+    for norm, category in seen.items():
+        name, global_cat, count = counts.get(norm, (norm, category, 0))
+        cat = category if category != "general" else global_cat
+        if should_hide_tag(name, cat, settings):
+            continue
+        ranked.append((count, norm, name, cat))
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+    groups: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    for count, _norm, name, cat in ranked[:limit]:
+        groups[cat].append((name, count))
+    return groups
+
+
+def autocomplete(settings: dict, prefix: str, limit: int = 12) -> list[dict]:
+    """Tags starting with ``prefix`` (then containing it), most used first."""
+    prefix = normalize_tag(prefix).lower()
+    if not prefix:
+        return []
+    counts = TAG_COUNTS.get(settings)
+    starts, contains = [], []
+    for norm, (name, category, count) in counts.items():
+        low = norm.lower()
+        if low.startswith(prefix):
+            starts.append((count, norm, name, category))
+        elif len(prefix) >= 3 and prefix in low:
+            contains.append((count, norm, name, category))
+    starts.sort(key=lambda x: (-x[0], x[1]))
+    contains.sort(key=lambda x: (-x[0], x[1]))
+    out = []
+    for count, norm, name, category in (starts + contains)[:limit]:
+        out.append({"tag": norm, "name": name, "category": category, "count": count})
+    return out
+
+
+def tag_rows(settings: dict, *, name_filter: str = "", category: str = "") -> list:
+    """The library's tags (norm, name, category, cards) — of ``category`` (all: ""), whose name matches ``name_filter``
+    (``webui/tag_lists.matcher``: * — any text, without it — the text anywhere); in no order."""
+    from webui.tag_lists import matcher
+    match = matcher(name_filter)
+    return [(norm, name, cat, count) for norm, (name, cat, count) in TAG_COUNTS.get(settings).items()
+            if (not category or cat == category) and match(norm)]
+
+
+def tag_categories(settings: dict) -> dict:
+    """category -> how many tags of the library have it."""
+    out: dict = defaultdict(int)
+    for _name, cat, _count in TAG_COUNTS.get(settings).values():
+        out[cat] += 1
+    return dict(out)
+
+
+def post_detail(settings: dict, image_id: int) -> dict | None:
+    from core.database.repository import enrich_items
+    with db(settings, readonly=True) as con:
+        row = con.execute("SELECT * FROM images WHERE id=?", (int(image_id),)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        meta = con.execute("SELECT site, post_url, file_url FROM raw_metadata WHERE image_id=?", (int(image_id),)).fetchone()
+        item["raw"] = dict(meta) if meta else {}
+        # Tags that belong to no site set (old library tags, manual tags): shown as their own group.
+        from core.image_notes import notes_for_image, text_regions_for_image
+        try:
+            item["notes"] = notes_for_image(con, int(image_id)) + text_regions_for_image(con, int(image_id))
+        except sqlite3.OperationalError:          # a library from before the notes tables
+            item["notes"] = []
+        loose = con.execute("""
+            SELECT t.name, COALESCE(NULLIF(t.category,''),'general') AS category FROM image_tags it
+            JOIN tags t ON t.id=it.tag_id
+            WHERE it.image_id=? AND it.tag_id NOT IN (SELECT tag_id FROM image_source_tags WHERE image_id=?)
+            ORDER BY t.name COLLATE NOCASE
+        """, (int(image_id), int(image_id))).fetchall()
+        if int(item.get("deleted") or 0):          # why it is in the trash (the post page says it)
+            item["trash_reason"], item["trash_target"] = trash_tools.reason_of(con, int(image_id))
+    enriched = {"id": int(image_id)}
+    enrich_items(settings, [enriched])
+    item["tag_groups"] = enriched.get("tag_groups") or {}
+    item["tag_groups_by_source"] = enriched.get("tag_groups_by_source") or {}
+    item["sources"] = enriched.get("sources") or []
+    loose_groups: dict[str, list[str]] = defaultdict(list)
+    if item["tag_groups_by_source"]:
+        for r in loose:
+            loose_groups[str(r["category"]).lower()].append(str(r["name"]))
+    item["loose_groups"] = dict(loose_groups)
+    return item
+
+
+def image_id_by_path(settings: dict, path: str) -> int:
+    """The live card of the file at ``path`` (0 — none): what a download became."""
+    with db(settings, readonly=True) as con:
+        row = con.execute("SELECT id FROM images WHERE path=? AND deleted=0 ORDER BY id DESC LIMIT 1",
+                          (str(Path(path)),)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def file_path_of(settings: dict, image_id: int) -> Path | None:
+    with db(settings, readonly=True) as con:
+        row = con.execute("SELECT path FROM images WHERE id=?", (int(image_id),)).fetchone()
+    if row is None:
+        return None
+    path = Path(str(row["path"] or ""))
+    return path if path.is_file() else None
+
+
+def file_and_version_of(settings: dict, image_id: int) -> tuple[Path | None, str]:
+    """The card's file (None when it is not on disk) and the version of its picture addresses
+    (``media_version``): the pages put it into ``/media/<id>?v=…``, and only an address with the current
+    version may be kept by the browser."""
+    with db(settings, readonly=True) as con:
+        row = con.execute("SELECT path, hash_md5, size_bytes, mtime_ns FROM images WHERE id=?",
+                          (int(image_id),)).fetchone()
+    if row is None:
+        return None, ""
+    path = Path(str(row["path"] or ""))
+    return (path if path.is_file() else None), media_version(dict(row))
+
+
+def media_version(item: dict) -> str:
+    """What makes ``/media/<id>``, ``/thumb/<id>`` and ``/poster/<id>`` of one picture differ from those of
+    another picture under the same number.  Numbers come back: a card deleted for good frees its number for
+    the next one, and «Сбросить базу» starts them again from 1 while the window still keeps pictures by
+    address — the old picture would be shown for the new card.  The md5 of the file (or its size and time
+    when there is no md5) goes into the address, so another file is another address."""
+    md5 = str(item.get("hash_md5") or "").strip().lower()
+    if len(md5) >= 12 and all(ch in "0123456789abcdef" for ch in md5[:12]):
+        return md5[:12]
+    try:
+        return f"{int(item.get('size_bytes') or 0):x}-{int(item.get('mtime_ns') or 0):x}"
+    except (TypeError, ValueError):
+        return "0-0"
+
+
+def media_url(kind: str, item: dict) -> str:
+    """``/media/<id>?v=…`` (``kind`` "media", "thumb" or "poster") for a card dict with id, hash_md5, size_bytes,
+    mtime_ns."""
+    return f"/{kind}/{int(item['id'])}?v={media_version(item)}"
+
+
+def media_file_of(settings: dict, image_id: int, *, video: bool = False) -> tuple[Path | None, str]:
+    """The card's file for actions that hand it to another program (open, play, clipboard, drag):
+    (path, "") or (None, why not).  Only picture and video types: a card whose file is something
+    else (a site served ``1234.hta``) is shown, but never opened."""
+    from core.media_utils import CARD_FILE_EXTS, CARD_VIDEO_EXTS
+    path = file_path_of(settings, image_id)
+    if path is None:
+        return None, "Файла этой карточки нет на диске"
+    allowed = CARD_VIDEO_EXTS if video else CARD_FILE_EXTS
+    if path.suffix.lower() not in allowed:
+        return None, f"Файл «{path.suffix or 'без расширения'}» — не картинка и не видео, галерея его не открывает"
+    return path, ""
+
+
+def source_hosts(settings: dict) -> list[tuple[str, int]]:
+    with db(settings, readonly=True) as con:
+        rows = con.execute("""
+            SELECT s.host AS host, COUNT(DISTINCT x.image_id) AS c FROM image_sources x
+            JOIN sources s ON s.id=x.source_id JOIN images i ON i.id=x.image_id AND i.deleted=0
+            GROUP BY s.host ORDER BY c DESC LIMIT 30
+        """).fetchall()
+    return [(str(r["host"]), int(r["c"])) for r in rows]
+
+
+def random_in_search(settings: dict, query: str = "", *, section: str = "all", source: str = "all",
+                     order: str = "newest") -> tuple[int, int] | None:
+    """«Случайная» of a search (no search — of the whole library): (a random card of it, its place in the search
+    for «previous / next») or None."""
+    import random
+    from core.database.repository import count_search_items
+    tags, bucket, extra, params = _filters(settings, query, section)
+    total = count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params,
+                               collapse_sets=collapses(settings, section))
+    if total <= 0:
+        return None
+    index = random.randrange(total)
+    item = item_at(settings, query, section=section, source=source, order=order, index=index)
+    return (int(item["id"]), index) if item else None
+
+
+def result_ids(settings: dict, query: str, *, section: str = "all", source: str = "all") -> list[int]:
+    """Card numbers of a whole search (for «экспорт тегов и источников этих результатов»)."""
+    from core.database.repository import search_items
+    tags, bucket, extra, params = _filters(settings, query, section)
+    rows = search_items(settings, tags, source, bucket, limit=None, order="newest", extra_where=extra, extra_params=params)
+    return [int(r["id"]) for r in rows]

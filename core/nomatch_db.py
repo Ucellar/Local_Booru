@@ -6,10 +6,11 @@ one-time import source. Normal operation reads/writes ``no_match_items``.
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import threading
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 from core.paths import CACHE_DIR
 
 NO_MATCH_DB_FILE = CACHE_DIR / "nomatch_cache.json"
@@ -64,10 +65,8 @@ def ensure_nomatch_schema(settings: dict | None) -> None:
 
 
 def _host_from_url(url: str) -> str:
-    try:
-        return urlparse(str(url or "")).netloc.lower().replace("www.", "")
-    except Exception:
-        return ""
+    from core.media_utils import host_from_url
+    return host_from_url(url)
 
 
 def _legacy_items() -> list[dict]:
@@ -230,6 +229,33 @@ def list_nomatches(root=None, *, settings: dict | None = None):
     return sorted(items, key=lambda x: float(x.get("ts", 0)), reverse=True)
 
 
+def entry_for_path(settings: dict, path) -> dict | None:
+    """The active Брак entry of one file — its copy in the library or the input file — as ``list_nomatches``
+    gives it; None when there is none.  Read-only (a page asks it for every Брак card it shows)."""
+    import os
+    from core.database.connection import db
+    key = str(Path(path))
+    with db(settings, readonly=True) as con:
+        row = con.execute("SELECT * FROM no_match_items WHERE +active=1 AND (media_path=? OR original_path=?) "
+                          "ORDER BY updated_at DESC LIMIT 1", (key, key)).fetchone()
+        if row is None and os.name == "nt":       # the same file written in another case
+            wanted = os.path.normcase(key)
+            row = next((r for r in con.execute("SELECT * FROM no_match_items WHERE active=1 ORDER BY updated_at DESC")
+                        if wanted in {os.path.normcase(str(r["media_path"] or "")),
+                                      os.path.normcase(str(r["original_path"] or ""))}), None)
+    if row is None:
+        return None
+    r = dict(row)
+    return _live_nomatch_item(
+        str(r.get("original_path") or ""), str(r.get("media_path") or ""), str(r.get("reason") or "no_match"),
+        str(r.get("manual_url") or ""), int(r.get("updated_at") or 0),
+        str(r.get("source_url") or ""), str(r.get("source_label") or ""), str(r.get("source_host") or ""),
+        float(r.get("source_similarity") or 0.0), str(r.get("last_error") or ""),
+        str(r.get("visual_status") or ""), float(r.get("visual_confidence") or 0.0),
+        str(r.get("visual_model") or ""), int(r.get("visual_checked_at") or 0),
+    )
+
+
 def upsert_nomatch(
     path,
     reason="no_match",
@@ -266,10 +292,10 @@ def upsert_nomatch(
                     source_host=excluded.source_host,
                     source_similarity=excluded.source_similarity,
                     last_error=excluded.last_error,
-                    visual_status=CASE WHEN excluded.visual_status<>'' THEN excluded.visual_status ELSE no_match_items.visual_status END,
-                    visual_confidence=CASE WHEN excluded.visual_status<>'' THEN excluded.visual_confidence ELSE no_match_items.visual_confidence END,
-                    visual_model=CASE WHEN excluded.visual_model<>'' THEN excluded.visual_model ELSE no_match_items.visual_model END,
-                    visual_checked_at=CASE WHEN excluded.visual_checked_at>0 THEN excluded.visual_checked_at ELSE no_match_items.visual_checked_at END,
+                    visual_status=CASE WHEN no_match_items.visual_model='manual' OR excluded.visual_status='' THEN no_match_items.visual_status ELSE excluded.visual_status END,
+                    visual_confidence=CASE WHEN no_match_items.visual_model='manual' OR excluded.visual_status='' THEN no_match_items.visual_confidence ELSE excluded.visual_confidence END,
+                    visual_checked_at=CASE WHEN no_match_items.visual_model='manual' OR excluded.visual_checked_at<=0 THEN no_match_items.visual_checked_at ELSE excluded.visual_checked_at END,
+                    visual_model=CASE WHEN no_match_items.visual_model='manual' OR excluded.visual_model='' THEN no_match_items.visual_model ELSE excluded.visual_model END,
                     updated_at=excluded.updated_at,
                     active=1""",
             (str(p), str(media_path or ""), str(reason or "no_match"), "", source_url,
@@ -277,6 +303,16 @@ def upsert_nomatch(
              str(visual_status or ""), float(visual_confidence or 0.0), str(visual_model or ""),
              int(visual_checked_at or 0), int(time.time())),
         )
+    # Local-only triage is a side lane and must never hold the parser write
+    # transaction or alter NO_MATCH admission.
+    try:
+        from core.local_nomatch_models import enqueue_local_nomatch_analysis
+        enqueue_local_nomatch_analysis(settings, media_path or p)
+    except Exception:
+        pass
+
+
+MANUAL = "manual"                 # visual_model of a mark the person set («Это фото» / «Это рисунок»)
 
 
 def set_visual_status(
@@ -287,24 +323,43 @@ def set_visual_status(
     visual_checked_at: int | None = None,
     *,
     settings: dict | None = None,
-):
-    """Update only the local visual triage flag for an active NO_MATCH row."""
+) -> int:
+    """Update only the local visual triage flag for an active NO_MATCH row; a model's answer never replaces the
+    person's mark (``visual_model`` «manual», ``set_manual_visual``).  Returns the rows changed."""
     if settings is None:
-        return
+        return 0
     key = str(Path(path))
     status = str(visual_status or "").strip().lower()
-    if status not in {"real", "booru", "unknown"}:
-        return
+    if status not in {"real", "booru", "unknown", "unreadable"}:     # unreadable: no model can see the file
+        return 0
     checked = int(visual_checked_at or time.time())
+    keep_mark = "" if str(visual_model or "") == MANUAL else " AND visual_model<>'manual'"
     from core.database.connection import db
     with db(settings, write=True) as con:
         _ensure_source_only_columns(con)
-        con.execute(
-            """UPDATE no_match_items
-               SET visual_status=?, visual_confidence=?, visual_model=?, visual_checked_at=?, updated_at=?
-               WHERE active=1 AND (original_path=? OR media_path=?)""",
-            (status, float(visual_confidence or 0.0), str(visual_model or ""), checked, int(time.time()), key, key),
+        cur = con.execute(
+            f"""UPDATE no_match_items
+               SET visual_status=?, visual_confidence=?, visual_model=?, visual_checked_at=?
+               WHERE +active=1 AND (original_path=? OR media_path=?){keep_mark}""",
+            (status, float(visual_confidence or 0.0), str(visual_model or ""), checked, key, key),
         )
+        return int(cur.rowcount or 0)
+
+
+def set_manual_visual(path, status: str | None, *, settings: dict) -> int:
+    """The person's mark on a Брак file: «real» (фото), «booru» (рисунок), or None — the mark taken off (the
+    model decides again).  Returns the rows changed."""
+    if status is None:
+        from core.database.connection import db
+        key = str(Path(path))
+        with db(settings, write=True) as con:
+            cur = con.execute(
+                """UPDATE no_match_items SET visual_status='', visual_confidence=0, visual_model='', visual_checked_at=0
+                   WHERE +active=1 AND (original_path=? OR media_path=?) AND visual_model='manual'""", (key, key))
+            return int(cur.rowcount or 0)
+    if status not in ("real", "booru"):
+        raise ValueError(f"mark {status!r}")
+    return set_visual_status(path, status, 1.0, MANUAL, settings=settings)
 
 
 def update_nomatch_media_path(original_path: str | Path, media_path: str | Path, *, settings: dict | None = None):
@@ -339,195 +394,208 @@ def deactivate_promoted_exact_match(
     original_path: str | Path | None = None,
     promoted_path: str | Path | None = None,
 ) -> dict:
-    """Remove obsolete NO_MATCH rows/copies after the same bytes become FOUND.
+    """Close the Брак entries of exactly these bytes after they became FOUND.
 
-    Retrying a NO_MATCH file can promote it through rule34 image-key/MD5 relay.
-    The old no_match copy is disposable generated output and must not remain as
-    a separate gallery/Брак card.  Only managed Local Booru output files are
-    unlinked; source archive files are never touched.
+    Touched are only:
+      * Брак rows of the same input file (original_path / promoted_path, exact paths);
+      * NO_MATCH copies whose bytes have the same MD5 (an older Брак copy of the same picture).
+    A file is never matched by a similar name alone: finding "1.png" must not close "11.png"
+    or "x_1.png" (that was a LIKE '%1.png' bug that hid other files from Брак and the gallery).
+    The promoted (now FOUND) path itself is never deleted.  Only managed output/no_match copies
+    are unlinked; source archive files are never touched.
     """
     result = {"rows_deactivated": 0, "image_rows_removed": 0, "files_removed": 0, "errors": 0}
     if settings is None:
         return result
     value = str(md5 or "").strip().lower()
-    keys = set()
+    if len(value) != 32:
+        value = ""
+    exact_keys: set[str] = set()
     for raw in (original_path, promoted_path):
         if raw:
-            try:
-                keys.add(str(Path(raw)))
-            except Exception:
-                keys.add(str(raw))
+            exact_keys.add(_norm_path(raw))
+    promoted_key = _norm_path(promoted_path) if promoted_path else ""
     try:
         from core.database.connection import db
         from core.source_protection import require_managed_media_mutation
         from core.services.media_storage_service import unlink_managed, delete_bucket_artifacts
         from core.paths import result_output_base
+        from core.media_utils import file_md5
         now = int(time.time())
-        candidate_paths: set[str] = set()
+        verified: set[str] = set()          # paths proven to hold the same picture
+
+        def same_bytes(path_text: str) -> bool:
+            if not value:
+                return False
+            try:
+                p = Path(path_text)
+                return p.is_file() and file_md5(p).lower() == value
+            except OSError:
+                return False
+
         with db(settings, write=True) as con:
             _ensure_source_only_columns(con)
-            # Direct row match first: covers retry-queue temp paths and current
-            # no_match media paths even if their MD5 was not indexed correctly.
-            if keys:
-                for key in sorted(keys):
-                    rows = con.execute(
-                        """SELECT original_path, media_path FROM no_match_items
-                           WHERE active=1 AND (original_path=? OR media_path=?)""",
-                        (key, key),
-                    ).fetchall()
-                    for r in rows:
-                        for col in ("original_path", "media_path"):
-                            val = str(r[col] or "")
-                            if val:
-                                candidate_paths.add(val)
-            # Exact-MD5 no_match image rows are obsolete once the same bytes are
-            # stored as FOUND/PARTIAL.  This is the important part for rechecks
-            # of old Брак rows: old session copies are in different folders, so
-            # basename cleanup alone is insufficient.
-            if value:
-                rows = con.execute(
-                    """SELECT path FROM images
-                       WHERE deleted=0
-                         AND lower(COALESCE(hash_md5,''))=?
-                         AND bucket IN ('no_match','downloaded_no_match')""",
-                    (value,),
-                ).fetchall()
-                for r in rows:
-                    val = str(r["path"] or "")
-                    if val:
-                        candidate_paths.add(val)
-            # Also catch active NO_MATCH rows whose media path still points to a
-            # stale managed copy with the same basename in output/no_match/media.
-            # The expensive hash check below keeps this safe.
-            basename_keys = set()
-            for key in list(keys):
-                try:
-                    name = Path(key).name
-                except Exception:
-                    name = ""
-                if not name:
-                    continue
-                basename_keys.add(name)
-                rows = con.execute(
+            # 1. Брак rows of this very input file.  («+active»: by the indexes of the two paths, not by ``active`` —
+            # that read every row of Брак, and every save of the parser comes here.)
+            for key in sorted(exact_keys):
+                for r in con.execute(
                     """SELECT original_path, media_path FROM no_match_items
-                       WHERE active=1 AND (original_path LIKE ? OR media_path LIKE ?)""",
-                    ("%" + name, "%" + name),
-                ).fetchall()
-                for r in rows:
-                    for col in ("original_path", "media_path"):
-                        val = str(r[col] or "")
-                        if val:
-                            candidate_paths.add(val)
-
-            # v308: old builds could leave physical output/no_match copies while
-            # the current DB no longer has the old no_match row (wrong/new DB,
-            # deleted rows, or a previous cleanup bug).  In that case there is
-            # nothing to deactivate in SQLite, but the gallery/scan can still
-            # rediscover those generated copies later.  Add same-basename
-            # managed no_match files as cleanup candidates; the MD5 check below
-            # keeps this conservative and source originals are never touched.
-            try:
-                no_match_roots = [
-                    result_output_base(settings) / "no_match" / "media",
-                    result_output_base(settings) / "downloads" / "no_match" / "media",
-                ]
-                for name in sorted(basename_keys):
-                    for root in no_match_roots:
-                        if not root.exists() or not root.is_dir():
-                            continue
-                        found = 0
-                        for candidate in root.rglob(name):
-                            candidate_paths.add(str(candidate))
-                            found += 1
-                            if found >= 64:
-                                break
-            except Exception:
-                result["errors"] += 1
-
-            # Deactivate durable NO_MATCH UI rows by all known aliases.
-            aliases = set(candidate_paths) | keys
-            for alias in sorted(x for x in aliases if x):
+                       WHERE +active=1 AND (original_path=? OR media_path=?)""",
+                    (key, key),
+                ).fetchall():
+                    verified.update(v for v in (str(r["original_path"] or ""), str(r["media_path"] or "")) if v)
+            # 2. NO_MATCH gallery rows of the same bytes (MD5 recorded by the library).
+            if value:
+                for r in con.execute(     # by the MD5's index (core/database/storage.media_path_by_md5)
+                    """SELECT path FROM images
+                       WHERE +deleted=0 AND hash_md5 IN (?,?)
+                         AND bucket IN ('no_match','downloaded_no_match')""",
+                    (value, value.upper()),
+                ).fetchall():
+                    if r["path"]:
+                        verified.add(str(r["path"]))
+            # 3. Older Брак rows of the same file name: accepted only when their copy has the same bytes.
+            names = {Path(k).name for k in exact_keys if Path(k).name}
+            for name in sorted(names):
+                pattern = "%" + _like_escape(name)
+                for r in con.execute(
+                    """SELECT original_path, media_path FROM no_match_items
+                       WHERE active=1 AND (original_path LIKE ? ESCAPE '\\' OR media_path LIKE ? ESCAPE '\\')""",
+                    (pattern, pattern),
+                ).fetchall():
+                    orig, media = str(r["original_path"] or ""), str(r["media_path"] or "")
+                    if Path(orig).name != name and Path(media).name != name:
+                        continue
+                    if same_bytes(media) or same_bytes(orig):
+                        verified.update(v for v in (orig, media) if v)
+            for alias in sorted(verified | exact_keys):
                 cur = con.execute(
                     """UPDATE no_match_items SET active=0, updated_at=?
-                       WHERE active=1 AND (original_path=? OR media_path=?)""",
+                       WHERE +active=1 AND (original_path=? OR media_path=?)""",
                     (now, alias, alias),
                 )
                 result["rows_deactivated"] += int(cur.rowcount or 0)
 
-        promoted_resolved = None
+        # Stale managed copies with the same name in output/no_match/media whose DB row is gone — looked for by name
+        # in each folder there (``_folders_of``), not by listing every picture of Брак on every save (``rglob``).
         try:
-            promoted_resolved = Path(promoted_path).resolve() if promoted_path else None
-        except Exception:
-            promoted_resolved = None
+            roots = [result_output_base(settings) / "no_match" / "media",
+                     result_output_base(settings) / "downloads" / "no_match" / "media"]
+            for name in sorted(names):
+                for root in roots:
+                    if not root.is_dir():
+                        continue
+                    found = 0
+                    for place in _folders_of(root):
+                        candidate = place / name
+                        if not candidate.is_file():
+                            continue
+                        found += 1
+                        if found > 64:
+                            break
+                        if same_bytes(str(candidate)):
+                            verified.add(str(candidate))
+        except OSError:
+            result["errors"] += 1
 
         removable: list[Path] = []
-        # File-system cleanup is intentionally conservative: only generated
-        # output/no_match copies are removed, and only when MD5 matches if a
-        # target MD5 is known.
-        for raw in sorted(candidate_paths):
-            try:
-                p = Path(raw)
-                if promoted_resolved is not None:
-                    try:
-                        if p.resolve() == promoted_resolved:
-                            continue
-                    except Exception:
-                        pass
-                if not p.exists() or not p.is_file():
-                    continue
-                parts = {x.lower() for x in p.parts}
-                if "no_match" not in parts:
-                    continue
-                if not require_managed_media_mutation(settings, p, "nomatch.promote_cleanup"):
-                    continue
-                if value:
-                    try:
-                        from core.media_utils import file_md5
-                        if file_md5(p).lower() != value:
-                            continue
-                    except Exception:
-                        continue
-                removable.append(p)
-            except Exception:
-                result["errors"] += 1
-
+        for raw in sorted(verified):
+            p = Path(raw)
+            if _norm_path(p) == promoted_key:
+                continue
+            if not p.is_file() or "no_match" not in {x.lower() for x in p.parts}:
+                continue
+            if not require_managed_media_mutation(settings, p, "nomatch.promote_cleanup"):
+                continue
+            if value and not same_bytes(raw):
+                continue
+            removable.append(p)
         for p in removable:
             try:
                 if unlink_managed(settings, p, operation="nomatch.promote_cleanup"):
                     result["files_removed"] += 1
-                try:
-                    delete_bucket_artifacts(settings, p, operation="nomatch.promote_cleanup_artifacts")
-                except Exception:
-                    pass
-            except Exception:
+                delete_bucket_artifacts(settings, p, operation="nomatch.promote_cleanup_artifacts")
+            except OSError:
                 result["errors"] += 1
 
-        # Hide/delete no_match image rows after the physical cleanup.  This
-        # prevents the gallery from showing the same file once as FOUND and once
-        # as stale NO_MATCH even when Windows kept the old file locked briefly.
-        with db(settings, write=True) as con:
-            for raw in sorted(candidate_paths):
-                try:
+        # Drop the NO_MATCH gallery rows of the removed copies (never the promoted file's own row).  Every save of
+        # the parser comes here: the orphan sweep reads every card's tags — only when a card went.
+        gone = [raw for raw in sorted(verified) if _norm_path(raw) != promoted_key
+                and not (Path(raw).exists() and Path(raw) not in removable)]
+        if gone:
+            with db(settings, write=True) as con:
+                for raw in gone:            # (a copy still on disk — locked or not managed — keeps its card)
+                    key = _norm_path(raw)
                     cur = con.execute(
-                        """DELETE FROM images
-                           WHERE path=? AND bucket IN ('no_match','downloaded_no_match')""",
-                        (str(Path(raw)),),
-                    )
+                        "DELETE FROM images WHERE path=? AND bucket IN ('no_match','downloaded_no_match')", (key,))
                     result["image_rows_removed"] += int(cur.rowcount or 0)
-                    con.execute("DELETE FROM processed_files WHERE media_path=?", (str(Path(raw)),))
-                except Exception:
-                    result["errors"] += 1
-            try:
-                from core.database.storage import cleanup_orphan_rows
-                # Use the public wrapper with its own connection outside this
-                # write transaction would be slower; do minimal local cleanup.
-                con.execute("DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)")
-                con.execute("DELETE FROM sources WHERE id NOT IN (SELECT DISTINCT source_id FROM image_sources)")
-            except Exception:
-                pass
-    except Exception:
+                    con.execute("DELETE FROM processed_files WHERE media_path=?", (key,))
+                if result["image_rows_removed"]:
+                    from core.database.repository import cleanup_orphans
+                    cleanup_orphans(con)
+    except Exception as exc:  # cleanup is best effort, but never silent
         result["errors"] += 1
+        _log_cleanup_error(exc)
     return result
+
+
+def _norm_path(value) -> str:
+    try:
+        return str(Path(value))
+    except (TypeError, ValueError):
+        return str(value or "")
+
+
+_FOLDERS_LOCK = threading.Lock()
+_FOLDERS: dict = {}           # a folder of Брак copies -> (when listed, trusted, ((each folder in it, its time), …))
+FOLDERS_MAX = 2000
+FOLDERS_FRESH = 600.0         # listed again at least this often (a disk whose folders keep their time — FAT)
+RACY_NS = 2_000_000_000       # a folder changed this close to its listing may change again with the same time
+
+
+def _folders_of(root: Path) -> list:
+    """``root`` and every folder in it (Брак keeps its copies in the session folders too), listed again only when
+    one of them changed — a folder's time changes when something is put into it or taken out — or ``FOLDERS_FRESH``
+    went by.  Every save of the parser looks there for old copies of its file by name: listing thousands of pictures
+    of Брак each time cost more than the save itself.  A folder's time comes from a coarse clock (Windows: about
+    16 ms, FAT: 2 s): a listing just after a change is not trusted — a second change in the same tick keeps the
+    time — and is made again until the folders have been still for ``RACY_NS``."""
+    key = str(root)
+    with _FOLDERS_LOCK:
+        listed_at, trusted, known = _FOLDERS.get(key, (0.0, False, ()))
+    if known and trusted and time.monotonic() - listed_at < FOLDERS_FRESH:
+        try:
+            if all(os.stat(folder).st_mtime_ns == stamp for folder, stamp in known):
+                return [Path(folder) for folder, _stamp in known]
+        except OSError:           # a folder went: listed again
+            pass
+    listed_at, started_ns = time.monotonic(), time.time_ns()
+    found, todo = [], [key]
+    while todo and len(found) < FOLDERS_MAX:
+        folder = todo.pop()
+        try:
+            stamp = os.stat(folder).st_mtime_ns          # before the listing: a change after it is seen next time
+            with os.scandir(folder) as entries:
+                inside = [e.path for e in entries if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        found.append((folder, stamp))
+        todo.extend(sorted(inside, reverse=True))
+    trusted = all(stamp < started_ns - RACY_NS for _folder, stamp in found)
+    with _FOLDERS_LOCK:
+        _FOLDERS[key] = (listed_at, trusted, tuple(found))
+    return [Path(folder) for folder, _stamp in found]
+
+
+def _like_escape(text: str) -> str:
+    """Escape LIKE wildcards so a file name is matched literally."""
+    return str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _log_cleanup_error(exc: Exception) -> None:
+    import logging
+    logging.getLogger("local_booru.nomatch").warning("NO_MATCH promote cleanup failed: %s: %s", type(exc).__name__, exc)
+
 
 def set_manual_url(path, url, *, settings: dict | None = None):
     if settings is None:
@@ -562,7 +630,7 @@ def deactivate_for_paths(paths, *, settings: dict | None = None) -> int:
             ph = ",".join("?" for _ in chunk)
             cur = con.execute(
                 f"""UPDATE no_match_items SET active=0, updated_at=?
-                    WHERE active=1 AND (original_path IN ({ph}) OR media_path IN ({ph}))""",
+                    WHERE +active=1 AND (original_path IN ({ph}) OR media_path IN ({ph}))""",
                 [now] + chunk + chunk,
             )
             changed += int(cur.rowcount or 0)

@@ -1,332 +1,81 @@
 # Local Booru
 
-Local Booru is a local Windows application for managing a large image and video archive in a booru-style workflow.
+**English** · [Русский](README_RU.md)
 
-It started as a simple parser: add a folder, find sources, fetch tags, and save everything into a database. Over time it grew into a gallery, downloader, duplicate cleaner, subscriptions system, built-in browser, grabber, SQLite backend, Blueprint parser, and a set of safeguards to keep a large archive from accidentally turning into a mess.
+Local Booru is a booru-style gallery for your own archive of pictures, videos and manga. It is a Windows program
+that finds tags for your files by itself, keeps a gallery you search by tags, and helps keep a large archive in
+order. Everything stays on your computer.
 
-The goal is simple: less manual routine. If a file can be found by MD5, by source, by visual similarity, or through a booru API, the program should try to do it automatically.
+**[Download the latest version](https://github.com/Ucellar/Local_Booru/releases/latest)**
 
----
+<img src="screenshots/gallery.png" width="720" alt="Gallery">
 
-## Download
+## What it does
 
-[Download Local Booru v1.5](https://github.com/Ucellar/Local_Booru/releases/tag/v1.5)
+- **Tags for your own files.** Each file is looked up on booru sites by an exact match of the file, by the same
+  pixels in a file of another format, and through reverse image search services. The tags, sources and post links
+  it finds are saved. What is not found goes to «Брак» (no match), to be checked again when you add sites.
+- **Gallery.** Tag search: a space means all tags, `-tag` excludes one, `a/b` means either. Sections for new, found,
+  downloaded, favorite and deleted pictures. Every picture has its own page with each site's tags, and the gallery
+  has a tag list. Series and the pages of one work are shown as a single tile.
+- **Manga and videos.** A manga reader. A video tab with series by folders, resume where you stopped, audio and
+  subtitle tracks, ratings.
+- **Grabber and subscriptions.** Search several sites by tags at once, with previews. Subscriptions to tags and
+  artists check themselves and download only what is new: originals, nothing you already have.
+- **Duplicates.** Similar pictures are shown in pairs: the better one stays, the other goes to the trash, and its
+  tags move to the one you keep.
+- **Diagnostics.** Library and database checks, maintenance of the database and files. Cleanup and reset first show
+  what they will remove, and only then remove it.
+- **Browser extension** (Chrome, Edge, Firefox). Cards on the sites show what your library already has. A post goes
+  to the program in one click, you can subscribe to a search right from the site, and posts with tags from your
+  blocklist are blurred.
+- **11 looks**, and every page can have its own.
 
-# Gallery
+<img src="screenshots/post.png" width="360" alt="Picture page"> <img src="screenshots/gallery_hub.png" width="360" alt="Gallery in another look">
+<img src="screenshots/tags.png" width="360" alt="Tag list"> <img src="screenshots/dupes.png" width="360" alt="Duplicates">
 
-<img src="screenshots/галерея.png" width="500">
+*The screenshots show a test library of painted pictures.*
 
-*This is a test screen. With a real archive it looks noticeably better, but I cannot include my own archive here for obvious reasons.*
+The interface is in Russian.
 
----
+## Install
 
-# Auto Tagger
+1. Download `Local_Booru_…_Windows_x64.zip` from the
+   [releases page](https://github.com/Ucellar/Local_Booru/releases/latest) and unpack it into any folder.
+2. Run `Local Booru.exe`.
 
-<img src="screenshots/парсер.png" width="500">
+Windows 10 or 11, 64-bit. The program keeps its database, settings and cache in `Documents\Local_Booru` by default.
+In «Настройки → Папки» (Settings → Folders) you can choose a separate archive folder or move the whole archive to
+another drive.
 
----
+### Browser extension
 
-# Settings
+1. Download `Local_Booru_Companion_…_Chrome.zip` or `…_Firefox.zip` from the same release and unpack it.
+2. **Chrome / Edge:** open `chrome://extensions`, turn on Developer mode, click «Load unpacked» and choose the
+   extension folder.
+   **Firefox:** open `about:debugging` → This Firefox → Load Temporary Add-on, and choose `manifest.json`.
+3. In the program: «Настройки» → «Браузер и расширение» → «Код для подключения расширения». Enter the code in the
+   extension's window.
 
-<img src="screenshots/настройки.png" width="500">
+The extension talks only to the program on this computer (127.0.0.1), and only after it is paired with that code.
 
----
+## Run from source
 
-# Blueprint
-
-<img src="screenshots/blueprint.png" width="500">
-
----
-
-## What it is for
-
-If your archive looks something like this:
-
-```text
-New folder
-New folder (2)
-Sort later
-Sort later 2
-Definitely sort later
-Sort someday, maybe
-```
-
-then this program is exactly about that.
-
-Local Booru is not made for twenty pictures. It is made for cases where you already have thousands or tens of thousands of files, and manually searching for sources, copying tags, cleaning duplicates, and sorting everything into folders stops making sense.
-
----
-
-## Features
-
-- local image and video gallery;
-- separate manga gallery;
-- search by tags, sources, and text fields;
-- automatic source and tag lookup;
-- exact MD5 search;
-- similar-file search using pHash;
-- reverse search through IQDB, Danbooru IQDB, e621 IQDB, SauceNAO, and TinEye;
-- downloading found posts;
-- subscriptions to tags and artists;
-- duplicate search and cleanup;
-- thumbnail cache;
-- SQLite database for tags, sources, site statuses, and queues;
-- support for multiple booru sources;
-- custom site support;
-- built-in browser and browser companion for difficult sites;
-- visual Blueprint parser for pipeline configuration;
-- multiple UI themes.
-
----
-
-## What is new in v1.5
-
-v1.5 focuses on first-run usability and safer database rebuilds.
-
-Added:
-
-- **First-run language picker** — on a fresh workspace/profile the app asks the user to choose **English** or **Russian** before opening the main window.
-- The language choice is saved in settings as `language` and `language_selected_once`, so the dialog appears only once.
-- The interface language can still be changed later from the Settings page.
-- Added English public README text for GitHub publication.
-
-Fixed and improved:
-
-- Fixed the `m024_reverse_branch_status` migration crash that could happen after deleting and rebuilding the SQLite database.
-- Migration journaling now has a safe fallback name if a future migration file misses its `NAME` field.
-- Legacy NO_MATCH and deleted-file registry imports now commit in batches, reducing long SQLite writer locks during clean database rebuilds.
-- Parser startup no longer treats a locked SQLite database as an empty database.
-- Added safer SQLite startup readiness checks and a low-memory parser profile for large archive runs.
-
----
-
-## How source lookup works
-
-The program first tries the fast path:
-
-```text
-file → real MD5 → booru site checks → tags and source
-```
-
-If the exact MD5 is not found, the file can be sent to a slower reverse-search queue:
-
-```text
-IQDB → Danbooru IQDB → e621 IQDB → SauceNAO → TinEye
-```
-
-If reverse search finds a post URL or file URL, the program tries to extract an MD5 from it and run that MD5 through the regular booru APIs again.
-
-This is important: TinEye and SauceNAO are not primary tag sources by themselves. They help find a link or MD5, and tags are then fetched from booru sites whenever possible.
-
----
-
-## Supported sources
-
-Best tested:
-
-- Danbooru;
-- Gelbooru;
-- rule34.xxx;
-- rule34.us;
-- e621;
-- booru.allthefallen.moe;
-- SauceNAO;
-- TinEye as a fallback locator.
-
-You can also add custom sites through the settings. Sites with Danbooru/Gelbooru/Moebooru-like APIs work best.
-
-Different sites behave differently: some have a normal API, while others have limits, Cloudflare, captchas, or unstable responses. Because of that, adding a site does not guarantee perfect operation.
-
----
-
-## Grabber and subscriptions
-
-Subscriptions and the grabber are not just “download images by tag”.
-
-The program tries to:
-
-- search posts across multiple sites;
-- show previews without downloading the original file;
-- merge identical images from different sources;
-- download the file only once;
-- save tags and links from every site where the file was found;
-- hide already downloaded or already processed items.
-
-If the same image exists on multiple sites, there is no point in downloading it several times. But it is useful to collect data from all of them.
-
----
-
-## Data storage
-
-Working data is stored separately from the program code.
-
-The usual structure is:
-
-```text
-Local_Booru_Archive/
-├─ output/      # media and working library
-└─ settings/    # SQLite, settings, cache, runtime, cookies, service data
-```
-
-SQLite stores:
-
-- tags;
-- sources;
-- MD5 values;
-- site check statuses;
-- NO_MATCH/FOUND states;
-- retry queues;
-- parser service data.
-
-After a bad shutdown, the app may check SQLite first and only then allow database writes. This is normal.
-
----
-
-## Installing from source
-
-### 1. Install Python
-
-Python 3.10 or newer is required.
-
-Check it in PowerShell:
+Python 3.11 is required.
 
 ```powershell
-python --version
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.lock.txt
+run.bat
 ```
 
-### 2. Download the project
+To build the exe yourself, run `build_exe.bat`. The program appears in `dist\Local Booru`.
 
-If you downloaded a ZIP from GitHub:
+## Your data and keys
 
-1. Extract the archive.
-2. Open PowerShell in the project folder.
-
-### 3. Install dependencies
-
-```powershell
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-For the built-in browser and some sites, Playwright may also be required:
-
-```powershell
-python -m playwright install
-```
-
-### 4. Run the program
-
-```powershell
-python app.py
-```
-
-Or:
-
-```text
-run_from_source.bat
-```
-
----
-
-## Building a Windows EXE
-
-Regular folder-based build:
-
-```powershell
-build_exe.bat
-```
-
-After the build, the program should appear roughly here:
-
-```text
-dist\Local Booru\Local Booru.exe
-```
-
-To distribute it, archive the whole folder:
-
-```text
-dist\Local Booru
-```
-
-Single-file build:
-
-```powershell
-build_exe_onefile.bat
-```
-
-For PySide6, the folder-based build is usually more stable.
-
----
-
-## Important warning
-
-The project is under active development.
-
-Before processing a large archive, it is better to test the program on a copy of a small folder first.
-
-This especially applies to:
-
-- duplicate deletion;
-- mass downloading;
-- database rebuilding;
-- subscriptions to large tags;
-- work with a new site;
-- manual SQLite repair.
-
-If you click “download everything” or “delete selected”, the program will actually try to do that. Safeguards exist, but it is better not to test them on the only copy of your archive.
-
----
-
-## Who this program is for
-
-Local Booru is for people who want to keep a large local image and video archive and do not want to constantly do everything manually:
-
-- search for sources;
-- copy tags;
-- clean duplicates;
-- sort files;
-- open dozens of sites;
-- track new posts.
-
-The ideal workflow:
-
-```text
-add a folder
-press start
-the program tries to sort out the archive
-```
-
-It tries. Some files have already gone through Telegram, Discord, recompression, cropping, watermarks, and reuploads, so there is no such thing as perfect magic.
-
----
-
-## Development
-
-The project is actively developed with the help of AI tools, but the goal remains practical: to build a convenient local archive manager, not a demo for the sake of a demo.
-
-Current focus:
-
-- stability;
-- large archive support;
-- fast MD5 pipeline;
-- asynchronous fallback queues;
-- proper gallery;
-- convenient grabber;
-- safe SQLite model;
-- less manual routine.
-
----
-
-## Important
-
-Local Booru does not provide any content by itself.
-
-The program works with the user’s own files and with sites that the user has added or selected for search and subscriptions.
-
-What to store, what to search for, and what to download is decided by the user.
-
----
+Pictures, the database and settings stay with you. Site keys and logins, if you enter any, are kept only in your
+archive's settings and never written to the logs or the program's pages.
 
 ## License
 
-MIT License
+[MIT](LICENSE)

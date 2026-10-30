@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
     QPlainTextEdit, QTabWidget, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QFileDialog, QGroupBox, QGridLayout, QProgressBar, QAbstractItemView
+    QMessageBox, QFileDialog, QGroupBox, QGridLayout, QProgressBar, QAbstractItemView, QSpinBox
 )
 
 from core.library_diagnostics import (
@@ -23,6 +23,8 @@ class DiagnosticsPage(QWidget):
         self.main = main
         self._report = None
         self._active_task = None
+        self._source_audit_report = None
+        self._source_audit_task = None
 
         layout = QVBoxLayout(self)
         note = QLabel(
@@ -39,16 +41,33 @@ class DiagnosticsPage(QWidget):
         self.export_btn = QPushButton("Экспорт отчёта JSON")
         self.export_btn.setEnabled(False)
         self.lost_sources_btn = QPushButton("Проверить потерянные source")
-        self.benchmark_btn = QPushButton("Замерить скорость SQLite")
         self.cancel_tasks_btn = QPushButton("Остановить фоновые задачи")
         toolbar.addWidget(self.refresh_btn)
         toolbar.addWidget(self.verify_files)
         toolbar.addWidget(self.lost_sources_btn)
-        toolbar.addWidget(self.benchmark_btn)
         toolbar.addWidget(self.cancel_tasks_btn)
         toolbar.addWidget(self.export_btn)
         toolbar.addStretch(1)
         layout.addLayout(toolbar)
+
+        source_audit_box = QGroupBox("Read-only аудит перекрёстного загрязнения source (v446)")
+        source_audit_layout = QHBoxLayout(source_audit_box)
+        self.source_audit_btn = QPushButton("Найти несколько source одного хоста")
+        self.source_audit_network = QCheckBox("Проверить MD5 постов через API (медленно)")
+        self.source_audit_limit = QSpinBox()
+        self.source_audit_limit.setRange(0, 1000000)
+        self.source_audit_limit.setValue(0)
+        self.source_audit_limit.setSpecialValueText("Все source")
+        self.source_audit_limit.setToolTip("0 = проверить через сеть все найденные source; ограничение не влияет на полный DB-only подсчёт")
+        self.source_audit_export_btn = QPushButton("Экспорт source-аудита JSON")
+        self.source_audit_export_btn.setEnabled(False)
+        source_audit_layout.addWidget(self.source_audit_btn)
+        source_audit_layout.addWidget(self.source_audit_network)
+        source_audit_layout.addWidget(QLabel("Лимит сети:"))
+        source_audit_layout.addWidget(self.source_audit_limit)
+        source_audit_layout.addWidget(self.source_audit_export_btn)
+        source_audit_layout.addStretch(1)
+        layout.addWidget(source_audit_box)
 
         self.progress_label = QLabel("Отчёт ещё не построен")
         self.progress = QProgressBar()
@@ -89,7 +108,13 @@ class DiagnosticsPage(QWidget):
         self.errors = QPlainTextEdit(); self.errors.setReadOnly(True)
         self.source_protection = QPlainTextEdit(); self.source_protection.setReadOnly(True)
         self.performance_table = self._make_table(["Время", "Операция", "мс", "Детали"])
-        self.benchmark_table = self._make_table(["SQL-проверка", "мс", "Строк", "Ошибка / пример"])
+        self.source_audit_text = QPlainTextEdit(); self.source_audit_text.setReadOnly(True)
+        self.source_audit_table = self._make_table(["Image ID", "Хост", "Source", "Tag owner", "Валидно", "Mismatch", "Не проверено", "Путь"])
+        self.source_audit_widget = QWidget()
+        _source_tab_layout = QVBoxLayout(self.source_audit_widget)
+        _source_tab_layout.setContentsMargins(0, 0, 0, 0)
+        _source_tab_layout.addWidget(self.source_audit_text)
+        _source_tab_layout.addWidget(self.source_audit_table, 1)
         self.tabs.addTab(self.summary, "Сводка")
         self.tabs.addTab(self.site_table, "Сайты")
         self.tabs.addTab(self.queue_table, "Очереди")
@@ -97,7 +122,7 @@ class DiagnosticsPage(QWidget):
         self.tabs.addTab(self.dup_table, "MD5-дубли")
         self.tabs.addTab(self.samples, "Потерянные метаданные")
         self.tabs.addTab(self.performance_table, "Медленные операции")
-        self.tabs.addTab(self.benchmark_table, "Замер SQLite")
+        self.tabs.addTab(self.source_audit_widget, "Source contamination")
         self.tabs.addTab(self.source_protection, "Защита исходников")
         self.tabs.addTab(self.errors, "Ошибки / падения")
         layout.addWidget(self.tabs, 1)
@@ -118,7 +143,6 @@ class DiagnosticsPage(QWidget):
         self.refresh_btn.clicked.connect(self.refresh_force)
         self.export_btn.clicked.connect(self.export_report)
         self.lost_sources_btn.clicked.connect(self.check_lost_sources)
-        self.benchmark_btn.clicked.connect(self.run_performance_audit)
         self.cancel_tasks_btn.clicked.connect(self.cancel_background_tasks)
         self.backup_btn.clicked.connect(self.create_backup)
         self.normalize_btn.clicked.connect(self.normalize_exact_md5)
@@ -126,6 +150,8 @@ class DiagnosticsPage(QWidget):
         self.indices_btn.clicked.connect(self.restore_indices)
         self.requeue_categories_btn.clicked.connect(self.requeue_stale_categories)
         self.redact_logs_btn.clicked.connect(self.redact_existing_logs)
+        self.source_audit_btn.clicked.connect(self.run_source_contamination_audit)
+        self.source_audit_export_btn.clicked.connect(self.export_source_contamination_audit)
 
     @staticmethod
     def _make_table(headers):
@@ -233,7 +259,10 @@ class DiagnosticsPage(QWidget):
             short_rem = int(data.get("short_remaining", -1) if data.get("short_remaining", -1) is not None else -1)
             long_rem = int(data.get("long_remaining", -1) if data.get("long_remaining", -1) is not None else -1)
             quota = f"короткий={short_rem if short_rem >= 0 else '—'}, сутки={long_rem if long_rem >= 0 else '—'}"
-            queue_rows.append(["Состояние сервиса", data.get("service"), "кулдаун" if eta else "готов", "—", f"{quota}; через {eta//60}м {eta%60}с; {data.get('reason','')}"])
+            probe_eta = max(0, int(data.get("quota_probe_after", 0) or 0) - now)
+            probe_text = f"; quota probe через {probe_eta//60}м {probe_eta%60}с" if probe_eta else ""
+            local_spent = int(data.get("quota_admissions_since_snapshot", 0) or 0)
+            queue_rows.append(["Состояние сервиса", data.get("service"), "кулдаун" if eta else ("quota reserve" if probe_eta else "готов"), "—", f"{quota}; через {eta//60}м {eta%60}с{probe_text}; локально после snapshot={local_spent}; {data.get('reason','')}"])
         for data in report.get("queues", {}).get("saucenao_retry_events", []):
             queue_rows.append(["SauceNAO proof", data.get("message") or "файл", data.get("status"), "1", f"время={data.get('created_at','')}"])
         for data in report.get("queues", {}).get("unfinished_operations", []):
@@ -241,7 +270,13 @@ class DiagnosticsPage(QWidget):
         try:
             for task in self.main.task_manager.active_snapshot():
                 if str(task.get("name")) != "library-audit":
-                    queue_rows.append(["Сейчас выполняется", task.get("name"), "отмена" if task.get("cancelled") else task.get("state", "работает"), "1", f"{task.get('progress', '')}; {task.get('elapsed_seconds', 0)} сек"])
+                    queue_rows.append([
+                        f"Сейчас выполняется [{task.get('kind','background')}]",
+                        task.get("name"),
+                        "отмена" if task.get("cancel_requested") else task.get("state", "работает"),
+                        "1",
+                        f"{task.get('progress_text', '')}; {task.get('elapsed_seconds', 0)} сек; idle={task.get('effective_idle_seconds',0)} сек",
+                    ])
         except Exception:
             pass
         self.queue_table.setRowCount(len(queue_rows))
@@ -265,6 +300,18 @@ class DiagnosticsPage(QWidget):
         no_tags = report.get("samples", {}).get("without_tags", [])
         text = ["Файлы без source (первые 30):"] + [f"  {x.get('path')}" for x in no_source]
         text += ["", "Файлы без тегов (первые 30):"] + [f"  {x.get('path')}" for x in no_tags]
+        presence = report.get("file_integrity", {})
+        if presence and not presence.get("error"):
+            text += [
+                "",
+                "Presence integrity (сохранённый статус текущих путей):",
+                f"  present={presence.get('present',0)} missing={presence.get('missing',0)} "
+                f"offline_root={presence.get('offline_root',0)} path_error={presence.get('path_error',0)} "
+                f"unknown/stale={presence.get('unknown',0)}",
+                f"Hash: ok={presence.get('hash_ok',0)} mismatch={presence.get('hash_mismatch',0)} "
+                f"unreadable={presence.get('hash_unreadable',0)} deferred={presence.get('hash_deferred',0)} "
+                f"unknown/stale={presence.get('hash_unknown',0)}",
+            ]
         if report.get("library", {}).get("missing_on_disk") is not None:
             text += ["", f"Отсутствует на диске: {report.get('library',{}).get('missing_on_disk',0)}"]
             text += [f"  {x.get('path')}" for x in report.get("samples", {}).get("missing_on_disk", [])]
@@ -290,42 +337,79 @@ class DiagnosticsPage(QWidget):
             n /= 1024
 
 
-    def run_performance_audit(self):
-        """Run explicit read-only SQL timings; does not modify the database."""
+    def run_source_contamination_audit(self):
+        """Build a separate read-only source-contamination report."""
+        if self._source_audit_task is not None or self._active_task is not None:
+            return
         try:
-            from core.performance_audit import audit_query_performance
+            from core.source_contamination_audit import audit_source_contamination
         except Exception as exc:
-            QMessageBox.warning(self, "Производительность", str(exc)); return
-        self.benchmark_btn.setEnabled(False)
-        self.progress_label.setText("Замер SQLite: подготовка…")
-        self.progress.setRange(0, 0); self.progress.setVisible(True)
-        self._benchmark_task = self.main.task_manager.submit(
-            audit_query_performance, dict(self.main.settings or {}), name="sqlite-performance-audit",
-            on_progress=lambda msg: self.progress_label.setText(str(msg)),
-            on_result=self._performance_audit_done,
-            on_error=lambda err: QMessageBox.warning(self, "Производительность", str(err)),
-            on_finished=self._performance_audit_finished,
+            QMessageBox.warning(self, "Source contamination", str(exc)); return
+        self.source_audit_btn.setEnabled(False)
+        self.source_audit_export_btn.setEnabled(False)
+        self.progress_label.setText("Source audit: полный DB-only поиск кандидатов…")
+        self.progress.setVisible(True); self.progress.setRange(0, 0)
+        settings = dict(self.main.settings or {})
+        self._source_audit_task = self.main.task_manager.submit(
+            audit_source_contamination, settings,
+            verify_network=self.source_audit_network.isChecked(),
+            max_network_sources=int(self.source_audit_limit.value()),
+            name="source-contamination-audit-v446",
+            on_progress=lambda message: self.progress_label.setText(str(message)),
+            on_result=self._source_contamination_done,
+            on_error=self._source_contamination_error,
+            on_finished=self._source_contamination_finished,
         )
 
-    def _performance_audit_finished(self):
-        self.benchmark_btn.setEnabled(True)
+    def _source_contamination_finished(self):
+        self._source_audit_task = None
+        self.source_audit_btn.setEnabled(True)
         self.progress.setVisible(False)
+        self.progress.setRange(0, 1); self.progress.setValue(1)
 
-    def _performance_audit_done(self, result):
-        if isinstance(self._report, dict):
-            self._report["sqlite_benchmark"] = dict(result or {})
-        rows = list((result or {}).get("queries", []) or [])
-        self.benchmark_table.setRowCount(len(rows))
-        for row, item in enumerate(rows):
-            sample = item.get("error") or str(item.get("sample") or "")
-            for col, value in enumerate([item.get("name", ""), item.get("duration_ms", ""), item.get("rows", ""), sample]):
-                self.benchmark_table.setItem(row, col, QTableWidgetItem(str(value)))
-        self.tabs.setCurrentWidget(self.benchmark_table)
-        if result.get("error"):
-            self.progress_label.setText(str(result.get("error")))
-        else:
-            slowest = result.get("slowest", {}) or {}
-            self.progress_label.setText(f"Замер готов: всего {result.get('total_ms',0)} мс; медленнее всего — {slowest.get('name','—')} ({slowest.get('duration_ms','—')} мс)")
+    def _source_contamination_error(self, error):
+        self.progress_label.setText("Ошибка source-аудита")
+        QMessageBox.warning(self, "Source contamination", str(error))
+
+    def _source_contamination_done(self, report):
+        self._source_audit_report = dict(report or {})
+        self.source_audit_export_btn.setEnabled(True)
+        self.source_audit_text.setPlainText(str(self._source_audit_report.get("summary_text", "")))
+        groups = list(self._source_audit_report.get("groups", []) or [])
+        self.source_audit_table.setRowCount(len(groups))
+        for row, item in enumerate(groups):
+            counts = dict(item.get("classification_counts") or {})
+            valid = int(counts.get("verified_local_md5", 0) or 0) + int(counts.get("verified_alias_same_image", 0) or 0)
+            mismatch = int(counts.get("alias_bound_to_other_image", 0) or 0) + int(counts.get("verified_mismatch", 0) or 0)
+            unverified = int(counts.get("network_unverified", 0) or 0) + int(counts.get("post_missing", 0) or 0) + int(counts.get("parse_error", 0) or 0)
+            values = [
+                item.get("image_id", ""), item.get("host", ""), item.get("source_count", 0),
+                item.get("current_tag_owner_count", 0), valid, mismatch, unverified, item.get("path", ""),
+            ]
+            for col, value in enumerate(values):
+                self.source_audit_table.setItem(row, col, QTableWidgetItem(str(value)))
+        self.tabs.setCurrentWidget(self.source_audit_widget)
+        self.progress_label.setText(
+            f"Source audit готов: {self._source_audit_report.get('created_at', '')}; "
+            f"groups={self._source_audit_report.get('summary', {}).get('candidate_groups', 0)}; данных не изменялось."
+        )
+
+    def export_source_contamination_audit(self):
+        if not self._source_audit_report:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить source contamination audit",
+            "Local_Booru_source_contamination_audit_v446.json", "JSON (*.json)"
+        )
+        if not path:
+            return
+        try:
+            from core.source_contamination_audit import save_source_contamination_json
+            save_source_contamination_json(self._source_audit_report, path)
+            QMessageBox.information(self, "Source contamination", f"Read-only отчёт сохранён:\n{path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Source contamination", str(exc))
+
 
     def cancel_background_tasks(self):
         count = 0

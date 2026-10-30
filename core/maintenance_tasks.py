@@ -80,11 +80,11 @@ def _category_recheck_host_aliases(hosts=None) -> list[str]:
 
 
 def find_general_only_category_sources(settings: dict, *, hosts=None, limit: int = 0) -> list[dict]:
-    """Find source-specific tag bundles where every stored tag category is general.
+    """Find source bundles with unresolved category rows.
 
-    The scan is source-scoped: one image can have good Danbooru categories and a
-    broken Gelbooru/rule34 source bundle at the same time.  Only the broken
-    source bundle is returned for reclassification.
+    This includes both untouched all-general bundles and legacy partial results
+    from older maintenance runs.  Rows explicitly confirmed by v422 are not
+    re-queued merely because their correct site category is ``general``.
     """
     aliases = _category_recheck_host_aliases(hosts)
     if not aliases:
@@ -118,7 +118,12 @@ def find_general_only_category_sources(settings: dict, *, hosts=None, limit: int
                 s.host AS source_host,
                 s.url AS source_url,
                 COUNT(*) AS tag_count,
-                SUM(CASE WHEN lower(COALESCE(NULLIF(ist.category,''),'general')) <> 'general' THEN 1 ELSE 0 END) AS non_general_count
+                SUM(CASE WHEN lower(COALESCE(NULLIF(ist.category,''),'general')) <> 'general' THEN 1 ELSE 0 END) AS non_general_count,
+                SUM(CASE WHEN lower(COALESCE(NULLIF(ist.category,''),'general')) = 'general'
+                              AND lower(COALESCE(ist.acquisition,'')) NOT LIKE 'maintenance_general_only_resolved_v422%'
+                         THEN 1 ELSE 0 END) AS unresolved_general_count,
+                SUM(CASE WHEN lower(COALESCE(ist.acquisition,'')) LIKE 'maintenance_general_only_%'
+                         THEN 1 ELSE 0 END) AS maintenance_touched_count
             FROM image_source_tags ist
             JOIN images i ON i.id=ist.image_id AND i.deleted=0
             JOIN sources s ON s.id=ist.source_id
@@ -126,7 +131,9 @@ def find_general_only_category_sources(settings: dict, *, hosts=None, limit: int
             WHERE ({where_hosts})
               AND COALESCE(s.url,'') <> ''
             GROUP BY i.id, s.id
-            HAVING tag_count > 0 AND non_general_count = 0
+            HAVING tag_count > 0
+               AND unresolved_general_count > 0
+               AND (non_general_count = 0 OR maintenance_touched_count > 0)
             ORDER BY lower(COALESCE(s.host,'')), i.indexed_at DESC, i.path COLLATE NOCASE
             {limit_sql}
         """, tuple(query_args)).fetchall()
@@ -174,6 +181,24 @@ def _source_tag_rows(settings: dict, image_id: int, source_id: int) -> list[dict
         return []
 
 
+
+def _source_general_tag_names(settings: dict, image_id: int, source_id: int) -> list[str]:
+    """Return source-scoped tags that still lack a confirmed category."""
+    try:
+        with db(settings, readonly=True) as con:
+            rows = con.execute("""
+                SELECT t.normalized_name AS name
+                FROM image_source_tags ist
+                JOIN tags t ON t.id=ist.tag_id
+                WHERE ist.image_id=? AND ist.source_id=?
+                  AND lower(COALESCE(NULLIF(ist.category,''),'general'))='general'
+                  AND lower(COALESCE(ist.acquisition,'')) NOT LIKE 'maintenance_general_only_resolved_v422%'
+                ORDER BY t.normalized_name COLLATE NOCASE
+            """, (int(image_id), int(source_id))).fetchall()
+        return [str(row["name"] or "").strip() for row in rows if str(row["name"] or "").strip()]
+    except Exception:
+        return []
+
 def _groups_from_tag_category_map(mapping: dict[str, str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for tag, cat in dict(mapping or {}).items():
@@ -218,7 +243,7 @@ def _fast_refine_general_only_from_local_hints(settings: dict, row: dict, *, met
     host = _canonical_category_recheck_host(row.get("source_host") or source_url)
     tag_rows = _source_tag_rows(settings, image_id, source_id)
     if not tag_rows:
-        return {"updated": 0, "source": "none", "still_general": True}
+        return {"updated": 0, "source": "none", "still_general": True, "remaining_general": []}
     mapping: dict[str, str] = {}
     for tr in tag_rows:
         name = str(tr.get("name") or "").strip()
@@ -234,10 +259,17 @@ def _fast_refine_general_only_from_local_hints(settings: dict, row: dict, *, met
             mapping[str(name)] = category
     groups = _groups_from_tag_category_map(mapping)
     if not groups:
-        return {"updated": 0, "source": "none", "still_general": True}
+        remaining = _source_general_tag_names(settings, image_id, source_id)
+        return {"updated": 0, "source": "none", "still_general": True, "remaining_general": remaining}
     refined = refine_source_tag_categories(settings, media_path, source_url, groups, method=method)
     updated = int((refined or {}).get("updated", 0) or 0)
-    return {"updated": updated, "source": "local_cache", "still_general": _still_source_all_general(settings, image_id, source_id)}
+    remaining = _source_general_tag_names(settings, image_id, source_id)
+    return {
+        "updated": updated,
+        "source": "local_cache",
+        "still_general": _still_source_all_general(settings, image_id, source_id),
+        "remaining_general": remaining,
+    }
 
 
 def recheck_general_only_tag_categories(
@@ -262,7 +294,7 @@ def recheck_general_only_tag_categories(
         if progress:
             progress(str(msg))
 
-    emit("Поиск source-наборов, где все теги лежат в general...")
+    emit("Поиск source-наборов с незавершёнными general-категориями...")
     candidates = find_general_only_category_sources(settings, hosts=hosts, limit=limit)
     if not candidates:
         return {"found": 0, "processed": 0, "fixed": 0, "updated": 0, "ignored_new": 0, "no_classified": 0, "missing": 0, "errors": 0, "backup": ""}
@@ -272,7 +304,7 @@ def recheck_general_only_tag_categories(
         host = _canonical_category_recheck_host(item.get("source_host") or item.get("source_url") or "")
         by_host_scan[host or "unknown"] += 1
     scan_summary = ", ".join(f"{h}={n}" for h, n in sorted(by_host_scan.items()))
-    emit(f"Найдено general-only наборов: {len(candidates)}; по сайтам: {scan_summary}")
+    emit(f"Найдено general-only/незавершённых наборов: {len(candidates)}; по сайтам: {scan_summary}")
 
     backup = ""
     if create_backup:
@@ -377,11 +409,14 @@ def recheck_general_only_tag_categories(
                     counters["fast_fixed"] += 1
                     counters["fixed"] += 1
                     counters["updated"] += updated
-            if updated > 0 and not bool(fast.get("still_general", True)):
+            remaining_general = list(fast.get("remaining_general") or [])
+            if not remaining_general:
                 maybe_emit()
                 continue
             host = _canonical_category_recheck_host(row.get("source_host") or row.get("source_url") or "") or "unknown"
-            network_by_host[host].append(row)
+            queued_row = dict(row)
+            queued_row["_remaining_general_tags"] = remaining_general
+            network_by_host[host].append(queued_row)
         except Exception as exc:
             with counter_lock:
                 counters["errors"] += 1
@@ -430,16 +465,28 @@ def recheck_general_only_tag_categories(
             with write_lock:
                 fast = _fast_refine_general_only_from_local_hints(worker_settings, row, method="maintenance_general_only_fast_cache_after_network")
             updated_fast = int(fast.get("updated", 0) or 0)
-            if updated_fast > 0 and not bool(fast.get("still_general", True)):
+            remaining_general = list(fast.get("remaining_general") or row.get("_remaining_general_tags") or [])
+            if not remaining_general:
                 with counter_lock:
-                    counters["fast_fixed"] += 1
-                    counters["fixed"] += 1
-                    counters["updated"] += updated_fast
+                    if updated_fast > 0:
+                        counters["fast_fixed"] += 1
+                        counters["fixed"] += 1
+                        counters["updated"] += updated_fast
                     counters["processed"] += 1
                 return
             with write_lock:
                 enqueue_tag_enrichment(worker_settings, original_path, media_path, source_url, job_key=CATEGORY_RECHECK_JOB_KEY)
-            groups = tagger.grouped_tags_from_url(source_url)
+            # Gelbooru-family tag categories are global within the source.  The
+            # stored source bundle already proves membership, so maintenance can
+            # query only the still-general names instead of re-fetching/parsing
+            # the whole post page.  This is both more reliable against current
+            # guarded HTML overlays and avoids 20 single-tag fallbacks when only
+            # one rare artist tag remains unresolved.
+            if host in ("gelbooru.com", "rule34.xxx", "xbooru.com", "hypnohub.net"):
+                tagger.log(f"    {host} TAG CATEGORY SOURCE: maintenance_remaining_general={len(remaining_general)}")
+                groups = tagger._categorize_flat_tags(host, remaining_general)
+            else:
+                groups = tagger.grouped_tags_from_url(source_url)
             classified = sum(len(groups.get(k, []) or []) for k in ("artist", "contributor", "character", "copyright", "species", "meta", "lore", "invalid", "parody", "language", "category", "pages")) if groups else 0
             if classified <= 0:
                 with write_lock:
@@ -450,7 +497,7 @@ def recheck_general_only_tag_categories(
                     counters["no_classified"] += 1
                 return
             with write_lock:
-                refined = refine_source_tag_categories(worker_settings, media_path, source_url, groups, method="maintenance_general_only_parallel_recheck_v401")
+                refined = refine_source_tag_categories(worker_settings, media_path, source_url, groups, method="maintenance_general_only_resolved_v422")
                 complete_tag_enrichment(worker_settings, original_path, source_url, job_key=CATEGORY_RECHECK_JOB_KEY, status="done")
             updated = int((refined or {}).get("updated", 0) or 0)
             ignored = int((refined or {}).get("ignored", 0) or 0)

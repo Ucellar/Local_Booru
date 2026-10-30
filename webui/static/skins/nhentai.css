@@ -1,0 +1,105 @@
+/* «nhentai»: charcoal with a pink-red accent, the manga site the manga pages are laid out after.
+   It is the default look of the manga pages; the gallery can use it too. */
+:root {
+  --bg: #1f1f1f;
+  --panel: #2b2b2b;
+  --panel-2: #3d3d3d;
+  --border: #3d3d3d;
+  --text: #d9d9d9;
+  --muted: #9a9a9a;
+  --link: #ffffff;
+  --link-hover: #ed2553;
+  --accent: #ed2553;
+  --accent-ink: #ffffff;
+  --bar-bg: #0d0d0d;
+  --bar-ink: #d9d9d9;
+  --bar-active-bg: transparent;
+  --bar-active-ink: #ffffff;
+  --thumb-bg: #2b2b2b;
+  --thumb-ring: #ed2553;
+  --danger: #ff6b6b;
+  --focus: #ed2553;
+  --shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
+
+  --tag-artist: #ff6b8a;
+  --tag-character: #7bd67b;
+  --tag-copyright: #c58cff;
+  --tag-general: #d9d9d9;
+  --tag-meta: #f0b45a;
+  --tag-species: #ff9157;
+  --tag-lore: #6fd4c0;
+  --tag-contributor: #ff8fc8;
+  --tag-invalid: #8a8a8a;
+
+  --font: "Noto Sans", "Segoe UI", Arial, sans-serif;
+  --font-size: 14px;
+  --font-head: "Noto Sans", "Segoe UI", Arial, sans-serif;
+  --radius: 3px;
+  --radius-thumb: 3px;
+  color-scheme: dark;
+}
+
+.top { align-items: center; min-height: 56px; gap: 6px 22px; padding: 0 20px; border-bottom: 0; }
+.brand { font: 900 24px/1 "Noto Sans", "Segoe UI", Arial, sans-serif; letter-spacing: -0.5px; padding: 0; }
+.bn-1 { color: var(--accent); }
+.bn-2 { color: #ffffff; }
+.main-nav { align-items: center; gap: 2px; }
+.main-nav a { padding: 6px 12px; border-radius: var(--radius); font-weight: bold; color: var(--bar-ink); }
+.main-nav a:hover, .main-nav a.active:hover { background: #262626; color: #ffffff; text-decoration: none; }
+.main-nav a.active { background: none; color: #ffffff; box-shadow: inset 0 -2px var(--accent); border-radius: 0; }
+.top-search { display: block; flex: 1 1 200px; max-width: 560px; }   /* wraps only below 200 px */
+.top-search .search-row { gap: 0; }
+.top .top-search input {
+  flex: 1;
+  padding: 9px 14px;
+  border: 0;
+  border-radius: var(--radius) 0 0 var(--radius);
+  background: #ffffff;
+  color: #111111;
+  font-size: 14px;
+}
+.top .top-search input:focus { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+.top-search .search-go {
+  display: block;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: bold;
+}
+.top-search .search-go:hover { color: #ffffff; filter: brightness(1.1); }
+.top-tools { margin-left: auto; }
+.skin-button { border-color: #3d3d3d; border-radius: var(--radius); color: var(--bar-ink); }
+.sidebar .search { display: none; }
+
+.sections { background: #161616; border-bottom: 0; padding: 8px 20px; }
+.sections a { color: var(--muted); }
+.sections a.active { color: #ffffff; }
+
+.layout { padding: 16px 20px 48px; }
+button, .button { background: var(--panel-2); border-color: #4a4a4a; color: var(--text); }
+button:hover, .button:hover { border-color: var(--accent); color: #ffffff; }
+input[type="search"], select { background: #2b2b2b; border-color: #4a4a4a; color: var(--text); }
+.paginator a { background: var(--panel); border-color: var(--panel); }
+.paginator a:hover { background: var(--panel-2); }
+.paginator b { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+.star { color: #4a4a4a; }
+.star.on { color: var(--accent); }
+.tag-table td { border-bottom-color: #2f2f2f; }
+
+/* lists of tags as nhentai's own (webui/tag_lists.py): the page darker than the box of the tags, the name on #4d4d4d,
+   its count on #333, «Популярные / А–Я» on #1a1a1a with the chosen one on #262626 */
+html:has(.taglist-nh), html:has(.taglist-nh) body { background: #0d0d0d; }
+.taglist-nh .tag-container { background: #1f1f1f; column-rule-color: #333333; }
+.taglist-nh .tagchip { color: #d9d9d9; }
+.taglist-nh .tagchip .name { background: #4d4d4d; }
+.taglist-nh .tagchip .count { background: #333333; color: #d9d9d9; }
+.taglist-nh .sort-type { background: #1a1a1a; }
+.taglist-nh .sort-type a { color: #d9d9d9; }
+.taglist-nh .sort-type a:hover { background: #333333; }
+.taglist-nh .sort-type a.current { background: #262626; }
+.taglist-nh .nh-tabs a.current { background: #262626; }
+.taglist-nh .alphabetical-pagination a { color: #d9d9d9; }
+.taglist-nh .alphabetical-pagination a:hover { background: #383838; }
+.taglist-nh .tag-letter:target { border-color: #404040; background: #262626; }

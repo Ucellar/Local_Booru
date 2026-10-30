@@ -123,35 +123,11 @@ try:
 except Exception:
     pass
 
-# Chromium/WebEngine flags — must be set before any PySide6.QtWebEngine import.
-_chromium_flags = [
-    "--lang=en-US",
-    "--disable-blink-features=AutomationControlled",
-    "--enable-features=NetworkService",
-    "--disable-features=SameSiteByDefaultCookies,CookiesWithoutSameSiteMustBeSecure,"
-    "CompressionDictionaryTransport,PersistentSharedDictionary",
-    "--disable-gpu",
-    "--disable-gpu-compositing",
-    "--disable-gpu-shader-disk-cache",
-    "--disable-software-rasterizer",
-    "--disable-webgl",
-    "--disable-3d-apis",
-    "--disk-cache-size=67108864",
-    "--media-cache-size=33554432",
-    "--log-level=3",
-    "--disable-logging",
-]
-_existing = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
-os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = ((_existing + " ") if _existing else "") + " ".join(_chromium_flags)
-os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
-os.environ.setdefault("QT_OPENGL", "software")
-
 _startup_log("импорт PySide6 / Qt")
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon, QPixmapCache
 _startup_log("PySide6 импортирован")
 
-from ui.main_window import MainWindow
 from core.paths import ERROR_LOG_FILE
 from core.redaction import sanitize_text
 
@@ -179,6 +155,137 @@ def _log_exception(exc_type, exc, tb):
         print(text, file=sys.stderr)
     except Exception:
         pass
+
+
+def _workspace_available_or_restart() -> bool:
+    """The chosen archive is unreachable (external drive not connected): ask before anything is written.
+
+    Starting anyway used to open an empty library in Documents and the first save deleted
+    the pointer to the archive, so after connecting the drive the archive was "lost".
+    Returns False when this process must exit (the user quit, or a restarted copy takes over).
+    """
+    from core.paths import WORKSPACE_UNAVAILABLE, remove_workspace_pointer, unavailable_workspace_target
+    if not WORKSPACE_UNAVAILABLE:
+        return True
+    from PySide6.QtWidgets import QMessageBox
+    _startup_log(f"архив недоступен: {WORKSPACE_UNAVAILABLE}")
+    while True:
+        box = QMessageBox()
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Архив не найден")
+        box.setText(f"Не найден архив Local Booru:\n{WORKSPACE_UNAVAILABLE}\n\n"
+                    "Скорее всего, не подключён диск. Подключи его и нажми «Повторить».")
+        box.setInformativeText("Пока архив недоступен, программа ничего не сохраняет, "
+                               "поэтому твои настройки и библиотека не пострадают.")
+        retry = box.addButton("Повторить", QMessageBox.AcceptRole)
+        forget = box.addButton("Забыть этот архив…", QMessageBox.DestructiveRole)
+        box.addButton("Выход", QMessageBox.RejectRole)
+        box.setDefaultButton(retry)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is retry:
+            if unavailable_workspace_target() is None:
+                _restart_self()
+                return False
+            continue
+        if clicked is forget:
+            sure = QMessageBox.question(
+                None, "Забыть архив?",
+                "Программа откроется с новой пустой библиотекой в «Документах».\n"
+                "Сам архив на диске не удаляется, его можно подключить снова в Настройках.\n\nПродолжить?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if sure == QMessageBox.Yes:
+                remove_workspace_pointer()
+                _restart_self()
+            return False
+        return False
+
+
+def _ask_pending_reset(request: dict) -> str:
+    """«Удалить всё» ordered on the page is done at this start only if the person says so now: the order can
+    be days old.  "yes" / "cancel" / "later" (also without a person: LOCAL_BOORU_SKIP_RESET_DIALOG)."""
+    if os.environ.get("LOCAL_BOORU_SKIP_RESET_DIALOG", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "later"
+    from PySide6.QtWidgets import QMessageBox
+    from core.library_reset import describe_request
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle("Полный сброс библиотеки")
+    box.setText(describe_request(request))
+    go = box.addButton("Удалить всё", QMessageBox.DestructiveRole)
+    drop = box.addButton("Отменить сброс", QMessageBox.RejectRole)
+    later = box.addButton("Не сейчас", QMessageBox.NoRole)
+    box.setDefaultButton(later)
+    box.setEscapeButton(later)
+    box.exec()
+    clicked = box.clickedButton()
+    return "yes" if clicked is go else ("cancel" if clicked is drop else "later")
+
+
+def _finish_archive_move(settings: dict) -> bool:
+    """«Перенести архив на другой диск» (core/archive_move.py): the files were copied while the program ran; here,
+    before anything opens the base, the rest is done after one more question.  True — the program starts again on the
+    moved archive (this process ends)."""
+    from core import archive_move
+    archive_move.recover()                  # (a start that ended while the base had its other name for a moment)
+    order = archive_move.pending()
+    if order is None or order.get("phase") != archive_move.COPIED:
+        return False
+    if os.environ.get("LOCAL_BOORU_SKIP_MOVE_DIALOG", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox, QProgressDialog
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle("Перенос архива")
+    box.setText(archive_move.describe(order))
+    if order.get("error"):
+        box.setInformativeText(f"В прошлый раз перенос не закончился: {order['error']}")
+    go = box.addButton("Перенести сейчас", QMessageBox.AcceptRole)
+    drop = box.addButton("Отменить перенос", QMessageBox.DestructiveRole)
+    later = box.addButton("Не сейчас", QMessageBox.RejectRole)
+    box.setDefaultButton(go)
+    box.setEscapeButton(later)
+    box.exec()
+    clicked = box.clickedButton()
+    said = archive_move.answer(order, "yes" if clicked is go else ("cancel" if clicked is drop else "later"))
+    if said == "cancel":
+        QMessageBox.information(None, "Перенос архива", "Перенос отменён. Сделанная копия осталась в\n"
+                                f"{order.get('target')}\n— её можно удалить вручную.")
+        return False
+    if said != "yes":
+        return False
+    dialog = QProgressDialog("Переношу архив…", "", 0, 1000)
+    dialog.setWindowTitle("Перенос архива")
+    dialog.setCancelButton(None)
+    dialog.setWindowModality(Qt.ApplicationModal)
+    dialog.setMinimumDuration(0)
+    dialog.setAutoClose(False)
+    dialog.show()
+    QApplication.processEvents()
+
+    def progress(text: str, done: int = 0, total: int = 0) -> None:
+        dialog.setLabelText(text)
+        dialog.setValue(int(1000 * done / total) if total else 0)
+        QApplication.processEvents()
+    result = archive_move.finish(order, progress=progress, log=_startup_log)
+    dialog.close()
+    if result.get("done"):
+        QMessageBox.information(None, "Перенос архива", f"Архив перенесён:\n{result['target']}\n\n"
+                                "Программа сейчас откроется с ним заново.")
+        _restart_self()
+        return True
+    QMessageBox.warning(None, "Перенос архива", f"Перенос не закончен: {result.get('error') or 'неизвестно почему'}\n\n"
+                        "Программа откроется со старым архивом, в нём ничего не изменилось. При следующем запуске "
+                        "программа спросит о переносе снова; отменить его можно в «Настройках» → «Папки».")
+    return False
+
+
+def _restart_self() -> None:
+    """Start a fresh copy of the program (paths are resolved once per process)."""
+    import subprocess
+    args = [sys.executable] + ([] if getattr(sys, "frozen", False) else [str(Path(__file__).resolve())]) + sys.argv[1:]
+    subprocess.Popen(args, cwd=str(Path(__file__).resolve().parent))
 
 
 def main() -> int:
@@ -219,9 +326,27 @@ def main() -> int:
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
+    # «Рисовать страницы — без видеокарты»: Qt WebEngine takes its switches before the application object.
+    try:
+        from ui.program_window import apply_browser_flags
+        if apply_browser_flags():
+            _startup_log("встроенный браузер рисует без видеокарты («Настройки» → «Окно программы»)")
+            _applog.info("Built-in browser: drawing without the graphics card (webview_gpu=off)")
+    except Exception as _flags_error:
+        _startup_log(f"режим отрисовки встроенного браузера не прочитан: {_flags_error}")
+
+    # Qt WebEngine (the new gallery is shown by it) has to be loaded before the application object.
+    try:
+        from PySide6 import QtWebEngineWidgets as _webengine_preload  # noqa: F401
+    except ImportError as _webengine_error:
+        _startup_log(f"Qt WebEngine недоступен ({_webengine_error}): новая галерея откроется в браузере")
+
     _startup_log("создание QApplication")
     app = QApplication(sys.argv)
     _startup_log("QApplication создан")
+    if not _workspace_available_or_restart():
+        _STARTUP_DONE = True
+        return 3
     try:
         _startup_log("загрузка настроек для QPixmapCache")
         _settings_for_pixmap = load_settings()
@@ -238,6 +363,33 @@ def main() -> int:
         except Exception as _language_dialog_error:
             try:
                 _applog.warning("Startup language dialog failed: %s", _language_dialog_error)
+            except Exception:
+                pass
+        # v458: one process-wide media-download gate. An environment override
+        # is useful for headless/tests; otherwise the user may choose on every
+        # launch without changing the persistent default.
+        try:
+            from core.download_policy import configure_session
+            _download_env = os.environ.get("LOCAL_BOORU_MEDIA_DOWNLOADS", "").strip().lower()
+            if _download_env in {"0", "false", "no", "off"}:
+                _downloads_enabled = False
+                _download_reason = "environment_override"
+            elif _download_env in {"1", "true", "yes", "on"}:
+                _downloads_enabled = True
+                _download_reason = "environment_override"
+            elif bool(_settings_for_pixmap.get("session_media_downloads_prompt", False)) and os.environ.get("LOCAL_BOORU_SKIP_DOWNLOAD_DIALOG", "").strip().lower() not in {"1", "true", "yes", "on"}:
+                _startup_log("выбор политики скачивания медиа на текущую сессию")
+                from ui.download_session_dialog import choose_session_media_downloads
+                _downloads_enabled = choose_session_media_downloads(bool(_settings_for_pixmap.get("session_media_downloads_default", True)))
+                _download_reason = "startup_dialog"
+            else:
+                _downloads_enabled = bool(_settings_for_pixmap.get("session_media_downloads_default", True))
+                _download_reason = "settings_default"
+            configure_session(_downloads_enabled, reason=_download_reason)
+            _startup_log("медиа-загрузки в этой сессии: " + ("разрешены" if _downloads_enabled else "ЗАПРЕЩЕНЫ"))
+        except Exception as _download_policy_error:
+            try:
+                _applog.warning("Startup download-policy dialog failed: %s", _download_policy_error)
             except Exception:
                 pass
         _pix_mb = int(_settings_for_pixmap.get("pixmap_cache_mb", 128) or 128)
@@ -267,16 +419,48 @@ def main() -> int:
         pass
 
     _db_startup_results = {}
+    _sqlite_writes_wait_for_health = False
+    _db_schema_state = {"ready": False, "error": ""}
     try:
         _startup_log("загрузка основных настроек")
         _startup_settings = load_settings()
+        # «Удалить всё» of the web page «Удаление и сброс» is done here, before anything opens the base
+        # or the library's files (core/library_reset.py), after one more question.  It clears
+        # «db_initialized_once» in these very settings (and saves them), so the checks below make the new
+        # base instead of reporting it missing.  A failure of it never stops the start.
+        # «Перенести архив на другой диск»: the files were copied while the program ran; the base and the rest are
+        # moved here, before anything opens them — then the program starts again on the moved archive.
+        try:
+            if _finish_archive_move(_startup_settings):
+                _STARTUP_DONE = True
+                return 5
+        except Exception as _move_error:
+            _applog.error("Archive move at start failed: %s", _move_error)
+        _reset_result = None
+        try:
+            from core.library_reset import perform_pending_reset
+            _reset_result = perform_pending_reset(_startup_settings, confirm=_ask_pending_reset,
+                                                  log=lambda m: (_startup_log(str(m)), _applog.info(m))[1])
+        except Exception as _reset_error:
+            _applog.error("Library reset at start failed: %s", _reset_error)
+        if isinstance(_reset_result, dict) and _reset_result.get("busy"):
+            # another copy of the program is resetting the library right now: this one must not open it
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(None, "Сброс библиотеки",
+                                    "Другая копия программы сейчас выполняет сброс библиотеки.\n"
+                                    "Дождитесь, пока откроется её окно.")
+            _STARTUP_DONE = True
+            return 4
         # Validate the existing working DB before any migration or maintenance writes.
         # A broken disposable gallery may be rebuilt, but it must not be changed
         # silently while the user is deciding what to do.
         from core.stability import run_startup_checks
-        _startup_log("SQLite startup fast checks / миграции")
+        _startup_log("SQLite startup fast checks")
         _db_startup_results = run_startup_checks(_startup_settings, log=lambda m: (_startup_log(str(m)), _applog.info(m))[1])
         _startup_log("SQLite startup fast checks завершены")
+        if _db_startup_results.get("db_missing"):
+            from core.database.connection import DatabaseMissingError
+            raise DatabaseMissingError(str(_db_startup_results["db_missing"]))
         # v406: settings-level guard complements the .initialized marker near
         # the DB.  The marker protects the normal case; this flag also catches
         # "folder/marker disappeared" after the app has successfully used a DB
@@ -293,6 +477,27 @@ def main() -> int:
         _sqlite_writes_wait_for_health = bool(_db_startup_results.get("write_deferred_until_health"))
         if _db_startup_results.get("write_blocked") and not _sqlite_writes_wait_for_health:
             raise RuntimeError("SQLite is in read-only safety mode: " + str(_db_startup_results.get("db_integrity", "integrity check failed")))
+        if not _sqlite_writes_wait_for_health:
+            _startup_log("SQLite writable schema migrations")
+            from core.database.connection import ensure_database_schema
+            _schema_status = ensure_database_schema(_startup_settings)
+            _db_schema_state["ready"] = True
+            _startup_log(
+                f"SQLite schema ready: v{int(_schema_status.get('current', 0) or 0)}/"
+                f"v{int(_schema_status.get('target', 0) or 0)}"
+            )
+            try:
+                from core.quality_upgrade_service import recover_incomplete_quality_upgrades
+                _upgrade_recovery = recover_incomplete_quality_upgrades(
+                    _startup_settings, trace=lambda m: _applog.info(str(m))
+                )
+                if _upgrade_recovery:
+                    _startup_log(f"quality-upgrade recovery: {len(_upgrade_recovery)} revision(s)")
+            except Exception as _upgrade_recovery_error:
+                _applog.error("Quality-upgrade startup recovery failed: %s", _upgrade_recovery_error)
+                raise
+        else:
+            _startup_log("SQLite schema migrations отложены до фоновой проверки")
         # One-time transitions from pre-SQLite compatibility files. These are
         # audit-preserving migrations; original media is never touched.  After a
         # bad shutdown, skip startup DB writes until the background health check
@@ -332,7 +537,7 @@ def main() -> int:
         _startup_log("очистка .part файлов")
         from core.file_safety import cleanup_partial_files
         from core.paths import result_output_base
-        _removed_parts = cleanup_partial_files(result_output_base(_startup_settings))
+        _removed_parts = cleanup_partial_files(result_output_base(_startup_settings), settings=_startup_settings)
         if not _sqlite_writes_wait_for_health:
             try:
                 _startup_log("проверка Inbox/Trash lifecycle")
@@ -419,23 +624,51 @@ def main() -> int:
         _applog.warning("Watcher startup failed: %s", _we)
 
     _startup_log("создание главного окна")
-    w = MainWindow()
+    try:
+        _window_settings = load_settings()
+    except Exception as _window_settings_error:   # the window loads them again and says what is wrong
+        _applog.warning("Settings not read for the choice of window: %s", _window_settings_error)
+        _window_settings = {}
+    from ui.program_window import make as _make_window
+    w = _make_window(_window_settings, say=_startup_log)
     _startup_log("главное окно создано")
     if icon:
         w.setWindowIcon(icon)
     _startup_log("показ главного окна")
-    w.show()
+    (getattr(w, "show_as_saved", None) or w.show)()     # the new window: maximized, as the person left it
 
-    # Browser extension companion API.  Starts after the UI is visible so a busy
-    # or locked SQLite DB can never block the main window from appearing.
-    browser_companion = None
+    # Browser extension companion API.  It may write immediately after a click,
+    # so it starts only after a successful writable schema/migration pass.
+    _browser_companion_lock = threading.Lock()
+    _browser_companion_state = {"handle": None}
+
+    def _start_browser_companion_when_schema_ready():
+        with _browser_companion_lock:
+            if _browser_companion_state.get("handle") is not None:
+                return _browser_companion_state.get("handle")
+            if not bool(_db_schema_state.get("ready")):
+                _startup_log("Browser Companion API отложен: SQLite schema ещё не готова")
+                return None
+            try:
+                from core.shutdown import is_shutting_down
+                if is_shutting_down():
+                    return None
+            except Exception:
+                pass
+            _startup_log("запуск Browser Companion API")
+            from core.browser_companion_api import start_browser_companion_api
+            from core.shutdown import register as _shutdown_register
+            handle = start_browser_companion_api(
+                load_settings(),
+                log_fn=lambda m: (_startup_log(str(m)), _applog.info(m))[1],
+            )
+            if handle is not None:
+                _browser_companion_state["handle"] = handle
+                _shutdown_register("browser companion API", handle.stop)
+            return handle
+
     try:
-        _startup_log("запуск Browser Companion API")
-        from core.browser_companion_api import start_browser_companion_api
-        from core.shutdown import register as _shutdown_register
-        browser_companion = start_browser_companion_api(load_settings(), log_fn=lambda m: (_startup_log(str(m)), _applog.info(m))[1])
-        if browser_companion is not None:
-            _shutdown_register("browser companion API", browser_companion.stop)
+        _start_browser_companion_when_schema_ready()
     except Exception as _browser_companion_error:
         _applog.warning("Browser companion API startup failed: %s", _browser_companion_error)
 
@@ -460,6 +693,32 @@ def main() -> int:
                         _startup_log("фоновая проверка SQLite нашла ошибку; запись заблокирована")
                     else:
                         _startup_log("фоновая проверка SQLite завершена")
+                        try:
+                            from core.database.connection import ensure_database_schema
+                            _startup_log("SQLite writable schema migrations после фоновой проверки")
+                            _schema_status = ensure_database_schema(_ls(), force=True)
+                            _db_schema_state["ready"] = True
+                            _startup_log(
+                                f"SQLite schema ready: v{int(_schema_status.get('current', 0) or 0)}/"
+                                f"v{int(_schema_status.get('target', 0) or 0)}"
+                            )
+                            from core.quality_upgrade_service import recover_incomplete_quality_upgrades
+                            _upgrade_recovery = recover_incomplete_quality_upgrades(
+                                _ls(), trace=lambda m: _applog.info(str(m))
+                            )
+                            if _upgrade_recovery:
+                                _startup_log(f"quality-upgrade recovery: {len(_upgrade_recovery)} revision(s)")
+                            _start_browser_companion_when_schema_ready()
+                        except Exception as _schema_after_health_error:
+                            _db_schema_state["ready"] = False
+                            _db_schema_state["error"] = str(_schema_after_health_error)
+                            _applog.warning(
+                                "Deferred SQLite schema migration failed: %s",
+                                _schema_after_health_error,
+                            )
+                            _startup_log(
+                                f"SQLite schema migration error: {_schema_after_health_error}"
+                            )
                 except Exception as _bg_db_error:
                     _applog.warning("Deferred DB health check failed: %s", _bg_db_error)
                     _startup_log(f"фоновая проверка SQLite ошибка: {_bg_db_error}")
@@ -486,6 +745,11 @@ def main() -> int:
     # The clean flag is written at the very end of main().
     def _on_qt_about_to_quit():
         try:
+            from webui import service as _webui_service
+            _webui_service.stop()
+        except Exception as _webui_stop_error:  # closing must go on; the server threads are daemons
+            _applog.warning("Web gallery stop failed: %s", _webui_stop_error)
+        try:
             from core.shutdown import begin_shutdown
             begin_shutdown()
         except Exception:
@@ -499,11 +763,18 @@ def main() -> int:
     # This runs after the Qt window is already gone, so slow drivers/backups do
     # not make Windows mark the visible app as "not responding" on close.
     _STARTUP_DONE = True
+    _shutdown_join_ok = True
+    _shutdown_join_alive = []
     try:
         from core.shutdown import request_shutdown
-        request_shutdown()
-    except Exception:
+        _shutdown_result = request_shutdown(timeout_hint=15.0, qt_roots=[w])
+        _shutdown_join_ok = bool((_shutdown_result or {}).get("ok", True))
+        _shutdown_join_alive = list((_shutdown_result or {}).get("alive", []) or [])
+    except Exception as _shutdown_error:
+        _shutdown_join_ok = False
+        _shutdown_join_alive = ["shutdown manager error"]
         try:
+            _applog.warning("Shutdown manager failed: %s", _shutdown_error)
             thumb_svc.stop()
         except Exception:
             pass
@@ -524,29 +795,82 @@ def main() -> int:
         _applog.warning("Exit thumbnail trim failed: %s", _thumb_exit_error)
     try:
         from core.light_backup import maybe_auto_backup, checkpoint_sqlite
-        if bool((_exit_settings or {}).get("light_backup_on_exit", True)):
-            result = maybe_auto_backup(_exit_settings, reason="app_exit")
-            if result.get("created"):
-                try:
-                    from core.settings import save_settings as _save_settings
-                    _save_settings(_exit_settings)
-                except Exception:
-                    pass
-        if bool((_exit_settings or {}).get("sqlite_checkpoint_on_exit", True)):
-            checkpoint_sqlite(_exit_settings, truncate=True, optimize=True)
+        if not _shutdown_join_ok:
+            _applog.warning(
+                "Skipping exit backup/checkpoint because worker threads did not stop: %s",
+                ", ".join(map(str, _shutdown_join_alive)) or "unknown",
+            )
+            try:
+                from core.stability import write_shutdown_flag
+                write_shutdown_flag(_exit_settings, bad=True)
+            except Exception:
+                pass
+        else:
+            if bool((_exit_settings or {}).get("light_backup_on_exit", True)):
+                result = maybe_auto_backup(_exit_settings, reason="app_exit")
+                if result.get("created"):
+                    try:
+                        from core.settings import save_settings as _save_settings
+                        _save_settings(_exit_settings)
+                    except Exception:
+                        pass
+            if bool((_exit_settings or {}).get("sqlite_checkpoint_on_exit", True)):
+                checkpoint_sqlite(_exit_settings, truncate=True, optimize=True)
     except Exception as _db_exit_error:
         # Shutdown must not be blocked by an external SSD being absent or a
         # transient SQLite lock.  The next manual/automatic backup will retry.
         _applog.warning("Exit backup/checkpoint failed: %s", _db_exit_error)
 
     try:
-        from core.stability import on_clean_exit
-        on_clean_exit(_exit_settings)
+        if _shutdown_join_ok:
+            from core.stability import on_clean_exit
+            on_clean_exit(_exit_settings)
     except Exception:
         pass
+
+    # «Перезапустить» of a page (core/app_restart.py): a new copy, now that the base and the files are closed
+    try:
+        from core import app_restart
+        if app_restart.requested():
+            _restart_self()
+    except Exception as _restart_error:
+        _applog.warning("Restart after exit failed: %s", _restart_error)
 
     return ret
 
 
+def _selfcheck() -> int:
+    """``Local Booru.exe --selfcheck``: every module of the program imports in this build, and Qt WebEngine with them
+    (the release build checks its folder so).  No window, no library: the answer — to the file named in
+    LOCAL_BOORU_SELFCHECK_OUT, else to the console; the exit code is 0 only when nothing failed."""
+    import importlib
+    import pkgutil
+    names, failed = [], []
+    for package in ("core", "ui", "webui"):
+        try:
+            module = importlib.import_module(package)
+            names += [info.name for info in pkgutil.walk_packages(module.__path__, package + ".")]
+        except Exception as exc:
+            failed.append(f"{package}: {type(exc).__name__}: {exc}")
+    for name in sorted(set(names)):
+        try:
+            importlib.import_module(name)
+        except Exception as exc:
+            failed.append(f"{name}: {type(exc).__name__}: {exc}")
+    try:
+        from PySide6 import QtWebEngineWidgets  # noqa: F401
+    except Exception as exc:
+        failed.append(f"PySide6.QtWebEngineWidgets: {type(exc).__name__}: {exc}")
+    text = f"modules: {len(set(names))}, failed: {len(failed)}\n" + "\n".join(failed)
+    out = os.environ.get("LOCAL_BOORU_SELFCHECK_OUT", "").strip()
+    if out:
+        Path(out).write_text(text + "\n", encoding="utf-8")
+    else:
+        print(text)
+    return 1 if failed or not names else 0
+
+
 if __name__ == "__main__":
+    if "--selfcheck" in sys.argv[1:]:
+        sys.exit(_selfcheck())
     sys.exit(main())
