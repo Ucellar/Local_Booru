@@ -20,6 +20,7 @@ _LOCK = threading.Lock()
 _CACHE: dict = {"stamp": None, "data": {}}
 THUMB_SIZES = {"s", "m", "l"}
 MANGA_STRIP_PLACES = ("bottom", "side", "off")     # the strip of page thumbnails in the manga reader
+MANGA_SETS = ("on", "off")                         # (v5.44) the parts of one work as one tile of «Вся манга»
 POST_FIT = ("fit", "original")                     # a card's picture: fitted to the window, or in its own size
 FIT_NOTE = ("on", "off")                           # the box «Картинка уменьшена под окно» (the «r34» look)
 VIDEO_AUTONEXT = ("on", "off")                     # the tab «Видео»: the next episode starts by itself
@@ -107,6 +108,8 @@ def save(update: dict) -> dict:
         clean["thumbs"] = str(update["thumbs"])
     if "manga_strip" in update and str(update["manga_strip"]) in MANGA_STRIP_PLACES:
         clean["manga_strip"] = str(update["manga_strip"])
+    if "manga_sets" in update and str(update["manga_sets"]) in MANGA_SETS:
+        clean["manga_sets"] = str(update["manga_sets"])
     if "post_fit" in update and str(update["post_fit"]) in POST_FIT:
         clean["post_fit"] = str(update["post_fit"])
     if "fit_note" in update and str(update["fit_note"]) in FIT_NOTE:

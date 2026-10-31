@@ -251,6 +251,31 @@ def search_box(query: str, *, section: str = "all", source: str = "all", order: 
 </form>"""
 
 
+# ── lists of covers paged by whole rows (v5.44.1: manga, the series and long videos of «Видео») ──
+ROWS_LIMITS = (4, 240)
+
+
+def rows_per_page(req, cookie: str, usual: int) -> int:
+    """Items on a page of a list of covers: whole rows of the columns the window has, as near ``usual`` as they come
+    (booru.js ``fitRows`` counts them into the list's ``cookie``; 25 in six columns left one cover alone in its last
+    row).  Before the window has counted — ``usual``."""
+    from http.cookies import CookieError, SimpleCookie
+    try:
+        jar = SimpleCookie(req.headers.get("Cookie", ""))
+        counted = int(jar[cookie].value) if cookie in jar else 0
+    except (CookieError, ValueError, TypeError):
+        counted = 0
+    low, high = ROWS_LIMITS
+    return max(low, min(high, counted)) if counted > 0 else usual
+
+
+def rows_attrs(cookie: str, usual: int, per_page: int, total: int, page: int = 0) -> str:
+    """The attributes of such a list's grid for booru.js ``fitRows`` (``page`` 0 — a list without pages: a shelf)."""
+    paged = f' data-page="{int(page)}"' if page else ""
+    return (f' data-rows="{int(usual)}" data-rows-cookie="{esc(cookie)}" data-per-page="{int(per_page)}"'
+            f' data-total="{int(total)}"{paged}')
+
+
 def paginator(page: int, pages: int, make_url) -> str:
     """Page numbers: «« ‹ 1 … 4 5 [6] 7 8 … 40 › »» and a field for a page number (the looks that show it)."""
     if pages <= 1:

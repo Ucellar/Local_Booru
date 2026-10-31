@@ -70,6 +70,10 @@ _ART_HOSTS = ("twitter.com", "x.com", "fanbox.cc", "fantia.jp", "deviantart.com"
 _MAX_CANDIDATES = 6
 NOMATCH_STATUSES = ("nomatch", "no_match", "downloaded_no_match")   # a file processed before that is in Брак
 _NO_PIXEL_HASH = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".gif"}
+# (v5.44, the order «SauceNAO первым») a file passes over a service with a daily quota (SauceNAO) whose queue would keep
+# it longer than this, when a service after it would answer sooner: those are asked first, the quota's service after
+# them (``reverse_next``).  In the order «IQDB первым» (the default since v5.44.3) it is last: nothing passes it over.
+PASS_OVER_WAIT = 120.0
 
 
 @dataclass
@@ -84,11 +88,17 @@ class FileJob:
 class ReverseTicket:
     """A file whose quick stages (MD5, file name, gallery) found nothing: it goes to reverse search, so slow reverse
     searches never hold up the MD5 lookups of other files.  ``step`` — where it is in the services' order (the next
-    one to look at), ``upload`` — the picture every service is sent (made once, ``reverse_prepare``)."""
+    one to look at), ``upload`` — the picture every service is sent (made once, ``reverse_prepare``), ``later`` — the
+    services passed over for their long queue (v5.44), asked after the rest; ``held`` — a service gave the file no
+    answer for a while (paused, its limit, the failure that paused it): a service with a daily quota after it is not
+    asked about the file now (v5.44.3: SauceNAO's searches only for what IQDB looked at and did not find) — the file is
+    deferred and asked again."""
     job: "FileJob"
     state: "_State"
     step: int = 0
     upload: object = None
+    later: list = field(default_factory=list)
+    held: str = ""
 
 
 @dataclass
@@ -165,7 +175,7 @@ class ParserEngine:
 
     # ── reverse search in steps (a run: every service's own queue, core/parser/runner.py) ──
     def reverse_services(self) -> list:
-        """The services a run asks, in their order (core/parser/reverse/__init__.py: SauceNAO first, iqdb.org last —
+        """The services a run asks, in their order (core/parser/reverse/__init__.py: iqdb.org first, SauceNAO last —
         or the other way round, as chosen on «Сайты и ключи»)."""
         return [s for s in self.services if s.enabled()]
 
@@ -175,9 +185,15 @@ class ParserEngine:
         ticket.upload = self._upload_copy(ticket.state)
         return ticket.upload is not None
 
-    def reverse_next(self, ticket: ReverseTicket):
+    def reverse_next(self, ticket: ReverseTicket, wait_of=None):
         """The next service to ask about the file, or None — none left.  One switched off for the run is passed
-        over; one paused for a while too, and it makes the file's miss untrustworthy (the file is deferred)."""
+        over; one paused for a while too, and it makes the file's miss untrustworthy (the file is deferred).
+        (v5.44) ``wait_of(service)`` — seconds a file would wait for the service now (its queue): a service with a
+        daily quota (``quota_limited``: SauceNAO) is passed over while its queue would keep the file longer than
+        :data:`PASS_OVER_WAIT` and a service after it would answer sooner — the file comes back to it after them, so
+        the day's searches go to the files the others did not find (in the order «SauceNAO первым»; in «IQDB первым»,
+        the default since v5.44.3, it is last anyway).  (v5.44.3) A service before it that gave the file no answer
+        (paused, its limit) holds it: :meth:`_held`."""
         while ticket.step < len(self.services):
             service = self.services[ticket.step]
             ticket.step += 1
@@ -185,9 +201,54 @@ class ParserEngine:
                 continue
             if service.paused():
                 ticket.state.problem(service, service.pause_note())
+                ticket.held = ticket.held or service.name
+                continue
+            if self._held(ticket, service):
+                continue
+            if wait_of is not None and getattr(service, "quota_limited", False) and \
+                    self._sooner_after(ticket, service, wait_of):
+                ticket.later.append(service)
+                continue
+            return service
+        while ticket.later:
+            service = ticket.later.pop(0)
+            if not service.enabled():
+                continue
+            if service.paused():
+                ticket.state.problem(service, service.pause_note())
+                continue
+            if self._held(ticket, service):
                 continue
             return service
         return None
+
+    def _held(self, ticket: ReverseTicket, service) -> bool:
+        """(v5.44.3) A service with a daily quota is not asked about a file a service before it gave no answer for a
+        while (``ticket.held``): its searches are for what the others looked at and did not find — the file is
+        deferred (the others' trouble is noted) and both are asked again later."""
+        if not ticket.held or not getattr(service, "quota_limited", False):
+            return False
+        self._say_rev(ticket.state, f"{service.name}: не спрашиваю, пока {ticket.held} не ответил — файл отложен")
+        return True
+
+    def _sooner_after(self, ticket: ReverseTicket, service, wait_of) -> bool:
+        """The file would wait for ``service`` longer than :data:`PASS_OVER_WAIT`, and a service after it in the order
+        (on, not paused) would answer sooner."""
+        try:
+            wait = float(wait_of(service))
+        except Exception:  # an estimate that fails changes nothing: the usual order
+            return False
+        if wait <= PASS_OVER_WAIT:
+            return False
+        for other in self.services[ticket.step:]:
+            if other is service or other in ticket.later or not other.enabled() or other.paused():
+                continue
+            try:
+                if float(wait_of(other)) < wait:
+                    return True
+            except Exception:  # see above
+                continue
+        return False
 
     def reverse_ask(self, service, ticket: ReverseTicket) -> ReverseOutcome:
         """One service's answer about one file (in a run — its queue's thread): nothing of the file is changed here.
@@ -206,17 +267,21 @@ class ParserEngine:
         state = ticket.state
         if outcome.status == "paused":
             state.problem(service, outcome.detail or service.pause_note())
+            ticket.held = ticket.held or service.name
             return []
         if outcome.status == "deferred":
             state.deferred_until = max(state.deferred_until, float(outcome.retry_after or 0))
             state.problem(service, f"{service.name}: {outcome.detail or 'лимит'}")
             self._say_rev(state, f"{service.name}: отложено — {outcome.detail}")
+            ticket.held = ticket.held or service.name
             return []
         if outcome.status == "failed":
             service.note_failure(short(outcome.detail, 80) or "ошибка", transient=True)
             state.problem(service, f"{service.name}: {short(outcome.detail, 80)}")
             # the whole reason in the journal (v5.27 cut it at 120 letters: «…Multi-service image search ( 0…»)
             self._say_rev(state, f"{service.name}: сбой — {short(outcome.detail, 400)}")
+            if service.paused():                # the failure that paused it: the service is down, not this file
+                ticket.held = ticket.held or service.name
             return []
         if outcome.status != "complete":  # bad_input / disabled: no answer, nothing to wait for
             if outcome.detail and outcome.status != "disabled":

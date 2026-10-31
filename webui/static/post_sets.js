@@ -5,6 +5,8 @@
 // program asks it, seconds the first time: «ищу на сайте…» meanwhile) and go in among the cards with «api»; the page
 // of such a part (/post/remote) has «Скачать» — the post goes to the program's import, its state is asked until it
 // is done.
+// (v5.44.1) A card of no сборка whose post has a family on a site: the same box (data-lone, nothing to change in it),
+// shown only when the site has parts the library has not.
 (() => {
   "use strict";
   const box = document.querySelector(".post-sets[data-set]");
@@ -13,9 +15,10 @@
   const setId = Number(box.dataset.set);
   const postId = Number(box.dataset.post);
   const toggle = box.querySelector(".post-set-toggle");
-  const edit = box.querySelector(".post-set-edit");
+  const edit = box.querySelector(".post-set-edit");          // none in a lone card's box
   const tools = box.querySelector(".post-set-tools");
   const strip = box.querySelector(".post-set-thumbs");
+  const lone = box.dataset.lone === "1";
   const EDITING = "lb_set_editing";             // «изменить» stays on over the pages of this window
 
   const relayout = () => window.dispatchEvent(new Event("resize"));   // the picture under the box is fitted again
@@ -28,6 +31,7 @@
   }
 
   function setEditing(on) {
+    if (!edit || !tools) return;
     box.classList.toggle("editing", on);
     edit.setAttribute("aria-pressed", on ? "true" : "false");
     edit.textContent = on ? "готово" : "изменить";
@@ -43,11 +47,14 @@
     setHidden(hide);
     LB.postJson("/api/prefs", { sets_box: hide ? "hidden" : "shown" }).catch(() => {});
   });
-  edit.addEventListener("click", () => setEditing(!box.classList.contains("editing")));
-  try { if (sessionStorage.getItem(EDITING) === String(setId)) setEditing(true); } catch (_) { /* nothing kept */ }
+  if (edit) {
+    edit.addEventListener("click", () => setEditing(!box.classList.contains("editing")));
+    try { if (sessionStorage.getItem(EDITING) === String(setId)) setEditing(true); } catch (_) { /* nothing kept */ }
+  }
 
   function status(text, isError) {
-    const line = tools.querySelector(".action-status");
+    const line = tools && tools.querySelector(".action-status");
+    if (!line) return;
     line.textContent = text;
     line.style.color = isError ? "var(--danger)" : "";
   }
@@ -86,6 +93,7 @@
       note.textContent = "";
     }
     if (!data || !data.ok) return;
+    if (lone && (data.tiles || []).length) box.hidden = false;      // the family the site has: now there is a box
     for (const tile of data.tiles || []) {
       if (strip.querySelector(`.post-set-item[data-remote="${CSS.escape(tile.key)}"]`)) continue;
       const holder = document.createElement("div");
@@ -150,7 +158,7 @@
       button.disabled = false;
     }
   });
-  const title = tools.querySelector('input[name="title"]');
+  const title = tools && tools.querySelector('input[name="title"]');
   if (title) {
     title.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {

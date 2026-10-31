@@ -1,5 +1,5 @@
 """The parser's site table as one ordered list of rows, read and written the same way by the web
-page «Сайты» and the old Qt table (ui/sites_widget.py).
+page «Сайты» and (until v5.40) the old window's Qt table (ui/sites_widget.py).
 
 Settings keep it in four keys: ``sites`` (built-in sites by their current domain, including
 switched-off ones), ``custom_sites`` (the user's own, each with ``site_id = "custom:<hex>"``),

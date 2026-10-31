@@ -30,7 +30,7 @@ class ManualRequest:
     post_id: str
     file: Path               # the card's file: its Брак copy (or the input file when the copy is gone)
     original: str            # where the parser found the file ("" when not known)
-    image_id: int = 0        # the Брак card (0 when the file has none: the old window works by file)
+    image_id: int            # the Брак card
 
 
 def _offline_context(settings: dict):
@@ -90,23 +90,12 @@ def check(settings: dict, image_id: int, url: str) -> ManualRequest:
                          image_id=int(row["id"]))
 
 
-def check_file(settings: dict, path, url: str) -> ManualRequest:
-    """The request for a file of the old window's page «Брак» (it lists files, not cards)."""
-    address, host, post_id = _parse_address(settings, url)
-    file, original = _card_file(settings, str(Path(path)))
-    return ManualRequest(url=address, host=host, post_id=post_id, file=file, original=original)
-
-
 def _still_brak(settings: dict, request: ManualRequest) -> bool:
-    """Nothing promoted the file meanwhile (a parser run, the other window)."""
+    """Nothing promoted the card meanwhile (a parser run, another page)."""
     from core.database.connection import db
-    from core.nomatch_db import entry_for_path
-    if request.image_id:
-        with db(settings, readonly=True) as con:
-            row = con.execute("SELECT bucket, deleted FROM images WHERE id=?", (request.image_id,)).fetchone()
-        return row is not None and not int(row["deleted"] or 0) and str(row["bucket"] or "") in BRAK_BUCKETS
-    return entry_for_path(settings, request.file) is not None or bool(
-        request.original and entry_for_path(settings, request.original))
+    with db(settings, readonly=True) as con:
+        row = con.execute("SELECT bucket, deleted FROM images WHERE id=?", (request.image_id,)).fetchone()
+    return row is not None and not int(row["deleted"] or 0) and str(row["bucket"] or "") in BRAK_BUCKETS
 
 
 def library_busy() -> str:

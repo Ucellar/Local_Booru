@@ -204,11 +204,6 @@ class AppBridge(QObject):
             if changes:
                 self.mw.settings.update(changes)
                 self.mw.save_settings()
-                # The old parser page keeps its own copy in its widgets and writes it back on START:
-                # show it the new values, or it would undo this change.
-                tagger = getattr(self.mw, "tagger_page", None)
-                if tagger is not None and hasattr(tagger, "load_values"):
-                    tagger.load_values()
         finally:
             done = payload.get("done")
             if done is not None:
@@ -233,21 +228,13 @@ class AppBridge(QObject):
                 return
             self.mw.settings.update(result["settings"])
             answer.update(ok=True, backup=str(result.get("backup") or ""), skipped=list(result.get("skipped") or []))
-            # the old pages keep copies in their widgets (and write them back): show them the new values
-            for page in (getattr(self.mw, "tagger_page", None), getattr(self.mw, "settings_page", None)):
-                if page is not None and hasattr(page, "load_values"):
-                    try:
-                        page.load_values()
-                    except Exception as exc:   # the profile is in place; a page that did not refresh is not a failed import
-                        _LOG.warning("page %s did not reload the imported settings: %s: %s",
-                                     type(page).__name__, type(exc).__name__, exc)
         finally:
             done = payload.get("done")
             if done is not None:
                 done.set()
 
     def _do_open_settings(self, _payload) -> None:
-        self.mw.go("Settings")
+        self.page.open_path("/settings")
 
     def _do_open_card(self, payload) -> None:
         """«Уже есть» clicked in the browser extension (v5.31): the card's page, the window in front (out of the
@@ -290,7 +277,7 @@ class AppBridge(QObject):
 
     def _do_drag_file(self, payload) -> None:
         """Drag a copy of the file out of the window, with its tags and sources written into it
-        (ExifTool), as the old gallery did.
+        (ExifTool).
 
         The copy is made in a background thread — a big video takes seconds, and the window must
         not freeze meanwhile — and the drag starts when it is ready, if the mouse button is still

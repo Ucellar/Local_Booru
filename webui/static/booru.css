@@ -874,6 +874,8 @@ html[data-skin="nhentai"] .taglist-r34 { display: none; }
 }
 /* (v5.30) a part the library has not, from the site: a dashed frame, «api» in its top right corner */
 .post-sets .post-set-item.remote img { border-style: dashed; border-color: #8fb8ff; opacity: 0.85; }
+.post-sets .post-set-item.remote.parent img { border-color: #3cd33c; }
+.post-sets .post-set-item.remote.child img { border-color: #f0a000; }
 .post-sets .post-set-item.remote > a:hover img { opacity: 1; }
 .post-sets .post-set-api {
   position: absolute;

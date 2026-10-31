@@ -1,7 +1,7 @@
 """The manga library: what lies in the manga folder, read without Qt (for the web pages).
 
-The rules are those of the old manga page (``ui/manga/helpers.py``), so the same folder shows the
-same titles:
+The rules are those of the old window's manga page (``ui/manga/helpers.py``, gone in v5.40), so a
+folder shows the same titles as it did there:
 
 * every entry at the top of the manga folder is one title;
 * a ``.zip``/``.cbz`` file is one title, its pages are the pictures inside;
@@ -115,6 +115,7 @@ class Manga:
     groups: dict = field(default_factory=dict)         # group -> [tag]
     mtime: float = 0.0
     title_japanese: str = ""
+    title_pretty: str = ""                             # nhentai's title without brackets (core/manga_works.py)
     source_url: str = ""
     chapters: list = field(default_factory=list)       # Manga (a series' chapters)
     parent_id: str = ""
@@ -273,6 +274,7 @@ def _apply_meta(manga: Manga, data) -> None:
     if isinstance(title, dict):
         manga.title = title.get("english") or title.get("pretty") or title.get("japanese") or manga.title
         manga.title_japanese = title.get("japanese") or manga.title_japanese
+        manga.title_pretty = title.get("pretty") or manga.title_pretty
     elif isinstance(title, str) and title.strip():
         manga.title = title.strip()
     elif isinstance(data.get("name"), str) and data["name"].strip():

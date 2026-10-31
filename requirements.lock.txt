@@ -13,3 +13,4 @@ python-mpv==1.0.8
 cloudscraper==1.2.71
 watchdog==6.0.0
 onnxruntime==1.31.1
+av==18.1.0

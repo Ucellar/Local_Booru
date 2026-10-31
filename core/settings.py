@@ -377,7 +377,9 @@ DEFAULT_SETTINGS = {
     "enable_md5_lookup": True,
     "enable_saucenao": True,
     "enable_iqdb": True,
-    "reverse_saucenao_first": True,         # reverse search: SauceNAO first, iqdb.org last (core/parser/reverse)
+    "reverse_saucenao_first": False,        # (v5.44.3) reverse search: iqdb.org and the others first, SauceNAO after them
+                                            # (its day's searches for what they did not find); True — SauceNAO first
+    "reverse_order_v5443": True,            # the order of v5.44.3 is in (load_settings: a file without it is older)
     "enable_danbooru_iqdb": False,
     "enable_e621_iqdb": True,
     "e621_browser_api_fallback": True,
@@ -411,8 +413,12 @@ DEFAULT_SETTINGS = {
     "manga_root": "",
     "video_root": "",                   # the folder of series for the tab «Видео» ("" — «video» in the archive)
     "video_tab_seconds": 60,            # a video card longer than this is on the tab «Видео», not in the gallery
+    "video_av1_own": "",                # (v5.44) the program's own player shows AV1 here: "yes", "no" (learnt), "" — not known
     "video_source_aniliberty": True,    # «Скачать с сайта»: a title without video of its own (YummyAnime) — on AniLiberty
     "aniliberty_url": "https://aniliberty.top",   # its address (core/video_sources; anilibria.top is its mirror)
+    "video_source_dubs": True,          # «Скачать с сайта»: YummyAnime's title — every voice-over from Kodik and CVH
+    "yummy_api_url": "https://api.yani.tv",       # YummyAnime's API (core/video_dubs)
+    "video_dub_merge": True,            # … the voice-overs of each episode into one MKV (core/video_merge): the page's tick
     "post_sets_enabled": True,          # the сборка over a card's picture (webui/pages/post_sets.py)
     "card_sets_tiles": True,            # a сборка is one tile of the gallery (core/card_sets.py)
     "card_sets_auto": True,             # the program puts сборки together by itself
@@ -492,10 +498,11 @@ DEFAULT_SETTINGS = {
     # disabled; by default v326 lets the user put any page inside any page.
     "interface_free_navigation": True,
     "interface_modules": {},
-    # The program window: "web" — the web pages in the whole window (ui/web_shell.py), "classic" — the old
-    # window with the sidebar of Qt pages (ui/main_window.py).  Read at start (app._make_window).
+    # The program window: "web" — the web pages in the whole window (ui/web_shell.py), "browser" — the pages in the
+    # usual browser and a small window that keeps the program running (where Qt WebEngine does not work; chosen by the
+    # program itself after a failure too).  Read at start (ui/program_window.py).  "classic" (the old window) — gone.
     "ui_shell": "web",
-    "window_maximized": True,               # (v5.28) the new window opens maximized unless the person left it smaller
+    "window_maximized": True,               # (v5.28) the window opens maximized unless the person left it smaller
     # How the window's built-in browser (Qt WebEngine) draws: "auto" — with the graphics card, "off" — without it
     # (Chromium's --disable-gpu; for drivers that leave half-drawn frames).  Read at start, before the application
     # object (ui/program_window.browser_flags).
@@ -736,11 +743,20 @@ def load_settings():
                     except (TypeError, ValueError):
                         loaded["saucenao_quota_spread_seconds"] = 3600
                     loaded["saucenao_spread_v525"] = True
+                # v5.40: the old window (ui_shell "classic") is gone: the program window (or, chosen, the browser).
+                if str(loaded.get("ui_shell") or "").strip().lower() not in ("web", "browser"):
+                    loaded["ui_shell"] = "web"
                 # v5.28: «Разрешить скачивание новых медиа в этой сессии?» at every start — the person asked it gone:
                 # once off; the switch is in «Настройки» (downloads stay allowed, as the question's default was).
                 if not loaded.get("session_downloads_prompt_v528"):
                     loaded["session_media_downloads_prompt"] = False
                     loaded["session_downloads_prompt_v528"] = True
+                # v5.44.3: reverse search — IQDB first, SauceNAO after it, as the old program's stages (the person:
+                # «очередью iqdb>snao»: the day's few searches of SauceNAO only for what IQDB did not find).  Once:
+                # «Сайты и ключи → Порядок» can turn it round again.
+                if not (isinstance(raw_loaded, dict) and raw_loaded.get("reverse_order_v5443")):
+                    loaded["reverse_saucenao_first"] = False
+                    loaded["reverse_order_v5443"] = True
                 # v5.1: the new gallery and manga go into the menu right before the old ones.
                 if not loaded.get("webui_menu_v51_placed"):
                     order = list(loaded.get("interface_module_order") or [])
@@ -800,6 +816,20 @@ def _settings_json(settings) -> str:
     """Settings as written to disk: runtime keys ("_parser_running", callbacks…) never are."""
     return json.dumps({k: v for k, v in settings.items() if not str(k).startswith("_")},
                       ensure_ascii=False, indent=2)
+
+
+def write_archive_settings(settings, target) -> Path:
+    """The settings of an archive made from «Документы» (``core/archive_create.py``, at a start, before the base opens):
+    ``settings`` with the archive's own folders (``separate_settings_storage``, ``settings_storage_dir`` — ``target``,
+    ``output_dir`` — the ``output`` beside it) as ``<target>/config/app_settings.json``.  Nothing else is written: the
+    settings in «Документах» stay as they were."""
+    fixed = _drop_removed_reverse_services(settings)
+    for retired in _RETIRED_LIVE_SETTINGS:
+        fixed.pop(retired, None)
+    fixed = _canonicalize_new_portable_workspace(fixed, target)
+    canonical = Path(target) / "config" / "app_settings.json"
+    _atomic_write_settings(canonical, _settings_json(fixed))
+    return canonical
 
 
 def _existing_archive_settings_root(settings):

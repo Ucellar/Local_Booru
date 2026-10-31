@@ -1362,6 +1362,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/extension/check":
             self._send_json(200, check_items(self.settings, data.get("items") or []))
             return
+        if path == "/extension/manga":
+            # (v5.44, extension 0.9.0) the galleries of a manga site's page: the manga folder has this one, or
+            # another version of its work (another language, another upload)
+            from core.manga_works import check as manga_check
+            self._send_json(200, manga_check(self.settings, data.get("items") or []))
+            return
         if path == "/extension/index":
             # The extension's copy of «what the library has», for marking cards while the program is closed.
             from core.browser_companion_index import build_index

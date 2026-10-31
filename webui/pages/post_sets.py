@@ -5,6 +5,10 @@ marked — with «изменить» (move, take out, name, take apart, add card
 
 ``/api/post/<id>/sets`` — the card's сборка as data; ``/api/sets/{remove,dissolve,move,rename,gather}`` — the edits.
 
+(v5.44.1) A card of no сборка whose post has a family on a site the grabber searches — a child (its parent known), or
+any other (its children asked) — gets the same box, hidden until the site shows parts the library has not
+(``card_sets.lone_family``, ``set_remote.family``): one picture of three of a family was alone in the library.
+
 (v5.30, «серия» and «одна работа» v5.32) The parts of a сборка the library has not (``core/set_remote.py``):
 ``/api/post/<id>/sets/remote`` — their tiles with «api» and where they go among the cards (post_sets.js puts them in),
 ``/sets/media`` — their pictures, ``/post/remote`` — the page of one (its picture, its tags, «Скачать»),
@@ -69,6 +73,8 @@ def children(n: int) -> str:
 
 def headline(found: dict, image_id: int) -> str:
     """What the box says first: «У этой карточки 3 дочерних», «Эта карточка — дочерняя…», «Серия: 12 карточек»…"""
+    if found.get("lone"):                       # the rest of the family is on the site: «нет в библиотеке: N (api)»
+        return "Эта карточка — дочерняя" if found.get("child") else "У этой карточки есть дочерние"
     count = len(found["members"])
     kind = found["kind"]
     parents = set(found.get("parents") or [])
@@ -104,22 +110,45 @@ def _grab_link(settings: dict, found: dict) -> str:
     return url("/grab", q=f"parent:{post}", sites=site) if site in hosts else ""
 
 
+def lone(settings: dict, image_id: int) -> dict | None:
+    """The family on a site of a card of no сборка (``card_sets.lone_family``) — when the missing parts are asked of
+    the sites at all («Недостающие части сборки — с сайта»)."""
+    from core import card_sets
+    if not (settings or {}).get("card_sets_remote", True):
+        return None
+    try:
+        from core.grabber.search import searchable_sites
+        sites = [host for host, _label in searchable_sites(settings)]
+    except Exception as exc:  # the site table: no family asked then
+        _LOG.debug("grabber sites: %s", exc)
+        return None
+    return card_sets.lone_family(settings, image_id, sites)
+
+
+def card_family(settings: dict, image_id: int) -> dict | None:
+    """The card's сборка (``card_sets.set_of``), or its family on a site when it is in none (:func:`lone`)."""
+    from core import card_sets
+    found = card_sets.set_of(settings, image_id)
+    return found if found is not None else lone(settings, image_id)
+
+
 # ── the box over the picture ───────────────────────────────────────────────────────────
 def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_current: str = "") -> str:
     """The card's сборка over its picture ("" — no сборка, or switched off).  Drawn here; post_sets.js hides it,
     moves cards, takes them out, puts in the parts the library has not (``remote_current`` — the one whose page this
-    is: /post/remote)."""
-    from core import card_sets
+    is: /post/remote).  A card of no сборка — its family on a site (:func:`lone`): hidden until the site shows parts
+    the library has not, nothing to change in it."""
     from webui import prefs
     if not enabled(req.settings):
         return ""
     try:
-        found = card_sets.set_of(req.settings, image_id)
+        found = card_family(req.settings, image_id)
     except sqlite3.Error as exc:                     # an old or locked base: the page goes on without it
         _LOG.debug("set of %s: %s", image_id, exc)
         return ""
     if not found or found["index"] < 0:
         return ""
+    alone = bool(found.get("lone"))
     hidden = prefs.load().get("sets_box") == "hidden"
     parents = set(found.get("parents") or [])
     count = len(found["members"])
@@ -128,6 +157,12 @@ def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_curre
         mid = int(member["id"])
         current = mid == int(image_id) and not remote_current
         role = (" parent" if mid in parents else " child") if found["kind"] == "parent" else ""
+        controls = "" if alone else (
+            f'<span class="post-set-ctl">'
+            f'<button type="button" data-set-act="left" title="Сдвинуть влево" aria-label="Сдвинуть влево">‹</button>'
+            f'<button type="button" data-set-act="remove" title="Убрать из сборки" aria-label="Убрать из сборки">×</button>'
+            f'<button type="button" data-set-act="right" title="Сдвинуть вправо" aria-label="Сдвинуть вправо">›</button>'
+            f'</span>')
         href = url(f"/post/{mid}", i=index if index >= 0 else None, **ctx)
         what = "эта карточка" if current else ("родитель" if mid in parents else f"карточка {mid}")
         video = '<span class="post-set-play" aria-hidden="true">▶</span>' if member.get("is_video") else ""
@@ -136,11 +171,7 @@ def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_curre
             f'<div class="post-set-item{role}{" current" if current else ""}" data-id="{mid}">'
             f'<a href="{esc(href)}" title="{esc(what)}"{mark}>'
             f'<img src="{esc(data.media_url("thumb", member))}" alt="" loading="lazy" decoding="async">{video}</a>'
-            f'<span class="post-set-ctl">'
-            f'<button type="button" data-set-act="left" title="Сдвинуть влево" aria-label="Сдвинуть влево">‹</button>'
-            f'<button type="button" data-set-act="remove" title="Убрать из сборки" aria-label="Убрать из сборки">×</button>'
-            f'<button type="button" data-set-act="right" title="Сдвинуть вправо" aria-label="Сдвинуть вправо">›</button>'
-            f'</span></div>')
+            f'{controls}</div>')
     grab = _grab_link(req.settings, found)
     grab_html = f' (<a href="{esc(grab)}">все части — в граббере</a>)' if grab else ""
     mine = (' <span class="post-set-mine" title="Эту сборку меняли вы: программа её не пересобирает, только добавляет '
@@ -150,17 +181,10 @@ def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_curre
     if remote_enabled(req.settings, found):
         remote = (f' data-remote="{esc(url(f"/api/post/{int(image_id)}/sets/remote", i=index if index >= 0 else None, **ctx))}"'
                   + (f' data-remote-current="{esc(remote_current)}"' if remote_current else ""))
-    return (
-        f'<section class="post-sets{" collapsed" if hidden else ""}" data-set="{int(found["id"])}" '
-        f'data-post="{int(image_id)}" data-kind="{esc(found["kind"])}"{remote} aria-label="Сборка">'
-        f'<p class="post-set-head"><span class="post-set-what">{esc(headline(found, int(image_id)))}</span>'
-        f'{mine}<span class="post-set-place"> · {found["index"] + 1} из {count}</span>'
-        f'<span class="post-set-missing" hidden></span>{grab_html} '
-        f'<button type="button" class="link post-set-toggle" aria-expanded="{"false" if hidden else "true"}">'
-        f'{"показать »" if hidden else "« скрыть"}</button>'
+    edit = "" if alone else (
         f'<span class="post-set-edit-wrap"> · <button type="button" class="link post-set-edit" aria-pressed="false">'
-        f'изменить</button></span></p>'
-        f'<div class="post-set-thumbs">{"".join(items)}</div>'
+        f'изменить</button></span>')
+    tools = "" if alone else (
         f'<div class="post-set-tools" hidden>'
         f'<label>Название <input type="text" name="title" maxlength="200" value="{esc(found.get("title") or "")}" '
         f'placeholder="без названия"></label> <button type="button" data-set-act="rename">Сохранить</button> '
@@ -169,7 +193,18 @@ def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_curre
         f'<span class="action-status" role="status"></span>'
         f'<p class="hint">‹ › — переставить, × — убрать карточку из сборки (сама программа её больше в сборки не '
         f'положит). Сборку, которую вы изменили, программа не пересобирает — только добавляет в конец новые части.</p>'
-        f'</div></section><script src="/static/post_sets.js" defer></script>')
+        f'</div>')
+    waiting = ' data-lone="1" hidden' if alone else ""
+    return (
+        f'<section class="post-sets{" collapsed" if hidden else ""}" data-set="{int(found["id"])}" '
+        f'data-post="{int(image_id)}" data-kind="{esc(found["kind"])}"{remote}{waiting} aria-label="Сборка">'
+        f'<p class="post-set-head"><span class="post-set-what">{esc(headline(found, int(image_id)))}</span>'
+        f'{mine}<span class="post-set-place"> · {found["index"] + 1} из {count}</span>'
+        f'<span class="post-set-missing" hidden></span>{grab_html} '
+        f'<button type="button" class="link post-set-toggle" aria-expanded="{"false" if hidden else "true"}">'
+        f'{"показать »" if hidden else "« скрыть"}</button>{edit}</p>'
+        f'<div class="post-set-thumbs">{"".join(items)}</div>{tools}'
+        f'</section><script src="/static/post_sets.js" defer></script>')
 
 
 # ── data and edits ─────────────────────────────────────────────────────────────────────
@@ -299,14 +334,18 @@ def remote_tiles(req: Request) -> Response:
     if not enabled(req.settings):
         return Response.json(empty)
     try:
-        found = card_sets.set_of(req.settings, image_id)
+        found = card_family(req.settings, image_id)
     except sqlite3.Error as exc:
         _LOG.debug("set of %s: %s", image_id, exc)
         return Response.json(empty)
     if not remote_enabled(req.settings, found):
         return Response.json(empty)
     try:
-        fam = set_remote.parts(req.settings, found["id"])
+        if found.get("lone"):                 # a card of no сборка: its family on the site (v5.44.1)
+            site, root = found["root"]
+            fam = set_remote.family(req.settings, site, root, children_only=not found.get("child"))
+        else:
+            fam = set_remote.parts(req.settings, found["id"])
         missing = fam.missing()
     except set_remote.FamilyError as exc:
         return Response.json(dict(empty, note=str(exc)))
@@ -327,7 +366,9 @@ def remote_tiles(req: Request) -> Response:
         what = f"пост {number} на {fam.site}: этой части нет в библиотеке{trash} — показана с сайта через его API"
         video = '<span class="post-set-play" aria-hidden="true">▶</span>' if any(e.get("video") for e in card["entries"]) else ""
         mark = ' aria-current="true"' if is_current else ""
-        html = (f'<div class="post-set-item remote{" current" if is_current else ""}" data-remote="{esc(card["key"])}">'
+        # a family's parent and children framed as the site frames them (green, orange), dashed — from the site
+        role = (" parent" if number == fam.parent else " child") if found["kind"] == "parent" and fam.parent else ""
+        html = (f'<div class="post-set-item remote{role}{" current" if is_current else ""}" data-remote="{esc(card["key"])}">'
                 f'<a href="{esc(_remote_href(fam, card, image_id, index, ctx))}" title="{esc(what)}"{mark}>'
                 f'<img src="{esc(_remote_media(fam, card, "preview"))}" alt="" loading="lazy" decoding="async">{video}'
                 f'<span class="post-set-api" aria-label="с сайта, через API">api</span></a></div>')

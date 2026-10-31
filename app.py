@@ -125,7 +125,7 @@ except Exception:
 
 _startup_log("импорт PySide6 / Qt")
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QIcon, QPixmapCache
+from PySide6.QtGui import QIcon
 _startup_log("PySide6 импортирован")
 
 from core.paths import ERROR_LOG_FILE
@@ -281,6 +281,64 @@ def _finish_archive_move(settings: dict) -> bool:
     return False
 
 
+def _finish_archive_create(settings: dict) -> bool:
+    """«Создать архив» (core/archive_create.py): ordered on «Настройки» while the base and the settings were in
+    «Документах»; here, before anything opens the base, it is made after one more question.  True — the program starts
+    again on the new archive (this process ends)."""
+    from core import archive_create
+    order = archive_create.pending()
+    if order is None:
+        return False
+    if os.environ.get("LOCAL_BOORU_SKIP_CREATE_DIALOG", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox, QProgressDialog
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Question)
+    box.setWindowTitle("Создание архива")
+    box.setText(archive_create.describe(order))
+    if order.get("error"):
+        box.setInformativeText(f"В прошлый раз архив не создан: {order['error']}")
+    go = box.addButton("Создать сейчас", QMessageBox.AcceptRole)
+    drop = box.addButton("Отменить", QMessageBox.DestructiveRole)
+    later = box.addButton("Не сейчас", QMessageBox.RejectRole)
+    box.setDefaultButton(go)
+    box.setEscapeButton(later)
+    box.exec()
+    clicked = box.clickedButton()
+    said = archive_create.answer(order, "yes" if clicked is go else ("cancel" if clicked is drop else "later"))
+    if said == "cancel":
+        QMessageBox.information(None, "Создание архива", "Архив не создаётся: программа работает с папкой в "
+                                "«Документах», как раньше. Создать его можно в «Настройках» → «Папки».")
+        return False
+    if said != "yes":
+        return False
+    dialog = QProgressDialog("Создаю архив…", "", 0, 1000)
+    dialog.setWindowTitle("Создание архива")
+    dialog.setCancelButton(None)
+    dialog.setWindowModality(Qt.ApplicationModal)
+    dialog.setMinimumDuration(0)
+    dialog.setAutoClose(False)
+    dialog.show()
+    QApplication.processEvents()
+
+    def progress(text: str, done: int = 0, total: int = 0) -> None:
+        dialog.setLabelText(text)
+        dialog.setValue(int(1000 * done / total) if total else 0)
+        QApplication.processEvents()
+    result = archive_create.finish(order, settings, progress=progress, log=_startup_log)
+    dialog.close()
+    if result.get("done"):
+        QMessageBox.information(None, "Создание архива", f"Архив создан:\n{result['archive']}\n\n"
+                                "Программа сейчас откроется с ним заново. Папка в «Документах» осталась как была.")
+        _restart_self()
+        return True
+    QMessageBox.warning(None, "Создание архива", f"Архив не создан: {result.get('error') or 'неизвестно почему'}\n\n"
+                        "Программа откроется как раньше, с папкой в «Документах», в ней ничего не изменилось. При "
+                        "следующем запуске программа спросит снова; отменить можно в «Настройках» → «Папки».")
+    return False
+
+
 def _restart_self() -> None:
     """Start a fresh copy of the program (paths are resolved once per process)."""
     import subprocess
@@ -326,11 +384,14 @@ def main() -> int:
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
-    # «Рисовать страницы — без видеокарты»: Qt WebEngine takes its switches before the application object.
+    # «Рисовать страницы — без видеокарты»: Qt WebEngine takes its switches before the application object (and after a
+    # start whose window died before its first page, this one draws without the graphics card: ui/program_window.py).
     try:
-        from ui.program_window import apply_browser_flags
+        from ui.program_window import apply_browser_flags, gpu_turned_off
         if apply_browser_flags():
-            _startup_log("встроенный браузер рисует без видеокарты («Настройки» → «Окно программы»)")
+            _startup_log("встроенный браузер рисует без видеокарты ("
+                         + ("в прошлый раз окно не показало ни одной страницы)" if gpu_turned_off()
+                            else "«Настройки» → «Окно программы»)"))
             _applog.info("Built-in browser: drawing without the graphics card (webview_gpu=off)")
     except Exception as _flags_error:
         _startup_log(f"режим отрисовки встроенного браузера не прочитан: {_flags_error}")
@@ -339,7 +400,7 @@ def main() -> int:
     try:
         from PySide6 import QtWebEngineWidgets as _webengine_preload  # noqa: F401
     except ImportError as _webengine_error:
-        _startup_log(f"Qt WebEngine недоступен ({_webengine_error}): новая галерея откроется в браузере")
+        _startup_log(f"Qt WebEngine недоступен ({_webengine_error}): страницы программы откроются в браузере")
 
     _startup_log("создание QApplication")
     app = QApplication(sys.argv)
@@ -348,7 +409,7 @@ def main() -> int:
         _STARTUP_DONE = True
         return 3
     try:
-        _startup_log("загрузка настроек для QPixmapCache")
+        _startup_log("загрузка настроек для первых вопросов")
         _settings_for_pixmap = load_settings()
         try:
             from core.language_bootstrap import apply_language_choice, should_show_language_dialog
@@ -392,14 +453,8 @@ def main() -> int:
                 _applog.warning("Startup download-policy dialog failed: %s", _download_policy_error)
             except Exception:
                 pass
-        _pix_mb = int(_settings_for_pixmap.get("pixmap_cache_mb", 128) or 128)
-        _pix_mb = max(32, min(512, _pix_mb))
-        QPixmapCache.setCacheLimit(_pix_mb * 1024)
-    except Exception:
-        try:
-            QPixmapCache.setCacheLimit(128 * 1024)
-        except Exception:
-            pass
+    except Exception as _first_settings_error:    # the window reads the settings again and says what is wrong
+        _applog.warning("Settings not read for the questions at the start: %s", _first_settings_error)
     app.setStyle("Fusion")
     app.setApplicationName("Local Booru")
     app.setOrganizationName("Local Booru")
@@ -407,16 +462,6 @@ def main() -> int:
     # Install global Qt + Python exception handler
     _startup_log("установка глобального обработчика ошибок")
     install_global_exception_handler(app)
-
-    # Start thumbnail service (background QThreadPool, 3 workers)
-    _startup_log("запуск thumbnail service")
-    from core.thumb_service import ThumbnailService
-    thumb_svc = ThumbnailService.instance(max_threads=3)
-    try:
-        from core.shutdown import register as _shutdown_register
-        _shutdown_register("thumbnail service", thumb_svc.stop)
-    except Exception:
-        pass
 
     _db_startup_results = {}
     _sqlite_writes_wait_for_health = False
@@ -436,6 +481,13 @@ def main() -> int:
                 return 5
         except Exception as _move_error:
             _applog.error("Archive move at start failed: %s", _move_error)
+        # «Создать архив» (the base and the settings still in «Документах»): copied into the archive the same way
+        try:
+            if _finish_archive_create(_startup_settings):
+                _STARTUP_DONE = True
+                return 5
+        except Exception as _create_error:
+            _applog.error("Archive creation at start failed: %s", _create_error)
         _reset_result = None
         try:
             from core.library_reset import perform_pending_reset
@@ -477,6 +529,17 @@ def main() -> int:
         _sqlite_writes_wait_for_health = bool(_db_startup_results.get("write_deferred_until_health"))
         if _db_startup_results.get("write_blocked") and not _sqlite_writes_wait_for_health:
             raise RuntimeError("SQLite is in read-only safety mode: " + str(_db_startup_results.get("db_integrity", "integrity check failed")))
+        if _sqlite_writes_wait_for_health:
+            # (v5.44.5) the base is older than the program and its update waits for the background check: the pages
+            # say so and wait (they need the new tables) instead of «no such table»
+            try:
+                from core.database.connection import schema_behind, set_pages_wait
+                if schema_behind(_startup_settings):
+                    set_pages_wait("Программа в прошлый раз закрылась аварийно, поэтому сначала проверяет базу, а потом "
+                                   "обновит её до новой версии. Страница откроется сама, когда это закончится.")
+                    _startup_log("страницы ждут обновления базы (после фоновой проверки)")
+            except Exception as _behind_error:   # not knowing it changes nothing: the pages open as before
+                _applog.warning("Schema version not read at start: %s", _behind_error)
         if not _sqlite_writes_wait_for_health:
             _startup_log("SQLite writable schema migrations")
             from core.database.connection import ensure_database_schema
@@ -521,10 +584,6 @@ def main() -> int:
                 _applog.warning("NO_MATCH migration failed: %s", _nm_error)
         else:
             _startup_log("SQLite записи отложены до фоновой проверки; startup DB-миграции пропущены")
-        thumb_svc.configure(
-            max_threads=int(_startup_settings.get("thumb_threads", 3) or 3),
-            memory_items=int(_startup_settings.get("thumb_memory_items", 400) or 400),
-        )
         if not _sqlite_writes_wait_for_health:
             try:
                 from core.stability import record_health_event
@@ -691,6 +750,10 @@ def main() -> int:
                     )
                     if _res.get("write_blocked"):
                         _startup_log("фоновая проверка SQLite нашла ошибку; запись заблокирована")
+                        from core.database.connection import pages_wait, set_pages_wait
+                        if pages_wait():
+                            set_pages_wait("Проверка базы нашла ошибку, поэтому обновить её до новой версии нельзя. "
+                                           "Подробности — в журнале программы (окно «запуск и журнал»).", failed=True)
                     else:
                         _startup_log("фоновая проверка SQLite завершена")
                         try:
@@ -698,6 +761,8 @@ def main() -> int:
                             _startup_log("SQLite writable schema migrations после фоновой проверки")
                             _schema_status = ensure_database_schema(_ls(), force=True)
                             _db_schema_state["ready"] = True
+                            from core.database.connection import set_pages_wait
+                            set_pages_wait("")
                             _startup_log(
                                 f"SQLite schema ready: v{int(_schema_status.get('current', 0) or 0)}/"
                                 f"v{int(_schema_status.get('target', 0) or 0)}"
@@ -712,6 +777,10 @@ def main() -> int:
                         except Exception as _schema_after_health_error:
                             _db_schema_state["ready"] = False
                             _db_schema_state["error"] = str(_schema_after_health_error)
+                            from core.database.connection import pages_wait, set_pages_wait
+                            if pages_wait():
+                                set_pages_wait(f"Базу не удалось обновить до новой версии: {_schema_after_health_error}",
+                                               failed=True)
                             _applog.warning(
                                 "Deferred SQLite schema migration failed: %s",
                                 _schema_after_health_error,
@@ -773,11 +842,7 @@ def main() -> int:
     except Exception as _shutdown_error:
         _shutdown_join_ok = False
         _shutdown_join_alive = ["shutdown manager error"]
-        try:
-            _applog.warning("Shutdown manager failed: %s", _shutdown_error)
-            thumb_svc.stop()
-        except Exception:
-            pass
+        _applog.warning("Shutdown manager failed: %s", _shutdown_error)
 
     # Post-UI maintenance that used to run in MainWindow.closeEvent().  Keep it
     # outside the GUI event handler: large thumbnail caches, external SSD
@@ -861,6 +926,11 @@ def _selfcheck() -> int:
         from PySide6 import QtWebEngineWidgets  # noqa: F401
     except Exception as exc:
         failed.append(f"PySide6.QtWebEngineWidgets: {type(exc).__name__}: {exc}")
+    try:                                     # the voice-overs into one file (core/video_merge): PyAV and its coders
+        import av
+        av.codec.Codec("aac", "w")
+    except Exception as exc:
+        failed.append(f"av (PyAV): {type(exc).__name__}: {exc}")
     text = f"modules: {len(set(names))}, failed: {len(failed)}\n" + "\n".join(failed)
     out = os.environ.get("LOCAL_BOORU_SELFCHECK_OUT", "").strip()
     if out:

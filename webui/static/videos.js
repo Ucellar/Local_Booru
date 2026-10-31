@@ -205,6 +205,149 @@
     }
     window.addEventListener("pagehide", () => send(false, true));
     document.addEventListener("visibilitychange", () => { if (document.hidden) send(false, true); });
+    setupSkips(holder);
+  }
+
+  // ── «Пропустить опенинг» (on the left) / «Пропустить эндинг» (on the right): shown only while it plays; their
+  // stretches marked on the bar in the look's colour.  A series' episode only (the page gives data-skips then).
+  // ── «Озвучка» under the episodes: the voice-overs of the episode's file; the program's player switches at once,
+  // before the play the choice is kept for the series (its play starts with it) ──
+  function setupDubs() {
+    const row = document.querySelector(".vdubs");
+    if (!row) return;
+    const now = row.querySelector(".vdubs-now");
+    const name = row.querySelector(".vdubs-name");
+    const list = row.querySelector(".vdubs-list");
+    const options = [...list.querySelectorAll(".vdub")];
+    const mark = (title) => {
+      for (const o of options) o.setAttribute("aria-selected", o.dataset.title === title ? "true" : "false");
+      name.textContent = title;
+    };
+    const open = (on) => {
+      list.hidden = !on;
+      now.setAttribute("aria-expanded", on ? "true" : "false");
+      if (on) (options.find((o) => o.getAttribute("aria-selected") === "true") || options[0]).focus();
+    };
+    now.addEventListener("click", (event) => {
+      event.preventDefault();
+      open(list.hidden);
+    });
+    document.addEventListener("click", (event) => { if (!list.hidden && !row.contains(event.target)) open(false); });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !list.hidden) {
+        open(false);
+        now.focus();
+      } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !list.hidden) {
+        event.preventDefault();
+        const at = options.indexOf(document.activeElement);
+        const next = options[(at + (event.key === "ArrowDown" ? 1 : options.length - 1)) % options.length];
+        if (next) next.focus();
+      }
+    });
+    list.addEventListener("click", (event) => {
+      const option = event.target.closest(".vdub");
+      if (!option) return;
+      const title = option.dataset.title;
+      mark(title);
+      open(false);
+      now.focus();
+      const player = window.LocalBooru && window.LocalBooru.nativeVideo;
+      const tracks = player && player.audioTracks ? player.audioTracks() : [];
+      const n = tracks.findIndex((t) => String(t.title || "").trim() === title);
+      if (n >= 0) player.chooseAudio(n);                     // playing: switched now (the program keeps it)
+      else postJson("/api/videos/tracks", { episode: row.dataset.episode, audio: title }).catch(() => {});
+    });
+    const box = document.querySelector(".native-video[data-episode]");
+    if (box) {
+      box.addEventListener("lb-video-state", (event) => {
+        const st = event.detail || {};
+        const track = (st.audio_tracks || [])[Number(st.audio)];
+        if (track && list.hidden) {
+          const title = String(track.title || "").trim();
+          if (title && options.some((o) => o.dataset.title === title)) mark(title);
+        }
+      });
+    }
+  }
+  setupDubs();
+
+  function setupSkips(holder) {
+    let skips = {};
+    try { skips = JSON.parse(holder.dataset.skips || "{}") || {}; } catch (_) { skips = {}; }
+    const kinds = ["opening", "ending"].filter((k) => Array.isArray(skips[k]) && skips[k][1] > skips[k][0]);
+    if (!kinds.length) return;
+    const screen = holder.matches("video") ? holder.closest(".vscreen") : holder.querySelector(".nv-screen");
+    const buttons = {};
+    for (const kind of kinds) {
+      const button = screen && screen.querySelector('.nv-skip[data-skip="' + kind + '"]');
+      if (!button) continue;
+      buttons[kind] = button;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const to = skips[kind][1];
+        if (holder.matches("video")) holder.currentTime = to;
+        else if (window.LocalBooru && window.LocalBooru.nativeVideo) window.LocalBooru.nativeVideo.seekTo(to);
+        button.hidden = true;
+      });
+    }
+    // the bar: a thin stripe under the track of the program's player; under the browser's player a strip of its own
+    let marked = 0;
+    const mark = (duration) => {
+      if (!(duration > 0) || Math.abs(duration - marked) < 0.5) return;
+      marked = duration;
+      const stops = [];
+      for (const kind of kinds) {
+        const a = Math.max(0, Math.min(100, 100 * skips[kind][0] / duration));
+        const b = Math.max(0, Math.min(100, 100 * skips[kind][1] / duration));
+        stops.push("transparent " + a.toFixed(2) + "%", "var(--accent, #4a90d9) " + a.toFixed(2) + "%",
+          "var(--accent, #4a90d9) " + b.toFixed(2) + "%", "transparent " + b.toFixed(2) + "%");
+      }
+      const image = "linear-gradient(to right, transparent 0%, " + stops.join(", ") + ", transparent 100%)";
+      if (holder.matches("video")) {
+        let strip = screen && screen.parentElement.querySelector(".vskips");
+        if (!strip && screen) {
+          strip = document.createElement("div");
+          strip.className = "vskips";
+          strip.setAttribute("aria-hidden", "true");
+          screen.insertAdjacentElement("afterend", strip);
+        }
+        if (strip) strip.style.backgroundImage = image;
+      } else {
+        // a range's own look paints no background: a stripe of its own under it, in a wrapper the size of the range
+        const seek = holder.querySelector(".nv-seek");
+        let marks = holder.querySelector(".nv-marks");
+        if (seek && !marks) {
+          const wrap = document.createElement("span");
+          wrap.className = "nv-seekwrap";
+          seek.parentNode.insertBefore(wrap, seek);
+          wrap.appendChild(seek);
+          marks = document.createElement("span");
+          marks.className = "nv-marks";
+          marks.setAttribute("aria-hidden", "true");
+          wrap.appendChild(marks);
+        }
+        if (marks) marks.style.backgroundImage = image;
+      }
+    };
+    const show = (position, duration) => {
+      mark(duration);
+      for (const kind of Object.keys(buttons)) {
+        const [a, b] = skips[kind];
+        buttons[kind].hidden = !(position >= a && position < b - 1);
+      }
+    };
+    if (holder.matches("video")) {
+      holder.addEventListener("timeupdate", () => show(holder.currentTime, holder.duration));
+      holder.addEventListener("loadedmetadata", () => mark(holder.duration));
+      mark(holder.duration || Number(skips.length) || 0);
+    } else {
+      holder.addEventListener("lb-video-state", (event) => {
+        const st = event.detail || {};
+        show(Number(st.position) || 0, Number(st.duration) || Number(holder.dataset.length) || Number(skips.length) || 0);
+      });
+      mark(Number(holder.dataset.length) || Number(skips.length) || 0);
+    }
   }
 
   // ── the chosen episode, not played yet: its frames one after another, each fading into the next ──
@@ -407,6 +550,10 @@
     const result = getJob.querySelector(".vget-result");
     const openLink = getJob.querySelector(".vget-open");
     const fileInput = box.querySelector("#vid-find-file");
+    const qualityBox = foundBox.querySelector(".vquality");
+    const qualityPick = qualityBox.querySelector("select");
+    const mergeBox = foundBox.querySelector(".vmerge");
+    const mergeTick = mergeBox.querySelector("input");
     let findId = 0;
     let found = null;                // the list shown (the search's result)
     let lastLine = "";               // the search's newest line: what it does now
@@ -419,6 +566,12 @@
     const findButtons = () => box.querySelectorAll('.vget-ask button[type="submit"], .vget-ask input[type="file"]');
     const downloading = () => RUNNING.includes(getJob.dataset.status || "");
     const tiles = () => [...list.querySelectorAll(".vtile")];
+    const manyDubs = () => !!found && found.choose === "dubs";   // every voice-over of a title: nothing ticked at first
+    // every voice-over of a title: the voice-overs and the subtitles' releases chosen in their plates, the episodes as
+    // tiles — what is downloaded is each episode ticked of each release ticked
+    const dubs = { groups: new Set(), episodes: new Set(), measured: null, measuring: 0, bar: null };
+    const isSubs = (name) => /^субтитры/i.test(name || "");
+    const natural = (a, b) => (parseFloat(a) - parseFloat(b)) || String(a).localeCompare(String(b), "ru");
 
     // ── the search: one line of what it does, its journal under «Подробности» ──
     function showStep(st, busy) {
@@ -472,7 +625,12 @@
         sourceBox.append(line);
       }
       const voices = found.voices || [];
-      if (sources.length && voices.length) {
+      if (manyDubs() && voices.length) {
+        const line = element("p", "vfound-voices");
+        line.append(element("span", "vfound-voices-label", "Только в плеерах, из которых программа не скачивает:"));
+        for (const v of voices) line.append(element("span", "voice", v.name + (v.players && v.players.length ? " (" + v.players.join(", ") + ")" : "")));
+        sourceBox.append(line);
+      } else if (sources.length && voices.length) {
         const line = element("p", "vfound-voices");
         line.append(element("span", "vfound-voices-label", "Озвучки на странице:"));
         for (const v of voices) {
@@ -507,7 +665,7 @@
       tick.type = "checkbox";
       tick.value = String(f.i);
       tick.disabled = f.have === "whole" || f.have === "other" || !!f.blocked;
-      tick.checked = !tick.disabled && f.kind === "video";
+      tick.checked = !tick.disabled && f.kind === "video" && !manyDubs();
       const quality = f.kind === "audio" ? (f.title || f.name)
         : f.quality || (f.size ? (f.stream ? "≈ " : "") + megabytes(f.size) : "");
       const said = f.blocked && !f.have ? "нет видео" : HAVE_MARKS[f.have] || "";
@@ -526,6 +684,13 @@
 
     function showTiles() {
       list.textContent = "";
+      if (manyDubs()) {
+        renderDubs();
+        return;
+      }
+      if (dubs.bar && qualityBox.parentElement !== dubs.bar.parent) {     // the plates' «Качество» back in the bar
+        dubs.bar.parent.insertBefore(qualityBox, dubs.bar.next);
+      }
       const groups = new Map();
       for (const f of found.files) {
         const key = f.kind === "audio" ? "\u0000звук" : f.group || "";
@@ -557,11 +722,242 @@
         : found.files.some((f) => f.kind === "audio") ? "Серии и звук" : "Серии";
     }
 
+    // ── every voice-over of a title: «Озвучка», «Качество», «Субтитры» — and the episodes ──
+    function dubGroups() {
+      const groups = new Map();
+      for (const f of found.files) {
+        const name = f.group || "";
+        if (!groups.has(name)) groups.set(name, { name, files: [], subs: isSubs(name) });
+        groups.get(name).files.push(f);
+      }
+      return [...groups.values()];
+    }
+
+    function groupFacts(g) {
+      const best = Math.max(0, ...g.files.map((f) => parseInt(String(f.quality || "").replace(/\D+/g, ""), 10) || 0));
+      const players = [...new Set(g.files.flatMap((f) => String(f.note || "").replace("Плеер: ", "").split(", ")))]
+        .filter(Boolean);
+      return (best ? "до " + best + "p" : "") + (players.length ? " · " + players.join(", ") : "");
+    }
+
+    // a release's kind by its name: a dubbing (the voices replaced), a voice-over (read over them), subtitles
+    const KINDS = [["dub", "Дубляж"], ["voice", "Озвучка"], ["subs", "Субтитры"]];
+    const kindOf = (name) => (/^дубляж/i.test(name || "") ? "dub" : isSubs(name) ? "subs" : "voice");
+    const shortName = (name) => String(name || "").replace(/^(озвучка|дубляж|субтитры)\s+/i, "") || name || "";
+
+    function studioPlate(groups) {
+      const kind = dubs.kind;
+      const box = element("div", "vplate");
+      box.dataset.plate = "studios";
+      const now = element("button", "vplate-now");
+      now.type = "button";
+      now.setAttribute("aria-expanded", "false");
+      now.append(element("span", "vplate-label", (KINDS.find((k) => k[0] === kind) || KINDS[1])[1]),
+        element("b", "vplate-value", ""));
+      const menu = element("div", "vplate-menu");
+      menu.hidden = true;
+      const tools = element("div", "vplate-tools");
+      const all = element("button", "link", "отметить все");
+      all.type = "button";
+      all.dataset.plateAll = kind;
+      const none = element("button", "link", "снять все");
+      none.type = "button";
+      none.dataset.plateNone = kind;
+      tools.append(all, none);
+      menu.append(tools);
+      if (kind === "subs") {
+        menu.append(element("p", "vplate-note", "Слова субтитров вшиты в картинку, поэтому каждый релиз — отдельное "
+          + "видео: в общий файл серии он не собирается и весит как серия целиком."));
+      }
+      for (const g of groups.filter((x) => kindOf(x.name) === kind)) {
+        const row = element("label", "vplate-row");
+        const tick = element("input");
+        tick.type = "checkbox";
+        tick.value = g.name;
+        tick.checked = dubs.groups.has(g.name);
+        const had = g.files.filter((f) => f.have === "whole").length;
+        row.append(tick, element("span", "vplate-name", shortName(g.name)), element("span", "vplate-meta", groupFacts(g)),
+          element("span", "vplate-count", (had ? "есть " + had + " из " : "") + plural(g.files.length, ["серия", "серии", "серий"])));
+        row.title = g.name;
+        menu.append(row);
+      }
+      box.append(now, menu);
+      return box;
+    }
+
+    function renderDubs() {
+      const groups = dubGroups();
+      const present = KINDS.filter(([kind]) => groups.some((g) => kindOf(g.name) === kind));
+      if (!present.some(([kind]) => kind === dubs.kind)) dubs.kind = (present.find(([k]) => k === "voice") || present[0] || ["voice"])[0];
+      const plates = element("div", "vplates");
+      // the kind: «Дубляж», «Озвучка», «Субтитры» — the list of studios beside it is of the kind chosen
+      const kinds = element("div", "vkinds");
+      kinds.setAttribute("role", "tablist");
+      kinds.setAttribute("aria-label", "Что выбирать");
+      for (const [kind, title] of present) {
+        const button = element("button", "vkind", "");
+        button.type = "button";
+        button.setAttribute("role", "tab");
+        button.dataset.kind = kind;
+        button.setAttribute("aria-selected", kind === dubs.kind ? "true" : "false");
+        button.append(element("span", "", title), element("span", "vkind-count",
+          String(groups.filter((g) => kindOf(g.name) === kind).length)));
+        kinds.append(button);
+      }
+      plates.append(kinds, studioPlate(groups));
+      const qualityPlate = element("div", "vplate vplate-quality");
+      qualityPlate.dataset.plate = "quality";
+      if (!dubs.bar) dubs.bar = { parent: qualityBox.parentElement, next: qualityBox.nextSibling };
+      qualityPlate.append(qualityBox);
+      plates.append(qualityPlate);
+      list.append(plates);
+      const note = element("p", "vplate-warn", "");
+      note.hidden = true;
+      list.append(note);
+      const labels = [...new Set(found.files.map((f) => f.label || ""))].sort(natural);
+      const grid = element("div", "vtiles vtiles-episodes");
+      for (const label of labels) {
+        const tile = element("label", "vtile vep-tile");
+        tile.dataset.label = label;
+        const tick = element("input");
+        tick.type = "checkbox";
+        tick.value = label;
+        tick.checked = dubs.episodes.has(label);
+        tile.append(tick, element("span", "vtile-n", label || "•"), element("span", "vtile-q", ""),
+          element("span", "vtile-t", ""), element("span", "vtile-mark", ""));
+        const bar = element("span", "vtile-bar");
+        bar.append(element("i"));
+        tile.append(bar);
+        grid.append(tile);
+      }
+      list.append(grid);
+      foundBox.querySelector(".vpick-head h3").textContent = "Серии";
+      paintDubs();
+    }
+
+    function chosenOf(kind) {
+      return [...dubs.groups].filter((name) => kindOf(name) === kind);
+    }
+
+    // the plates say what is chosen; each episode's tile — how much of it the chosen releases have
+    function paintDubs() {
+      const groups = dubGroups();
+      const box = list.querySelector(".vplate[data-plate='studios']");
+      if (box) {
+        const mine = groups.filter((g) => kindOf(g.name) === dubs.kind);
+        const on = mine.filter((g) => dubs.groups.has(g.name));
+        box.querySelector(".vplate-value").textContent = !on.length ? (dubs.kind === "subs" ? "нет" : "не выбрана")
+          : on.length === 1 ? shortName(on[0].name) : on.length + " из " + mine.length;
+        box.classList.toggle("chosen", !!on.length);
+      }
+      for (const button of list.querySelectorAll(".vkind")) {
+        const n = chosenOf(button.dataset.kind).length;
+        button.classList.toggle("chosen", n > 0);
+        button.querySelector(".vkind-count").textContent = n ? n + " из " + groups.filter((g) => kindOf(g.name) === button.dataset.kind).length
+          : String(groups.filter((g) => kindOf(g.name) === button.dataset.kind).length);
+      }
+      const warn = list.querySelector(".vplate-warn");
+      const subsOn = chosenOf("subs").length > 0;
+      warn.hidden = !subsOn;
+      warn.textContent = subsOn ? "Субтитры — отдельными видео: слова вшиты в картинку, видеоряд у них свой, поэтому "
+        + "с ними скачается и займёт больше." : "";
+      for (const tile of list.querySelectorAll(".vep-tile")) {
+        const files = found.files.filter((f) => (f.label || "") === tile.dataset.label && dubs.groups.has(f.group || ""));
+        const had = files.filter((f) => f.have === "whole" || f.have === "other").length;
+        const tick = tile.querySelector("input");
+        tick.disabled = !files.length || had === files.length;
+        if (tick.disabled) tick.checked = false;
+        tile.dataset.have = files.length && had === files.length ? "whole" : had ? "part" : "";
+        tile.querySelector(".vtile-q").textContent = files.length ? plural(files.length, ["релиз", "релиза", "релизов"]) : "";
+        tile.querySelector(".vtile-mark").textContent = !dubs.groups.size ? "" : !files.length ? "нет у выбранных"
+          : had === files.length ? "уже есть" : had ? "есть " + had + " из " + files.length : "";
+        tile.title = files.map((f) => (f.group || "") + (f.have === "whole" ? " — есть" : "")).join("\n");
+      }
+      dubs.episodes = new Set([...list.querySelectorAll(".vep-tile input:checked")].map((x) => x.value));
+      paintEpisodesRun();
+    }
+
+    function paintEpisodesRun() {
+      for (const tile of list.querySelectorAll(".vep-tile")) {
+        const mine = Object.keys(runStates).filter((i) => (found.files[Number(i)] || {}).label === tile.dataset.label);
+        if (!mine.length) { delete tile.dataset.dl; tile.style.setProperty("--p", "0%"); continue; }
+        const states = mine.map((i) => runStates[i]).map((s) => (s === "queued" && !downloading() ? "" : s));
+        const active = mine.find((i) => runStates[i] === "active");
+        const left = states.filter((s) => s === "queued" || s === "active").length;
+        const bad = states.filter((s) => s === "failed" || s === "dead").length;
+        const state = active ? "active" : left ? "queued" : bad ? "failed" : states.every((s) => !s) ? "" : "done";
+        if (state) tile.dataset.dl = state; else delete tile.dataset.dl;
+        const part = active && runActive.file === Number(active) ? runActive.part : 0;
+        const done = states.filter((s) => s === "done" || s === "whole").length;
+        const mark = tile.querySelector(".vtile-mark");
+        if (state === "active") mark.textContent = "качается " + (done + 1) + " из " + mine.length + (part ? " · " + Math.floor(part * 100) + "%" : "");
+        else if (state === "queued") mark.textContent = "в очереди";
+        else if (state === "failed") mark.textContent = "не скачались: " + bad;
+        else if (state === "done") mark.textContent = "скачана";
+        tile.style.setProperty("--p", state === "active" ? Math.round(((done + part) / mine.length) * 100) + "%" : "0%");
+      }
+    }
+
+    // what the chosen ones take on the disk: one episode measured in each quality (/api/videos/measure)
+    function measure() {
+      if (dubs.measured || dubs.measuring === findId) return;
+      dubs.measuring = findId;
+      const mine = findId;
+      fetch("/api/videos/measure?find=" + encodeURIComponent(mine), { credentials: "same-origin" })
+        .then((r) => r.json()).then((reply) => {
+          if (mine !== findId) return;
+          dubs.measured = (reply && reply.measured) || {};
+          countChosen();
+        }).catch(() => { if (mine === findId) { dubs.measured = {}; countChosen(); } });
+    }
+
+    function estimate(files) {
+      const m = dubs.measured;
+      if (!m || !m.sizes || !m.seconds) return 0;
+      const heights = Object.keys(m.sizes).map(Number).sort((a, b) => b - a);
+      const cap = qualityPick.value === "best" ? 1e9 : Number(qualityPick.value) || 1e9;
+      const sizeAt = (limit) => {
+        const h = heights.find((x) => x <= Math.min(cap, limit)) || heights[heights.length - 1];
+        return m.sizes[String(h)] || 0;
+      };
+      const limitOf = (f) => (/CVH/.test(f.note || "") ? 1e9 : 720);
+      const sound = 14000 * m.seconds;          // a voice-over's sound alone: ~110 kbit/s
+      const merge = mergeTick.checked;
+      let total = 0;
+      const episodes = new Map();
+      for (const f of files) {
+        if (!episodes.has(f.label)) episodes.set(f.label, []);
+        episodes.get(f.label).push(f);
+      }
+      for (const [label, mine] of episodes) {
+        const voices = mine.filter((f) => !isSubs(f.group));
+        total += mine.filter((f) => isSubs(f.group)).reduce((s, f) => s + sizeAt(limitOf(f)), 0);
+        if (!voices.length) continue;
+        if (!merge) { total += voices.reduce((s, f) => s + sizeAt(limitOf(f)), 0); continue; }
+        const had = found.files.some((f) => f.label === label && !isSubs(f.group) && f.have === "whole");
+        total += (had ? 0 : sizeAt(Math.max(...voices.map(limitOf)))) + (voices.length - (had ? 0 : 1)) * sound;
+      }
+      return total;
+    }
+
     function showFound(st) {
       found = st && st.found;
       if (!found) { foundBox.hidden = true; return; }
+      if (st.id !== dubs.find) {     // a new list: the voice-overs begun in the folder chosen, no episode yet
+        dubs.find = st.id;
+        dubs.measured = null;
+        dubs.episodes = new Set();
+        dubs.groups = new Set((found.files || []).filter((f) => f.have === "whole" || f.have === "part")
+          .map((f) => f.group || ""));
+        const begun = [...dubs.groups][0];
+        dubs.kind = begun !== undefined ? kindOf(begun) : "voice";
+      }
       findId = st.id;
       foundBox.hidden = false;
+      if (manyDubs()) measure();
+      qualityBox.hidden = !manyDubs();
+      mergeBox.hidden = !manyDubs();
+      foundBox.classList.toggle("many-dubs", manyDubs());
       lastPicked = -1;
       showCard(st);
       showTiles();
@@ -570,11 +966,33 @@
     }
 
     function chosen() {
+      if (manyDubs()) {              // each episode ticked of each release ticked — not the ones there already
+        return found.files.filter((f) => dubs.episodes.has(f.label || "") && dubs.groups.has(f.group || "")
+          && f.have !== "whole" && f.have !== "other" && !f.blocked).map((f) => f.i);
+      }
       return [...list.querySelectorAll(".vtile input:checked")].map((t) => Number(t.value));
     }
 
     function countChosen() {
       if (!found) return;
+      if (manyDubs()) {
+        const files = chosen().map((i) => found.files[i]).filter(Boolean);
+        const open = [...list.querySelectorAll(".vep-tile input")].filter((x) => !x.disabled).length;
+        const said = [["dub", ["дубляж", "дубляжа", "дубляжей"]], ["voice", ["озвучка", "озвучки", "озвучек"]],
+          ["subs", ["релиз субтитров", "релиза субтитров", "релизов субтитров"]]]
+          .map(([kind, forms]) => [chosenOf(kind).length, forms]).filter(([n]) => n).map(([n, forms]) => plural(n, forms));
+        goButton.disabled = !files.length || downloading();
+        goButton.textContent = files.length ? "Скачать " + plural(files.length, ["файл", "файла", "файлов"])
+          : !dubs.groups.size ? "Выберите озвучку" : "Отметьте серии";
+        const folderName = String(found.folder || "").split(/[\\/]/).filter(Boolean).pop() || "";
+        const weight = files.length ? estimate(files) : 0;
+        sum.textContent = (files.length && dubs.measured === null ? "считаю вес…, "
+          : weight ? "≈ " + megabytes(weight) + " на диске, " : "") + "в папку «" + folderName + "»";
+        pickCount.textContent = (said.length ? said.join(", ") : "ничего не выбрано") + " · серий отмечено "
+          + dubs.episodes.size + " из " + list.querySelectorAll(".vep-tile").length;
+        foundBox.classList.toggle("all-had", !open && dubs.groups.size > 0);
+        return;
+      }
       const files = chosen().map((i) => found.files[i]).filter(Boolean);
       const open = tiles().filter((t) => !t.querySelector("input").disabled).length;
       const videos = files.filter((f) => f.kind === "video").length;
@@ -591,9 +1009,65 @@
       foundBox.classList.toggle("all-had", !open);
     }
 
+    const closePlates = (except) => {
+      for (const box of list.querySelectorAll(".vplate")) {
+        if (box === except) continue;
+        const menu = box.querySelector(".vplate-menu");
+        if (menu && !menu.hidden) {
+          menu.hidden = true;
+          box.querySelector(".vplate-now").setAttribute("aria-expanded", "false");
+        }
+      }
+    };
+    document.addEventListener("click", (event) => { if (!event.target.closest(".vplate")) closePlates(null); });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape") closePlates(null); });
     list.addEventListener("click", (event) => {
+      if (manyDubs()) {
+        const kind = event.target.closest(".vkind[data-kind]");
+        if (kind) {                  // another kind: its studios in the plate beside (the ones chosen stay chosen)
+          event.preventDefault();
+          dubs.kind = kind.dataset.kind;
+          for (const b of list.querySelectorAll(".vkind")) b.setAttribute("aria-selected", b === kind ? "true" : "false");
+          const old = list.querySelector(".vplate[data-plate='studios']");
+          old.replaceWith(studioPlate(dubGroups()));
+          paintDubs();
+          countChosen();
+          return;
+        }
+        const now = event.target.closest(".vplate-now");
+        if (now) {
+          event.preventDefault();
+          const box = now.closest(".vplate");
+          const menu = box.querySelector(".vplate-menu");
+          closePlates(box);
+          menu.hidden = !menu.hidden;
+          now.setAttribute("aria-expanded", menu.hidden ? "false" : "true");
+          return;
+        }
+        const all = event.target.closest("[data-plate-all], [data-plate-none]");
+        if (all) {
+          event.preventDefault();
+          for (const tick of all.closest(".vplate-menu").querySelectorAll(".vplate-row input")) {
+            tick.checked = !!all.dataset.plateAll;
+            if (tick.checked) dubs.groups.add(tick.value); else dubs.groups.delete(tick.value);
+          }
+          paintDubs();
+          countChosen();
+          return;
+        }
+        const tick = event.target.closest(".vep-tile input");
+        if (tick && event.shiftKey && lastPicked >= 0) {     // shift: the episodes from the last one ticked to this
+          const all = [...list.querySelectorAll(".vep-tile input")];
+          const at = all.indexOf(tick);
+          const [from, to] = at < lastPicked ? [at, lastPicked] : [lastPicked, at];
+          all.slice(from, to + 1).forEach((x) => { if (!x.disabled) x.checked = !tick.checked ? false : true; });
+        }
+        if (tick) lastPicked = [...list.querySelectorAll(".vep-tile input")].indexOf(tick);
+        return;
+      }
       const group = event.target.closest("button[data-group]");
       if (group) {
+        event.preventDefault();
         const boxes = [...group.closest(".vgroup").querySelectorAll(".vtile input")].filter((t) => !t.disabled);
         const on = boxes.some((t) => !t.checked);
         boxes.forEach((t) => { t.checked = on; });
@@ -606,14 +1080,38 @@
       const at = all.indexOf(tick);
       if (event.shiftKey && lastPicked >= 0 && lastPicked !== at) {
         const [from, to] = at < lastPicked ? [at, lastPicked] : [lastPicked, at];
-        all.slice(from, to + 1).forEach((t) => { if (!t.disabled) t.checked = tick.checked; });
+        all.slice(from, to + 1).forEach((t) => {
+          if (!t.disabled) t.checked = tick.checked;
+        });
       }
       lastPicked = at;
     });
-    list.addEventListener("change", countChosen);
+    list.addEventListener("change", (event) => {
+      if (manyDubs()) {
+        const tick = event.target;
+        if (tick.closest(".vplate-row")) {
+          if (tick.checked) dubs.groups.add(tick.value); else dubs.groups.delete(tick.value);
+          paintDubs();
+        }
+        dubs.episodes = new Set([...list.querySelectorAll(".vep-tile input:checked")].map((x) => x.value));
+      }
+      countChosen();
+    });
+    qualityPick.addEventListener("change", () => { if (manyDubs()) countChosen(); });
+    mergeTick.addEventListener("change", () => { if (manyDubs()) countChosen(); });
     foundBox.querySelector(".vpick-tools").addEventListener("click", (event) => {
       const how = event.target.closest("[data-pick]");
       if (!how) return;
+      if (manyDubs()) {              // the episodes: all of them, none, the ones the chosen releases do not have yet
+        for (const tick of list.querySelectorAll(".vep-tile input")) {
+          if (tick.disabled) continue;
+          tick.checked = how.dataset.pick === "all"
+            || (how.dataset.pick === "new" && tick.closest(".vep-tile").dataset.have === "");
+        }
+        dubs.episodes = new Set([...list.querySelectorAll(".vep-tile input:checked")].map((x) => x.value));
+        countChosen();
+        return;
+      }
       for (const t of list.querySelectorAll(".vtile input")) {
         if (t.disabled) continue;
         const audio = t.closest(".vtile").classList.contains("audio");
@@ -624,6 +1122,10 @@
 
     // ── the download: the tiles show each file's way, the bar the whole of it ──
     function paintRun() {
+      if (manyDubs()) {
+        if (found) paintEpisodesRun();
+        return;
+      }
       for (const t of tiles()) {
         const i = t.dataset.i;
         let state = runStates[i] || "";
@@ -677,6 +1179,8 @@
             : "ничего не скачано");
       if (st.status !== "failed" && had) text += ", уже были: " + had;
       if (st.status !== "failed" && failed) text += ", не скачались: " + failed + " — причины в подробностях";
+      const merged = Number(sumUp.merged) || 0;
+      if (st.status !== "failed" && merged) text += ", собрано в общие файлы: " + plural(merged, ["серия", "серии", "серий"]);
       result.textContent = text;
       result.className = "vget-result " + (st.status === "failed" || (failed && !done) ? "bad" : failed || sumUp.stopped ? "part" : "ok");
       result.hidden = false;
@@ -768,8 +1272,10 @@
     actions["vid-download"] = async (el) => {
       const files = chosen();
       if (!files.length) { say(el, "Отметьте серии, которые скачать", true); return; }
+      const quality = manyDubs() ? qualityPick.value : "";
+      const merge = manyDubs() && mergeTick.checked;
       try {
-        await postJson("/api/videos/download", { find: findId, files });
+        await postJson("/api/videos/download", { find: findId, files, quality, merge });
         say(el, "");
         runStates = {};
         files.forEach((i) => { runStates[i] = "queued"; });
@@ -783,6 +1289,14 @@
         say(el, err.message, true);
       }
     };
+
+    try {                            // the quality chosen before (this browser)
+      const kept = localStorage.getItem("lb.video-dub-quality");
+      if (kept && [...qualityPick.options].some((o) => o.value === kept)) qualityPick.value = kept;
+    } catch (_) { /* the best, this time */ }
+    qualityPick.addEventListener("change", () => {
+      try { localStorage.setItem("lb.video-dub-quality", qualityPick.value); } catch (_) { /* only this time */ }
+    });
 
     actions["vid-download-stop"] = (el) => postJson("/api/videos/download/stop", {})
       .then(() => say(el, "Останавливаю…")).catch((err) => say(el, err.message, true));

@@ -40,14 +40,14 @@ def _prefs() -> dict:
 
 
 # ── the sections ───────────────────────────────────────────────────────────
-# Bounds and choices are the old settings page's (ui/settings_page.py): it clamps what it loads to its
-# own ranges and writes that back on «Сохранить», so a wider range here would be undone there.
+# Bounds and choices came from the old settings page (ui/settings_page.py, gone in v5.40).
 WINDOW = Section("window", "Окно программы",
-                 lead="Новое окно — эти страницы во всё окно. Старое — боковое меню со страницами на Qt, как до "
-                      "версии 5.13; эти страницы там открывает пункт «Галерея», и здесь же можно вернуть новое окно.",
+                 lead="Страницы программы показывает её окно. Если на этом компьютере окно их не показывает (белое "
+                      "или закрывается само), страницы можно открывать в обычном браузере: тогда окно программы "
+                      "маленькое — оно держит программу запущенной.",
                  fields=(
     Field("ui_shell", "choice", "Открывать", default="web",
-          choices=(("web", "новое окно"), ("classic", "старое окно")), hint="со следующего запуска программы"),
+          choices=(("web", "в окне программы"), ("browser", "в браузере")), hint="со следующего запуска программы"),
     Field("webview_gpu", "choice", "Рисовать страницы", default="auto",
           choices=(("auto", "видеокартой — быстрее"), ("off", "без видеокарты")),
           hint="«без видеокарты» — если картинки показываются полосами или кусками старой; со следующего запуска"),
@@ -108,7 +108,8 @@ GALLERY = Section("gallery", "Галерея", fields=(
     Field("card_sets_remote", "bool", "Недостающие части сборки — с сайта",
           "у сборок «родитель и дочерние», «одна работа» и «серия»: части, которых нет в библиотеке, — превью с "
           "сайта с пометкой «api» (серию программа ищет среди постов того же загрузившего, работу — по ссылке на "
-          "источник); на странице такой части — «Скачать»", default=True),
+          "источник); на странице такой части — «Скачать». У карточки, которая в библиотеке одна, — родитель и "
+          "дочерние её поста на сайте (страница карточки спрашивает сайт)", default=True),
 ))
 
 VIDEOS = Section("videos", "Вкладка «Видео»",
@@ -119,9 +120,22 @@ VIDEOS = Section("videos", "Вкладка «Видео»",
           choices=((0, "не переносить — все видео в галерее"), (30, "30 секунд"), (60, "1 минуты"),
                    (120, "2 минут"), (300, "5 минут"), (600, "10 минут")),
           hint="такие видео — на вкладке «Видео»; длину видео из библиотеки программа узнаёт сама, в фоне"),
+    Field("video_source_dubs", "bool", "Все озвучки тайтлов с YummyAnime",
+          "«Скачать с сайта»: озвучки и субтитры тайтла из плееров Kodik (до 720p) и CVH (до 1080p) — каждая своей "
+          "вкладкой сериала; ссылки на видео программа берёт перед скачиванием каждой серии. Выключено — серии с "
+          "AniLiberty (строка ниже)",
+          default=True),
+    Field("video_dub_merge", "bool", "Собирать озвучки серии в один файл",
+          "после «Скачать» озвучки каждой серии становятся дорожками звука одного MKV: картинка одна, озвучки "
+          "переключаются в плеере; сдвиги и вставки студий программа находит по кадрам. Отдельные файлы озвучек "
+          "удаляются, когда общий файл проверен. Галочка на странице «Скачать с сайта» — для одного скачивания",
+          default=True),
+    Field("yummy_api_url", "text", "Адрес API YummyAnime", default="https://api.yani.tv",
+          placeholder="https://api.yani.tv", hint="если сайт переедет, впишите новый адрес его API"),
     Field("video_source_aniliberty", "bool", "Серии тайтлов с YummyAnime — с AniLiberty",
-          "«Скачать с сайта»: у YummyAnime видео в чужом плеере (Kodik), его программа не трогает; тот же тайтл она "
-          "найдёт на AniLiberty по номерам Shikimori и MyAnimeList, а описание и постер возьмёт с YummyAnime",
+          "«Скачать с сайта»: тот же тайтл программа найдёт на AniLiberty по номерам Shikimori и MyAnimeList (одна "
+          "озвучка — AniLiberty), а описание и постер возьмёт с YummyAnime. Работает, когда озвучки выше выключены "
+          "или YummyAnime их не отдал",
           default=True),
     Field("aniliberty_url", "text", "Адрес AniLiberty", default="https://aniliberty.top",
           placeholder="https://aniliberty.top",
@@ -311,7 +325,9 @@ def _gallery_extra(settings: dict) -> str:
     st = site_posts.status(settings)
     asked = f"сайты рассказали о {st['known']} постах" + (f" (нет на сайте: {st['gone']})" if st["gone"] else "")
     if st["waiting"]:
-        asked += f"; ещё спросить: {st['waiting']}" + (f" (ждёт: {st['busy']})" if st.get("busy") else "")
+        busy = st.get("busy") or ""
+        asked += f"; ещё спросить: {st['waiting']}" + (
+            "" if not busy else f" (ждёт: {busy})" if busy == site_posts.MAINTENANCE else f" (медленнее, пока {busy})")
     elif not st["scanned"] and site_posts.enabled(settings):
         asked += "; что ещё спросить — программа посмотрит в фоне"
     notes = "".join(f"<li>{esc(host)}: {esc(note)}</li>" for host, note in sorted(st["notes"].items()))
@@ -386,13 +402,13 @@ def move_state(req: Request) -> Response:
     return Response.json({"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0))})
 
 
-def _archive_html() -> tuple[str, str]:
-    """(the rows of the archive open now and of the one the next start opens — when another was chosen —, how to
-    move it)."""
-    from core import archive_switch
+def _archive_html(settings: dict) -> tuple[str, str]:
+    """(the rows of the archive open now and of the one the next start opens — when another was chosen or one is to be
+    made from «Документов» —, how to move it or make it)."""
+    from core import archive_create, archive_switch
     from core.paths import DATA_DIR
     nxt = archive_switch.pending()
-    move = ""
+    move = later = create = ""
     if archive_switch.portable():
         where = (f'<span class="tool-path">{esc(archive_switch.open_archive())}</span> '
                  f'<small class="muted">база и настройки — в {esc(DATA_DIR.name)}, файлы библиотеки — в output</small>')
@@ -406,17 +422,34 @@ def _archive_html() -> tuple[str, str]:
         where = (f'<span class="tool-path">{esc(DATA_DIR)}</span> <small class="muted">в «Документах»: архива ещё '
                  'нет</small>')
         label = "Подключить существующий архив…"
+        archive = archive_create.target(settings).parent
+        order = archive_create.pending()
+        if order is None:
+            create = ('<button type="button" data-action="settings-act" data-act="archive_create" data-ask="Архив '
+                      'создастся при следующем запуске — нажмите ещё раз">Создать архив</button>')
+        else:
+            failed = (f'<br><span class="bad">В прошлый раз не получилось: {esc(order["error"])}</span>'
+                      if order.get("error") else "")
+            later = (f'<span class="tool-label">При следующем запуске</span><span class="tool-value">создать архив '
+                     f'<span class="tool-path">{esc(order.get("archive") or archive)}</span> <small class="muted">'
+                     f'перезапустите программу: при запуске она скопирует в него базу, настройки и кэш</small>{failed}'
+                     ' <span class="tool-actions"><button type="button" class="primary" data-action="settings-restart" '
+                     'data-ask="Программа закроется и откроется снова — нажмите ещё раз">Перезапустить и создать '
+                     'архив</button><button type="button" data-action="settings-act" data-act="archive_create_cancel">'
+                     'Не создавать</button><span class="action-status" role="status"></span></span></span>')
         how = ('<p class="hint">Архив — одна папка Local_Booru_Archive с базой, настройками и файлами библиотеки: его '
-               'можно держать на любом диске и переносить целиком. Создать новый архив из «Документов» пока можно '
-               'только в старом окне («Настройки», папка вывода).</p>')
-    later = ""
+               'можно держать на любом диске, перенести целиком на другой и подключить на другом компьютере. «Создать '
+               'архив» — при следующем запуске программа скопирует базу, настройки, кэш и журналы из «Документов» в '
+               f'<span class="tool-path">{esc(archive)}</span>, рядом с файлами библиотеки, и откроется с ним; папка '
+               'в «Документах» останется как была. «Подключить существующий архив…» — для архива, который уже '
+               'есть.</p>')
     if nxt is not None:
         later = (f'<span class="tool-label">При следующем запуске</span><span class="tool-value">'
                  f'<span class="tool-path">{esc(nxt.parent)}</span> <small class="muted">перезапустите программу; '
                  'до этого всё сохраняется в открытый архив</small> <span class="tool-actions">'
                  '<button type="button" data-action="settings-act" data-act="archive_stay">Остаться на открытом</button>'
                  '<span class="action-status" role="status"></span></span></span>')
-    return (f'<span class="tool-label">Архив</span><span class="tool-value">{where} <span class="tool-actions">'
+    return (f'<span class="tool-label">Архив</span><span class="tool-value">{where} <span class="tool-actions">{create}'
             f'<button type="button" data-action="settings-archive">{esc(label)}</button>'
             f'<span class="action-status" role="status"></span></span></span>{later}{move}', how)
 
@@ -428,7 +461,7 @@ def _folders_html(settings: dict) -> str:
     from core.video_library import video_root
     video = video_root(settings)
     video_note = "" if str(settings.get("video_root") or "").strip() else ' <small class="muted">по умолчанию — в архиве</small>'
-    archive, how = _archive_html()
+    archive, how = _archive_html(settings)
     return f"""<section class="settings-block" id="set-folders"><h2>Папки</h2>
   <div class="tool-grid">
     {archive}
@@ -473,7 +506,7 @@ def _profile_html() -> str:
       <input type="file" id="profile-file" name="profile" accept=".zip,.json,application/zip,application/json"></div>
     <div class="tool-actions"><button type="submit" data-ask="Настройки заменятся настройками из файла — нажмите ещё раз">Загрузить</button>
       <span class="action-status" role="status"></span></div>
-    <p class="hint">Профиль — ZIP отсюда или из старой страницы настроек (подойдёт и app_settings.json). Перед загрузкой
+    <p class="hint">Профиль — ZIP отсюда или из прежних версий программы (подойдёт и app_settings.json). Перед загрузкой
     текущие настройки сохраняются копией; ключи, которых нет в файле, и папки этого компьютера остаются прежними.</p>
   </form>
 </section>"""
@@ -494,14 +527,29 @@ TABS = (
 )
 
 
+DUBS_FIELDS = ("video_source_dubs", "video_dub_merge", "yummy_api_url")
+
+
+def section_fields(section: Section) -> tuple:
+    """The fields the page shows.  The public copy of the program has no voice-overs from the sites' players (its
+    ``core/video_dubs`` is a stand-in with ``AVAILABLE = False``, ``publish/core/video_dubs.py``): their fields go."""
+    if section.id != "videos":
+        return section.fields
+    from core import video_dubs
+    if getattr(video_dubs, "AVAILABLE", True):
+        return section.fields
+    return tuple(f for f in section.fields if f.key not in DUBS_FIELDS)
+
+
 def settings_page(req: Request) -> Response:
     s = req.settings
     blocks = {}
     for section in SECTIONS:
         extra = EXTRAS.get(section.id)
-        if extra is not None:
-            section = Section(section.id, section.title, section.lead, section.fields, extra(s), section.note,
-                              section.danger)
+        fields = section_fields(section)
+        if extra is not None or fields != section.fields:
+            section = Section(section.id, section.title, section.lead, fields, extra(s) if extra else section.extra,
+                              section.note, section.danger)
         blocks[section.id] = render(section, s)
     from webui import prefs
     blocks.update({"folders": _folders_html(s), "logs": _logs_html(), "profile": _profile_html(),
@@ -620,6 +668,17 @@ def settings_act(req: Request) -> Response:
         from core import archive_switch
         archive_switch.stay()
         return Response.json({"ok": True, "message": "Следующий запуск откроет этот архив", "reload": True})
+    if act == "archive_create":
+        from core import archive_create
+        result = archive_create.request(s)
+        if not result.get("ok"):
+            return Response.json({"ok": False, "error": result.get("error") or "Не получилось"}, 409)
+        return Response.json({"ok": True, "reload": True,
+                              "message": "Перезапустите программу: при запуске она создаст архив"})
+    if act == "archive_create_cancel":
+        from core import archive_create
+        archive_create.cancel()
+        return Response.json({"ok": True, "message": "Архив не создаётся", "reload": True})
     if act == "open_logs":
         from core.paths import LOGS_DIR
         from webui import desktop

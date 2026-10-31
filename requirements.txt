@@ -13,5 +13,8 @@ cloudscraper
 
 watchdog
 
+# the voice-overs of an episode in one MKV (core/video_merge): FFmpeg inside
+av
+
 # Брак, «фото или рисунок» (core/visual_models.py): small models on the processor
 onnxruntime

@@ -338,11 +338,40 @@ def release_url(release: dict, site: str) -> str:
     return f"{site}/anime/releases/release/{quote(str(release.get('alias') or release.get('id') or ''))}/episodes"
 
 
+def title_page(*, main: str, others: list, refs: list, rows: list, picture: str, text: str, url: str, origin: str):
+    """A title's page made of what an API said, in the markup ``video_meta`` reads on YummyAnime (AniLiberty's release
+    here, YummyAnime's own title in ``core/video_dubs``): ``refs`` — [(«Shikimori»|«MyAnimeList», address, rating)],
+    ``rows`` — [(label, value, items)] of ``ul.content-main-info`` (a row with ``items`` is a list; «Озвучка:» —
+    ``animeVoices``), ``text`` — the description, its paragraphs by lines."""
+    from core.video_meta_import import SavedPage
+    lines = []
+    for label, value, items in rows:
+        if items:
+            inner = "".join(f"<li><a>{escape(i)}</a></li>" for i in items)
+            lines.append(f'<li><span>{escape(label)}</span><ul{" class=animeVoices" if label == "Озвучка:" else ""}>'
+                         f"{inner}</ul></li>")
+        elif value:
+            lines.append(f"<li><span>{escape(label)}</span><div>{escape(value)}</div></li>")
+    links = [f'<a data-balloon="{label}" href="{escape(str(address))}"><span>{escape(str(rating or ""))}</span></a>'
+             for label, address, rating in refs]
+    paragraphs = "".join(f"<p>{escape(p.strip())}</p>" for p in re.split(r"\r?\n", str(text or "")) if p.strip())
+    html = (f'<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>{escape(main)}</title>'
+            f'<link rel="canonical" href="{escape(url)}"></head><body>'
+            + (f'<div class="poster-block"><img data-full="{escape(picture)}" src="{escape(picture)}" alt=""></div>'
+               if picture else "")
+            + f'<h1 itemprop="name">{escape(main)}</h1>'
+            + (f'<ul class="alt-names-list">{"".join(f"<li>{escape(o)}</li>" for o in others)}</ul>' if others else "")
+            + (f'<div class="content-ref-ids">{"".join(links)}</div>' if links else "")
+            + f'<ul class="content-main-info">{"".join(lines)}</ul>'
+            + (f'<div class="content-desc"><div id="content-desc-text">{paragraphs}</div></div>' if paragraphs else "")
+            + "</body></html>")
+    return SavedPage(html=html, url=url, origin=origin)
+
+
 def release_page(release: dict, site: str):
     """A page of the release made of the API's answer, in the markup ``video_meta`` reads on YummyAnime: the title,
     the other titles, the numbers on Shikimori and MyAnimeList with their ratings, type, year, genres, episodes, age,
     who voiced it, the text, the poster."""
-    from core.video_meta_import import SavedPage
     name = release.get("name") if isinstance(release.get("name"), dict) else {}
     main = str(name.get("main") or name.get("english") or release.get("alias") or "")
     others = [str(n) for n in (name.get("english"), name.get("alternative")) if n and str(n) != main]
@@ -353,46 +382,21 @@ def release_page(release: dict, site: str):
     voices = [str(m.get("nickname")) for m in release.get("members") or []
               if isinstance(m, dict) and m.get("nickname") and isinstance(m.get("role"), dict)
               and m["role"].get("value") == "voicing"]
-    rows = []
-
-    def row(label: str, value: str = "", items: list | None = None) -> None:
-        if items:
-            inner = "".join(f"<li><a>{escape(i)}</a></li>" for i in items)
-            rows.append(f'<li><span>{escape(label)}</span><ul{" class=animeVoices" if label == "Озвучка:" else ""}>'
-                        f"{inner}</ul></li>")
-        elif value:
-            rows.append(f"<li><span>{escape(label)}</span><div>{escape(value)}</div></li>")
-    row("Тип:", str(kind.get("description") or ""))
     year = " ".join(b for b in (str(season.get("description") or ""), str(_year(release) or "")) if b)
-    row("Год выпуска:", year)
-    row("Жанры:", items=genres)
     total = release.get("episodes_total")
-    row("Эпизоды:", str(total) if isinstance(total, int) and total > 0 else "")
-    row("Возрастной рейтинг:", str(age.get("label") or ""))
-    row("Озвучка:", items=voices)
+    rows = [("Тип:", str(kind.get("description") or ""), None), ("Год выпуска:", year, None),
+            ("Жанры:", "", genres), ("Эпизоды:", str(total) if isinstance(total, int) and total > 0 else "", None),
+            ("Возрастной рейтинг:", str(age.get("label") or ""), None), ("Озвучка:", "", voices)]
     refs = []
     for key, label in (("shikimori", "Shikimori"), ("mal", "MyAnimeList")):
         part = release.get(key) if isinstance(release.get(key), dict) else {}
         if part.get("url") and part.get("id"):
-            refs.append(f'<a data-balloon="{label}" href="{escape(str(part["url"]))}"><span>'
-                        f'{escape(str(part.get("rating") or ""))}</span></a>')
+            refs.append((label, part["url"], part.get("rating")))
     poster = release.get("poster") if isinstance(release.get("poster"), dict) else {}
     optimized = poster.get("optimized") if isinstance(poster.get("optimized"), dict) else {}
     picture = _absolute(poster.get("src") or poster.get("preview") or optimized.get("src"), site)
-    text = "".join(f"<p>{escape(p.strip())}</p>" for p in re.split(r"\r?\n", str(release.get("description") or ""))
-                   if p.strip())
-    url = release_url(release, site)
-    html = (f'<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><title>{escape(main)}</title>'
-            f'<link rel="canonical" href="{escape(url)}"></head><body>'
-            + (f'<div class="poster-block"><img data-full="{escape(picture)}" src="{escape(picture)}" alt=""></div>'
-               if picture else "")
-            + f'<h1 itemprop="name">{escape(main)}</h1>'
-            + (f'<ul class="alt-names-list">{"".join(f"<li>{escape(o)}</li>" for o in others)}</ul>' if others else "")
-            + (f'<div class="content-ref-ids">{"".join(refs)}</div>' if refs else "")
-            + f'<ul class="content-main-info">{"".join(rows)}</ul>'
-            + (f'<div class="content-desc"><div id="content-desc-text">{text}</div></div>' if text else "")
-            + "</body></html>")
-    return SavedPage(html=html, url=url, origin=f"{NAME} (API)")
+    return title_page(main=main, others=others, refs=refs, rows=rows, picture=picture,
+                      text=str(release.get("description") or ""), url=release_url(release, site), origin=f"{NAME} (API)")
 
 
 # ── a page → what to download ─────────────────────────────────────────────────────

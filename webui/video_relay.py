@@ -25,6 +25,7 @@ class FrameRelay:
         self._jpeg = b""
         self._state: dict = {}
         self._releasers: list = []
+        self._full = False          # the window's full-size player is open (it plays without frames to the page)
 
     # ── the program's side ─────────────────────────────────────────────────
     def begin(self, token: str) -> None:
@@ -54,6 +55,17 @@ class FrameRelay:
             if token and token == self._token:
                 self._state.update(state, token=token, at=time.time())
 
+    def set_full(self, on: bool) -> None:
+        """The window's full-size player opened (True) or left (False)."""
+        with self._cond:
+            self._full = bool(on)
+
+    def playing(self) -> bool:
+        """A video plays now in the window — in the page or full size (work in the background waits for its end:
+        ``core.video_skips``)."""
+        with self._cond:
+            return self._full or (bool(self._token) and bool(self._state.get("playing")))
+
     # ── the server's side ──────────────────────────────────────────────────
     def active(self, token: str) -> bool:
         with self._cond:
@@ -73,6 +85,11 @@ class FrameRelay:
                 if left <= 0:
                     return None
                 self._cond.wait(left)
+
+    def frames(self, token: str) -> int:
+        """How many frames the play ``token`` has had (0 for a play that is over or another one)."""
+        with self._cond:
+            return self._seq if token and token == self._token else 0
 
     def state(self, token: str) -> dict:
         with self._cond:

@@ -11,7 +11,8 @@ and queued into the other archive while its base stayed here.
 
 * :func:`connect` — an existing archive (its settings, base and cookies are its own: nothing is written over them);
   choosing the archive open now takes a pending choice back (:func:`stay`).
-* A new archive while the data is in «Документах» is made only by the old window's settings page so far.
+* A new archive while the data is in «Документах» — «Создать архив» (``core/archive_create.py``: made at the next
+  start); choosing an existing one takes such an order back.
 """
 from __future__ import annotations
 
@@ -62,6 +63,8 @@ def connect(chosen: str | Path) -> dict:
     if _same(target, paths.DATA_DIR):
         return stay()
     paths.choose_next_archive(target)
+    from core import archive_create
+    archive_create.cancel()                  # this one opens next: an archive ordered from «Документов» is not made
     return {"ok": True, "archive": str(target.parent)}
 
 

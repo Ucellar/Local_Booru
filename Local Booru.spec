@@ -11,6 +11,7 @@ datas += collect_data_files("PySide6")
 hiddenimports = collect_submodules("core") + collect_submodules("ui") + collect_submodules("webui")
 hiddenimports += ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtWebEngineCore",
                   "PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel", "PySide6.QtNetwork", "onnxruntime", "sqlite3"]
+hiddenimports += collect_submodules("av")   # PyAV: the voice-overs of an episode into one file (core/video_merge)
 
 a = Analysis(
     ["app.py"],

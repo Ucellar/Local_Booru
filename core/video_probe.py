@@ -11,6 +11,12 @@ Containers read here: MP4 / MOV / M4V / 3GP (``mvhd``, fragmented files — thei
 the video stream, ``avih``), FLV (``onMetaData``), ASF / WMV (File Properties).  Anything else, or a file these
 readers cannot tell — OpenCV, when installed (frames / fps).  Reading takes a few small pieces of the file: the
 beginning, the ``moov`` box, the end of a Matroska file.
+
+(v5.44) What is inside, from the same headers: the container the file really is (a «.webm» may be an MP4 or a
+Matroska file with H.264 in it), the codec of its picture and of its first sound, the bits of the picture (10 — «Hi10P»,
+«Main 10»).  The program window has two players and neither plays everything (``window_player``): its browser (Qt
+WebEngine) has no H.264, H.265 or AAC — their license —, the program's own (Qt Multimedia) has no AV1 without the
+graphics card's help.
 """
 from __future__ import annotations
 
@@ -18,7 +24,7 @@ import logging
 import os
 import struct
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 _LOG = logging.getLogger("local_booru.video")
@@ -35,6 +41,10 @@ class VideoInfo:
     duration: float = 0.0             # seconds, 0 — not told by the file
     width: int = 0
     height: int = 0
+    container: str = ""               # what the file really is: "mp4", "matroska", "avi", "flv", "asf"; "" — unknown
+    video: str = ""                   # the picture's codec ("h264", "hevc", "av1", "vp9", "vp8" …); "" — not told
+    audio: str = ""                   # the first sound's codec ("aac", "opus" …); "" — no sound, or not told
+    depth: int = 0                    # bits of the picture's samples when the file says (10, 12); 0 — not told
 
 
 class _Bad(Exception):
@@ -77,6 +87,67 @@ def is_video_name(name) -> bool:
     return Path(str(name)).suffix.lower() in VIDEO_EXTS
 
 
+# (v5.44) what the window's browser (Qt WebEngine, without the licensed codecs) plays — tried on a real one: VP8, VP9,
+# AV1 (8 and 10 bits) in WebM, Matroska and MP4, with Opus, Vorbis, FLAC or MP3.  H.264 (in any file) — «no supported
+# streams»; H.265 — the sound plays, the picture stays empty; AAC — the picture plays without the sound.
+BROWSER_VIDEO = frozenset({"vp8", "vp9", "av1", "theora"})
+BROWSER_AUDIO = frozenset({"", "opus", "vorbis", "flac", "mp3"})
+BROWSER_FILES = frozenset({"matroska", "mp4"})
+BROWSER, OWN = "browser", "own"
+
+
+def own_av1(settings: dict | None):
+    """Whether the program's own player shows AV1 on this computer: True, False — learnt by playing one
+    (``ui/video_inline.py``), None — not known yet."""
+    told = str((settings or {}).get("video_av1_own") or "").strip().lower()
+    return True if told == "yes" else (False if told == "no" else None)
+
+
+def window_player(path, *, prefer: str = BROWSER, settings: dict | None = None) -> str:
+    """Which player of the program window plays this video: ``BROWSER`` — the window's browser (a ``<video>`` of the
+    page), ``OWN`` — the program's own (Qt Multimedia: its frames into the page, ``ui/video_inline.py``), "" — the file
+    does not say what is inside (the page decides by the name and goes over to the other player when the first one
+    cannot play it).  The own player has every codec but AV1, which it decodes only with a graphics card that can
+    (``own_av1``: learnt).  ``prefer`` — the player of a file both can play: the browser for a card (lighter), the
+    own one for an episode of the tab «Видео» (voice-overs, subtitles, the whole screen)."""
+    info = probe(path)
+    av1 = own_av1(settings)
+    if prefer == OWN:
+        return BROWSER if info is not None and info.video == "av1" and av1 is False else OWN
+    if info is None or not info.container:
+        return ""
+    if info.container not in BROWSER_FILES:
+        return OWN                       # AVI, FLV, WMV: the browser does not open them at all
+    if not info.video:
+        return ""
+    if info.video in BROWSER_VIDEO and info.audio in BROWSER_AUDIO:
+        return BROWSER
+    if info.video == "av1":              # with a sound the browser has not (AAC): the picture at least
+        return OWN if av1 else BROWSER
+    return OWN
+
+
+_NAMES = {"h264": "H.264", "hevc": "H.265", "av1": "AV1", "vp9": "VP9", "vp8": "VP8", "mpeg4": "MPEG-4",
+          "theora": "Theora", "mpeg2": "MPEG-2", "mpeg1": "MPEG-1", "mjpeg": "MJPEG", "prores": "ProRes",
+          "aac": "AAC", "opus": "Opus", "vorbis": "Vorbis", "flac": "FLAC", "mp3": "MP3", "mp2": "MP2", "ac3": "AC-3",
+          "eac3": "E-AC-3", "dts": "DTS", "pcm": "PCM", "truehd": "TrueHD", "alac": "ALAC"}
+
+
+def codecs_label(path) -> str:
+    """«H.265, 10 бит · AAC» — what is inside a video, for its card; "" when the file does not say."""
+    info = probe(path)
+    if info is None or not info.video:
+        return ""
+    words = _NAMES.get(info.video, info.video.upper())
+    if info.depth > 8:
+        words += f", {info.depth} бит"
+    if info.audio:
+        words += " · " + _NAMES.get(info.audio, info.audio.upper())
+    else:
+        words += " · без звука"
+    return words
+
+
 def human_duration(seconds) -> str:
     """12:34 or 1:02:03."""
     try:
@@ -110,9 +181,9 @@ def _probe(p: Path) -> VideoInfo | None:
     if info is None or info.duration <= 0 or info.width <= 0:
         more = _opencv(p)
         if more is not None:
-            info = VideoInfo(duration=info.duration if info and info.duration > 0 else more.duration,
-                             width=info.width if info and info.width > 0 else more.width,
-                             height=info.height if info and info.height > 0 else more.height)
+            info = replace(info or VideoInfo(), duration=info.duration if info and info.duration > 0 else more.duration,
+                           width=info.width if info and info.width > 0 else more.width,
+                           height=info.height if info and info.height > 0 else more.height)
     return info if info is not None else VideoInfo()
 
 
@@ -225,6 +296,8 @@ def _mp4(fh, file_size: int) -> VideoInfo:
     width = height = 0
     tracks = {}                    # track id -> (timescale, is video)
     fragment_duration = 0
+    video = audio = ""
+    depth = 0
     for kind, start, end in _boxes(moov):
         if kind == b"mvhd":
             version = moov[start]
@@ -239,6 +312,11 @@ def _mp4(fh, file_size: int) -> VideoInfo:
             tracks[track_id] = (track_scale, is_video)
             if is_video and not width and w > 0 and h > 0:
                 width, height = w, h
+            handler, codec, bits = _mp4_codec(moov, start, end)
+            if handler == b"vide" and codec and not video:
+                video, depth = codec, bits
+            elif handler == b"soun" and codec and not audio:
+                audio = codec
         elif kind == b"mvex":
             found = _find(moov, start, end, b"mehd")
             if found:
@@ -250,7 +328,8 @@ def _mp4(fh, file_size: int) -> VideoInfo:
         seconds = fragment_duration / timescale
     if seconds <= 0 and moofs:
         seconds = _fragments_end(fh, moofs, tracks)
-    return VideoInfo(duration=max(0.0, seconds), width=width, height=height)
+    return VideoInfo(duration=max(0.0, seconds), width=width, height=height, container="mp4", video=video,
+                     audio=audio, depth=depth)
 
 
 def _mp4_track(moov: bytes, start: int, end: int) -> tuple[int, int, bool, int, int]:
@@ -281,6 +360,58 @@ def _mp4_track(moov: bytes, start: int, end: int) -> tuple[int, int, bool, int, 
         if is_video and (not width or not height):
             width, height = _stsd_size(moov, ms, me) or (width, height)
     return track_id, scale, is_video, width, height
+
+
+# the sample entries of MP4 / MOV tracks: their codecs
+_MP4_CODECS = {
+    b"avc1": "h264", b"avc3": "h264", b"hvc1": "hevc", b"hev1": "hevc", b"av01": "av1", b"vp09": "vp9",
+    b"vp08": "vp8", b"mp4v": "mpeg4", b"s263": "h263", b"h263": "h263", b"mjpa": "mjpeg", b"jpeg": "mjpeg",
+    b"apcn": "prores", b"apch": "prores", b"apcs": "prores", b"apco": "prores", b"ap4h": "prores",
+    b"mp4a": "aac", b"Opus": "opus", b"fLaC": "flac", b".mp3": "mp3", b"ac-3": "ac3", b"ec-3": "eac3",
+    b"alac": "alac", b"sowt": "pcm", b"twos": "pcm", b"lpcm": "pcm", b"ipcm": "pcm", b"fpcm": "pcm",
+}
+_VISUAL_ENTRY = 86                    # a visual sample entry's own fields, before the boxes inside it
+
+
+def _mp4_codec(moov: bytes, start: int, end: int) -> tuple[bytes, str, int]:
+    """(handler — b"vide", b"soun" …, codec, bits of the picture's samples or 0) of a ``trak``: its first sample
+    entry, and for a picture the configuration box inside it (``avcC``, ``hvcC``, ``av1C``, ``vpcC``)."""
+    mdia = _find(moov, start, end, b"mdia")
+    if not mdia:
+        return b"", "", 0
+    hdlr = _find(moov, *mdia, b"hdlr")
+    handler = moov[hdlr[0] + 8:hdlr[0] + 12] if hdlr else b""
+    minf = _find(moov, *mdia, b"minf")
+    stbl = _find(moov, *minf, b"stbl") if minf else None
+    stsd = _find(moov, *stbl, b"stsd") if stbl else None
+    if not stsd or stsd[0] + 16 > stsd[1]:
+        return handler, "", 0
+    entry = stsd[0] + 8                      # version, flags, entry count; then the first sample entry
+    size = struct.unpack_from(">I", moov, entry)[0]
+    fourcc = moov[entry + 4:entry + 8]
+    codec = _MP4_CODECS.get(fourcc) or fourcc.decode("latin-1").strip().lower()
+    bits = 0
+    if handler == b"vide":
+        stop = min(stsd[1], entry + size) if size >= 8 else stsd[1]
+        for kind, s, e in _boxes(moov, entry + _VISUAL_ENTRY, stop):
+            bits = _config_bits(kind, moov[s:e])
+            if bits:
+                break
+    return handler, codec, bits
+
+
+def _config_bits(kind: bytes, box: bytes) -> int:
+    """Bits of the picture's samples told by a codec's configuration (the same bytes in MP4 and in Matroska's
+    CodecPrivate); 0 — not told."""
+    if kind == b"avcC" and len(box) >= 2:
+        return 10 if box[1] in (110, 122, 244) else 8          # High 10, High 4:2:2, High 4:4:4
+    if kind == b"hvcC" and len(box) >= 23:
+        return 8 + (box[17] & 0x07)
+    if kind == b"av1C" and len(box) >= 3:
+        return 12 if box[2] & 0x20 else (10 if box[2] & 0x40 else 8)
+    if kind == b"vpcC" and len(box) >= 7:
+        return box[6] >> 4
+    return 0
 
 
 def _stsd_size(moov: bytes, start: int, end: int):
@@ -428,12 +559,16 @@ def _matroska(fh, file_size: int) -> VideoInfo:
             elif ident == 0x4489:
                 duration = _float(block, s, e)
     tracks = _element_data(fh, data, found_tracks, tracks_at, _TRACKS)
+    video = audio = ""
+    depth = 0
     if tracks is not None:
         width, height = _matroska_size(*tracks)
+        video, audio, depth = _matroska_codecs(*tracks)
     seconds = duration * scale / 1e9 if duration > 0 else 0.0
     if seconds <= 0:
         seconds = _matroska_tail(fh, file_size, scale)
-    return VideoInfo(duration=max(0.0, seconds), width=width, height=height)
+    return VideoInfo(duration=max(0.0, seconds), width=width, height=height, container="matroska", video=video,
+                     audio=audio, depth=depth)
 
 
 def _seek_positions(data: bytes, start: int, end: int, segment: int):
@@ -504,6 +639,71 @@ def _matroska_size(data: bytes, start: int, end: int) -> tuple[int, int]:
                 return int(round(height * shown_w / shown_h)), height
             return width, height
     return 0, 0
+
+
+# Matroska's CodecID of a track: its codec
+_MKV_CODECS = {
+    "V_VP8": "vp8", "V_VP9": "vp9", "V_AV1": "av1", "V_MPEG4/ISO/AVC": "h264", "V_MPEGH/ISO/HEVC": "hevc",
+    "V_THEORA": "theora", "V_MPEG4/ISO/SP": "mpeg4", "V_MPEG4/ISO/ASP": "mpeg4", "V_MPEG4/ISO/AP": "mpeg4",
+    "V_MPEG4/MS/V3": "msmpeg4", "V_MPEG1": "mpeg1", "V_MPEG2": "mpeg2", "V_MJPEG": "mjpeg", "V_PRORES": "prores",
+    "V_MS/VFW/FOURCC": "vfw", "A_OPUS": "opus", "A_VORBIS": "vorbis", "A_MPEG/L3": "mp3", "A_MPEG/L2": "mp2",
+    "A_FLAC": "flac", "A_AC3": "ac3", "A_EAC3": "eac3", "A_TRUEHD": "truehd", "A_ALAC": "alac",
+}
+
+
+def _mkv_codec(codec_id: str) -> str:
+    codec_id = codec_id.strip("\x00 ").upper()
+    if codec_id in _MKV_CODECS:
+        return _MKV_CODECS[codec_id]
+    if codec_id.startswith("A_AAC"):
+        return "aac"
+    if codec_id.startswith("A_DTS"):
+        return "dts"
+    if codec_id.startswith("A_PCM"):
+        return "pcm"
+    return codec_id.lower()
+
+
+def _matroska_codecs(data: bytes, start: int, end: int) -> tuple[str, str, int]:
+    """(the picture's codec, the first sound's codec, bits of the picture's samples or 0) of the Tracks."""
+    video = audio = ""
+    depth = 0
+    for ident, s, e in _elements(data, start, end):
+        if ident != 0xAE:                            # TrackEntry
+            continue
+        kind, codec, private, bits = 0, "", b"", 0
+        for k, ks, ke in _elements(data, s, e):
+            if k == 0x83:
+                kind = _uint(data, ks, ke)
+            elif k == 0x86:
+                codec = _mkv_codec(data[ks:ke].decode("latin-1", "replace"))
+            elif k == 0x63A2:
+                private = bytes(data[ks:ke])
+            elif k == 0xE0:                          # Video → Colour → BitsPerChannel
+                for v, vs, ve in _elements(data, ks, ke):
+                    if v == 0x55B0:
+                        for c, cs, ce in _elements(data, vs, ve):
+                            if c == 0x55B2:
+                                bits = _uint(data, cs, ce)
+        if kind == 1 and codec and not video:
+            video, depth = codec, bits or _private_bits(codec, private)
+        elif kind == 2 and codec and not audio:
+            audio = codec
+    return video, audio, depth
+
+
+def _private_bits(codec: str, private: bytes) -> int:
+    """Bits of the picture's samples told by a Matroska track's CodecPrivate; 0 — not told."""
+    if codec == "vp9":                               # a list of features: id, length, value; 3 — the bits
+        pos = 0
+        while pos + 2 <= len(private):
+            ident, length = private[pos], private[pos + 1]
+            if ident == 3 and length >= 1 and pos + 2 < len(private):
+                return private[pos + 2]
+            pos += 2 + length
+        return 0
+    kind = {"h264": b"avcC", "hevc": b"hvcC", "av1": b"av1C"}.get(codec)
+    return _config_bits(kind, private) if kind else 0
 
 
 def _matroska_tail(fh, file_size: int, scale: int) -> float:
@@ -607,7 +807,7 @@ def _avi(fh, file_size: int) -> VideoInfo:
             seconds = from_stream
     if avih is None and stream is None:
         raise _Bad("no avih")
-    return VideoInfo(duration=max(0.0, seconds), width=width, height=height)
+    return VideoInfo(duration=max(0.0, seconds), width=width, height=height, container="avi")
 
 
 # ── FLV ──────────────────────────────────────────────────────────────────────
@@ -623,7 +823,7 @@ def _flv(fh, file_size: int) -> VideoInfo:
         if tag_type == 18:
             values = _amf_meta(data, body, min(len(data), body + size))
             return VideoInfo(duration=float(values.get("duration") or 0.0), width=int(values.get("width") or 0),
-                             height=int(values.get("height") or 0))
+                             height=int(values.get("height") or 0), container="flv")
         pos = body + size + 4
     raise _Bad("no onMetaData")
 
@@ -719,7 +919,7 @@ def _asf(fh, file_size: int) -> VideoInfo:
         elif guid == _ASF_STREAM_PROPERTIES and data[pos + 24:pos + 40] == _ASF_VIDEO and pos + 86 <= len(data):
             width, height = struct.unpack_from("<II", data, pos + 78)
         pos += size
-    return VideoInfo(duration=seconds, width=width, height=height)
+    return VideoInfo(duration=seconds, width=width, height=height, container="asf")
 
 
 # ── the background duty ───────────────────────────────────────────────────────────

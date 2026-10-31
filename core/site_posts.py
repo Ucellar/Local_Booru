@@ -10,6 +10,11 @@ and nothing else; until then (and on a site that answers it with posts nobody as
 about are asked one by one.  What a site said is kept for ever: a post it does not have (deleted, hidden) is kept as
 «gone» and not asked again.  A site that does not answer rests :data:`FAILED_PAUSE`; a site without its key
 (rule34.xxx) or switched off by the site table is not asked.  Nothing but these questions goes to the network.
+
+(v5.44.4) While the parser or the subscriptions use the sites the questions go on, only slower (:data:`BUSY_BUDGET` a
+round): the pace of every site is shared by all who ask it (``core/http_rate_limiter``, the parser's ``_HostGate``),
+and a few packs are nothing to a parser's run — which at the owner's took days, the questions waited all the time, and
+the cards from before stayed without their uploader and parent: in no сборка.
 """
 from __future__ import annotations
 
@@ -24,6 +29,7 @@ ENGINES = ("danbooru", "e621", "gelbooru", "moebooru")     # engines whose posts
 FAILED_PAUSE = 10 * 60          # seconds a site that did not answer is not asked again
 RESCAN = 15 * 60                # seconds between two looks at which posts are still to be asked
 ROUND_BUDGET = 20.0             # seconds one background round asks at most
+BUSY_BUDGET = 6.0               # …while the parser or the subscriptions use the sites (v5.44.4)
 ATTEMPTS = 2                    # tries of one request
 SOURCE_MAX = 2000               # characters of a post's source links kept
 _URL_RE = re.compile(r"https?://[^\s|<>\"']+", re.I)
@@ -343,36 +349,43 @@ def _ask(site, ids: list, st: dict) -> tuple[dict, list, list]:
     return found, ([] if found else [first]), ids[1:]
 
 
+MAINTENANCE = "идёт обслуживание"      # a job of «Обслуживание» has the parser: nothing is asked meanwhile
+
+
 def sites_busy() -> str:
     """Who uses the sites now — the parser, a check of the subscriptions (the grabber's downloads too), a job of
     «Обслуживание»: the questions wait for them ("" — nobody)."""
     from core import subscription_jobs
     from core.parser import jobs as parser_jobs
     if parser_jobs.is_running():
-        return "работает парсер" if not parser_jobs.owner().startswith("обслуживание") else "идёт обслуживание"
+        return "работает парсер" if not parser_jobs.owner().startswith("обслуживание") else MAINTENANCE
     if subscription_jobs.is_running():
         return "проверяются подписки"
     return ""
 
 
 def backfill(settings: dict, *, stop_check=None, budget: float = ROUND_BUDGET, client: _Client | None = None) -> dict:
-    """One round: ask the sites about the posts not asked yet, as much as ``budget`` seconds allow; nothing while the
-    parser or the subscriptions use the sites (``sites_busy``).
-    {"asked": posts asked, "written": rows kept, "more": something is left, "busy": who waits it}."""
+    """One round: ask the sites about the posts not asked yet, as much as ``budget`` seconds allow; while the parser or
+    the subscriptions use the sites (``sites_busy``) — :data:`BUSY_BUDGET` at most (v5.44.4: before, nothing — and a
+    parser's run of days left the old cards out of сборки); nothing while «Обслуживание» has the sites.
+    {"asked": posts asked, "written": rows kept, "more": something is left, "busy": who the round shared them with}."""
     from core.database.connection import writes_blocked
     if not enabled(settings) or writes_blocked():
         return {"asked": 0, "written": 0, "more": False}
     busy = sites_busy()
     with _LOCK:
         _STATE["busy"] = busy
-    if busy:
+    if busy == MAINTENANCE:
         return {"asked": 0, "written": 0, "more": True, "busy": busy}
+    if busy:
+        budget = min(budget, BUSY_BUDGET)
     if not _RUN_LOCK.acquire(blocking=False):            # another round is asking right now
         return {"asked": 0, "written": 0, "more": True}
     try:
-        return _round(settings, stop_check, budget, client)
+        result = _round(settings, stop_check, budget, client)
     finally:
         _RUN_LOCK.release()
+    return {**result, "busy": busy} if busy else result
 
 
 def _base_key(settings: dict) -> str:

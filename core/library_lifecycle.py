@@ -721,12 +721,6 @@ def _delete_thumb_files_for_paths(paths: Iterable[str]) -> int:
             marker.unlink(missing_ok=True)
         except Exception:
             pass
-    try:
-        from core.thumb_service import ThumbnailService
-        if ThumbnailService._instance is not None:
-            ThumbnailService.instance().clear_memory_cache()
-    except Exception:
-        pass
     return removed
 
 
@@ -1003,12 +997,6 @@ def clear_thumbnail_cache(settings: dict) -> dict:
             continue
         removed += 1
         freed += size
-    try:                    # the old window keeps thumbnails in memory as well
-        from core.thumb_service import ThumbnailService
-        if ThumbnailService._instance is not None:
-            ThumbnailService.instance().clear_memory_cache()
-    except ImportError:     # no Qt here (the web pages without the window): nothing kept in memory
-        pass
     return {"removed": removed, "bytes": freed, "busy": busy}
 
 

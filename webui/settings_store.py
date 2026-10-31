@@ -32,6 +32,7 @@ PAGE_KEYS = frozenset({
     "sqlite_idle_checkpoint_threshold_mb", "sqlite_idle_checkpoint_interval_seconds", "derived_cache_external_enabled", "manga_root",
     "visual_nomatch_classify_enabled", "visual_nomatch_auto_download_model", "visual_nomatch_model",
     "visual_nomatch_min_confidence", "video_root", "video_tab_seconds", "video_source_aniliberty", "aniliberty_url",
+    "video_source_dubs", "yummy_api_url", "video_dub_merge",
     "post_sets_enabled",
     "card_sets_tiles", "card_sets_auto", "card_sets_ask_sites", "card_sets_remote",
 })

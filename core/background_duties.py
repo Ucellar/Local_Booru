@@ -19,11 +19,15 @@
   the long ones to the tab «Видео»), 15 seconds at most a round, the rest 5 seconds later; not while «Обслуживание»
   has the library nor while the base is read-only;
 - every 2 minutes: the sites are asked once about the posts of the cards from before (``site_posts.backfill``: who
-  uploaded a post, its parent — what сборки are made of), 20 seconds at most a round, the rest 15 seconds later; not
-  while the parser or the subscriptions use the sites, nor while «Обслуживание» has the library, nor while the base
-  is read-only;
+  uploaded a post, its parent — what сборки are made of), 20 seconds at most a round, the rest 15 seconds later;
+  while the parser or the subscriptions use the sites — 6 seconds a round, every 45 seconds (v5.44.4: they shared
+  the sites' pace; before, nothing was asked, and a parser's run of days left the cards from before out of сборки);
+  not while «Обслуживание» has the library, nor while the base is read-only;
 - every 3 minutes: the сборки are put together again when the library changed (``card_sets.rebuild``; the сборки
   the person changed or made are left as they are); not while «Обслуживание» has the library.
+- every 3 minutes: the openings and endings of the series of the tab «Видео» whose episodes are new
+  (``video_skips.background_round``: their sound and key frames compared episode to episode), 45 seconds at most a
+  round, the rest 10 seconds later; not while a video plays in the window (it would stutter).
 
 One daemon thread, so none of this waits in the window's thread (the old window's timers wrote to the base from
 it, and a VACUUM of «Обслуживание» froze the window for the base's busy time).  It ends with the program: the exit
@@ -49,12 +53,15 @@ INTERVALS = {                        # seconds between the runs of each duty
     "durations": 2 * 60,
     "site_posts": 2 * 60,
     "card_sets": 3 * 60,
+    "skips": 3 * 60,
 }
 FIRST_RUN = {"lifecycle": 1.5, "subscriptions": 60, "checkpoint": 30, "stalls": 60, "visual": 45,
-             "durations": 20, "site_posts": 75, "card_sets": 25}        # seconds after the start
+             "durations": 20, "site_posts": 75, "card_sets": 25, "skips": 90}        # seconds after the start
 VISUAL_AGAIN = 30                    # seconds to the next round of «фото или рисунок» when the last one was cut short
 DURATIONS_AGAIN = 5                  # seconds to the next round of video lengths when cards are still waiting
 SITE_POSTS_AGAIN = 15                # seconds to the next round of questions to the sites when posts are still waiting
+SITE_POSTS_SHARED_AGAIN = 45         # …while the parser or the subscriptions use the sites (v5.44.4)
+SKIPS_AGAIN = 10                     # seconds to the next round of openings and endings when episodes still wait
 TICK = 1.0
 
 _LOCK = threading.Lock()
@@ -229,7 +236,20 @@ class BackgroundDuties:
             _LOG.info("site posts: %d asked, %d card row(s) kept%s", result["asked"], result["written"],
                       ", more to come" if result.get("more") else "")
         if result.get("more") and result.get("asked"):
-            self._next_in["site_posts"] = SITE_POSTS_AGAIN
+            self._next_in["site_posts"] = SITE_POSTS_SHARED_AGAIN if result.get("busy") else SITE_POSTS_AGAIN
+
+    def _skips(self, settings: dict) -> None:
+        """The openings and endings of series' new episodes, by their sound and pictures (``core/video_skips``); not
+        while a video plays in the window or a download writes the series folders, stopped at the exit."""
+        if self._stopping() or _watching() or _downloading():
+            return
+        from core import video_skips
+        result = video_skips.background_round(settings, stop=lambda: self._stopping() or _watching() or _downloading())
+        if result.get("done"):
+            _LOG.info("openings and endings: %d episode(s) looked at%s", result["done"],
+                      ", more to come" if result.get("more") else "")
+        if result.get("more"):
+            self._next_in["skips"] = SKIPS_AGAIN
 
     def _card_sets(self, settings: dict) -> None:
         """The сборки put together again when the library changed since the last time."""
@@ -256,6 +276,21 @@ class BackgroundDuties:
                          task_id, row.get("kind", "background"), row.get("name", "?"),
                          float(row.get("effective_idle_seconds") or 0) / 60.0, row.get("thread_name", "?"),
                          row.get("detail", ""))
+
+
+def _watching() -> bool:
+    """A video plays in the window now: in the page (its frames go to it) or full size."""
+    try:
+        from webui.video_relay import RELAY
+    except ImportError:
+        return False
+    return RELAY.playing()
+
+
+def _downloading() -> bool:
+    """«Скачать с сайта» downloads into the video folder now (and puts voice-overs together: files are replaced)."""
+    from core import video_download
+    return video_download.busy()
 
 
 def _library_taken() -> bool:

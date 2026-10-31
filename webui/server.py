@@ -531,6 +531,10 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send(_static(path[len("/static/"):]), method)
             if not ui.cookie_ok(self.headers.get("Cookie", "")):
                 return self._send(_login_required(), method)
+            from core.database.connection import pages_wait
+            wait = pages_wait()
+            if wait:                                # (v5.44.5) the base is being checked and updated: no page yet
+                return self._send(_waiting_page(wait, api=path.startswith("/api/")), method)
             handler, params = ui.router.match("GET" if method == "HEAD" else method, path)
             if handler is None:
                 if params == "method":
@@ -722,6 +726,21 @@ def _login_required() -> Response:
             "<h2>Откройте галерею из программы Local Booru</h2>"
             "<p>Эта страница доступна только по ссылке, которую даёт сама программа.</p></body>")
     return Response(403, text.encode("utf-8"))
+
+
+def _waiting_page(wait: dict, *, api: bool) -> Response:
+    """(v5.44.5) The base is older than the program and is checked before its update (``pages_wait``): pages say so and
+    ask again every few seconds (they open by themselves once it is done); an API — 503 with the same words."""
+    from html import escape
+    reason = str(wait.get("reason") or "")
+    if api:
+        return Response.json({"ok": False, "error": reason, "waiting": not wait.get("failed")}, 503)
+    again = "" if wait.get("failed") else "<meta http-equiv='refresh' content='3'>"
+    title = "Базу обновить не удалось" if wait.get("failed") else "Программа готовит базу"
+    text = (f"<!doctype html><meta charset=utf-8>{again}<title>Local Booru</title>"
+            "<body style='font:15px sans-serif;padding:40px;background:#1c1e25;color:#d9dbe4;max-width:70ch'>"
+            f"<h2>{escape(title)}</h2><p>{escape(reason)}</p></body>")
+    return Response(503, text.encode("utf-8"), headers={"Retry-After": "3"})
 
 
 def _error_page(exc: Exception) -> str:

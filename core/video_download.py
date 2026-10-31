@@ -124,9 +124,18 @@ class Found:
                                                    # the one a source gives
     facts: dict = field(default_factory=dict)      # what the page says of the title, for its card on the page
     poster: tuple | None = None                    # (bytes, extension, where from) — shown with the list, then written
+    choose: str = ""                               # "dubs" — many voice-overs (``core/video_dubs``): nothing is ticked
+                                                   # at first, the page offers «Качество»
+    resolve: object = None                         # (remote, *, session, quality, say, stop) -> HLS plan | None: the
+                                                   # file's address asked right before it is downloaded (signed
+                                                   # addresses that live for hours — ``video_dubs.Resolver``)
+    had: object = None                             # (remote) -> bool: the file is in the folder in another shape
+                                                   # (a voice-over put into the episode's MKV — ``video_dubs.Merger``)
+    after: object = None                           # (*, say, stop) -> dict: done after «Скачать» when asked
+                                                   # (``download(merge=True)``: the voice-overs into one file)
 
     def public(self, root: Path) -> dict:
-        _look_at_folder(self.folder, self.files)           # what is in the folder now (a download may have run)
+        _look_at_folder(self.folder, self.files, self.had)  # what is in the folder now (a download may have run)
         try:
             where = str(self.folder.relative_to(root))
         except ValueError:
@@ -142,7 +151,8 @@ class Found:
         return {"title": self.title, "folder": where, "new_folder": self.new_folder, "page_url": self.page.url,
                 "streams": self.streams, "hidden": self.hidden, "frames": self.frames, "frame_site": self.frame_site,
                 "episodes": self.episodes, "files": files, "sources": [dict(x) for x in self.sources],
-                "voices": [dict(v) for v in self.voices], "facts": dict(self.facts), "poster": self.poster is not None}
+                "voices": [dict(v) for v in self.voices], "facts": dict(self.facts), "poster": self.poster is not None,
+                "choose": self.choose}
 
 
 _TITLE_NUMBER = re.compile(r"(\d{1,4}(?:\.\d{1,2})?)\s*$")
@@ -472,7 +482,7 @@ def target_of(folder: Path, remote: Remote) -> Path:
     return folder / remote.group / remote.name if remote.group else folder / remote.name
 
 
-def _look_at_folder(folder: Path, files: list) -> None:
+def _look_at_folder(folder: Path, files: list, had=None) -> None:
     for remote in files:
         _fit(folder, remote)
         remote.have, remote.part = "", 0
@@ -484,6 +494,8 @@ def _look_at_folder(folder: Path, files: list) -> None:
                 remote.have = "whole" if same else "other"
             elif part.is_file():
                 remote.have, remote.part = "part", part.stat().st_size
+            elif had is not None and had(remote):    # in another shape (a voice-over in the episode's MKV)
+                remote.have = "whole"
         except OSError:
             continue
 
@@ -550,10 +562,10 @@ def look(page, root: Path, *, say=None, stop_check=None, fetch=None) -> Found:
 def complete(found: Found, say, stop) -> Found:
     """The sizes of the files asked, the streams read (quality, length, why one cannot be taken), what of it is in the
     folder already — for a list of files from the page or from another site (``core/video_sources``)."""
-    if found.files:
+    if found.files and found.resolve is None:      # addresses asked later have nothing to ask now
         _sizes([f for f in found.files if not f.stream], found.page.url, say, stop)
         _plan_streams(found, say, stop)
-    _look_at_folder(found.folder, found.files)
+    _look_at_folder(found.folder, found.files, found.had)
     return found
 
 
@@ -635,6 +647,12 @@ def _sizes(files: list, referer: str, say, stop) -> None:
 # ── downloading ─────────────────────────────────────────────────────────────────────
 _METER_LOCK = threading.Lock()
 _METER: dict = {}
+_BUSY: list = []                    # one item while ``download`` runs (work in the background waits for its end)
+
+
+def busy() -> bool:
+    """A download (and its putting together) goes on now: the files of the series folder are being written."""
+    return bool(_BUSY)
 
 
 def meter() -> dict:
@@ -981,8 +999,10 @@ def _describe(found: Found, say, stop) -> None:
         say(f"Описание не записано: {exc}")
 
 
-def download(found: Found, chosen: list, root: Path, *, say, stop_check) -> dict:
-    """Download the chosen files of a page into the series folder: {"done", "whole", "failed", "folder", "series"}."""
+def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality: str = "", merge: bool = False) -> dict:
+    """Download the chosen files of a page into the series folder: {"done", "whole", "failed", "folder", "series"}.
+    ``quality`` — «Качество» of the page for addresses asked right before a file (``Found.resolve``); ``merge`` — then
+    ``Found.after`` (the voice-overs of each episode into one file)."""
     from core.video_meta_import import _session
     places = [n for n in dict.fromkeys(chosen) if isinstance(n, int) and 0 <= n < len(found.files)]
     files = [found.files[n] for n in places]
@@ -997,7 +1017,20 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check) -> dict
     _describe(found, say, stop_check)
     video_library.LIBRARY.invalidate()
     session = _session(files[0].url)
-    counts = {"done": 0, "whole": 0, "other": 0, "failed": 0, "dead": 0, "stopped": 0}
+    counts = {"done": 0, "whole": 0, "other": 0, "failed": 0, "dead": 0, "stopped": 0, "merged": 0}
+    roles = {}                                     # into one file: voice-overs wanted for their sound only — lower
+    if merge and found.after is not None and found.resolve is not None and hasattr(found.resolve, "roles"):
+        from core import video_merge               # (without PyAV nothing is put together: every file as chosen)
+        if video_merge.available():
+            roles = found.resolve.roles(files, quality, session=session, say=say, stop=stop_check)
+        sound = sum(1 for role in roles.values() if role == "sound")
+        if sound:
+            say(f"Озвучки собираются в один файл: картинку серии даёт одна озвучка, остальные ({sound}) качаются "
+                "ради звука — в 360p у Kodik, 480p у CVH: звук тот же, скачивать в разы меньше. Сначала — картинки")
+        if roles:   # the pictures first: one that does not come is given by another voice-over, not yet downloaded
+            pairs = sorted(zip(places, files), key=lambda pair: roles.get(id(pair[1])) == "sound")
+            places, files = [p for p, _f in pairs], [f for _p, f in pairs]
+    _BUSY.append(1)
     try:
         for n, (place, remote) in enumerate(zip(places, files), 1):
             if stop_check():
@@ -1006,8 +1039,32 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check) -> dict
             states[place] = "active"
             _set_meter(index=n, count=len(files), name=remote.name, file=place, states=dict(states), done=remote.part,
                        total=remote.size, speed=0)
-            state = download_file(session, remote, found.folder, found.page.url, say=say, stop=stop_check,
-                                  number=f"{n}/{len(files)} " if len(files) > 1 else "", plan=found.plans.get(remote.url))
+            number = f"{n}/{len(files)} " if len(files) > 1 else ""
+            plan = found.plans.get(remote.url)
+            state = ""
+            if found.had is not None and not target_of(found.folder, remote).is_file() and found.had(remote) \
+                    and roles.get(id(remote)) != "picture":   # its sound is in the file, its picture is wanted
+                say(f"{number}{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
+                    + ": уже есть в общем файле серии")
+                state = "whole"
+            if found.resolve is not None and not target_of(found.folder, remote).is_file():
+                try:
+                    plan = found.resolve(remote, session=session, quality=quality, say=say, stop=stop_check,
+                                         role=roles.get(id(remote), "")) or plan
+                except DownloadError as exc:
+                    state = "stopped" if stop_check() else "failed"
+                    say(f"{number}{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
+                        + (": остановлено" if state == "stopped" else f": не скачан — {exc}"))
+            if not state:
+                state = download_file(session, remote, found.folder, found.page.url, say=say, stop=stop_check,
+                                      number=number, plan=plan)
+            if found.resolve is not None and hasattr(found.resolve, "finished"):
+                found.resolve.finished(remote, state)
+            if roles.get(id(remote)) == "picture" and state in ("failed", "dead") and hasattr(found.resolve, "instead"):
+                other = found.resolve.instead(remote, roles)
+                if other is not None:
+                    say(f"{remote.title or remote.name}: картинку серии даст {other.group or other.name} — "
+                        "она скачается в выбранном качестве")
             states[place] = state
             _set_meter(states=dict(states))
             counts[state] += 1
@@ -1015,7 +1072,12 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check) -> dict
                 video_library.LIBRARY.invalidate()
             if state == "stopped":
                 break
+        if merge and found.after is not None and not counts["stopped"] and not stop_check():
+            _set_meter(clear=True)
+            merged = found.after(say=say, stop=stop_check) or {}
+            counts["merged"] = int(merged.get("episodes") or 0)
     finally:
+        _BUSY.pop()
         _set_meter(clear=True)
         video_library.LIBRARY.invalidate()
     summary = [f"скачано {counts['done']}"]
@@ -1027,11 +1089,15 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check) -> dict
         summary.append(f"не скачаны {counts['failed']}")
     if counts["dead"]:
         summary.append(f"пустые на сайте {counts['dead']}")
+    if counts["merged"]:
+        summary.append(f"собрано в общие файлы серий {counts['merged']}")
     say("Итог: " + ", ".join(summary))
     series_id = video_library._id_for(root, found.folder)
     result = {"done": counts["done"], "whole": counts["whole"], "failed_files": counts["failed"] + counts["dead"],
               "folder": str(found.folder), "series": series_id, "stopped": bool(counts["stopped"]),
               "states": {str(n): state for n, state in states.items()}}
+    if counts["merged"]:
+        result["merged"] = counts["merged"]
     if (counts["failed"] or counts["dead"]) and not counts["done"] and not counts["whole"] and not counts["stopped"]:
         result["failed"] = ("Сайт не отдаёт эти файлы: они пустые, и его плеер на странице их тоже не покажет — "
                             "поищите тайтл на другом сайте" if not counts["failed"] else

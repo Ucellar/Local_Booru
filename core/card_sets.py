@@ -1149,6 +1149,44 @@ def set_of(settings: dict, image_id: int) -> dict | None:
             "posts": [(int(p[0]), str(p[1]), int(p[2])) for p in posts]}
 
 
+def lone_family(settings: dict, image_id: int, sites) -> dict | None:
+    """(v5.44.1) A card of no сборка whose post may have a family on a site: the box over its picture asks the site
+    for it (``webui/pages/post_sets.py``) — the library had one picture of a parent and its two children, and no box
+    showed the other two.  {"id": 0, "kind": "parent", "lone": True, "child" — its post has a parent there, "members":
+    [the card], "index": 0, "parents" — the card when its own post is asked about, "root": (site, the parent's post —
+    or the card's own: its children are asked), "post_ids", "posts"}; None — it is in a сборка of two cards or more,
+    the person took it out of сборки, it is in the trash, or it has no post on ``sites`` (the sites the grabber
+    searches, in its order: the first one where its post has a parent, else the first)."""
+    from core.database.connection import db
+    order = {str(site): n for n, site in enumerate(sites or [])}
+    if not order:
+        return None
+    with db(settings, readonly=True) as con:
+        if con.execute("SELECT 1 FROM card_set_optout WHERE image_id=?", (int(image_id),)).fetchone():
+            return None
+        together = con.execute(
+            "SELECT COUNT(*) FROM card_set_members m JOIN card_set_members x ON x.set_id=m.set_id "
+            "JOIN images j ON j.id=x.image_id AND j.deleted=0 WHERE m.image_id=?", (int(image_id),)).fetchone()
+        if together and int(together[0]) >= 2:
+            return None
+        row = con.execute("SELECT id, path, hash_md5, size_bytes, mtime_ns, is_video, width, height, deleted FROM images "
+                          "WHERE id=? AND deleted=0", (int(image_id),)).fetchone()
+        if row is None:
+            return None
+        posts = [(str(site), int(post_id), int(parent or 0)) for site, post_id, parent in con.execute(
+            "SELECT site, post_id, parent_id FROM site_posts WHERE image_id=? AND state='ok' ORDER BY site, post_id",
+            (int(image_id),))]
+    usable = [p for p in posts if p[0] in order]
+    if not usable:
+        return None
+    children = [p for p in usable if p[2]]
+    site, post_id, parent = min(children or usable, key=lambda p: (order[p[0]], p[1]))
+    card = int(row[0])
+    return {"id": 0, "kind": "parent", "title": "", "locked": False, "lone": True, "child": bool(parent),
+            "members": [dict(row)], "index": 0, "parents": [] if parent else [card], "root": (site, parent or post_id),
+            "post_ids": {card: post_id}, "posts": [(card, s, p) for s, p, _parent in posts]}
+
+
 def numbers_on(found: dict, site: str) -> dict:
     """{card: its post's number on ``site``} of a сборка of :func:`set_of`."""
     out: dict = {}

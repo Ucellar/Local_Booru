@@ -1,7 +1,8 @@
-"""The new gallery inside the program window: the web pages of ``webui`` shown by Qt WebEngine.
+"""The program's web pages (``webui``) inside the program window, shown by Qt WebEngine.
 
 Links to other sites (post sources) open in the usual browser; «Скачать оригинал» asks where to save.
-Without Qt WebEngine (an old installation) the page offers to open the gallery in the browser instead.
+Without Qt WebEngine — or where it does not work (``ui/program_window.py``) — the pages open in the usual browser, and
+this part of the window says so and offers its buttons (``browser=True``).
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import weakref
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
-from PySide6.QtWidgets import QLabel, QPushButton, QStackedLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedLayout, QVBoxLayout, QWidget
 
 _LOG = logging.getLogger("local_booru.webui")
 
@@ -91,9 +92,8 @@ _DOWNLOADS = None          # weak reference to the gallery page that asks where 
 
 def _shared_profile(page: "WebGalleryPage"):
     """The gallery's web profile: one per program run, belonging to the application — it must outlive its pages
-    (Qt warns and may lose cookies otherwise), and two profiles on one storage folder would fight over it (a new
-    window that failed to build leaves its profile behind, and the old window opens instead).  «Скачать оригинал»
-    is asked by the page made last."""
+    (Qt warns and may lose cookies otherwise), and two profiles on one storage folder would fight over it (a window
+    that failed to build leaves its profile behind).  «Скачать оригинал» is asked by the page made last."""
     global _PROFILE, _DOWNLOADS
     if _PROFILE is None:
         from core.paths import CACHE_DIR
@@ -121,6 +121,16 @@ def _refuse_permission(permission) -> None:
         _LOG.debug("permission request not answered: %s", exc)
 
 
+def _full_player(on: bool) -> None:
+    """The full-size player opened or left: work in the background that waits while a video plays knows it
+    (``RELAY.playing``)."""
+    try:
+        from webui.video_relay import RELAY
+    except ImportError:
+        return
+    RELAY.set_full(on)
+
+
 def _download_requested(download) -> None:
     page = _DOWNLOADS() if _DOWNLOADS is not None else None
     if page is None:
@@ -130,29 +140,25 @@ def _download_requested(download) -> None:
 
 
 class WebGalleryPage(QWidget):
-    """Page of the main window; ``open_path("/posts?tags=...")`` shows any gallery address."""
+    """The program window's content; ``open_path("/posts?tags=...")`` shows any address of its pages."""
 
-    def __init__(self, main_window):
+    def __init__(self, main_window, *, browser: bool = False, why: str = ""):
         # the window is its parent from the start: a page left without one would be destroyed by the garbage
         # collector, in whatever thread it runs — and a web view destroyed outside the window's thread ends the program
         super().__init__(main_window if isinstance(main_window, QWidget) else None)
         self.mw = main_window
         self._view = None
         self._loaded = False
-        self.pending_path = ""            # where the next refresh() goes (set by the «Манга» entry)
+        self._player = None
+        self._inline = None              # the video played inside the page (ui/video_inline.py), made when first asked
+        self._screen = False
+        self._screen_was = None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        if QWebEngineView is None:
-            lay.addStretch(1)
-            note = QLabel("Новая галерея показывается встроенным браузером Qt WebEngine, а его нет в этой установке.\n"
-                          "Её можно открыть в обычном браузере — все функции там те же.")
-            note.setWordWrap(True)
-            lay.addWidget(note)
-            button = QPushButton("Открыть галерею в браузере")
-            button.clicked.connect(lambda: self.open_in_browser("/posts"))
-            lay.addWidget(button)
-            lay.addStretch(2)
-            _LOG.warning("Qt WebEngine is not available: %s", _WEBENGINE_ERROR)
+        if browser or QWebEngineView is None:
+            self._browser_panel(lay, why)
+            if QWebEngineView is None:
+                _LOG.warning("Qt WebEngine is not available: %s", _WEBENGINE_ERROR)
             return
         self._profile = _shared_profile(self)
         self._view = QWebEngineView(self)
@@ -160,6 +166,11 @@ class WebGalleryPage(QWidget):
         page.settings_provider = lambda: getattr(self.mw, "settings", {}) or {}
         if hasattr(page, "permissionRequested"):                   # Qt 6.8 and later
             page.permissionRequested.connect(_refuse_permission)
+        try:            # (v5.44) the program's own pages: an episode asked to play plays (as the program's own player)
+            from PySide6.QtWebEngineCore import QWebEngineSettings
+            page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+        except (ImportError, AttributeError) as exc:
+            _LOG.debug("autoplay of the window's pages not allowed: %s", exc)
         self._view.setPage(page)
         from ui.qt_language import hide_dead_actions
         hide_dead_actions(page)                 # the menu over a page: only what works in this window
@@ -169,10 +180,7 @@ class WebGalleryPage(QWidget):
         holder = QWidget(self)
         self._layers = QStackedLayout(holder)
         self._layers.addWidget(self._view)
-        self._player = None
-        self._inline = None              # the video played inside the page (ui/video_inline.py), made when first asked
         # ⛶ of the page's player: the window is full screen for it (booru.js ``setFull`` puts the player over the page)
-        self._screen = False
         self._screen_since = 0.0
         self._screen_was = None          # the window's state before (None — it was full screen already: F11)
         self._f11_was_maximized = False  # F11: the window was maximized before (back so)
@@ -194,27 +202,67 @@ class WebGalleryPage(QWidget):
         self._screen_esc.activated.connect(self._screen_off_by_window)
         self._screen_esc.setEnabled(False)
 
-    # ── called by the main window ───────────────────────────────────────────
+    def _browser_panel(self, lay, why: str) -> None:
+        """The pages are in the usual browser: what this window is for now, and its buttons."""
+        lay.setContentsMargins(24, 20, 24, 20)
+        lay.setSpacing(12)
+        title = QLabel("Local Booru работает в браузере")
+        font = title.font()
+        font.setPointSizeF(font.pointSizeF() * 1.3)
+        font.setBold(True)
+        title.setFont(font)
+        lay.addWidget(title)
+        text = (why + "\n\n" if why else "") + (
+            "Это окно держит программу запущенной и отвечает страницам (выбор папок, вопросы); закроете его — "
+            "программа закончит работу.")
+        note = QLabel(text)
+        note.setObjectName("lb_browser_note")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        buttons = QHBoxLayout()
+        go = QPushButton("Открыть Local Booru в браузере")
+        go.setObjectName("lb_open_browser")
+        go.setDefault(True)
+        go.clicked.connect(lambda: self.open_in_browser("/posts"))
+        buttons.addWidget(go)
+        if QWebEngineView is not None:
+            window = QPushButton("Открыть в окне программы")
+            window.setObjectName("lb_back_to_window")
+            window.setToolTip("Программа начнёт заново и попробует показать страницы в своём окне")
+            window.clicked.connect(self._back_to_window)
+            buttons.addWidget(window)
+        buttons.addStretch(1)
+        lay.addLayout(buttons)
+        lay.addStretch(1)
+
+    def _back_to_window(self) -> None:
+        """«Открыть в окне программы»: the window again from now on, the program starts again at once."""
+        settings = getattr(self.mw, "settings", None)
+        if isinstance(settings, dict) and settings.get("ui_shell") == "browser":
+            settings["ui_shell"] = "web"
+            try:
+                self.mw.save_settings()
+            except OSError as exc:
+                _LOG.warning("the window not chosen again: %s", exc)
+                return
+        from core import app_restart
+        app_restart.request()                    # app.py starts the program again once this window has closed
+        self.mw.close()
+
+    # ── called by the program window ─────────────────────────────────────────
     @property
     def view(self):
         """The web view (None without Qt WebEngine)."""
         return self._view
 
     def start(self) -> None:
-        """The server, the bridge and the first page now (the new window: the pages ask the window for
-        dialogs, and «Подписки» look for the bridge, before the window is first shown)."""
+        """The server, the bridge and the first page now (the pages ask the window for dialogs, and «Подписки» look
+        for the bridge, before the window is first shown).  The pages in the browser: it opens them once the program
+        is up."""
         self._server()
+        if self._view is None:
+            QTimer.singleShot(0, lambda: self.open_in_browser("/posts"))
         self._ensure_loaded()
-
-    def refresh(self):
-        """The sidebar opened this page: «Галерея» shows the gallery, «Манга» (``pending_path``) the manga."""
-        target, self.pending_path = self.pending_path, ""
-        if target:
-            self.open_path(target)
-        elif self._loaded and self.current_path().startswith("/manga"):
-            self.open_path("/posts")
-        else:
-            self._ensure_loaded()
 
     def showEvent(self, event):
         self._ensure_loaded()
@@ -223,11 +271,11 @@ class WebGalleryPage(QWidget):
             self._view.setFocus()       # arrow keys and typing go to the gallery at once
 
     def hideEvent(self, event):
-        # Another sidebar page: the video stops (it would play on unseen and keep its file open).
+        # The window minimized or closing: the video stops (it would play on unseen and keep its file open).
         if self.player_visible():
             self._show_page()
         self._stop_inline()
-        if not event.spontaneous():            # another sidebar page; a minimized window stays as it is
+        if not event.spontaneous():            # closing; a minimized window keeps its full screen as it was
             self._screen_leave()
         super().hideEvent(event)
 
@@ -253,8 +301,10 @@ class WebGalleryPage(QWidget):
         QDesktopServices.openUrl(QUrl(self._server().login_url(path)))
 
     def toggle_fullscreen(self) -> None:
-        """F11: the whole window on the full screen and back (as in the old post page) — back maximized when it was
-        (it came back in its own size, smaller than before)."""
+        """F11: the whole window on the full screen and back — back maximized when it was (it came back in its own
+        size, smaller than before).  Not for the small window of the pages in the browser."""
+        if self._view is None:
+            return
         window = self.window()
         if window.isFullScreen():
             was = self._screen_was if self._screen and self._screen_was is not None else None
@@ -273,6 +323,8 @@ class WebGalleryPage(QWidget):
         back to the state it had (maximized or not; full screen by F11 stays so)."""
         if not on:
             self._screen_leave()
+            return
+        if self._view is None:                   # the pages in the browser: the browser has its own full screen
             return
         self._screen_claimed = True
         if self._screen:
@@ -360,6 +412,7 @@ class WebGalleryPage(QWidget):
             self._player.navigate.connect(self._player_navigate)
             self._layers.addWidget(self._player)
         self._layers.setCurrentWidget(self._player)
+        _full_player(True)
         on_choice = on_progress = None
         if series:
             def on_choice(kind: str, value, series=series) -> None:
@@ -413,6 +466,7 @@ class WebGalleryPage(QWidget):
     def _show_page(self) -> None:
         if self._player is not None:
             self._player.stop()
+        _full_player(False)
         self._layers.setCurrentWidget(self._view)
         self._view.setFocus()
 
@@ -441,7 +495,7 @@ class WebGalleryPage(QWidget):
     def _server(self):
         from webui import service
         server = service.ensure_started(lambda: self.mw.settings)
-        if service.bridge() is None and self._view is not None:
+        if service.bridge() is None:             # (the pages in the browser too: settings are saved by the window)
             from ui.web_bridge import AppBridge
             service.set_bridge(AppBridge(self.mw, self))
         return server
@@ -455,19 +509,11 @@ class WebGalleryPage(QWidget):
             return
         self.open_path("/posts")
 
-    def _on_url_changed(self, url) -> None:
-        """Gallery or manga: the window title and the pressed sidebar button follow the page."""
+    def _on_url_changed(self, _url) -> None:
+        """Another page: the video of the old one stops."""
         if self.player_visible():
-            self._show_page()                   # another page: the video of the old one stops
+            self._show_page()
         self._stop_inline()
-        manga = url.path().startswith("/manga")
-        try:
-            if self.mw.stack.currentWidget() is self:
-                self.mw.title.setText("Манга" if manga else "Галерея")
-                for key, button in self.mw.page_buttons.items():
-                    button.setChecked(key == ("BooruManga" if manga else "Booru"))
-        except AttributeError:        # a window without these parts (tests)
-            pass
 
     def _on_download(self, download) -> None:
         from pathlib import Path
@@ -481,24 +527,3 @@ class WebGalleryPage(QWidget):
         download.setDownloadDirectory(str(Path(target).parent))
         download.setDownloadFileName(Path(target).name)
         download.accept()
-
-
-class WebMangaShortcut(QWidget):
-    """Sidebar entry «Манга»: shows the manga pages of the new gallery (one web view serves both)."""
-
-    def __init__(self, main_window):
-        super().__init__()
-        self.mw = main_window
-
-    def refresh(self):
-        # ``go()`` shows this page right after refresh(); switch to the gallery view once it has.
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._open)
-
-    def _open(self):
-        page = getattr(self.mw, "web_gallery_page", None)
-        if page is None:
-            return
-        if not page.current_path().startswith("/manga"):
-            page.pending_path = "/manga"
-        self.mw.go("Booru")

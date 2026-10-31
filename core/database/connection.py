@@ -47,6 +47,35 @@ def writes_blocked() -> bool:
     return bool(_WRITE_BLOCK_REASON)
 
 
+# (v5.44.5) The pages wait while the base the program opened is older than its schema and its update waits for the
+# background check (after a crash of the program nothing is written before the check; the pages need the new tables:
+# a friend of the owner saw «no such table: card_set_members» on the gallery).  {"reason", "failed"} or None.
+_PAGES_WAIT: dict = {}
+
+
+def set_pages_wait(reason: str = "", *, failed: bool = False) -> None:
+    """The pages show ``reason`` instead of themselves ("" — they work again); ``failed`` — the update failed: the
+    pages say so and do not wait for it."""
+    global _PAGES_WAIT
+    _PAGES_WAIT = {"reason": str(reason or "").strip(), "failed": bool(failed)} if reason else {}
+
+
+def pages_wait() -> dict | None:
+    return dict(_PAGES_WAIT) if _PAGES_WAIT else None
+
+
+def schema_behind(settings) -> bool:
+    """The base exists and its schema is older than this program's (read only: nothing is created or written)."""
+    if not Path(db_path(settings)).is_file():
+        return False
+    from .migrations.runner import CURRENT_SCHEMA_VERSION, _version_from_meta
+    con = connect(settings, readonly=True)
+    try:
+        return _version_from_meta(con) < CURRENT_SCHEMA_VERSION
+    finally:
+        con.close()
+
+
 def _db_root(settings, *, create: bool = True) -> Path:
     folder = str((settings or {}).get("sqlite_db_folder", "")).strip()
     if folder:

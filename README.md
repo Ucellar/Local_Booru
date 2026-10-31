@@ -18,7 +18,8 @@ order. Everything stays on your computer.
 - **Gallery.** Tag search: a space means all tags, `-tag` excludes one, `a/b` means either. Sections for new, found,
   downloaded, favorite and deleted pictures. Every picture has its own page with each site's tags, and the gallery
   has a tag list. Series and the pages of one work are shown as a single tile.
-- **Manga and videos.** A manga reader. A video tab with series by folders, resume where you stopped, audio and
+- **Manga and videos.** A manga reader; the parts of one title are stacked as one. A video tab with series by
+  folders, resume where you stopped, «Skip opening / ending» buttons (found by the program itself), audio and
   subtitle tracks, ratings.
 - **Grabber and subscriptions.** Search several sites by tags at once, with previews. Subscriptions to tags and
   artists check themselves and download only what is new: originals, nothing you already have.
@@ -45,8 +46,11 @@ The interface is in Russian.
 2. Run `Local Booru.exe`.
 
 Windows 10 or 11, 64-bit. The program keeps its database, settings and cache in `Documents\Local_Booru` by default.
-In «Настройки → Папки» (Settings → Folders) you can choose a separate archive folder or move the whole archive to
-another drive.
+In «Настройки → Папки» (Settings → Folders) you can gather them and the library's files into one archive folder
+(`Local_Booru_Archive`), connect an archive you already have, or move the whole archive to another drive.
+
+If the program window stays blank on your computer, the program draws its pages without the graphics card the next
+time, and if that does not help either, opens them in your usual browser (Settings → Program window).
 
 ### Browser extension
 

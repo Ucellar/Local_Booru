@@ -85,6 +85,8 @@ class Media:
     key: str = ""                       # the method of a key ("" or NONE — none)
     ended: bool = True                  # #EXT-X-ENDLIST (a live stream never ends)
     breaks: int = 0                     # #EXT-X-DISCONTINUITY: joins of other pieces (an inserted advertisement?)
+    resume_key: str = ""                # what the resume note knows the stream by, when its address is signed in its
+                                        # path (Kodik — ``core/video_dubs.kodik_key``); "" — by the address
 
     @property
     def duration(self) -> float:
@@ -352,7 +354,7 @@ def _read_state(part: Path, media: Media) -> int:
     """How many parts are in ``part`` already (0 — start anew: no note, another stream, or the file is not as noted)."""
     try:
         state = json.loads(_state_file(part).read_text(encoding="utf-8"))
-        if state.get("playlist") != _key(media.url) or not part.is_file():
+        if state.get("playlist") != _note_key(media) or not part.is_file():
             return 0
         if part.stat().st_size != int(state.get("bytes") or -1):
             return 0
@@ -367,8 +369,12 @@ def _key(url: str) -> str:
     return f"{parsed.netloc}{parsed.path}"
 
 
+def _note_key(media: Media) -> str:
+    return media.resume_key or _key(media.url)
+
+
 def _write_state(part: Path, media: Media, done: int) -> None:
-    note = {"playlist": _key(media.url), "done": done, "bytes": part.stat().st_size if part.is_file() else 0}
+    note = {"playlist": _note_key(media), "done": done, "bytes": part.stat().st_size if part.is_file() else 0}
     tmp = _state_file(part).with_suffix(".tmp")
     tmp.write_text(json.dumps(note), encoding="utf-8")
     tmp.replace(_state_file(part))

@@ -26,11 +26,15 @@ from webui.video_relay import RELAY, fit_size
 _LOG = logging.getLogger("local_booru.video")
 
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoSink
+    from PySide6.QtMultimedia import (QAudioOutput, QMediaMetaData, QMediaPlayer, QVideoFrame, QVideoFrameFormat,
+                                      QVideoSink)
 except ImportError:                  # PySide6-Addons without Qt Multimedia
-    QAudioOutput = QMediaMetaData = QMediaPlayer = QVideoFrame = QVideoSink = None
+    QAudioOutput = QMediaMetaData = QMediaPlayer = QVideoFrame = QVideoFrameFormat = QVideoSink = None
 
 FPS = 30
+NO_PICTURE_AFTER = 8.0      # seconds of play without a single frame of a file with a picture: the player cannot show it
+NO_PICTURE = ("Собственный проигрыватель программы не показывает картинку этого видео (например, AV1 он "
+              "декодирует только видеокартой, которая это умеет)")
 QUALITY = 84
 START_TRIES = 4             # the jump to where an episode stopped last time: asked again if it did not take …
 START_WAIT = 6.0            # … for this many seconds in all
@@ -126,6 +130,74 @@ def draw_subtitle(image, text: str):
 
 def available() -> bool:
     return QMediaPlayer is not None
+
+
+def deep_frame_image(frame, *, half: bool = False):
+    """A frame of 10 or 16 bits a sample (H.264 «Hi10P», H.265 «Main 10», VP9 profile 2) as a picture, or None for
+    other frames.  Qt turns such a frame into a picture with the graphics card only; without one (another graphics
+    path, an old driver) ``toImage`` gives nothing and the play would show no picture, so it is turned here.
+    ``half`` — at half its size (the page shows it that small anyway): four times quicker."""
+    if QVideoFrameFormat is None:
+        return None
+    formats = QVideoFrameFormat.PixelFormat
+    kind = frame.pixelFormat()
+    if kind not in (formats.Format_YUV420P10, formats.Format_P010, formats.Format_P016):
+        return None
+    import numpy as np
+    from PySide6.QtGui import QImage
+    copy = QVideoFrame(frame)
+    if not copy.map(QVideoFrame.MapMode.ReadOnly):
+        return None
+    try:
+        width, height = copy.width(), copy.height()
+        if width < 2 or height < 2:
+            return None
+        cw, ch = (width + 1) // 2, (height + 1) // 2
+
+        def plane(n: int, rows: int, cols: int):
+            line = copy.bytesPerLine(n)
+            data = np.frombuffer(copy.bits(n), dtype=np.uint8, count=line * rows)
+            return data.reshape(rows, line)[:, :cols * 2].view("<u2")
+        luma = plane(0, height, width)
+        if kind == formats.Format_YUV420P10:
+            u, v, shift = plane(1, ch, cw), plane(2, ch, cw), 2          # 10 bits in the low bits
+        else:
+            both = plane(1, ch, cw * 2)
+            u, v, shift = both[:, 0::2], both[:, 1::2], 8                # the bits in the high ones (P010, P016)
+        if half:                                      # every second sample of the brightness, the colour as it is
+            luma = luma[0:2 * ch:2, 0:2 * cw:2]
+            height, width = luma.shape
+            u, v = u[:height, :width], v[:height, :width]
+        else:
+            u = np.repeat(np.repeat(u, 2, axis=0), 2, axis=1)[:height, :width]
+            v = np.repeat(np.repeat(v, 2, axis=0), 2, axis=1)[:height, :width]
+        y = luma.astype(np.float32) / (1 << shift)
+        u = u.astype(np.float32) / (1 << shift) - 128.0
+        v = v.astype(np.float32) / (1 << shift) - 128.0
+        fmt = frame.surfaceFormat()
+        full = fmt.colorRange() == QVideoFrameFormat.ColorRange.ColorRange_Full
+        space = fmt.colorSpace()
+        if space == QVideoFrameFormat.ColorSpace.ColorSpace_BT601 or (
+                space == QVideoFrameFormat.ColorSpace.ColorSpace_Undefined and height < 720):
+            kr, kb = 0.299, 0.114
+        elif space == QVideoFrameFormat.ColorSpace.ColorSpace_BT2020:
+            kr, kb = 0.2627, 0.0593
+        else:
+            kr, kb = 0.2126, 0.0722
+        if not full:                                  # the video range: 16–235 and 16–240 in eight bits
+            y = (y - 16.0) * (255.0 / 219.0)
+            u *= 255.0 / 224.0
+            v *= 255.0 / 224.0
+        kg = 1.0 - kr - kb
+        r = y + 2.0 * (1.0 - kr) * v
+        b = y + 2.0 * (1.0 - kb) * u
+        g = (y - kr * r - kb * b) / kg
+        rgb = np.clip(np.dstack((r, g, b)), 0, 255).astype(np.uint8)
+        rgb = np.ascontiguousarray(rgb)
+        image = QImage(rgb.data, width, height, 3 * width, QImage.Format.Format_RGB888)
+        return image.copy()                           # the numbers' memory is gone after this function
+    finally:
+        copy.unmap()
 
 
 def later(target, method: str, *args) -> None:
@@ -238,9 +310,13 @@ class _FrameMaker:
         if not frame.isValid():
             return b"", ()
         image = frame.toImage()
-        if image.isNull():
-            return b"", ()
         dims = (image.width(), image.height())
+        if image.isNull():                           # 10 bits a sample, no graphics card for it
+            shown = fit_size(frame.width(), frame.height(), *size)
+            image = deep_frame_image(frame, half=shown[0] * 2 <= frame.width())
+            if image is None or image.isNull():
+                return b"", ()
+            dims = (frame.width(), frame.height())
         words = str(frame.subtitleText() or "").strip()
         if not words and cues is not None and frame.startTime() >= 0:
             words = cues.at(frame.startTime() / 1_000_000.0)
@@ -284,6 +360,9 @@ class InlineVideo(QObject):
         self._looping = True
         self._ended = False
         self._letting_go: list = []              # (token, threading.Event | None): told once the player let go
+        self._dark_since = 0.0                   # it has played without a single frame since then (0 — not so)
+        self._dark_said = False                  # … and the page was told it cannot show this file
+        self._av1 = False                        # the file of this play is AV1 (``_learn_av1``)
         self._prefer: dict = {}                  # the voice-over and subtitles chosen for the series before
         self._applied = False                    # … put on this play's tracks once they are known
         self._subfiles: list = []                # core.video_tracks.SubFile next to the video
@@ -385,6 +464,14 @@ class InlineVideo(QObject):
             _LOG.info("subtitle files of %s not looked at: %s", path, exc)
             self._subfiles = []
         self.path_key = os.path.normcase(os.path.abspath(path))
+        self._dark_since, self._dark_said = 0.0, False
+        try:                                     # an AV1 file: what it shows tells whether this computer can
+            from core import video_probe
+            info = video_probe.probe(path)
+            self._av1 = info is not None and info.video == "av1"
+        except Exception as exc:  # the play goes on; nothing is learnt
+            _LOG.debug("inline video: codec of %s not read: %s", path, exc)
+            self._av1 = False
         self._seek_to = max(0.0, float(start_at or 0))
         self._want_at, self._want_tries, self._want_last, self._want_until = self._seek_to, 0, 0.0, 0.0
         self._looping = bool(loop)
@@ -593,6 +680,7 @@ class InlineVideo(QObject):
         if not self.token:
             return
         self._check_start()
+        self._check_picture()
         status = self.player.mediaStatus()
         RELAY.set_state(self.token, ended=self._ended,
                         playing=self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState,
@@ -601,6 +689,48 @@ class InlineVideo(QObject):
                         volume=int(round(self.audio.volume() * 100)), muted=bool(self.audio.isMuted()),
                         ready=status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia,
                                          QMediaPlayer.MediaStatus.BufferingMedia, QMediaPlayer.MediaStatus.EndOfMedia))
+
+    def _check_picture(self) -> None:
+        """(every publish) a file with a picture that has played ``NO_PICTURE_AFTER`` seconds without one frame: the
+        player cannot show it (AV1 without a graphics card that decodes it — Qt's FFmpeg has no AV1 of its own; it
+        says no error).  The page is told — it goes over to the window's browser — and the play pauses."""
+        if self._dark_said:
+            return
+        if RELAY.frames(self.token) > 0:
+            self._dark_since = 0.0
+            self._learn_av1(True)
+            return
+        if not self.player.hasVideo():
+            self._dark_since = 0.0
+            return
+        now = time.monotonic()
+        if not self._ended:                      # (a short episode played to its end without a frame: at once)
+            if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                self._dark_since = 0.0
+                return
+            if not self._dark_since:
+                self._dark_since = now
+                return
+            if now - self._dark_since < NO_PICTURE_AFTER:
+                return
+        self._dark_said = True
+        _LOG.warning("inline video: no picture after %.0f s of play: %s", now - (self._dark_since or now), self.path_key)
+        self._learn_av1(False)
+        RELAY.set_state(self.token, error=NO_PICTURE, no_picture=True)
+        later(self.player, "pause")
+
+    def _learn_av1(self, shows: bool) -> None:
+        """An AV1 file showed its picture here, or did not: kept (``video_av1_own``) — the pages choose the player of
+        the next AV1 by it (``core.video_probe.window_player``)."""
+        if not self._av1:
+            return
+        self._av1 = False                        # once a play
+        word = "yes" if shows else "no"
+        if self.settings.get("video_av1_own") == word:
+            return
+        _LOG.info("inline video: AV1 %s here", "plays" if shows else "shows no picture")
+        self.settings["video_av1_own"] = word
+        self._save_later.start()
 
     def _error(self, _error, text: str) -> None:
         if self.token:

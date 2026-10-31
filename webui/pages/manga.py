@@ -1,5 +1,9 @@
 """Manga pages, laid out like nhentai: a wall of covers, a title page with its tags and page
-thumbnails, and a reader that turns pages by click or arrow keys."""
+thumbnails, and a reader that turns pages by click or arrow keys.
+
+(v5.44) The parts of one work («Title», «Title 2», «Title Part 3» — ``core/manga_works.py``) are one tile of the wall,
+a сборка: its page (``/manga/s/<id>``) is the wall of its parts in their order.  A title page says the сборка it is in
+and takes it out of it, or puts it with another title, by hand («Вся манга» → «Каждую отдельно» shows every title)."""
 from __future__ import annotations
 
 import time
@@ -7,10 +11,11 @@ import zipfile
 from pathlib import Path
 
 from core import manga_library as M
-from webui.html import esc, human_count, page_frame, paginator, url
+from webui.html import esc, human_count, page_frame, paginator, rows_attrs, rows_per_page, url
 from webui.server import Request, Response
 
-PER_PAGE = 25
+PER_PAGE = 25             # about this many covers a page (as nhentai); the page is whole rows of its columns
+ROWS_COOKIE = "lb_manga_pp"     # (v5.44.1) covers a page in this browser: whole rows (booru.js ``fitRows``)
 COVER_SIZE = 500          # px, long side of a cover (shown at ~250 px)
 THUMB_SIZE = 320          # px, long side of a page thumbnail on the title page
 SORTS = {"newest": "Сначала новые", "title": "По названию", "pages": "Больше страниц"}
@@ -26,6 +31,8 @@ def register(router) -> None:
     router.add("GET", r"/manga/page/(?P<id>[0-9a-f]{12})/(?P<n>\d+)", page_image)
     router.add("POST", r"/api/manga/(?P<id>[0-9a-f]{12})/reveal", reveal)
     router.add("GET", r"/manga/random", random_title)
+    router.add("GET", r"/manga/s/(?P<id>[0-9a-f]{12})", set_page)
+    router.add("POST", r"/api/manga/(?P<id>[0-9a-f]{12})/set", set_change)
     router.add("GET", r"/manga/(?P<kind>tags|artists|characters|parodies)", tag_index)
 
 
@@ -102,6 +109,59 @@ def _language(manga: M.Manga) -> str:
         langs[0], langs[0][:2].upper()) if langs else ""
 
 
+# ── сборки: the parts of one work ──────────────────────────────────────────────
+_SETS = {"key": None, "stamp": None, "sets": []}
+
+
+def _sets(items: list) -> list:
+    """The сборки of this scan of the folder (made again for another scan or a change by hand)."""
+    from core import manga_works as W
+    try:
+        stamp = W._manual_file().stat().st_mtime_ns
+    except OSError:
+        stamp = 0
+    if _SETS["key"] is not items or _SETS["stamp"] != stamp:
+        _SETS.update(key=items, stamp=stamp, sets=W.sets(items, W.manual()))
+    return _SETS["sets"]
+
+
+def _sets_on() -> bool:
+    from webui import prefs
+    return str(prefs.load().get("manga_sets") or "on") != "off"
+
+
+def _set_of(items: list, manga_id: str):
+    return next((s for s in _sets(items) if any(p.id == manga_id for p in s.parts)), None)
+
+
+class _Tile:
+    """A сборка on the wall: sorted and paged as one title."""
+
+    def __init__(self, found):
+        self.set = found
+        self.title = found.title
+        self.mtime = max(p.mtime for p in found.parts)
+        self.page_count = sum(p.page_count for p in found.parts)
+        self.id = found.id
+
+
+def _set_card(tile: "_Tile") -> str:
+    first = tile.set.parts[0]
+    langs = sorted({_language(p) for p in tile.set.parts if _language(p)})
+    badges = "".join(f'<span class="mbadge lang">{esc(x)}</span>' for x in langs[:3])
+    badges += f'<span class="mbadge set">{len(tile.set.parts)} {_parts_word(len(tile.set.parts))}</span>'
+    return (f'<a class="cover set" href="/manga/s/{tile.id}" title="{esc(tile.title)} — сборка">'
+            f'<img src="/manga/cover/{first.id}" alt="" loading="lazy" decoding="async">'
+            f'<span class="mbadges">{badges}</span>'
+            f'<span class="cover-caption">{esc(tile.title)}</span></a>')
+
+
+def _parts_word(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "часть"
+    return "части" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "частей"
+
+
 def _cover_card(manga: M.Manga) -> str:
     badges = []
     lang = _language(manga)
@@ -139,18 +199,30 @@ def index(req: Request) -> Response:
     query = req.arg("q").strip()
     sort = req.arg("sort", "newest")
     found = [m for m in items if _matches(m, query)] if query else list(items)
+    grouped = not query and _sets_on()
+    if grouped:                         # the parts of one work: one tile (a search shows each title it found)
+        sets = _sets(items)
+        inside = {p.id for s in sets for p in s.parts}
+        found = [m for m in found if m.id not in inside] + [_Tile(s) for s in sets]
     found = _sorted(found, sort if sort in SORTS else "newest")
-    pages = max(1, (len(found) + PER_PAGE - 1) // PER_PAGE)
+    per_page = rows_per_page(req, ROWS_COOKIE, PER_PAGE)     # whole rows of the window's columns (v5.44.1)
+    pages = max(1, (len(found) + per_page - 1) // per_page)
     page = min(req.int_arg("page", 1, lo=1), pages)
-    shown = found[(page - 1) * PER_PAGE: page * PER_PAGE]
+    shown = found[(page - 1) * per_page: page * per_page]
     sorts = "".join(
         f'<a class="{"active" if key == sort else ""}" href="{esc(url("/manga", q=query, sort=key))}">{esc(label)}</a>'
         for key, label in SORTS.items())
+    together = "" if query else (
+        f'<button type="button" class="link" data-action="manga-sets" data-value="{"off" if grouped else "on"}" '
+        f'title="{"Показать каждую часть отдельной мангой" if grouped else "Части одного тайтла — одной плиткой"}">'
+        f'{"Каждую отдельно" if grouped else "Сборками"}</button>')
     head = (f'<div class="manga-head"><h1>{"Поиск: " + esc(query) if query else "Вся манга"} '
-            f'<span class="muted">{len(found)}</span></h1><nav class="manga-sorts">{sorts}'
+            f'<span class="muted">{len(found)}</span></h1><nav class="manga-sorts">{sorts}{together}'
             f'<a href="{esc(url("/manga", q=query, sort=sort, refresh=1))}" title="Перечитать папку манги">Обновить</a></nav></div>')
     if shown:
-        grid = '<div class="covers">' + "".join(_cover_card(m) for m in shown) + "</div>"
+        rows = rows_attrs(ROWS_COOKIE, PER_PAGE, per_page, len(found), page)
+        grid = f'<div class="covers"{rows}>' + "".join(_set_card(m) if isinstance(m, _Tile) else _cover_card(m)
+                                                       for m in shown) + "</div>"
     elif query:
         grid = f'<div class="empty"><p>По запросу «{esc(query)}» манги нет.</p></div>'
     else:
@@ -267,12 +339,13 @@ def title_page(req: Request) -> Response:
             + (f'<h2>{esc(manga.title_japanese)}</h2>' if manga.title_japanese else "")
             + f'<div class="tag-rows">{_tag_rows(manga, _counts(items))}</div>'
             f'<div class="manga-buttons">{"".join(buttons)}<p class="action-status" role="status"></p></div></div></div>')
-    parts = M.related(items, manga)
-    related_html = ""
-    if parts:
-        cards = "".join(_cover_card(m) for m in parts)
-        related_html = (f'<h3 class="manga-sub">Другие главы этого тайтла <span class="muted">{len(parts)}</span></h3>'
-                        f'<div class="covers">{cards}</div>')
+    related_html = _set_box(items, manga) if not manga.parent_id else ""
+    if not manga.parent_id and _set_of(items, manga.id) is None:
+        parts = M.related(items, manga)          # (not a сборка: loose chapters by their files' names)
+        if parts:
+            cards = "".join(_cover_card(m) for m in parts)
+            related_html = (f'<h3 class="manga-sub">Другие главы этого тайтла <span class="muted">{len(parts)}</span></h3>'
+                            f'<div class="covers">{cards}</div>') + related_html
     if manga.is_series:
         cards = "".join(
             f'<a class="cover chapter" href="/manga/r/{c.id}/1" title="{esc(c.title)}">'
@@ -286,6 +359,81 @@ def title_page(req: Request) -> Response:
             f'loading="lazy" decoding="async"></a>' for n in range(1, len(manga.pages) + 1))
         extra = f'<div class="page-thumbs">{thumbs}</div>'
     return _frame(req, manga.title, f'<div class="manga-gallery">{info}{extra}{related_html}</div>', kind="manga-title")
+
+
+def _set_box(items: list, manga: M.Manga) -> str:
+    """The title's сборка (its other parts, «Убрать из сборки») — or «В сборку с…» (titles by the same people)."""
+    from core import manga_works as W
+    found = _set_of(items, manga.id)
+    done = manga.id in W.manual()["apart"] or manga.id in W.manual()["joined"]
+    back = (f'<button type="button" class="link" data-action="manga-set" data-id="{manga.id}" data-do="program">'
+            f'Пусть решает программа</button>') if done else ""
+    if found is not None:
+        others = [p for p in found.parts if p.id != manga.id]
+        number = next((n for n, p in enumerate(found.parts, 1) if p.id == manga.id), 0)
+        cards = "".join(_cover_card(m) for m in others)
+        return (f'<h3 class="manga-sub">Сборка: <a href="/manga/s/{found.id}">{esc(found.title)}</a> '
+                f'<span class="muted">часть {number} из {len(found.parts)}</span></h3>'
+                f'<p class="manga-set-tools"><button type="button" class="link" data-action="manga-set" '
+                f'data-id="{manga.id}" data-do="apart">Убрать из сборки</button> {back}'
+                f'<span class="action-status" role="status"></span></p><div class="covers">{cards}</div>')
+    mine = W.people_of(manga)
+    near = [m for m in items if m.id != manga.id and mine and W.people_of(m) & mine][:60]
+    if not near:
+        return (f'<p class="manga-set-tools">{back}<span class="action-status" role="status"></span></p>' if back else "")
+    options = "".join(f'<option value="{m.id}">{esc(m.title[:120])}</option>'
+                      for m in sorted(near, key=lambda m: M.natural_key(m.title)))
+    return (f'<form class="manga-set-tools" data-form="manga-set" data-id="{manga.id}">'
+            f'<label>В сборку с <select name="with" aria-label="С какой мангой собрать">{options}</select></label> '
+            f'<button type="submit" class="link">Собрать</button> {back}'
+            f'<span class="action-status" role="status"></span></form>')
+
+
+def set_page(req: Request) -> Response:
+    root, items = _library(req)
+    missing = _no_folder(req, root, "")
+    if missing is not None:
+        return missing
+    found = next((s for s in _sets(items) if s.id == req.params["id"]), None)
+    if found is None:
+        return _frame(req, "Нет такой сборки", '<div class="empty"><p>Такой сборки нет — её части переименовали, '
+                      'убрали из папки или из сборки.</p><p><a href="/manga">Вся манга</a></p></div>')
+    cards = "".join(_cover_card(m) for m in found.parts)
+    pages = sum(p.page_count for p in found.parts)
+    head = (f'<div class="manga-head"><h1>{esc(found.title)} <span class="muted">{len(found.parts)} '
+            f'{_parts_word(len(found.parts))} · {pages} стр.</span></h1><nav class="manga-sorts">'
+            f'<a href="/manga">← Вся манга</a><a class="mbutton primary" href="/manga/r/{_first_page(found.parts[0])}">'
+            f'Читать с первой части</a></nav></div>')
+    return _frame(req, found.title, f'<div class="manga-index manga-set">{head}<div class="covers">{cards}</div></div>')
+
+
+def _first_page(manga: M.Manga) -> str:
+    target = manga.chapters[0] if manga.is_series else manga
+    return f"{target.id}/1"
+
+
+def set_change(req: Request) -> Response:
+    """By hand: «apart» — out of its сборка; «with» — together with another title; «program» — as the program decides."""
+    from core import manga_works as W
+    manga = _get(req)
+    if manga is None:
+        return Response.json({"ok": False, "error": "Такой манги нет"}, 404)
+    body = req.json() or {}
+    act = str(body.get("do") or "")
+    if act == "apart":
+        W.take_apart(manga.id)
+    elif act == "with":
+        other = M.LIBRARY.get(M.manga_root(req.settings), str(body.get("with") or ""))
+        if other is None or other.id == manga.id:
+            return Response.json({"ok": False, "error": "Выберите другую мангу"}, 400)
+        W.put_with(manga.id, other.id)
+    elif act == "program":
+        W.back_to_program(manga.id)
+    else:
+        return Response.json({"ok": False, "error": "Непонятно, что сделать"}, 400)
+    _root, items = _library(req)
+    found = _set_of(items, manga.id)
+    return Response.json({"ok": True, "set": found.id if found else ""})
 
 
 # ── /manga/r/<id>/<n> ───────────────────────────────────────────────────────

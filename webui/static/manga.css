@@ -65,6 +65,27 @@
   font: bold 11px/1.6 "Segoe UI", Tahoma, sans-serif;
 }
 .mbadge.lang { background: var(--accent); color: var(--accent-ink); }
+/* (v5.44) a сборка — the parts of one work: a stack of covers */
+.cover.set {
+  overflow: visible;
+  box-shadow: 5px -5px 0 -1px rgba(128, 128, 128, 0.55), 10px -10px 0 -2px rgba(128, 128, 128, 0.28);
+}
+.cover.set img { border-radius: var(--radius); }
+.cover.set:hover img { transform: none; filter: brightness(1.08); }
+.cover.set .cover-caption { border-radius: 0 0 var(--radius) var(--radius); }
+.mbadge.set { background: var(--accent-ink); color: var(--accent); }
+.manga-sorts .link {
+  padding: 5px 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.manga-sorts .link:hover { background: var(--panel-2); }
+.manga-set-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 6px 0 12px; }
+.manga-set-tools select { max-width: min(60ch, 70vw); }
 
 /* a title */
 .manga-info {

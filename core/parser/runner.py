@@ -205,8 +205,11 @@ class ParserRunner:
         # (a service's hits looked up, a find asked of the other sites); the reverse-search threads only make the
         # pictures the services are sent.  (v5.39) A waiting file holds a thread and nothing else (its pixel hash is
         # made): with 3 × the file workers ATF's lists carried 3 files of 20 (14 requests of 21 s in 5 minutes, the
-        # owner's «ВРЕМЯ») — eight times the file workers fill them: as many requests, more files in each
-        after_workers = 1 if low_power else min(48, max(12, 8 * workers))
+        # owner's «ВРЕМЯ») — eight times the file workers fill them: as many requests, more files in each.  (v5.44)
+        # Eight times carried 11 files a list (5.40 at the owner: 213 files, 20 requests of 15 s in 5 minutes; 138
+        # files waited for a thread, 43 a minute): twenty times (60 with 3) fill ATF's lists of 20 — ATF answers no
+        # more requests a minute for it, the files a minute grow
+        after_workers = 1 if low_power else min(96, max(12, 20 * workers))
         site_pool = ThreadPoolExecutor(max_workers=max(2, min(8, len(sites) or 2)), thread_name_prefix="parser-site")
         batch = self._make_batch(ctx, sites, site_pool)
         engine = ParserEngine(ctx, sites, services, site_pool, batch=batch)
@@ -343,15 +346,30 @@ class ParserRunner:
             settle(entry.job, result)
             submit(slow_pool, "closed", entry, engine.abandon, entry.ticket)
 
+        def lane_wait(service) -> float:
+            """Seconds a file put now would wait for ``service``: what waits in its queue at its pace (the queue's own
+            lately, else what the service allows — SauceNAO: the day's searches spread as set)."""
+            lane = rlanes.get(service.name)
+            if lane is None:
+                return 0.0
+            waiting = lane.waiting() + (1 if lane.asking else 0)
+            if not waiting:
+                return 0.0
+            rate = lane.pace.per_second()
+            if rate <= 0:
+                per_minute = float(service.expected_per_minute() or 0.0)
+                rate = per_minute / 60.0 if per_minute > 0 else 1.0 / 30.0
+            return waiting / rate
+
         def next_service(entry: "_Open") -> None:
             """The file goes to the next service's lane — or, none left, to its answer."""
             nonlocal tasks
             if self.stopped():
                 give_up(entry, FileResult(entry.job.path, "skip", "остановлено"))
                 return
-            service = engine.reverse_next(entry.ticket)
+            service = engine.reverse_next(entry.ticket, lane_wait)
             while service is not None and service.name not in rlanes:     # not on when the pass began
-                service = engine.reverse_next(entry.ticket)
+                service = engine.reverse_next(entry.ticket, lane_wait)
             if service is None:
                 submit(after_pool, "found", entry, engine.reverse_finish, entry.ticket, [], counted=False)
                 return

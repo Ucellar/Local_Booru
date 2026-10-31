@@ -15,6 +15,7 @@ gallery leaves them out: ``data.section_filter``), in a look of its own («Ха�
 """
 from __future__ import annotations
 
+import json
 import logging
 import mimetypes
 import re
@@ -26,7 +27,7 @@ from core import video_library as V
 from core.video_meta import FIELD_ORDER, FIELD_TITLES, LIST_FIELDS
 from core.video_probe import human_duration
 from webui import data
-from webui.html import esc, page_frame, paginator, url
+from webui.html import esc, page_frame, paginator, rows_attrs, rows_per_page, url
 from webui.server import Request, Response
 
 _LOG = logging.getLogger("local_booru.webui")
@@ -215,21 +216,26 @@ def index(req: Request) -> Response:
     if show in ("all", "series"):
         shown = found
         pages = 1
+        # whole rows of the window's columns (v5.44.1, booru.js ``fitRows``): the shelf and the pages of the series
         if show == "series":
-            pages = max(1, (len(found) + SERIES_PER_PAGE - 1) // SERIES_PER_PAGE)
+            per_page = rows_per_page(req, "lb_vseries_pp", SERIES_PER_PAGE)
+            pages = max(1, (len(found) + per_page - 1) // per_page)
             page_s = min(page, pages)
-            shown = found[(page_s - 1) * SERIES_PER_PAGE: page_s * SERIES_PER_PAGE]
+            shown = found[(page_s - 1) * per_page: page_s * per_page]
+            rows = rows_attrs("lb_vseries_pp", SERIES_PER_PAGE, per_page, len(found), page_s)
         else:
-            shown = found[:SHELF]
+            shelf = rows_per_page(req, "lb_vshelf_pp", SHELF)
+            shown = found[:shelf]
+            rows = rows_attrs("lb_vshelf_pp", SHELF, shelf, len(found))
         head_count += len(found)
         sorts = "".join(f'<a class="{"active" if key == sort else ""}" href="{esc(url("/videos", tags=tags, show=show, sort=key))}">'
                         f'{esc(label)}</a>' for key, label in SORTS.items())
         title = "Сериалы и фильмы из папки видео"
         more = ""
-        if show == "all" and len(found) > SHELF:
+        if show == "all" and len(found) > len(shown):
             more = f'<a class="vmore" href="{esc(url("/videos", tags=tags, show="series", sort=sort))}">Все {len(found)} →</a>'
         if shown:
-            body = '<div class="vcards">' + "".join(_series_card(s) for s in shown) + "</div>"
+            body = f'<div class="vcards"{rows}>' + "".join(_series_card(s) for s in shown) + "</div>"
             if show == "series":
                 body += paginator(min(page, pages), pages, lambda n: url("/videos", tags=tags, show=show, sort=sort, page=n))
         else:
@@ -273,14 +279,16 @@ def _long_section(req: Request, tags: str, order: str, source: str, page: int) -
         return ('<section class="vlong"><div class="vhead"><h2>Длинные видео</h2></div><p class="hint">Все видео '
                 'библиотеки остаются в галерее: так выбрано в «<a href="/settings#set-videos">Настройки → Вкладка '
                 '«Видео»</a>».</p></section>')
+    per_page = long_per_page(req)
     items, total = data.search_page(req.settings, tags, section=data.VIDEO_SECTION, source=source, order=order,
-                                    page=page, per_page=LONG_PER_PAGE)
-    pages = max(1, (total + LONG_PER_PAGE - 1) // LONG_PER_PAGE)
+                                    page=page, per_page=per_page)
+    pages = max(1, (total + per_page - 1) // per_page)
     ctx = {"tags": tags, "section": data.VIDEO_SECTION, "source": source, "order": order}
     from webui.pages.gallery import _thumb
     if items:
-        first = (page - 1) * LONG_PER_PAGE
-        grid = '<div class="thumbs">' + "".join(_thumb(it, ctx, first + n) for n, it in enumerate(items)) + "</div>"
+        first = (page - 1) * per_page
+        rows = rows_attrs("lb_vlong_pp", LONG_PER_PAGE, per_page, total, min(page, pages))
+        grid = f'<div class="thumbs"{rows}>' + "".join(_thumb(it, ctx, first + n) for n, it in enumerate(items)) + "</div>"
         grid += paginator(min(page, pages), pages, lambda n: url("/videos", tags=tags, show=req.arg("show", "all"),
                                                                   order=order, source=source, page=n))
     else:
@@ -291,6 +299,12 @@ def _long_section(req: Request, tags: str, order: str, source: str, page: int) -
                      f'{esc(label)}</a>' for key, label in data.ORDERS.items())
     return (f'<section class="vlong"><div class="vhead"><h2>Длинные видео библиотеки <span class="muted">{total}</span></h2>'
             f'<nav class="vsorts">{orders}</nav></div>{grid}</section>')
+
+
+def long_per_page(req: Request) -> int:
+    """Long videos on a page of the tab: whole rows of the window's columns about :data:`LONG_PER_PAGE` (v5.44.1,
+    booru.js ``fitRows``); the post page counts its way back («К результатам») by the same number."""
+    return rows_per_page(req, "lb_vlong_pp", LONG_PER_PAGE)
 
 
 def _seconds(limit: int) -> str:
@@ -336,6 +350,7 @@ def series_page(req: Request) -> Response:
     before, after = series.neighbours(episode)
     # the episodes over the player (as on the sites): the next one is chosen where the play is seen
     watch = (f'<div class="vwatch" id="player">{_episodes(series, episode, done)}'
+             f'{_dubs_row(req, series, episode)}'
              f'{_player(req, series, episode, before, after, resume, play, full, length=length)}</div>')
     body = (f'<div class="vseries" data-series="{series.id}">{_hero(req, series, episode, resume)}{watch}'
             f'{_meta_box(req, series)}</div>')
@@ -425,6 +440,18 @@ def _value(key: str, value) -> str:
 def _player(req: Request, series: V.Series, episode: V.Episode, before, after, resume: float, play: bool,
             full: bool = False, *, length: float = 0.0) -> str:
     in_app = "QtWebEngine" in req.headers.get("User-Agent", "")
+    # (v5.44) in the program window the program's own player plays an episode — but AV1 where it cannot (it decodes
+    # AV1 only with a graphics card that can; learnt by the first such episode): the window's browser plays that one
+    # (``gallery.window_player``); a player that cannot play the file after all hands it to the other one, once
+    # (``other``: this page with it)
+    from core import video_probe
+    from webui.pages.gallery import window_player
+    own = in_app and window_player(req, Path(episode.path), prefer=video_probe.OWN) == video_probe.OWN
+    other = ""
+    if in_app and req.arg("player") not in (video_probe.BROWSER, video_probe.OWN):
+        switch = video_probe.BROWSER if own else video_probe.OWN
+        other = (f"/videos/s/{series.id}?ep={episode.id}" + ("&play=1" if play or own else "")
+                 + ("&full=1" if full else "") + f"&player={switch}#player")
     next_href = f"/videos/s/{series.id}?ep={after.id}&play=1#player" if after else ""
     now = "" if series.single else f"<b>Серия {esc(episode.label)}</b>"
     note = " · ".join(esc(x) for x in (episode.site_title, episode.note) if x)
@@ -437,29 +464,46 @@ def _player(req: Request, series: V.Series, episode: V.Episode, before, after, r
         attrs["length"] = f"{length:.1f}"            # where the play will start, shown on the bar before it starts
     if full:
         attrs["full"] = "1"
+    skip_buttons = ""
+    if not series.single:                             # the opening's and the ending's places (core/video_skips)
+        known = _skips(series, episode)
+        if known:
+            attrs["skips"] = json.dumps(known, separators=(",", ":"))
+            skip_buttons = ('<button type="button" class="nv-skip nv-skip-opening" data-skip="opening" hidden>'
+                            'Пропустить опенинг</button>'
+                            '<button type="button" class="nv-skip nv-skip-ending" data-skip="ending" hidden>'
+                            'Пропустить эндинг</button>')
     # frames of the episode one after another over its poster until it is played (videos.js); in a browser they
     # cover its <video> with a button of their own — its buttons are under them till then
     slides = ""
     if not play:
-        if in_app:
+        if own:
             slides = f'<div class="vslides" data-episode="{episode.id}" data-count="{V.SLIDES}" aria-hidden="true"></div>'
         else:
             slides = (f'<div class="vslides vcover" data-episode="{episode.id}" data-count="{V.SLIDES}" '
                       f'data-action="vid-play"><button type="button" class="nv-big" data-action="vid-play" '
                       f'aria-label="Смотреть">▶</button></div>')
-    if in_app:
+    if own:
         from webui.pages.gallery import native_video_box
+        if other:
+            attrs["other"] = other
         title = series.title if series.single else f"{series.title} · Серия {episode.label}"
         go_on = (f'<a class="nv-next" href="{esc(next_href)}" title="Следующая серия" aria-label="Следующая серия">'
                  f'⏭</a>' if next_href else "")
         viewer = native_video_box(req, attrs, poster, frame_class="vframe", full=f'data-episode="{episode.id}"',
                                   external=f'<button type="button" data-action="vid-open" data-id="{episode.id}">'
-                                           f'Открыть в видеоплеере</button>', overlay=slides, title=title, bar=go_on)
+                                           f'Открыть в видеоплеере</button>', overlay=slides + skip_buttons,
+                                  title=title, bar=go_on)
     else:
+        if other:
+            attrs["other"] = other
+            info = video_probe.probe(episode.path)
+            if info is not None and info.video:
+                attrs["picture"] = "1"           # a picture that never shows is the browser's failure too
         data_attrs = "".join(f' data-{k}="{esc(v)}"' for k, v in attrs.items())
         viewer = (f'<div class="vscreen"><video class="vvideo" src="/videos/file/{episode.id}" controls preload="metadata" '
                   f'poster="{poster}"{" autoplay" if play else ""}{data_attrs}>{_subtitle_tracks(series, episode)}'
-                  f'</video>{slides}</div>'
+                  f'</video>{slides}{skip_buttons}</div>'
                   f'<div class="video-fallback" hidden><p>Этот файл браузер показать не может (формат не поддерживается).'
                   f'</p><button type="button" data-action="vid-open" data-id="{episode.id}">Открыть в видеоплеере</button></div>')
     links = []
@@ -478,6 +522,50 @@ def _player(req: Request, series: V.Series, episode: V.Episode, before, after, r
     return (f'<section class="vplayer">{head}<div class="vstage">{viewer}</div>'
             f'<nav class="vep-nav" aria-label="Серии">{"".join(links)}{auto}<span class="vspacer"></span>{tools}'
             f'<span class="action-status" role="status"></span></nav></section>')
+
+
+def _skips(series: V.Series, episode: V.Episode) -> dict:
+    """{"opening": [start, end], "ending": [start, end], "length": seconds} of an episode — the ones known
+    (``core/video_skips``)."""
+    from core import video_skips
+    try:
+        known = video_skips.skips_of(Path(series.path), Path(episode.path))
+    except (OSError, ValueError) as exc:
+        _LOG.info("skips of %s not read: %s", episode.path, exc)
+        return {}
+    out = {k: [round(float(v[0]), 2), round(float(v[1]), 2)] for k in ("opening", "ending")
+           if isinstance(v := known.get(k), (list, tuple)) and len(v) == 2 and float(v[1]) > float(v[0])}
+    if out and float(known.get("length") or 0) > 0:
+        out["length"] = round(float(known["length"]), 1)      # the bar is marked before the episode plays
+    return out
+
+
+def _dubs_row(req: Request, series: V.Series, episode: V.Episode) -> str:
+    """«Озвучка: …» under the episodes — the voice-overs of an episode's file (its sound tracks: the MKV the voice-overs
+    were put together in), the one chosen for the series marked; videos.js asks the program's player to switch, or
+    keeps the choice for the play to come.  Only in the program's window (a browser's player does not switch the
+    tracks of a file) and only when there are two or more."""
+    if "QtWebEngine" not in req.headers.get("User-Agent", "") or not Path(episode.path).is_file():
+        return ""
+    try:
+        from core.video_merge import tracks_in
+        titles = [t.strip() for t in tracks_in(Path(episode.path))]
+    except ImportError:
+        return ""
+    if len(titles) < 2:
+        return ""
+    from core import video_tracks
+    titles = [t or f"Дорожка {n + 1}" for n, t in enumerate(titles)]
+    chosen = video_tracks.choose([{"name": t, "title": t, "lang": ""} for t in titles],
+                                 V.PROGRESS.tracks(series.id).get("audio"))
+    now = titles[chosen if chosen is not None else 0]
+    options = "".join(f'<button type="button" role="option" class="vdub" data-title="{esc(t)}" '
+                      f'aria-selected="{"true" if t == now else "false"}">{esc(t)}</button>' for t in titles)
+    return (f'<div class="vdubs" data-episode="{episode.id}"><span class="vdubs-label">Озвучка</span>'
+            f'<div class="vdubs-pick"><button type="button" class="vdubs-now" aria-haspopup="listbox" '
+            f'aria-expanded="false"><span class="vdubs-name">{esc(now)}</span>'
+            f'<span class="vdubs-count">{len(titles)}</span></button>'
+            f'<div class="vdubs-list" role="listbox" aria-label="Озвучки серии" hidden>{options}</div></div></div>')
 
 
 def _episodes(series: V.Series, current: V.Episode, done: dict) -> str:
@@ -625,14 +713,19 @@ def episode_subs(req: Request) -> Response:
 
 
 def tracks_choice(req: Request) -> Response:
-    """The subtitles chosen in a browser's player (``value`` "xN" — the N-th file, "-1" — none): kept for the series,
-    its next episode opens with them."""
+    """The subtitles chosen in a browser's player (``value`` "xN" — the N-th file, "-1" — none) or the voice-over
+    chosen under the episodes before the play (``audio`` — its track's title): kept for the series, its next episode
+    opens with them."""
     from core import video_tracks
     body = req.json()
     root = _root(req)
     series, episode = V.LIBRARY.episode(root, str(body.get("episode") or "")) if Path(root).is_dir() else (None, None)
     if episode is None:
         return Response.json({"ok": False, "error": "Такой серии нет"}, 404)
+    audio = str(body.get("audio") or "").strip()
+    if audio:                                     # «Озвучка» under the episodes, chosen before the play
+        V.PROGRESS.set_tracks(series.id, "audio", {"name": "", "title": audio[:120], "lang": ""})
+        return Response.json({"ok": True})
     value = str(body.get("value") or "")
     if value == "-1":
         V.PROGRESS.set_tracks(series.id, "subtitle", {"off": True})

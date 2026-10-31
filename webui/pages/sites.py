@@ -199,11 +199,12 @@ def sites_page(req: Request) -> Response:
             <small>{esc(_saucenao_state(s))} · <a href="{SAUCENAO_KEY_PAGE}" target="_blank" rel="noopener">где взять ключ</a></small></div>
           <div class="field-row stacked"><label for="reverse-order">Порядок</label>
             <select id="reverse-order" name="reverse_order">
-              <option value="saucenao"{"" if not s.get("reverse_saucenao_first", True) else " selected"}>SauceNAO первым, IQDB последним — быстрее</option>
-              <option value="iqdb"{" selected" if not s.get("reverse_saucenao_first", True) else ""}>IQDB первым, SauceNAO последним — бережёт лимит SauceNAO</option>
+              <option value="iqdb"{"" if s.get("reverse_saucenao_first", False) else " selected"}>IQDB первым, SauceNAO последним — бережёт лимит SauceNAO</option>
+              <option value="saucenao"{" selected" if s.get("reverse_saucenao_first", False) else ""}>SauceNAO первым, IQDB последним — быстрее, пока хватает лимита</option>
             </select>
-            <small>файл идёт от сервиса к сервису, пока какой-нибудь его не найдёт; IQDB отвечает полминуты и дольше,
-            SauceNAO — за секунды, но поисков на сутки у него не больше лимита аккаунта</small></div>
+            <small>файл идёт от сервиса к сервису по очереди, пока какой-нибудь его не найдёт: при «IQDB первым»
+            SauceNAO ищет только то, что не нашли остальные. IQDB отвечает полминуты и дольше, SauceNAO — за секунды,
+            но поисков на сутки у него не больше лимита аккаунта</small></div>
           <div class="field-row"><label for="sauce-spread">Растянуть суточный лимит SauceNAO на, ч</label>
             <input type="number" id="sauce-spread" name="saucenao_spread_hours" min="1" max="24"
               value="{_spread_hours(s)}">

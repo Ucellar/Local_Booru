@@ -229,3 +229,39 @@
 
   if (field.value.trim()) readField();
 })();
+
+// (v5.44) сборки of the manga folder: «Сборками / Каждую отдельно» on «Вся манга»; on a title's page «Убрать из
+// сборки», «Пусть решает программа» and «В сборку с …» (core/manga_works.py keeps what was done by hand)
+(() => {
+  "use strict";
+
+  const LB = window.LocalBooru;
+  if (!LB) return;
+  const { actions, postJson, say } = LB;
+  actions["manga-sets"] = async (el) => {
+    try {
+      await postJson("/api/prefs", { manga_sets: el.dataset.value === "off" ? "off" : "on" });
+      location.reload();
+    } catch (err) {
+      say(el, err.message, true);
+    }
+  };
+  async function change(el, body) {
+    try {
+      const answer = await postJson("/api/manga/" + el.dataset.id + "/set", body);
+      say(el, answer.set ? "Готово" : "Готово: манга не в сборке");
+      setTimeout(() => location.reload(), 400);
+    } catch (err) {
+      say(el, err.message, true);
+    }
+  }
+  actions["manga-set"] = (el) => change(el, { do: el.dataset.do });
+  const form = document.querySelector('[data-form="manga-set"]');
+  if (form) {
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      change(form, { do: "with", with: form.querySelector("select").value });
+    });
+  }
+})();
+

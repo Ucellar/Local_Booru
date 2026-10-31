@@ -86,7 +86,7 @@ def _fmt_bytes(value: int) -> str:
 
 SITE_SCAN_KEY_REVISIONS = {
     "rule34.us": "remote-media-md5-v2",
-    # Must match ui.tagger_page._site_scan_key().  The parser writes rule34.xxx
+    # As the old parser page's _site_scan_key() had it (ui/tagger_page.py, gone in v5.40).  The parser wrote rule34.xxx
     # checkpoints under the revised internal key, while the audit used to read
     # only the visible domain key.  That made diagnostics show
     # rule34.xxx checked=0 even when the parser had actually checkpointed it.

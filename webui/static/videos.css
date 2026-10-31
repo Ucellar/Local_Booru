@@ -401,6 +401,60 @@
 .vgroup-count { color: var(--muted); font-size: 12px; }
 .vgroup-head button.link { color: var(--muted); font-size: 12px; font-weight: normal; }
 .vgroup-head button.link:hover { color: var(--text); }
+/* every voice-over of a title (core/video_dubs): a voice-over a line that opens to its episodes */
+details.vgroup { border-top: 1px solid var(--border); padding-top: 10px; }
+/* every voice-over of a title: three plates — «Озвучка», «Качество», «Субтитры» — and the episodes under them */
+.vplates { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 12px; }
+/* the kind: «Дубляж» (the voices replaced), «Озвучка» (read over them), «Субтитры» — the studios beside are of it */
+.vkinds { display: inline-flex; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.vkind { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer; }
+.vkind:hover { color: var(--text); }
+.vkind[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #fff); font-weight: bold; }
+.vkind-count { padding: 0 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); font-size: 11px; font-weight: normal; }
+.vkind.chosen:not([aria-selected="true"]) { color: var(--text); }
+.vplate { position: relative; }
+.vplate-now, .vplate-quality .vquality { display: inline-flex; align-items: center; gap: 8px; min-height: 40px;
+  padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text);
+  font: inherit; font-size: 14px; cursor: pointer; }
+.vplate-now:hover, .vplate-now[aria-expanded="true"], .vplate.chosen .vplate-now { border-color: var(--accent); }
+.vplate-label { color: var(--muted); }
+.vplate-value { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vplate-now::after { content: "▾"; color: var(--muted); }
+.vplate-quality .vquality { cursor: default; color: var(--muted); }
+.vget .vplate-quality .vquality select { min-height: 0; padding: 0 2px; border: 0; background: transparent;
+  color: var(--text); font: inherit; font-weight: bold; cursor: pointer; box-shadow: none; }
+.vget .vplate-quality .vquality select option { background: var(--panel); color: var(--text); }
+.vplate-menu { position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; width: min(560px, 90vw);
+  max-height: 420px; overflow-y: auto; padding: 8px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5); }
+.vplate-menu[hidden] { display: none; }
+.vplate-tools { display: flex; gap: 14px; padding: 2px 8px 8px; }
+.vplate-tools button.link { color: var(--muted); font-size: 12px; }
+.vplate-tools button.link:hover { color: var(--text); }
+.vplate-note { margin: 0 8px 8px; color: var(--muted); font-size: 12px; }
+.vplate-row { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; padding: 7px 8px;
+  border-radius: 6px; cursor: pointer; }
+.vplate-row:hover { background: rgba(255, 255, 255, 0.06); }
+.vplate-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+.vplate-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold; }
+.vplate-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.vplate-count { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; min-width: 64px; }
+.vplate-row:has(input:checked) .vplate-count { color: var(--text); }
+.vplate-warn { margin: -4px 0 12px; color: var(--muted); font-size: 12px; }
+.vtiles-episodes .vep-tile[data-have="whole"] { opacity: 0.55; }
+details.vgroup + details.vgroup { margin-top: 10px; }
+details.vgroup > summary.vgroup-head { cursor: pointer; list-style: none; margin-bottom: 0; }
+details.vgroup > summary.vgroup-head::-webkit-details-marker { display: none; }
+details.vgroup > summary.vgroup-head h4::before { content: "▸ "; color: var(--muted); }
+details.vgroup[open] > summary.vgroup-head h4::before { content: "▾ "; }
+details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
+.vget .vmerge { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.vget .vmerge[hidden] { display: none; }
+.vget .vquality { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+.vget .vquality[hidden] { display: none; }
+.vget .vquality select { font: inherit; color: var(--text); background: var(--panel, transparent);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
 .vtiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
 .vget label.vtile {
   position: relative;
@@ -535,3 +589,47 @@
   .vfacts dd { margin-bottom: 6px; }
   .vcards { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); }
 }
+
+/* «Пропустить опенинг» (left) / «Пропустить эндинг» (right) over the picture, while it plays (videos.js setupSkips) */
+.nv-screen .nv-skip, .vscreen .nv-skip { position: absolute; bottom: 64px; z-index: 6; padding: 9px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 8px; background: rgba(12, 12, 12, 0.72); color: #fff;
+  font: inherit; font-size: 14px; font-weight: bold; line-height: 1.2; cursor: pointer; backdrop-filter: blur(4px); }
+.nv-screen .nv-skip:hover, .vscreen .nv-skip:hover { background: var(--accent, #4a90d9); color: var(--accent-ink, #fff);
+  border-color: transparent; }
+.nv-skip[hidden] { display: none; }
+.nv-skip-opening { left: 18px; }
+.nv-skip-ending { right: 18px; }
+/* full size: above «Продолжить просмотр» (left) and the voice-overs' menu (right) */
+.native-video.nv-fullscreen .nv-skip { bottom: 128px; }
+.native-video.nv-fullscreen .nv-skip-opening { left: 22px; }
+.native-video.nv-fullscreen .nv-skip-ending { right: 22px; }
+.vscreen { position: relative; }
+/* their stretches on the bar: a stripe in the look's colour under the track, from the thumb's middle at the start to
+   its middle at the end (10px: the range's own 2px margin and half its thumb — measured in Chromium) */
+.nv-seekwrap { position: relative; display: flex; align-items: center; flex: 1; min-width: 60px; }
+.nv-seekwrap .nv-seek { flex: 1; min-width: 0; }
+.nv-marks { position: absolute; left: 10px; right: 10px; bottom: -2px; height: 3px; border-radius: 2px;
+  background-repeat: no-repeat; background-size: 100% 100%; pointer-events: none; }
+.vskips { height: 4px; margin-top: 2px; background-repeat: no-repeat; background-size: 100% 100%; border-radius: 2px; }
+
+/* «Озвучка» under the episodes: the voice-overs of the episode's file (videos.js setupDubs) */
+.vdubs { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; }
+.vdubs-label { color: var(--muted); font-size: 13px; }
+.vdubs-pick { position: relative; }
+.vdubs-now { display: inline-flex; align-items: center; gap: 10px; max-width: min(520px, 70vw); padding: 8px 14px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel, #1c1c1c); color: var(--text);
+  font: inherit; font-size: 14px; font-weight: bold; cursor: pointer; }
+.vdubs-now:hover, .vdubs-now[aria-expanded="true"] { border-color: var(--accent); }
+.vdubs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vdubs-count { padding: 1px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: var(--muted);
+  font-size: 11px; font-weight: normal; }
+.vdubs-now::after { content: "▾"; color: var(--muted); font-weight: normal; }
+.vdubs-list { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; width: min(660px, 86vw); max-height: 340px;
+  overflow-y: auto; padding: 8px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel, #1c1c1c); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); }
+.vdubs-list[hidden] { display: none; }
+.vdub { padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit;
+  font-size: 13px; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vdub:hover, .vdub:focus-visible { background: rgba(255, 255, 255, 0.08); outline: none; }
+.vdub[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #fff); font-weight: bold; }

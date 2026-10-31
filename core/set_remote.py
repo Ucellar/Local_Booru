@@ -34,7 +34,7 @@ from collections import OrderedDict
 _LOG = logging.getLogger("local_booru.set_remote")
 
 FAMILY_TTL = 30 * 60            # seconds what was asked of a site is kept (its posts, what the library has of them)
-KEEP = 16                       # families and сборки kept at once
+KEEP = 48                       # families and сборки kept at once (v5.44.1: the families of lone cards too)
 PAGES = 3                       # pages of ``parent:P`` asked (the grabber's ``per_site`` each)
 PER_PAGE = 100
 SHOWN_MAX = 60                  # missing parts shown at most (a parent with hundreds of children: the first ones)
@@ -72,16 +72,20 @@ def post_id_of(card: dict, site: str = "") -> int:
 
 
 class Family:
-    """A parent post and its children on one site, as the grabber's searches found them."""
+    """A parent post and its children on one site, as the grabber's searches found them.  ``children_only`` — the
+    parent is the library's own card (a lone card asking whether its post has children, v5.44.1): ``id:P`` is not
+    asked."""
 
-    def __init__(self, settings: dict, site: str, parent: int):
+    def __init__(self, settings: dict, site: str, parent: int, *, children_only: bool = False):
         from core.grabber.search import GrabberSearch
         self.site, self.parent = site, int(parent)
         self.key = family_key(site, parent)
         self.asked = time.time()
         self.error = ""
-        self.searches = [GrabberSearch(settings, f"parent:{self.parent}", [site], per_site=PER_PAGE),
-                         GrabberSearch(settings, f"id:{self.parent}", [site], per_site=5)]
+        self.children_only = bool(children_only)
+        self.searches = [GrabberSearch(settings, f"parent:{self.parent}", [site], per_site=PER_PAGE)]
+        if not self.children_only:
+            self.searches.append(GrabberSearch(settings, f"id:{self.parent}", [site], per_site=5))
         self.cards: list = []                 # the family: the parent first, then by post number
         self._found: dict = {}                # card key -> (search, card)
         self._loaded = False
@@ -133,8 +137,9 @@ class Family:
             search.close()
 
 
-def family(settings: dict, site: str, parent: int) -> Family:
-    """The family of ``parent`` on ``site`` — asked now or kept from a while ago (:data:`FAMILY_TTL`)."""
+def family(settings: dict, site: str, parent: int, *, children_only: bool = False) -> Family:
+    """The family of ``parent`` on ``site`` — asked now or kept from a while ago (:data:`FAMILY_TTL`; one asked for
+    the children only is asked again whole when the whole is wanted)."""
     from core.grabber.search import searchable_sites
     if site not in {host for host, _label in searchable_sites(settings)}:
         raise FamilyError(f"{site} не в таблице сайтов граббера или выключен — недостающие части не спрашиваются")
@@ -144,8 +149,11 @@ def family(settings: dict, site: str, parent: int) -> Family:
         for old_key in [k for k, f in _FAMILIES.items() if now - f.asked > FAMILY_TTL]:
             _FAMILIES.pop(old_key).close()
         found = _FAMILIES.get(key)
+        if found is not None and getattr(found, "children_only", False) and not children_only:
+            _FAMILIES.pop(key).close()
+            found = None
         if found is None:
-            found = _FAMILIES[key] = Family(settings, site, parent)
+            found = _FAMILIES[key] = Family(settings, site, parent, children_only=children_only)
             while len(_FAMILIES) > KEEP:
                 _old_key, old = _FAMILIES.popitem(last=False)
                 old.close()

@@ -9,12 +9,14 @@ the names of the files only — their addresses stay in the program.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from core import video_library as V
 from webui.html import esc
 from webui.server import Request, Response
 
+_LOG = logging.getLogger("local_booru.video")
 FIND = "video_find"                    # the page task «Найти видео»
 GET = "video_download"                 # the page task «Скачать»
 
@@ -27,6 +29,7 @@ def register(router) -> None:
     router.add("GET", r"/api/videos/find-poster", find_poster)
     router.add("POST", r"/api/videos/download", download)
     router.add("GET", r"/api/videos/download-state", download_state)
+    router.add("GET", r"/api/videos/measure", measure)
     router.add("POST", r"/api/videos/download/stop", download_stop)
 
 
@@ -41,22 +44,32 @@ def _root(req: Request) -> tuple[Path | None, str]:
 
 # ── the page ──────────────────────────────────────────────────────────────────────
 def page(req: Request) -> Response:
-    from core import video_sources
+    from core import video_dubs, video_sources
     from webui.pages.videos import _frame
     address = req.arg("url").strip()
     root, why = _root(req)
     trouble = f'<p class="vnote" role="alert">{esc(why)}</p>' if why else ""
     sources = video_sources.enabled(req.settings)
-    sites = ["hentasis1.top", "hentai-xs.com", "hentaihaven.xxx"] + (["YummyAnime — серии с AniLiberty", "AniLiberty"]
-                                                                      if sources else [])
-    if sources:
-        frames = ("У YummyAnime видео в чужом плеере (Kodik) — его программа не трогает, а серии этого тайтла ищет на "
+    dubs = video_dubs.enabled(req.settings)
+    can_dubs = getattr(video_dubs, "AVAILABLE", True)    # the public copy has none (its core/video_dubs: a stand-in)
+    sites = ["hentasis1.top", "hentai-xs.com", "hentaihaven.xxx"]
+    sites += ["YummyAnime — все озвучки (Kodik, CVH)"] if dubs else ["YummyAnime — серии с AniLiberty"] if sources else []
+    sites += ["AniLiberty"] if sources else []
+    if dubs:
+        frames = ("У YummyAnime программа берёт все озвучки и субтитры тайтла из плееров Kodik (до 720p) и CVH (до "
+                  "1080p): каждая озвучка — своя вкладка сериала. Отметьте нужные серии или «пробную серию» озвучки, "
+                  "выберите качество и нажмите «Скачать». Плееры Alloha и Aksor программа не скачивает.")
+    elif sources:
+        frames = ("У YummyAnime видео в чужом плеере (Kodik) — сейчас программа его не трогает, а серии этого тайтла ищет на "
                   "AniLiberty по номерам Shikimori и MyAnimeList: это будет тот же тайтл и тот же сезон, а описание и "
-                  "постер останутся с YummyAnime. Ссылка прямо на релиз AniLiberty тоже подходит.")
+                  "постер останутся с YummyAnime. Ссылка прямо на релиз AniLiberty тоже подходит."
+                  + (" Все озвучки из Kodik и CVH — это включается в «Настройки → Вкладка «Видео»»." if can_dubs else ""))
     else:
-        frames = ("С YummyAnime и других сайтов с плеером Kodik и подобными программа не скачивает. Искать серии таких "
-                  "тайтлов на AniLiberty — это включается в «Настройки → Вкладка «Видео»».")
+        frames = ("С YummyAnime и других сайтов с плеером Kodik и подобными программа сейчас не скачивает. "
+                  + ("Все озвучки YummyAnime или серии с AniLiberty" if can_dubs else "Серии с AniLiberty")
+                  + " — это включается в «Настройки → Вкладка «Видео»».")
     chips = "".join(f'<li>{esc(site)}</li>' for site in sites)
+    merge_on = " checked" if req.settings.get("video_dub_merge", True) else ""
     body = f"""<div class="vget" id="vid-get">
   <section class="vget-ask" aria-labelledby="vget-title">
     <h1 id="vget-title">Скачать с сайта</h1>
@@ -121,6 +134,11 @@ def page(req: Request) -> Response:
     </div>
     <div class="vbar">
       <div class="vbar-go tool-actions"><button type="button" class="vbutton primary" data-action="vid-download">Скачать</button>
+        <label class="vmerge" hidden><input type="checkbox" name="merge"{merge_on}> Собрать озвучки серии в один файл</label>
+        <label class="vquality" hidden>Качество <select name="quality">
+          <option value="best">лучшее</option><option value="1080">не выше 1080p</option>
+          <option value="720">не выше 720p</option><option value="480">не выше 480p</option>
+          <option value="360">не выше 360p</option></select></label>
         <span class="vbar-sum"></span><span class="action-status" role="status"></span></div>
       <div class="vbar-run job" data-job="download" hidden>
         <div class="job-head tool-actions"><b class="job-title"></b> <span class="job-status"></span>
@@ -140,20 +158,30 @@ def page(req: Request) -> Response:
 
 # ── «Найти видео» ────────────────────────────────────────────────────────────────────
 def _start_find(req: Request, label: str, get_page, address: str = "") -> Response:
-    from core import page_jobs, video_download, video_sources
+    from core import page_jobs, video_download, video_dubs, video_sources
     from core import video_meta_import as I
     from webui.pages.videos import _window_fetch
     root, why = _root(req)
     if root is None:
         return Response.json({"ok": False, "error": why}, 409)
     window = _window_fetch()
-    settings = {key: req.settings.get(key) for key in ("video_source_aniliberty", "aniliberty_url")}
+    settings = {key: req.settings.get(key) for key in ("video_source_aniliberty", "aniliberty_url", "video_source_dubs",
+                                                       "yummy_api_url")}
 
     def run(say, stop_check):
         try:                                         # a page of AniLiberty: its release, the page is not read
             found = video_sources.find_alias(address, root, settings=settings, say=say, stop_check=stop_check)
         except video_sources.SourceError as exc:
             return {"failed": str(exc)}
+        api_failed = False
+        if found is None:                            # a page of YummyAnime: all its voice-overs, by its API
+            try:
+                found = video_dubs.find_address(address, root, settings=settings, say=say, stop_check=stop_check)
+            except video_dubs.DubError as exc:
+                if stop_check():
+                    return {"stopped": True}
+                say(f"Озвучки из API {video_dubs.NAME} не получены: {exc} — читаю саму страницу")
+                found, api_failed = None, True
         if found is None:
             try:
                 got = get_page(say)
@@ -163,8 +191,18 @@ def _start_find(req: Request, label: str, get_page, address: str = "") -> Respon
             def fetch(address: str):                 # the pages of the series' episodes, its own page
                 return I.page_from_url(address, progress=lambda _text: None, window_fetch=window)
             found = video_download.look(got, root, say=say, stop_check=stop_check, fetch=fetch)
-            if not found.files:                      # its video is another site's player (YummyAnime): the title
-                try:                                 # on a site that gives its episodes
+            dubs = None
+            if not found.files and not api_failed:   # its video is another site's player (YummyAnime): its
+                try:                                 # voice-overs from the players, by the site's API
+                    dubs = video_dubs.find(got, root, settings=settings, say=say, stop_check=stop_check)
+                except video_dubs.DubError as exc:
+                    if stop_check():
+                        return {"stopped": True}
+                    say(f"Озвучки из API {video_dubs.NAME} не получены: {exc}")
+            if dubs is not None:
+                found = dubs
+            elif not found.files:                    # … else the title on a site that gives its episodes
+                try:
                     found = video_sources.find(got, root, settings=settings, say=say, stop_check=stop_check) or found
                 except video_sources.SourceError as exc:
                     return {"failed": _nothing(found, str(exc))}
@@ -173,7 +211,8 @@ def _start_find(req: Request, label: str, get_page, address: str = "") -> Respon
         if found.files and all(f.blocked for f in found.files):
             return {"failed": "Скачать с этой страницы нечего: " + found.files[0].blocked}
         if found.files:
-            say(f"Нашлось видео: {videos}" + (f", звук: {sounds}" if sounds else ""))
+            say(f"Нашлось серий во всех озвучках: {videos}" if found.choose == "dubs" else
+                f"Нашлось видео: {videos}" + (f", звук: {sounds}" if sounds else ""))
             say(f"Папка: {found.folder}" + (" (новая)" if found.new_folder else " (уже есть — докачается в неё)"))
             if not stop_check():                     # the poster for the list, written with the description later
                 found.poster = I.poster_of(found.about or found.page, say=say, stop_check=stop_check)
@@ -272,7 +311,7 @@ def find_poster(req: Request) -> Response:
 
 # ── «Скачать» ─────────────────────────────────────────────────────────────────────────
 def download(req: Request) -> Response:
-    from core import page_jobs, video_download
+    from core import page_jobs, video_download, video_dubs
     body = req.json()
     task = page_jobs.current(FIND)
     kept = _found_of(task)
@@ -281,19 +320,49 @@ def download(req: Request) -> Response:
     chosen = body.get("files")
     if not isinstance(chosen, list) or not chosen or not all(isinstance(n, int) for n in chosen):
         return Response.json({"ok": False, "error": "Отметьте файлы, которые скачать"}, 400)
+    quality = str(body.get("quality") or "")
+    merge = bool(body.get("merge")) and found_merges(kept)
+    if quality and quality not in video_dubs.QUALITIES:
+        return Response.json({"ok": False, "error": "Непонятное качество"}, 400)
     root, why = _root(req)
     if root is None:
         return Response.json({"ok": False, "error": why}, 409)
     found = kept["found"]
 
     def run(say, stop_check):
-        return video_download.download(found, chosen, root, say=say, stop_check=stop_check)
+        return video_download.download(found, chosen, root, say=say, stop_check=stop_check, quality=quality,
+                                       merge=merge)
     title = found.title or found.folder.name
     try:
         started = page_jobs.start(GET, f"Скачать с сайта: «{title}»", run, about=task.id)
     except page_jobs.TaskBusy as exc:
         return Response.json({"ok": False, "error": f"{exc}. Дождитесь конца или остановите."}, 409)
     return Response.json({"ok": True, "id": started.id})
+
+
+def measure(req: Request) -> Response:
+    """What an episode of the title found weighs in each quality (every voice-over of a YummyAnime title: one episode
+    asked of CVH — ``video_dubs.Resolver.measure``), for the estimate beside «Скачать»."""
+    from core import page_jobs
+    from core.video_meta_import import _session
+    task = page_jobs.current(FIND)
+    kept = _found_of(task)
+    if kept is None or req.arg("find") != str(task.id):
+        return Response.json({"ok": False, "error": "Список устарел"}, 409)
+    resolver = kept["found"].resolve
+    if resolver is None or not hasattr(resolver, "measure"):
+        return Response.json({"ok": True, "measured": {}})
+    try:
+        measured = resolver.measure(_session(kept["found"].page.url or "https://site.yummyani.me/"))
+    except Exception as exc:   # noqa: BLE001 - an estimate that does not come: the page goes without it
+        _LOG.info("measure: %s: %s", type(exc).__name__, exc)
+        measured = {}
+    return Response.json({"ok": True, "measured": measured})
+
+
+def found_merges(kept: dict) -> bool:
+    """The list can put its voice-overs into one file (every voice-over of a YummyAnime title)."""
+    return kept["found"].after is not None
 
 
 def download_state(req: Request) -> Response:
@@ -308,7 +377,7 @@ def download_state(req: Request) -> Response:
         state["states"] = dict(state["meter"].get("states") or {})
     else:                                            # how each file ended, and the sum of it
         state["states"] = dict(result.get("states") or {})
-        state["summary"] = {k: result.get(k) for k in ("done", "whole", "failed_files", "stopped") if k in result}
+        state["summary"] = {k: result.get(k) for k in ("done", "whole", "failed_files", "stopped", "merged") if k in result}
     series = str(result.get("series") or "")
     root = Path(V.video_root(req.settings))
     if series and root.is_dir() and V.LIBRARY.get(str(root), series) is not None:

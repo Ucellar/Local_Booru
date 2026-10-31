@@ -21,6 +21,8 @@ const DEFAULT_OPTIONS = {
   blocklist: [],                     // its tags, as the program last gave them (kept while it is closed)
   blocklistRev: '',
   blocklistSyncedAt: 0,
+  mangaMode: 'blur',                 // (0.9.0) nhentai: the galleries the manga folder has — 'blur', 'hide', 'mark', 'off'
+  mangaVersions: true,               // … and the other versions of their works (another language, another upload)
 };
 const WATCHDOG_ALARM = 'lb-companion-event-watchdog';
 let eventLoopRunning = false;
@@ -1307,6 +1309,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const sets = isOfflineError(err) ? await loadOfflineSets() : null;
         if (!sets) throw err;
         return { ok: true, offline: true, items: offlineCheckItems(sets, items) };
+      }
+    }
+    if (message.type === 'LB_MANGA_CHECK') {      // (0.9.0) nhentai: what the manga folder has of these galleries
+      const options = await getOptions();
+      if (!options.enabled || options.mangaMode === 'off') return { ok: true, disabled: true, items: [] };
+      const items = Array.isArray(message.items) ? message.items.slice(0, 300) : [];
+      try {
+        return await apiFetch('/extension/manga', { items });
+      } catch (err) {
+        if (isOfflineError(err)) return { ok: true, offline: true, items: [] };
+        throw err;
       }
     }
     if (message.type === 'LB_OPEN_CARD') {        // «Уже есть» clicked: the card in the program's window

@@ -49,6 +49,10 @@ class ReverseService(Availability):
         paces = [float(x) for x in (rpm, 60.0 / delay if delay > 0 else None) if x]
         return min(paces) if paces else 0.0
 
+    def expected_per_minute(self) -> float:
+        """Searches a minute to expect before the queue has a pace of its own (``runner.lane_wait``)."""
+        return self.per_minute()
+
     def pace_note(self) -> str:
         """How the service is asked, for the page of the run: one file at a time, at most so many a minute."""
         pace = self.per_minute()

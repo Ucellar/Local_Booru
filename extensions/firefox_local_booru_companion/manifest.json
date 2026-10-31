@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
   "permissions": [
     "storage",
@@ -28,7 +28,8 @@
     "*://tineye.com/*",
     "*://www.tineye.com/*",
     "*://ascii2d.net/*",
-    "*://www.ascii2d.net/*"
+    "*://www.ascii2d.net/*",
+    "*://nhentai.net/*"
   ],
   "background": {
     "scripts": [
@@ -58,6 +59,18 @@
       ],
       "css": [
         "content_styles.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://nhentai.net/*"
+      ],
+      "js": [
+        "manga_script.js"
+      ],
+      "css": [
+        "manga_styles.css"
       ],
       "run_at": "document_idle"
     }

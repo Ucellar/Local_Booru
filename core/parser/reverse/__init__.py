@@ -1,10 +1,12 @@
-"""Reverse image search services in the order they are tried.
+"""Reverse image search services in the order they are tried: a file goes to the next one only when the one before
+did not find it.
 
-By default (v5.28) SauceNAO first — it answers in a couple of seconds at the account's pace and knows many sites —
-and iqdb.org last: it takes half a minute and more a search, and with it first every file waited for it.  «IQDB
-первым» (``reverse_saucenao_first`` off, «Сайты и ключи») keeps SauceNAO's daily searches for the files the others
-did not find.  A service paused for a while (SauceNAO's limit, a failure of its server) is passed over: the file goes
-on to the next one (core/parser/engine.reverse_next), and a miss of the others is then not trusted (deferred)."""
+By default (v5.44.3, the owner's word: «очередью iqdb>snao», as the stages of the old program) iqdb.org first,
+SauceNAO last: its few searches a day (an account's daily limit — at the owner about a hundred) go only to the files
+the others did not find.  «SauceNAO первым» (``reverse_saucenao_first``, «Сайты и ключи»; the default of v5.28–5.44)
+is quicker while its searches last.  A service paused for a while (SauceNAO's limit, a failure of its server) is
+passed over: the file goes on to the next one (core/parser/engine.reverse_next), and a miss of the others is then not
+trusted (deferred)."""
 from __future__ import annotations
 
 from core.parser.reverse.ascii2d import Ascii2d
@@ -20,7 +22,7 @@ IQDB_FIRST = (Iqdb, DanbooruIqdb, E621Iqdb, Ascii2d, SauceNao)
 
 
 def reverse_order(settings: dict) -> tuple:
-    return SAUCENAO_FIRST if (settings or {}).get("reverse_saucenao_first", True) else IQDB_FIRST
+    return SAUCENAO_FIRST if (settings or {}).get("reverse_saucenao_first", False) else IQDB_FIRST
 
 
 def build_reverse(ctx, sites) -> list:

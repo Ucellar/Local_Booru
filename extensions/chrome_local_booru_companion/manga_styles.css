@@ -1,0 +1,53 @@
+/* Local Booru on nhentai (0.9.0): the galleries the manga folder has — blurred, hidden or labelled (manga_script.js) */
+.lb-manga-marked { position: relative !important; }
+.lb-manga-hidden { display: none !important; }
+.lb-manga-blur img { filter: blur(14px) saturate(0.6) !important; transition: filter 0.15s ease !important; }
+.lb-manga-blur .caption { filter: blur(4px) !important; }
+.lb-manga-blur.lb-manga-shown img, .lb-manga-blur.lb-manga-shown .caption { filter: none !important; }
+.lb-manga-label {
+  position: absolute !important;
+  z-index: 999998 !important;
+  left: 6px !important;
+  top: 6px !important;
+  max-width: calc(100% - 12px) !important;
+  margin: 0 !important;
+  padding: 3px 8px !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  background: rgba(21, 101, 192, 0.95) !important;
+  color: #fff !important;
+  font: 600 12px/1.35 system-ui, "Segoe UI", Arial, sans-serif !important;
+  text-align: left !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  cursor: pointer !important;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45) !important;
+}
+.lb-manga-label[data-status="version"] { background: rgba(106, 27, 154, 0.95) !important; }
+.lb-manga-label:hover { filter: brightness(1.15) !important; }
+.lb-manga-shown .lb-manga-label { opacity: 0.75 !important; }
+.lb-manga-note {
+  margin: 0 0 10px !important;
+  padding: 8px 12px !important;
+  border-radius: 6px !important;
+  background: rgba(21, 101, 192, 0.18) !important;
+  border: 1px solid rgba(21, 101, 192, 0.6) !important;
+  color: inherit !important;
+  font: 600 14px/1.4 system-ui, "Segoe UI", Arial, sans-serif !important;
+  text-align: left !important;
+}
+.lb-manga-note[data-status="version"] { background: rgba(106, 27, 154, 0.18) !important; border-color: rgba(106, 27, 154, 0.6) !important; }
+.lb-companion-toast {
+  position: fixed !important;
+  z-index: 2147483647 !important;
+  right: 12px !important;
+  bottom: 64px !important;
+  max-width: 360px !important;
+  padding: 8px 10px !important;
+  border-radius: 6px !important;
+  background: rgba(20, 20, 20, 0.92) !important;
+  color: white !important;
+  font: 13px/1.35 Arial, sans-serif !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35) !important;
+}

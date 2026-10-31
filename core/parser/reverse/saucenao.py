@@ -35,6 +35,7 @@ SHORT_WAIT = SHORT_WINDOW + 2.0   # how long a full 30-second window is waited o
 class SauceNao(ReverseService):
     name = "SauceNAO"
     host = "saucenao.com"
+    quota_limited = True          # (v5.44) searches a day: a file passes it over while its queue is long (engine)
 
     def __init__(self, ctx, sites: list):
         super().__init__(ctx, sites)
@@ -43,8 +44,9 @@ class SauceNao(ReverseService):
     def enabled(self) -> bool:
         return self.ctx.flag("enable_saucenao", True) and bool(self._key()) and not self.disabled_reason
 
-    def pace_note(self) -> str:
-        """The pace on the page of the run: the account's limit, and what is left of the day's searches."""
+    def expected_per_minute(self) -> float:
+        """Searches a minute: the account's 30-second limit, or the day's searches left spread as set (the quota
+        governor), whichever is slower."""
         pace = self.per_minute()
         left = self.limits.get("long_remaining")
         try:
@@ -54,6 +56,12 @@ class SauceNao(ReverseService):
                 pace = min(pace, spread) if pace else spread
         except ImportError:
             pass
+        return pace
+
+    def pace_note(self) -> str:
+        """The pace on the page of the run: the account's limit, and what is left of the day's searches."""
+        pace = self.expected_per_minute()
+        left = self.limits.get("long_remaining")
         text = f"по одному, до {pace:.0f} в минуту" if pace >= 1 else (
             f"по одному, раз в {60.0 / pace:.0f} с" if pace > 0 else "по одному")
         return text + (f" · на сутки осталось {left}" if isinstance(left, int) and left >= 0 else "")

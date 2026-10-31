@@ -424,13 +424,23 @@ def post(req: Request) -> Response:
     poster_url = esc(data.media_url("poster", item))
     in_app = "QtWebEngine" in req.headers.get("User-Agent", "")
     if path.suffix.lower() in VIDEO_EXTS or item.get("is_video"):
-        if in_app and path.suffix.lower() != ".webm":
-            # The program window's browser cannot decode H.264 (MP4, MOV, MKV, AVI): the program plays the video
-            # and shows its frames right here, in the video's place (webui/video_relay.py); ⛶ — its full-size player.
-            viewer = _native_video_html(req, item, poster_url)
+        from core import video_probe
+        player = window_player(req, path) if in_app else video_probe.BROWSER
+        # the other player of the window, when this one cannot play the file (once: that page is told which it is)
+        other = ""
+        if in_app and req.arg("player") not in (video_probe.BROWSER, video_probe.OWN):
+            other = url(f"/post/{image_id}", i=index if index >= 0 else None, tag_source=tag_source,
+                        player=video_probe.OWN if player == video_probe.BROWSER else video_probe.BROWSER, **ctx)
+        if player == video_probe.OWN:
+            # The program window's browser cannot decode H.264, H.265, AAC (MP4, MOV, MKV, AVI — and a «.webm» with
+            # them inside): the program plays the video and shows its frames right here, in the video's place
+            # (webui/video_relay.py); ⛶ — its full-size player.
+            viewer = _native_video_html(req, item, poster_url, other=other)
         else:
+            picture = ' data-picture="1"' if int(item.get("width") or 0) > 0 else ""
             viewer = (f'<video class="post-media" src="{media_url}" controls loop preload="metadata" '
-                      f'poster="{poster_url}" data-id="{image_id}"></video>'
+                      f'poster="{poster_url}" data-id="{image_id}"'
+                      + (f' data-other="{esc(other)}"' if other else "") + f'{picture}></video>'
                       f'<div class="video-fallback" hidden><p>Это видео встроенный просмотр не показывает '
                       f'(формат не поддерживается).</p><button type="button" data-action="open-external" '
                       f'data-id="{image_id}">Открыть в видеоплеере</button></div>')
@@ -471,12 +481,27 @@ def _sets_box(req: Request, image_id: int, ctx: dict, index: int) -> str:
     return post_sets.box_html(req, image_id, ctx, index)
 
 
-def _native_video_html(req: Request, item: dict, poster_url: str) -> str:
+def window_player(req: Request, path: Path, *, prefer: str = "browser") -> str:
+    """Which player of the program window plays this video (``core.video_probe.window_player``): the page's own
+    choice (``player=`` — it went over to the other one), else what is inside the file, else by its name."""
+    from core import video_probe
+    asked = req.arg("player")
+    if asked in (video_probe.BROWSER, video_probe.OWN):
+        return asked
+    chosen = video_probe.window_player(path, prefer=prefer, settings=req.settings)
+    if chosen:
+        return chosen
+    return video_probe.BROWSER if path.suffix.lower() == ".webm" else video_probe.OWN
+
+
+def _native_video_html(req: Request, item: dict, poster_url: str, *, other: str = "") -> str:
     """A video played by the program inside the page: its frames take the poster's place (booru.js
-    ``setupNativeVideo``), the bar under it has the usual buttons."""
+    ``setupNativeVideo``), the bar under it has the usual buttons; ``other`` — this page with the window's browser
+    playing it, when the program's player cannot (AV1 without the graphics card's help)."""
     image_id = int(item["id"])
     width, height = int(item.get("width") or 0), int(item.get("height") or 0)
-    return native_video_box(req, {"id": image_id}, poster_url, width=width, height=height,
+    attrs = {"id": image_id, **({"other": other} if other else {})}
+    return native_video_box(req, attrs, poster_url, width=width, height=height,
                             frame_class="post-media fit", full=f'data-id="{image_id}"',
                             external=f'<button type="button" data-action="open-external" data-id="{image_id}">'
                                      f'Открыть в видеоплеере</button>')
@@ -645,6 +670,11 @@ def _info_box(item: dict) -> str:
     if item.get("width") and item.get("height"):
         rows.append(("Размер", f'{int(item["width"])}×{int(item["height"])}'))
     rows.append(("Файл", f'{human_size(item.get("size_bytes") or 0)}, {Path(str(item.get("path") or "")).suffix.lstrip(".") or "?"}'))
+    if item.get("is_video") or Path(str(item.get("path") or "")).suffix.lower() in VIDEO_EXTS:
+        from core.video_probe import codecs_label
+        inside = codecs_label(str(item.get("path") or ""))
+        if inside:
+            rows.append(("Внутри", inside))
     if item.get("indexed_at"):
         rows.append(("Добавлена", time.strftime("%d.%m.%Y %H:%M", time.localtime(int(item["indexed_at"])))))
     section = {"inbox": "Новые", "archive": "Архив", "trash": "Корзина", "missing": "Корзина (файл пропал)"}.get(
@@ -787,8 +817,8 @@ def random_post(req: Request) -> Response:
 def _list_per_page(req: Request, ctx: dict) -> int:
     """Cards on a page of the list a card was opened from (for «К результатам»)."""
     if ctx["section"] == data.VIDEO_SECTION:
-        from webui.pages.videos import LONG_PER_PAGE
-        return LONG_PER_PAGE
+        from webui.pages.videos import long_per_page
+        return long_per_page(req)
     return _per_page(req)
 
 

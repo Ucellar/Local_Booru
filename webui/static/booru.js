@@ -691,6 +691,68 @@
     });
   }
 
+  // ── lists of covers paged by whole rows (manga, the series and long videos of «Видео») ──
+  // About the list's usual number on a page (data-rows: 25 as on nhentai), as many whole rows of the columns this
+  // window has as come nearest to it — 25 covers in six columns left one alone in the last row.  The number goes
+  // into the list's cookie (data-rows-cookie: the server pages by it, webui/html.py ``rows_per_page``), and a page
+  // made for another number is asked again with the same first item (data-page; a shelf without pages — the same
+  // address).  Numbers that go back right after such a reload are left as they are (no endless reloads).
+  function rowColumns(grid) {
+    const cs = getComputedStyle(grid);
+    if (cs.display.includes("grid") && cs.gridTemplateColumns && cs.gridTemplateColumns !== "none") {
+      const tracks = cs.gridTemplateColumns.split(" ").filter(Boolean).length;      // auto-fill keeps empty tracks
+      if (tracks) return tracks;
+    }
+    if (cs.display.includes("flex") && (parseFloat(cs.getPropertyValue("--row")) || 0) > 0) return 0;  // «Лента»
+    const cells = Array.from(grid.children);
+    if (cells.length < 2) return 0;
+    const top0 = cells[0].offsetTop;
+    const first = cells.filter((c) => Math.abs(c.offsetTop - top0) < 2).length;
+    return first < cells.length ? first : 0;           // one row of all of them: how many more would fit is unknown
+  }
+
+  function fitRows() {
+    const changes = [];
+    let page = 0;
+    for (const grid of document.querySelectorAll("[data-rows]")) {
+      const usual = Number(grid.dataset.rows) || 0;
+      const cookie = grid.dataset.rowsCookie || "";
+      const cols = usual && /^[a-z_]+$/.test(cookie) ? rowColumns(grid) : 0;
+      if (!cols) continue;
+      const want = Math.max(4, Math.min(240, cols * Math.max(1, Math.round(usual / cols))));
+      document.cookie = cookie + "=" + want + "; path=/; max-age=31536000; SameSite=Strict";
+      const per = Number(grid.dataset.perPage) || 0;
+      const total = Number(grid.dataset.total) || 0;
+      if (!per || want === per || total <= Math.min(want, per)) continue;
+      changes.push(cookie + ":" + per + ">" + want);
+      if (grid.dataset.page) page = Math.floor(((Number(grid.dataset.page) || 1) - 1) * per / want) + 1;
+    }
+    if (!changes.length) return;
+    const here = new URL(location.href);
+    here.searchParams.delete("page");
+    const key = [root.dataset.skin, window.innerWidth, here.pathname, here.search].join("|");
+    let last = null;
+    try { last = JSON.parse(sessionStorage.getItem("lb-rows-last") || "null"); } catch (_) { last = null; }
+    const back = changes.map((c) => c.replace(/:(\d+)>(\d+)$/, ":$2>$1")).join(",");
+    if (last && last.key === key && Date.now() - last.t < 4000 && last.back === changes.join(",")) return;
+    try {
+      sessionStorage.setItem("lb-rows-last", JSON.stringify({ key, back, t: Date.now() }));
+    } catch (_) { /* fine */ }
+    const target = new URL(location.href);
+    if (page > 1) target.searchParams.set("page", String(page));
+    else if (page === 1) target.searchParams.delete("page");
+    location.replace(target.toString());
+  }
+
+  if (document.querySelector("[data-rows]")) {
+    fitRows();
+    let rowsResizing = 0;
+    window.addEventListener("resize", () => {
+      clearTimeout(rowsResizing);
+      rowsResizing = setTimeout(fitRows, 450);
+    });
+  }
+
   // ── the picture of the post page (and of the manga reader): shown when it is all there ──
   // A big picture drawn while it still arrives goes in stripes (a progressive JPEG comes as blocks first), and on
   // some graphics drivers such a half-drawn frame — even with a strip of the previous page in it — stayed on the
@@ -1082,6 +1144,15 @@
   // over it.  The bar asks the program to pause, seek and change the sound, and reads the state back.
   // the page before was a player over the whole screen (⛶) and went on to this one (the next episode): this page's
   // player goes on over the whole screen; a page without one gives the window its usual size back at once
+  // Another player of the window for this video (the address of this page with it): asked once a page — the
+  // address itself says which player it is for, and that page offers the usual player if it cannot play it either.
+  let switched = false;
+  function switchPlayer(address) {
+    if (switched || !inApp || !address) return false;
+    switched = true;
+    location.replace(address);
+    return true;
+  }
   const FULL_KEY = "lb-video-full";
   const carriedFull = (() => {
     try {
@@ -1147,6 +1218,7 @@
       play.textContent = "▶";
       if (tracksRow) tracksRow.hidden = true;
       if (resumeButton) resumeButton.hidden = true;
+      box.querySelectorAll(".nv-skip").forEach((b) => { b.hidden = true; });     // «Пропустить …»: while it plays
       showSaved();
     }
     // before the play: where it starts — an episode watched before goes on from its place (the bar shows it, the
@@ -1238,7 +1310,12 @@
         volume.value = String(state.volume);
       }
       box.classList.toggle("ended", !!state.ended);
-      if (state.error) showProblem("Видео не открылось: " + state.error);
+      if (state.error) {
+        // (v5.44) the program's own player cannot show this file (AV1 without the graphics card's help): the window's
+        // browser plays it — once; a page opened for that player already says what went wrong
+        if (box.dataset.other && switchPlayer(box.dataset.other)) return;
+        showProblem("Видео не открылось: " + state.error);
+      }
       renderTracks();
       renderResume(position, duration, playing);
       // the tab «Видео» keeps what was watched and goes on to the next episode (videos.js)
@@ -1318,10 +1395,12 @@
         if (document.activeElement !== audioMenu && state.audio !== undefined) audioMenu.value = String(state.audio);
         if (document.activeElement !== subsMenu && state.subtitle !== undefined) subsMenu.value = String(state.subtitle);
       }
-      audioMenu.closest(".nv-track").hidden = audio.length < 2;
+      // the voice-overs are chosen under the episodes (videos.js, «.vdubs») — here only at full screen
+      const outside = !box.classList.contains("nv-fullscreen") && !!document.querySelector(".vdubs");
+      audioMenu.closest(".nv-track").hidden = audio.length < 2 || outside;
       subsMenu.closest(".nv-track").hidden = !subs.length;
       tracksRow.querySelector(".nv-track-note").textContent = state.subtitle_error || "";
-      tracksRow.hidden = audio.length < 2 && !subs.length && !state.subtitle_error;
+      tracksRow.hidden = (audio.length < 2 || outside) && !subs.length && !state.subtitle_error;
     }
     function choose(cmd, value, track) {
       chosenAt = Date.now();
@@ -1468,6 +1547,9 @@
       toggle: () => command("toggle"),
       mute: () => command("mute", { value: !state.muted }),
       seekBy: (seconds) => command("seek", { value: Math.max(0, (Number(state.position) || 0) + seconds) }),
+      seekTo: (seconds) => command("seek", { value: Math.max(0, Number(seconds) || 0) }),
+      audioTracks: () => (token && Array.isArray(state.audio_tracks) ? state.audio_tracks.slice() : []),
+      chooseAudio: (n) => choose("audio", n, (state.audio_tracks || [])[n]),
       stop: stopHere,
       inPlayer: full,
       fullscreen: (on) => setFull(on === undefined ? !fullOn : on),
@@ -1649,16 +1731,25 @@
     });
   }
 
-  // A video the window cannot play: offer the usual player instead of an empty frame.
-  document.querySelectorAll("video.post-media").forEach((video) => {
-    const fallback = video.parentElement.querySelector(".video-fallback");
-    if (!fallback) return;
+  // A video the window cannot play: offer the usual player instead of an empty frame.  (v5.44) In the program window
+  // the page first goes over to the program's own player (data-other — this page with it): the window's browser has
+  // no H.264, H.265 or AAC, and a «.webm» may have them inside; a picture that never shows (H.265: the sound plays,
+  // the picture stays empty) is the same failure.
+  document.querySelectorAll("video.post-media, video.vvideo").forEach((video) => {
+    const fallback = (video.closest(".vstage") || video.parentElement).querySelector(".video-fallback");
     const giveUp = () => {
+      if (video.dataset.other && switchPlayer(video.dataset.other)) return;
+      if (!fallback || !video.classList.contains("post-media")) return;   // the tab «Видео»: videos.js says it
       video.hidden = true;
       fallback.hidden = false;
     };
     video.addEventListener("error", giveUp);
     if (video.error) giveUp();             // failed before this script ran
+    if (video.dataset.picture === "1") {
+      const noPicture = () => { if (video.readyState >= 2 && !video.videoWidth) giveUp(); };
+      video.addEventListener("loadeddata", noPicture);
+      noPicture();
+    }
   });
 
   // tools.js (the parser page, many cards at once) adds its buttons to the same dispatcher.

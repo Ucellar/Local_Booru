@@ -1,10 +1,11 @@
-"""The program window of the new interface: the web pages (``webui``) fill it, and the window gives them what a
-browser cannot — dialogs, the clipboard, the video player, dragging files out (``ui/web_bridge.py``, through
-``WebGalleryPage``) — and runs what the program does by itself (``core/background_duties.py``: the archive of
-«Новые», the trash's days, the automatic check of subscriptions, the idle checkpoint of the base).
+"""The program window: the web pages (``webui``) fill it, and the window gives them what a browser cannot — dialogs,
+the clipboard, the video player, dragging files out (``ui/web_bridge.py``, through ``WebGalleryPage``) — and runs what
+the program does by itself (``core/background_duties.py``: the archive of «Новые», the trash's days, the automatic check
+of subscriptions, the idle checkpoint of the base).
 
-The old window (``ui/main_window.py``, its sidebar of Qt pages) opens instead when the settings ask for it
-(«Окно программы» on «Настройки», key ``ui_shell``) or when this one cannot start — ``ui/program_window.py``.
+Where Qt WebEngine does not work (``ui/program_window.py`` decides: «Открывать» on «Настройки», key ``ui_shell``, or a
+failure), the window is small (``browser=True``): the pages open in the usual browser, and the window keeps the program
+running, asks its questions and opens its dialogs for them; closing it ends the program.
 The program's exit work (backup, checkpoint, thumbnails) stays in ``app.py``: it needs only ``.settings``.
 """
 from __future__ import annotations
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 _LOG = logging.getLogger("local_booru.window")
 TITLE = "Local Booru"
-RENDER_RETRY_SECONDS = 120          # the page's renderer dying twice within this — the window offers the old one
+RENDER_RETRY_SECONDS = 120          # the page's renderer dying twice within this — the window offers another way
 STARTED_AFTER_MS = 3000             # a page in and the window shown this long: the new window works here
 
 
@@ -28,14 +29,17 @@ def can_show_web() -> bool:
 
 
 class WebShell(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, browser: bool = False, why: str = ""):
+        """``browser`` — the pages in the usual browser, this window small (``why`` — what it says about it)."""
         super().__init__()
+        self.browser = bool(browser)
+        self._why = str(why or "")
         self._closing = False
         self._plan_box = None
         self._plan_key = None
         self._asking = None
         self._render_deaths: list = []
-        self._offered_old = False
+        self._offered = False
         self._page_in = False
         self._confirmed = False
         self.web_gallery_page = None
@@ -53,14 +57,18 @@ class WebShell(QMainWindow):
         self.settings = self.context.settings            # the one live settings dict of this run
         from core.maintenance_coordinator import install_qt_activity_filter
         install_qt_activity_filter()                      # the idle checkpoint waits for a pause of the person
-        self.setWindowTitle(TITLE)
-        self.setMinimumSize(800, 500)
-        self.resize(*self._saved_size())
+        if self.browser:
+            self.setWindowTitle(TITLE + " — в браузере")
+            self.resize(620, 360)
+        else:
+            self.setWindowTitle(TITLE)
+            self.setMinimumSize(800, 500)
+            self.resize(*self._saved_size())
         if APP_ICON_FILE.exists():
             from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(str(APP_ICON_FILE)))
         from ui.web_gallery_page import WebGalleryPage
-        self.web_gallery_page = WebGalleryPage(self)
+        self.web_gallery_page = WebGalleryPage(self, browser=self.browser, why=self._why)
         self.setCentralWidget(self.web_gallery_page)
         view = self.web_gallery_page.view
         if view is not None:
@@ -75,11 +83,14 @@ class WebShell(QMainWindow):
         from core import background_duties
         from webui import data
         from webui.server import FILE_STREAMS
-        background_duties.start(lambda: self.settings, hold=lambda paths: FILE_STREAMS.holding(*paths),
-                                changed=data.TAG_COUNTS.invalidate)
+        try:
+            background_duties.start(lambda: self.settings, hold=lambda paths: FILE_STREAMS.holding(*paths),
+                                    changed=data.TAG_COUNTS.invalidate)
+        except Exception as exc:  # the program opens all the same; what it does by itself waits for the next start
+            _LOG.error("background duties did not start: %s", exc, exc_info=True)
 
     def _abandon(self) -> None:
-        """The window failed to build: what it started is stopped, so the old window starts clean (its own
+        """The window failed to build: what it started is stopped, so the window in the browser starts clean (its own
         settings for the web server, its own bridge)."""
         from core import background_duties
         from webui import service
@@ -102,12 +113,6 @@ class WebShell(QMainWindow):
     # ── what other parts ask of a window ────────────────────────────────────
     def save_settings(self) -> None:
         self.context.save_settings()
-
-    def go(self, key: str) -> None:
-        """A page by the old window's name (the bridge's «open settings»): here, its web page."""
-        self.web_gallery_page.open_path({"Settings": "/settings", "Manga": "/manga", "BooruManga": "/manga",
-                                         "Tagger": "/parser", "Subs": "/subs", "DLER": "/grab",
-                                         "Duplicates": "/dupes", "Diagnostics": "/diag"}.get(key, "/posts"))
 
     def release_open_media_handles(self) -> None:
         """Before the program moves or deletes files: the player and the web server let go of them."""
@@ -152,7 +157,7 @@ class WebShell(QMainWindow):
 
     def _render_died(self, status, code) -> None:
         """The page's renderer process ended: the page is blank.  Once — the page loads again; twice within
-        ``RENDER_RETRY_SECONDS`` — the window offers the old window (the settings are out of reach in a blank page)."""
+        ``RENDER_RETRY_SECONDS`` — the window offers another way (the settings are out of reach in a blank page)."""
         from PySide6.QtWebEngineCore import QWebEnginePage
         if status == QWebEnginePage.RenderProcessTerminationStatus.NormalTerminationStatus or self._closing:
             return
@@ -162,41 +167,57 @@ class WebShell(QMainWindow):
         if len(self._render_deaths) < 2:
             QTimer.singleShot(500, self.web_gallery_page.view.reload)
             return
-        self._offer_old_window()
+        self._offer_other_way()
 
-    def _offer_old_window(self) -> None:
-        if self._offered_old:
+    def _offer_other_way(self) -> None:
+        """The pages keep failing: the program starts again drawing them without the graphics card — or, when it draws
+        without it already, with its pages in the usual browser (``ui/program_window.py``)."""
+        if self._offered:
             return
-        self._offered_old = True
-        box = QMessageBox(QMessageBox.Warning, "Окно программы",
-                          "Страницы программы не показываются: встроенный браузер (Qt WebEngine) падает.\n\n"
-                          "Можно открывать старое окно программы — со следующего запуска. Вернуть новое потом: "
-                          "«Галерея» → «Настройки» → «Окно программы».", QMessageBox.NoButton, self)
-        old = box.addButton("Старое окно со следующего запуска", QMessageBox.ButtonRole.AcceptRole)
+        self._offered = True
+        from ui import program_window
+        if program_window.drawing_with_gpu():
+            text = ("Страницы программы не показываются: встроенный браузер (Qt WebEngine) падает. Часто дело в "
+                    "видеокарте — программа может начать заново и рисовать страницы без неё. Вернуть как было: "
+                    "«Настройки» → «Окно программы» → «Рисовать страницы».")
+            label, change = "Перезапустить без видеокарты", {"webview_gpu": "off"}
+        else:
+            text = ("Страницы программы не показываются: встроенный браузер (Qt WebEngine) падает и без видеокарты. "
+                    "Программа может начать заново и открывать свои страницы в обычном браузере. Вернуть окно: "
+                    "«Настройки» → «Окно программы» → «Открывать».")
+            label, change = "Перезапустить и открывать в браузере", {"ui_shell": "browser"}
+        box = QMessageBox(QMessageBox.Warning, "Окно программы", text, QMessageBox.NoButton, self)
+        other = box.addButton(label, QMessageBox.ButtonRole.AcceptRole)
         stay = box.addButton("Остаться", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(stay)                # a stray Enter keeps the new window
+        box.setDefaultButton(stay)                # a stray Enter keeps the window as it is
         box.setEscapeButton(stay)
         box.setAttribute(Qt.WA_DeleteOnClose)
 
         def chosen(_result) -> None:
-            if box.clickedButton() is not old:
-                self._offered_old = False             # a third failure asks again
+            if box.clickedButton() is not other:
+                self._offered = False                 # a third failure asks again
                 self._render_deaths.clear()
                 self.web_gallery_page.view.reload()
                 return
-            self.settings["ui_shell"] = "classic"     # the box said: from the next start
+            self.settings.update(change)
             try:
                 self.save_settings()
             except OSError as exc:
-                _LOG.warning("the choice of the old window not saved: %s", exc)
+                _LOG.warning("the choice of another way not saved: %s", exc)
+                return
+            from core import app_restart
+            app_restart.request()                 # app.py starts the program again once it has closed
+            self.close()
         box.finished.connect(chosen)
         box.show()
 
     def show_as_saved(self) -> None:
         """Shown as the person left it: maximized — the default, and when its own size takes the whole screen (a
         window «stretched» to the screen had its title bar and bottom beyond it) — or in its own size, whole on the
-        screen (``_clamp_to_screen``)."""
-        if self._wants_maximized():
+        screen (``_clamp_to_screen``).  The small window of the pages in the browser — in its own size."""
+        if self.browser:
+            self.show()
+        elif self._wants_maximized():
             self.showMaximized()
         else:
             self.show()
@@ -218,7 +239,7 @@ class WebShell(QMainWindow):
 
     def changeEvent(self, event):
         super().changeEvent(event)
-        if event.type() == QEvent.Type.WindowStateChange:
+        if event.type() == QEvent.Type.WindowStateChange and not self.browser:
             if self.web_gallery_page is not None:
                 self.web_gallery_page.window_state_changed()   # a player on the whole screen goes back to its page
             if not self.isMinimized() and not self.isFullScreen():
@@ -246,8 +267,8 @@ class WebShell(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.isMaximized() or self.isMinimized() or self.isFullScreen():
-            return
+        if self.browser or self.isMaximized() or self.isMinimized() or self.isFullScreen():
+            return                     # (the small window of the pages in the browser keeps no size)
         from PySide6.QtGui import QGuiApplication
         screen = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
         if screen is not None:

@@ -1,6 +1,6 @@
 """One parser run at a time for the whole program, and its state for the pages that show it.
 
-Whoever starts the parser — the web page «Парсер», a «Брак» retry, the old Qt parser page — goes
+Whoever starts the parser — the web page «Парсер», a «Брак» retry, «Диагностика» — goes
 through :func:`claim`: a second run is refused while one is going (two runs over the same files
 and the same sites would fight for the database and the site limits).  :class:`ParserJob` runs
 :class:`ParserRunner` in a thread and keeps what a page polls: status, progress, counters, the last
