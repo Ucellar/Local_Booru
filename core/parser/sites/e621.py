@@ -1,6 +1,7 @@
 """e621 / e926 JSON API (tags already grouped by category)."""
 from __future__ import annotations
 
+from core import site_agent
 from core.parser.models import Post
 from core.parser.sites.base import Site
 from core.parser.util import norm_md5, post_dicts
@@ -20,6 +21,20 @@ class E621Site(Site):
 
     def _headers(self) -> dict:
         return {"Accept": "application/json", "User-Agent": self.api_user_agent()}
+
+    def api_user_agent(self) -> str:
+        """e621's rules (its API help): the program's name and the person's login on e621 — never a browser's
+        (core/site_agent.py, v5.44.22)."""
+        custom = str(self.cfg.get("user_agent") or self.cfg.get("api_user_agent") or "")
+        return site_agent.user_agent(self.host, self.ctx.settings, name=self.login or None, custom=custom)
+
+    def preflight(self) -> None:
+        """No login on e621 in «Сайты и ключи»: said once in the journal — e621 asks every program to carry the name
+        of its person's account (to write to it when something goes wrong); the requests go on without it."""
+        if not self.login and not site_agent.account(self.ctx.settings, site_agent.family(self.host))[0]:
+            self.ctx.log(f"  {self.host}: в «Сайтах и ключах» не вписан логин e621 — правила e621 просят, чтобы в "
+                         "запросах программы было имя аккаунта (чтобы написать, если что-то не так); API-ключ — по "
+                         "желанию, с ним поиск по картинке на e621 быстрее")
 
     def _auth(self):
         return (self.login, self.api_key) if self.login and self.api_key else None

@@ -17,6 +17,10 @@ not proved yet is a failed proof too.  A site asked one file a request whose que
 turn shared with everything else) is not waited for: a file whose wait would pass :data:`SKIP_AFTER` is not asked
 there (:data:`SKIPPED`; «ВРЕМЯ» — ``AFTER_PIXEL_SKIP``) — a pixel find there is rare, and the files waiting for it held
 the threads of the stages after the sites (5.35.1 at the owner: 107 s a file).
+(v5.44.12) A site whose request takes long (:data:`FILL_PACE`: its turn is scarce — ATF's ten a minute are shared with
+its MD5 packs) is asked a list only when it is full or its oldest file has waited :data:`FILL_WAIT`: at the owner the
+lists carried 6–12 files of 20 (the files come a second apart, a list went every 7 s), the pixels' requests took the
+turns the MD5 packs needed, and the stages after the sites did no more than 250–300 files in 5 minutes.
 """
 from __future__ import annotations
 
@@ -29,6 +33,8 @@ from core.work_timing import AFTER_PIXEL_ASK, AFTER_PIXEL_SKIP, STEPS
 BATCH = 20                  # files in one request
 PROOFS = 3                  # lists with one of the site's own pictures, before it is asked one file a request
 SKIP_AFTER = 90.0           # seconds a file may wait for a site asked one file a request; longer — it is not asked
+FILL_PACE = 4.0             # seconds a request to the site takes (its turn, its answer) from which its lists wait to fill
+FILL_WAIT = 30.0            # seconds the oldest file of a list waits at most for the list to fill
 
 
 class _NotAsked(tuple):
@@ -80,6 +86,16 @@ class PixelQueue(SiteQueue):
 
     def _take(self) -> int:
         return 1 if self.mode == ONE else BATCH
+
+    def _hold(self, waiting: int, oldest: float) -> float:
+        """A slow site's list waits to be full (:data:`FILL_PACE`, :data:`FILL_WAIT`); one asked a file a request, a
+        quick one, or a list not proved yet — at once."""
+        if self.mode != MANY or self.pace < FILL_PACE or waiting >= BATCH or self.refused is not None:
+            return 0.0
+        http = getattr(self.site, "http", None)
+        if http is not None and getattr(http, "cancel_check", lambda: False)():
+            return 0.0                              # the run stops: the files go now (their request ends at once)
+        return min(1.0, max(0.0, FILL_WAIT - oldest))     # looked at again every second (a stop, a full list)
 
     def _ask(self, fn, *args):
         """One request to the site — the wait for its turn and its answer, counted and timed for «ВРЕМЯ»."""

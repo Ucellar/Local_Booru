@@ -20,8 +20,12 @@ from typing import Callable
 
 import requests
 
+from core import site_agent
 from core.parser.util import host_of
 
+# Sites that are browsed (Cloudflare, cookies of a browser) get a browser's User-Agent; the hosts of e621 and Danbooru
+# never do — their rules ban a program that says it is a browser: they get ``core.site_agent.user_agent`` (v5.44.22,
+# v5.44.24).
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
@@ -156,6 +160,7 @@ class HttpClient:
                 "Accept-Language": "en-US,en;q=0.9",
             })
             self._load_cookies(sess, host)
+            self._own_agent(sess, host)
             cache[host] = (sess, wanted)
             with self._registry_lock:
                 self._sessions.append(sess)
@@ -163,8 +168,15 @@ class HttpClient:
             sess.cookies.clear()
             sess.headers["User-Agent"] = BROWSER_UA
             self._load_cookies(sess, host)
+            self._own_agent(sess, host)
             cache[host] = (sess, wanted)
         return sess
+
+    def _own_agent(self, sess: requests.Session, host: str) -> None:
+        """The hosts of e621 and Danbooru (their API, their picture servers): the program's own User-Agent with the
+        person's account — not a browser's, not the one the cookies came with (core/site_agent.py)."""
+        if site_agent.is_own(host):
+            sess.headers["User-Agent"] = site_agent.user_agent(host, self.settings)
 
     def renew_cookies(self, host: str) -> None:
         """The person renewed the cookies of ``host`` (in a browser, Companion wrote them): every thread's session of
@@ -227,6 +239,7 @@ class HttpClient:
 
         host = host_of(url)
         assert_url_allowed(url)
+        headers = site_agent.fix_headers(host, headers, self.settings)
         attempts = max(1, int(attempts))
         gate = _gate_for(host, self.settings)
         last_error = ""

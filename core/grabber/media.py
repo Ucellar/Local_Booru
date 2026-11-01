@@ -6,14 +6,22 @@ with the site's session (its cookies, User-Agent) and the post page as the Refer
 or HTML answer is refused (an SVG opened as a page would run its script on the gallery's address).
 The cache (``cache/grabber_web``) keeps the size set by ``grabber_cache_limit_mb``; the oldest
 files go first.
+
+(v5.44.10) A copy the site does not give (the sample refused, no preview) — another copy of the same picture is
+shown (the sample: the original, then the preview); a file server that names every file «octet-stream» — the first
+bytes say whether it is a picture; a refusal is written to the log once in a while per site (the page of a part of a
+сборка showed nothing and said nothing).
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 from collections import defaultdict
 from pathlib import Path
 from urllib.parse import urlparse
+
+_LOG = logging.getLogger("local_booru.grabber_media")
 
 PREVIEW_MAX = 6 * 1024 * 1024
 SAMPLE_MAX = 60 * 1024 * 1024
@@ -126,16 +134,87 @@ def prune(settings: dict) -> int:
     return removed
 
 
+def _tries(card: dict, variant: str) -> list:
+    """[(entry, URL, limit)] to try for a card's picture, the wanted one first: (v5.44.10) a site that does not give
+    one copy (a sample refused, a preview missing) still shows the post — the other copies of the same picture."""
+    out, seen = [], set()
+
+    def add(item: dict, url: str, limit: int) -> None:
+        if url and url not in seen:
+            seen.add(url)
+            out.append((item, url, limit))
+    for item in card["entries"]:
+        if variant == "preview":
+            add(item, item.get("preview") or "", PREVIEW_MAX)
+        else:
+            add(item, item.get("sample") or "", SAMPLE_MAX)
+    for item in card["entries"]:
+        if variant == "preview":
+            add(item, item.get("sample") or "", SAMPLE_MAX)
+        else:
+            if not item.get("video"):
+                add(item, item.get("original") or "", SAMPLE_MAX)
+            add(item, item.get("preview") or "", PREVIEW_MAX)
+    return out
+
+
 def media(search, key: str, variant: str) -> tuple[bytes, str]:
-    """(bytes, content type) of a card's preview (``variant`` "preview") or sample ("sample")."""
+    """(bytes, content type) of a card's preview (``variant`` "preview") or sample ("sample") — or of another copy of
+    the same picture when the site does not give that one (the first refusal is said when none comes)."""
     card = search.card(key)
     if card is None:
         raise MediaError(404, "такой карточки нет в этом поиске")
-    item, url = _pick(card, "preview" if variant == "preview" else "sample")
-    if not url:
+    tries = _tries(card, "preview" if variant == "preview" else "sample")
+    if not tries:
         raise MediaError(404, "у поста нет картинки для показа")
-    return fetch_picture(search.http, item["site"], url, item.get("url") or f"https://{item['site']}/", search.settings,
-                         limit=PREVIEW_MAX if variant == "preview" else SAMPLE_MAX)
+    first = None
+    for item, url, limit in tries:
+        try:
+            return fetch_picture(search.http, item["site"], url, item.get("url") or f"https://{item['site']}/",
+                                 search.settings, limit=limit)
+        except MediaError as exc:
+            first = first or exc
+            _note_refusal(str(item.get("site") or "?"), exc)
+    raise first
+
+
+_NOTED: dict = {}                       # host -> time.monotonic() its refusal was last written to the log
+NOTE_EVERY = 10 * 60
+
+
+def _note_refusal(site: str, exc: Exception) -> None:
+    """A site's picture not given — in the log, once in a while per site (a page of tiles is not a page of lines)."""
+    import time
+    now = time.monotonic()
+    if now - _NOTED.get(site, -NOTE_EVERY) < NOTE_EVERY:
+        return
+    _NOTED[site] = now
+    _LOG.info("picture of %s not shown: %s", site, exc)
+
+
+_UNNAMED = {"", "application/octet-stream", "binary/octet-stream", "application/binary"}
+
+
+def _sniffed(head: bytes) -> str:
+    """The type of a picture or a video by its first bytes ("" — none of :data:`TYPES`): for a site's file server that
+    sends every file as «octet-stream» (never an SVG or a page: those are not among them)."""
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[4:12] in (b"ftypavif", b"ftypavis"):
+        return "image/avif"
+    if head[4:8] == b"ftyp":
+        return "video/mp4"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    if head.startswith(b"BM"):
+        return "image/bmp"
+    return ""
 
 
 def fetch_picture(http, site: str, url: str, referer: str, settings: dict, *, limit: int = PREVIEW_MAX) -> tuple[bytes, str]:
@@ -169,7 +248,7 @@ def _download(http, site: str, url: str, referer: str, limit: int) -> tuple[byte
             if response.status_code >= 400:
                 raise MediaError(502, f"{host} ответил {response.status_code}")
             ctype = str(response.headers.get("content-type") or "").split(";")[0].strip().lower()
-            if ctype not in TYPES:
+            if ctype not in TYPES and ctype not in _UNNAMED:
                 raise MediaError(502, f"{host} прислал не картинку ({ctype or 'без типа'})")
             chunks, size = [], 0
             for chunk in response.iter_content(128 * 1024):
@@ -179,7 +258,12 @@ def _download(http, site: str, url: str, referer: str, limit: int) -> tuple[byte
                 if size > limit:
                     raise MediaError(502, "файл слишком большой для просмотра")
                 chunks.append(chunk)
-            return b"".join(chunks), ctype
+            data = b"".join(chunks)
+            if ctype not in TYPES:                       # sent without its type: the bytes say what it is
+                ctype = _sniffed(data[:16])
+                if not ctype:
+                    raise MediaError(502, f"{host} прислал не картинку (без типа)")
+            return data, ctype
         except requests.RequestException as exc:
             raise MediaError(502, f"{host}: связь оборвалась ({type(exc).__name__})") from exc
         finally:

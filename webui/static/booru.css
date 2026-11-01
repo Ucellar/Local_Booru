@@ -906,20 +906,15 @@ html[data-skin="nhentai"] .taglist-r34 { display: none; }
 .post-sets .post-set-tools input:focus-visible { outline: 2px solid #4fb3ff; outline-offset: 1px; }
 .post-sets .post-set-item:first-child [data-set-act="left"],
 .post-sets .post-set-item:last-child [data-set-act="right"] { visibility: hidden; }
-/* the page of a part from the site (/post/remote): its picture fitted to the window, «Скачать» right under it */
+/* the page of a part from the site (/post/remote): a card's page (its picture as a card's), «Скачать» right under the
+   picture (v5.44.10) */
 .remote-view { max-width: 100%; }
-.remote-stage { display: flex; justify-content: center; margin: 4px 0 0; }
-.remote-picture { display: block; max-width: 100%; max-height: calc(100vh - 230px); object-fit: contain; background: #000000; }
 .remote-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px; margin: 8px auto 10px;
   padding: 8px 12px; max-width: 900px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); }
 .remote-bar .remote-api { padding: 0 5px; border-radius: 3px; background: #1f5fbf; color: #ffffff; font: bold 11px/16px var(--font); }
 .remote-bar .remote-download { padding: 6px 18px; font-weight: bold; }
 .remote-bar .remote-note { color: var(--muted); }
-.remote-tags { max-width: 900px; margin: 0 auto; }
-.remote-group { margin: 0 0 4px; }
-.remote-group-name { color: var(--muted); }
-.remote-group a { margin-right: 6px; }
-.remote-back { max-width: 900px; margin: 10px auto 0; }
+.remote-back { margin: 10px 0 0; }
 .post-sets .post-set-tools { margin: 8px 0 0; padding: 6px 0 0; border-top: 1px solid #1d7a1d; }
 .post-sets .post-set-tools input { width: 18em; max-width: 100%; }
 .post-sets .post-set-tools .danger { border-color: #a33; color: #ffb4b4; }

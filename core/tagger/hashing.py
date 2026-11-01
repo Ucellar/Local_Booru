@@ -177,6 +177,53 @@ def file_phash(path, settings=None, log=None) -> str:
         return ""
 
 
+WINDOW_STEPS = (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
+
+
+def window_phashes(path, aspect: float, settings=None, log=None) -> list:
+    """(v5.44.15) [(pHash, where)] of the parts of a still picture shaped as a site's preview (``aspect`` =
+    width / height): windows along the picture's long side.  e621 makes the preview of a picture wider than 2:1 or
+    taller than 1:2 of a part of it (31.10.2026: 1233×441 → 512×256, 1169×2964 → 256×512) — its pHash is then far
+    from the whole picture's (d=18…28 for the very picture).  [] — the picture has the preview's shape (within 6 %),
+    is narrower than it, is a video or a GIF, or cannot be read."""
+    if imagehash is None or not aspect or aspect <= 0:
+        return []
+    path = Path(path)
+    if path.suffix.lower() in VIDEO_EXTS or path.suffix.lower() == ".gif" or _skip_big_file(path, settings, log):
+        return []
+    try:
+        with Image.open(path) as img:
+            if _skip_big_dimensions(path, img.size[0], img.size[1], settings, log):
+                return []
+            img.seek(0)
+            try:
+                working = ImageOps.exif_transpose(img)
+            except Exception:
+                working = img
+            working.thumbnail((1024, 1024))
+            picture = working.convert("RGB")
+        w, h = picture.size
+        if not w or not h:
+            return []
+        own = w / h
+        if own > aspect * 1.06:                       # wider than the preview: windows across
+            part = max(1, round(h * aspect))
+            boxes = [(round((w - part) * f), 0, round((w - part) * f) + part, h) for f in WINDOW_STEPS]
+        elif own < aspect / 1.06:                     # taller: windows down
+            part = max(1, round(w / aspect))
+            boxes = [(0, round((h - part) * f), w, round((h - part) * f) + part) for f in WINDOW_STEPS]
+        else:
+            return []
+        out = []
+        for box in boxes:
+            value = str(imagehash.phash(picture.crop(box))).strip().lower()
+            if value and value not in [v for v, _w in out]:
+                out.append((value, "часть картинки"))
+        return out
+    except Exception:
+        return []
+
+
 def danbooru_pixel_hash(path) -> str:
     """Return Danbooru/ATF-style pixel_hash for static images."""
     path = Path(path)

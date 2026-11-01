@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from core.file_safety import atomic_write_bytes
 from urllib.parse import urlparse
+from core import site_agent
 from core.net import http_request
 
 try:
@@ -14,6 +15,8 @@ except ImportError:
     import requests
     _CURL = False
 
+# A browser's User-Agent for the sites that are browsed; never for the hosts of e621 and Danbooru — their rules ban a
+# program that says it is a browser: they get ``core.site_agent.user_agent`` (v5.44.22, v5.44.24).
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
        "AppleWebKit/537.36 (KHTML, like Gecko) "
        "Chrome/136.0.0.0 Safari/537.36")
@@ -41,8 +44,9 @@ def _safe_file_name(url_name: str, fallback: str) -> str:
     return name[:60].rstrip(" .") or fallback
 
 
+# (v5.44.24) not Danbooru: its rules forbid a program to pass for a browser (core/site_agent.py)
 _CF_HOSTS = {
-    "danbooru.donmai.us", "booru.allthefallen.moe",
+    "booru.allthefallen.moe",
     "rule34.xxx", "rule34.us",
 }
 
@@ -161,24 +165,14 @@ def _get_or_create_session(host: str, settings: dict, log=None):
         return _session_cache[host]
     s = _session(host, settings=settings, log=log)
     clean_host = str(host or "").lower().replace("www.", "")
-    if clean_host in {"e621.net", "e926.net"}:
-        cfg = ((settings or {}).get("sites") or {}).get(clean_host, {})
-        login = str((cfg or {}).get("login") or "").strip()
-        identity = f"by {login} on e621" if login else "local archive manager"
+    if clean_host in {"e621.net", "e926.net", "danbooru.donmai.us", "donmai.us"}:
         s.headers.update({
-            "User-Agent": f"LocalBooru/3.2 ({identity})",
+            "User-Agent": site_agent.user_agent(clean_host, settings),
             "Accept": "application/json",
             "Accept-Encoding": "gzip, deflate",
         })
-    elif clean_host in {"danbooru.donmai.us", "donmai.us"}:
-        cfg = ((settings or {}).get("sites") or {}).get("danbooru.donmai.us", {})
-        login = str((cfg or {}).get("login") or "").strip()
-        identity = f"by {login} on Danbooru" if login else "local archive manager"
-        s.headers.update({
-            "User-Agent": f"LocalBooru/3.6 ({identity})",
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip, deflate",
-        })
+    elif site_agent.is_own(clean_host):          # their picture servers (static1.e621.net, cdn.donmai.us): the same
+        s.headers["User-Agent"] = site_agent.user_agent(clean_host, settings)
     elif "allthefallen" in clean_host:
         cfg = ((settings or {}).get("sites") or {}).get("booru.allthefallen.moe", {})
         login = str((cfg or {}).get("login") or "").strip()
@@ -197,7 +191,9 @@ def _get_or_create_session(host: str, settings: dict, log=None):
         if not creds and clean_host.startswith("www."):
             creds = load_domain_credentials(settings, clean_host[4:])
         if creds:
-            if creds.get("user_agent"):
+            # e621 and Danbooru ban a program with a browser's User-Agent (their API rules): their cookies go, the
+            # browser's words do not
+            if creds.get("user_agent") and not site_agent.is_own(clean_host):
                 s.headers["User-Agent"] = str(creds["user_agent"])
             for cookie in creds.get("cookies") or []:
                 if not isinstance(cookie, dict) or not cookie.get("name"):
@@ -396,7 +392,7 @@ def _session(host: str, settings: dict | None = None, log=None):
             s = __import__("requests").Session()
     else:
         s = __import__("requests").Session()
-    s.headers["User-Agent"] = _UA
+    s.headers["User-Agent"] = site_agent.user_agent(h, settings) if site_agent.is_own(h) else _UA
     s.headers["Accept"] = "application/json, */*"
     try:
         from core.network import install_safe_session
@@ -491,12 +487,8 @@ def _api_headers_for_host(host: str, settings: dict | None = None):
     clean = _host(host)
     params = _auth_params(clean, settings)
     login = str(params.get("login") or "").strip()
-    if clean in {"e621.net", "e926.net"}:
-        identity = f"by {login} on e621" if login else "local archive manager"
-        return {"User-Agent": f"LocalBooru/3.6 ({identity})", "Accept": "application/json"}
-    if clean in {"danbooru.donmai.us", "donmai.us"}:
-        identity = f"by {login} on Danbooru" if login else "local archive manager"
-        return {"User-Agent": f"LocalBooru/3.6 ({identity})", "Accept": "application/json"}
+    if site_agent.is_own(clean):
+        return {"User-Agent": site_agent.user_agent(clean, settings, name=login or None), "Accept": "application/json"}
     if "allthefallen" in clean:
         identity = f"by {login} on ATF" if login else "local archive manager"
         return {"User-Agent": f"LocalBooru/3.6 ({identity})", "Accept": "application/json"}

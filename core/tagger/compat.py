@@ -71,19 +71,24 @@ class Tagger:
         return str(site.get("name") or site.get("domain") or site.get("base_url") or "site").strip() or "site"
 
     # ── URL -> tags ─────────────────────────────────────────────────────────
-    def grouped_tags_from_url(self, url):
+    def site_post_from_url(self, url):
+        """The site's own post of a post page's URL — a parser ``Post``: the tags by category, the MD5, the uploader
+        and the parent (``meta``); None — the site is not known, did not answer, has no such post."""
         site = self._site_for_host(host_of(url))
         if site is None:
             self.log(f"URL: сайт {host_of(url)} не поддерживается")
-            return empty_tag_groups()
+            return None
         from core.parser.sites import SiteUnavailable
         try:
-            post = site.post_from_url(url)
+            return site.post_from_url(url)
         except (SiteUnavailable, HttpFailure) as exc:
             self.log(f"URL: {site.label} недоступен — {exc}")
-            return empty_tag_groups()
+            return None
         except Cancelled:
-            return empty_tag_groups()
+            return None
+
+    def grouped_tags_from_url(self, url):
+        post = self.site_post_from_url(url)
         return post.groups if post else empty_tag_groups()
 
     def tags_from_url(self, url):

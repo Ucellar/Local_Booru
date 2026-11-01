@@ -78,16 +78,40 @@ class Prints:
         return float(self.times[-1] - self.times[0]) + self.frame if len(self.times) else 0.0
 
 
+PRINTS_VERSION = 2          # how a print is made (2: the picture made small by hand first — ``thumb``); kept prints
+                            # of another way are made anew
+THUMB_FROM = 480            # a frame is cut down to about this width before it is made 17 × 9 (its every k-th pixel)
+_EIGHT_BIT = {"yuv420p", "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "nv12", "nv21", "gray"}
+
+
+def thumb(frame):
+    """A frame's tiny grey picture (``SIZE[0] + 1`` × ``SIZE[1]``, int16).  Made small from a large frame directly, the
+    scaler spends most of the time (4K: ~6 ms a frame — the owner's computer decoded 4K at ~1000 frames a second and
+    made prints of ~150; a video card does not help: the frames are brought back to the processor slower), so its
+    brightness plane is cut down first to ~``THUMB_FROM`` wide (every k-th pixel, no copy), then made 17 × 9.  Two
+    encodes of a picture give closer prints so (3.6 bits of 144 differ on average against 4.3) — and in any size."""
+    import av
+    import numpy as np
+    if frame.format.name in _EIGHT_BIT and frame.width and frame.height:
+        plane = frame.planes[0]
+        k = max(1, frame.width // THUMB_FROM)
+        luma = np.frombuffer(plane, dtype=np.uint8).reshape(-1, plane.line_size)[:frame.height:k, :frame.width:k]
+        small = av.VideoFrame.from_ndarray(np.ascontiguousarray(luma), format="gray")
+        return small.reformat(width=SIZE[0] + 1, height=SIZE[1]).to_ndarray().astype(np.int16)
+    return frame.to_ndarray(format="gray", width=SIZE[0] + 1, height=SIZE[1]).astype(np.int16)
+
+
 def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = False, start: float | None = None,
-              end: float | None = None) -> Prints:
+              end: float | None = None, threads: int = 0) -> Prints:
     """The prints of every frame of a file's picture (kept in ``cache`` by the file's size and time); ``keys`` — of
     its key frames only (8 times faster: where a voice-over is on the picture is found by them, the exact frame in
-    windows — :class:`Detail`); ``start``/``end`` — of the frames of that stretch only (seconds, the file's clock)."""
+    windows — :class:`Detail`); ``start``/``end`` — of the frames of that stretch only (seconds, the file's clock);
+    ``threads`` — the decoder's threads at most (work in the background leaves the computer to the person; 0 — all)."""
     import av
     import numpy as np
     path = Path(path)
     stat = path.stat()
-    key = f"{stat.st_size}-{int(stat.st_mtime)}-{'k' if keys else 'f'}"
+    key = prints_key(stat, keys)
     if start is not None:
         cache = None
     if cache is not None and cache.is_file():
@@ -105,6 +129,8 @@ def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = 
                 raise MergeError(f"в файле {path.name} нет видео")
             stream = box.streams.video[0]
             stream.thread_type = "AUTO"
+            if threads:
+                stream.thread_count = int(threads)
             if keys:
                 stream.codec_context.skip_frame = "NONKEY"
             rate = stream.average_rate or stream.guessed_rate or Fraction(24)
@@ -128,7 +154,7 @@ def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = 
                     continue
                 if end is not None and frame.time > end:
                     break
-                grey = frame.to_ndarray(format="gray", width=SIZE[0] + 1, height=SIZE[1]).astype(np.int16)
+                grey = thumb(frame)
                 bits.append(np.packbits((grey[:, 1:] > grey[:, :-1]).ravel()))
                 times.append(frame.time)
     except av.FFmpegError as exc:
@@ -142,13 +168,52 @@ def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = 
     return found
 
 
+def prints_key(stat, keys: bool = False) -> str:
+    """What kept prints of a file are kept under: its size and time, key frames or all, the way prints are made."""
+    return f"{stat.st_size}-{int(stat.st_mtime)}-{'k' if keys else 'f'}{PRINTS_VERSION}"
+
+
+def kept_prints(cache: Path, path: Path, *, keys: bool = False):
+    """The prints of ``path`` kept in ``cache`` — None when there are none for the file as it is now (nothing is
+    read from the file itself)."""
+    import numpy as np
+    try:
+        key = prints_key(Path(path).stat(), keys)
+        if not Path(cache).is_file():
+            return None
+        with np.load(cache) as kept:
+            if str(kept["key"]) == key:
+                return Prints(kept["times"], kept["bits"], float(kept["frame"]), int(kept["width"]), int(kept["height"]))
+    except Exception as exc:   # noqa: BLE001 - a cut-short or foreign file: as if none
+        _LOG.info("prints of %s not read from %s: %s: %s", Path(path).name, cache, type(exc).__name__, exc)
+    return None
+
+
+def restamp(cache: Path, old_key: str, new_key: str) -> bool:
+    """Kept prints (or any kept ``.npz`` with a ``key``) of a file whose bytes changed but not what they were made of
+    (an episode's MKV got another voice-over's track: its picture, its first track are the same) — kept under the
+    file's new key."""
+    import numpy as np
+    try:
+        if not Path(cache).is_file():
+            return False
+        with np.load(cache) as kept:
+            if str(kept["key"]) != old_key:
+                return False
+            arrays = {name: kept[name] for name in kept.files if name != "key"}
+    except Exception as exc:   # noqa: BLE001 - a cut-short or foreign file: left to be made anew
+        _LOG.info("%s not restamped: %s: %s", cache, type(exc).__name__, exc)
+        return False
+    return save_kept(Path(cache), key=new_key, **arrays)
+
+
 def keep(cache: Path, path: Path, prints: Prints, *, keys: bool = False) -> None:
     """``prints`` of ``path`` (as it is now) kept in ``cache``."""
     try:
         stat = path.stat()
     except OSError:
         return
-    save_kept(cache, key=f"{stat.st_size}-{int(stat.st_mtime)}-{'k' if keys else 'f'}", times=prints.times,
+    save_kept(cache, key=prints_key(stat, keys), times=prints.times,
               bits=prints.bits, frame=prints.frame, width=prints.width, height=prints.height)
 
 
@@ -892,6 +957,8 @@ class Merger:
             if chosen is not None:
                 place = self.folder / chosen.group if chosen.group else self.folder
                 prefer = next((place / f"{stem}{ext}" for ext in (".mp4", ".ts") if (place / f"{stem}{ext}").is_file()), None)
+            from core import video_skips
+            before = video_skips.stamp_of(self.folder / f"{stem}.mkv")
             try:
                 result = merge_episode(self.folder, stem, files, say=say, stop=stop, prefer=prefer)
             except MergeError as exc:
@@ -908,8 +975,9 @@ class Merger:
                         else f"{stem}: картинка общего файла заменена")
                 say(f"{stem}: в общем файле теперь озвучек: {count}")
                 try:                             # YummyAnime's times of its picture's file — the new file's
-                    from core import video_skips
                     video_skips.carry(self.folder, [result.get("picture") or ""], Path(result["file"]))
+                    if not result.get("repictured") and before:      # the same picture: what was found of it stays
+                        video_skips.kept_after_merge(self.folder, Path(result["file"]), before)
                 except (OSError, ValueError) as exc:
                     _LOG.info("skips of %s not carried: %s", result["file"], exc)
         video_library.LIBRARY.invalidate()

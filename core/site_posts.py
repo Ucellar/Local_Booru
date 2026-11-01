@@ -15,6 +15,12 @@ about are asked one by one.  What a site said is kept for ever: a post it does n
 round): the pace of every site is shared by all who ask it (``core/http_rate_limiter``, the parser's ``_HostGate``),
 and a few packs are nothing to a parser's run — which at the owner's took days, the questions waited all the time, and
 the cards from before stayed without their uploader and parent: in no сборка.
+
+(v5.44.10) The same questions mend the tags the browser extension wrote over a site's own (:data:`PAGE_METHODS`): the
+check of the badges put a grid's search word («some_artist», ``all``) in place of a card's tags of that site — the card lost
+them, and its place in a сборка — and a post page's tags without categories.  A card whose tags of a site are such is
+asked about its post once more, and the site's answer (its tags by category; the categories it did not send — the
+library's) takes their place (:data:`MEND_METHOD`).  Nothing more is asked of the sites for it.
 """
 from __future__ import annotations
 
@@ -32,6 +38,8 @@ ROUND_BUDGET = 20.0             # seconds one background round asks at most
 BUSY_BUDGET = 6.0               # …while the parser or the subscriptions use the sites (v5.44.4)
 ATTEMPTS = 2                    # tries of one request
 SOURCE_MAX = 2000               # characters of a post's source links kept
+PAGE_METHODS = ("browser_page_seen", "browser_manual_import", "browser_quality_upgrade")   # tags the extension wrote
+MEND_METHOD = "site_answer"     # a card's tags of a site as the site's answer gave them (they mended the extension's)
 _URL_RE = re.compile(r"https?://[^\s|<>\"']+", re.I)
 
 
@@ -184,6 +192,8 @@ _LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()     # one round at a time
 _STATE: dict = {
     "queue": {},          # host -> {post id: [(image id, source id)]} still to be asked (newest cards first)
+    "mend": {},           # host -> {post id: {image id}}: cards whose tags of that site the extension wrote (v5.44.10)
+    "mended": set(),      # (host, post id) mended (or tried) in this run: not asked for it again
     "scanned_at": 0.0,    # time.monotonic() of the last look
     "db": "",             # the base the queue is of
     "sites": {},          # host -> {"style", "tried", "singles", "sure", "paused_until", "note"}
@@ -200,23 +210,41 @@ def _site_state(host: str) -> dict:
 def forget() -> None:
     """Forget the queue and what was learnt about the sites' ways of asking (another base; the checks)."""
     with _LOCK:
-        _STATE.update(queue={}, scanned_at=0.0, db="", sites={}, asked=0, busy="")
+        _STATE.update(queue={}, mend={}, mended=set(), scanned_at=0.0, db="", sites={}, asked=0, busy="")
 
 
 def _scan(settings: dict) -> dict:
-    """host -> {post id: [(image id, source id)]}: the live picture cards' posts on sites of :data:`ENGINES` not asked
-    yet.  The source link is checked again when the answer is written: a card deleted meanwhile may have given its
-    number to a new card (SQLite reuses numbers) — that one does not get another post's answer."""
+    """host -> {post id: [(image id, source id)]}: the posts still to be asked (:func:`_scan_all`)."""
+    return _scan_all(settings)[0]
+
+
+def _scan_all(settings: dict) -> tuple[dict, dict]:
+    """(host -> {post id: [(image id, source id)]}, host -> {post id: {image id}}): the live picture cards' posts on
+    sites of :data:`ENGINES` not asked yet, and those asked again because the card's tags of that site are what the
+    extension wrote (:data:`PAGE_METHODS`; not a post the site said it has not, not one mended in this run).  The
+    source link is checked again when the answer is written: a card deleted meanwhile may have given its number to a
+    new card (SQLite reuses numbers) — that one does not get another post's answer."""
     from core.database.connection import db
     from core.parser.util import post_id_from_url
+    with _LOCK:
+        mended = set(_STATE["mended"])
     with db(settings, readonly=True) as con:
         hosts = [str(r[0] or "") for r in con.execute("SELECT DISTINCT host FROM sources")]
         wanted = {}
         for host in hosts:
             if host and engine_of_host(settings, host):
                 wanted[host] = canonical_site(host)
-        known = {(int(r[0]), str(r[1]), int(r[2])) for r in con.execute("SELECT image_id, site, post_id FROM site_posts")}
+        known = {(int(r[0]), str(r[1]), int(r[2])): str(r[3] or "ok")
+                 for r in con.execute("SELECT image_id, site, post_id, state FROM site_posts")}
+        marks = ",".join("?" * len(PAGE_METHODS))
+        paged: set = set()                          # (image id, site): its tags of the site are the extension's
+        for image_id, host in con.execute(
+                f"SELECT DISTINCT ist.image_id, s.host FROM image_source_tags ist JOIN sources s ON s.id=ist.source_id "
+                f"WHERE ist.acquisition IN ({marks})", PAGE_METHODS):
+            if str(host or "") in wanted:
+                paged.add((int(image_id), wanted[str(host)]))
         queue: dict = {}
+        mend: dict = {}
         names = sorted(wanted)
         for start in range(0, len(names), 200):
             part = names[start:start + 200]
@@ -229,13 +257,17 @@ def _scan(settings: dict) -> dict:
                 post = post_id_from_url(str(url or ""))
                 if not post.isdigit() or int(post) <= 0:
                     continue
-                site = wanted[str(host)]
-                if (int(image_id), site, int(post)) in known:
+                site, image_id, post = wanted[str(host)], int(image_id), int(post)
+                state = known.get((image_id, site, post))
+                again = ((image_id, site) in paged and state != "gone" and (site, post) not in mended)
+                if state is not None and not again:
                     continue
-                cards = queue.setdefault(site, {}).setdefault(int(post), [])
-                if all(card != int(image_id) for card, _source in cards):
-                    cards.append((int(image_id), int(source_id)))
-    return queue
+                cards = queue.setdefault(site, {}).setdefault(post, [])
+                if all(card != image_id for card, _source in cards):
+                    cards.append((image_id, int(source_id)))
+                if again:
+                    mend.setdefault(site, {}).setdefault(post, set()).add(image_id)
+    return queue, mend
 
 
 def waiting(settings: dict) -> int:
@@ -304,10 +336,41 @@ def _answer(site, ids: list, style: str) -> tuple[dict, bool]:
         if not row:
             continue
         if row["post_id"] in asked:
-            found.setdefault(row["post_id"], row)
+            found.setdefault(row["post_id"], {**row, "_raw": raw})     # the raw post: its tags mend (v5.44.10)
         else:
             stray = True
     return found, stray
+
+
+def _site_answer(site, raw) -> tuple[str, dict]:
+    """(the post's page, its tags by category) as the site's answer gave them — no question more to the site: the
+    categories it did not send are put by the library's (``storage.library_categories``, by the caller)."""
+    if not isinstance(raw, dict):
+        return "", {}
+    try:
+        try:
+            post = site.parse(raw, categorize=False)      # Gelbooru-likes: no tag-API questions for the categories
+        except TypeError:
+            post = site.parse(raw)
+    except Exception as exc:  # a post the engine cannot read: its tags stay as they are
+        _LOG.debug("site posts: a post of %s not read: %s", getattr(site, "host", "?"), exc)
+        return "", {}
+    if post is None:
+        return "", {}
+    groups = {str(k): list(v) for k, v in (post.groups or {}).items() if v}
+    return str(post.url or ""), groups
+
+
+def _mend(con, site, image_id: int, row: dict) -> int:
+    """The card's tags of the site as the site's answer gave them, in place of what the browser extension wrote (1 —
+    mended, 0 — the answer had no tags: they stay)."""
+    from core.database.storage import add_image_source_tag_groups, library_categories
+    url, groups = _site_answer(site, row.get("_raw"))
+    if not url or not any(groups.values()):
+        return 0
+    groups = library_categories(con, groups)
+    add_image_source_tag_groups(con, image_id, [{"url": url, "groups": groups, "method": MEND_METHOD}])
+    return 1
 
 
 def _prove(site, st: dict, sure: list) -> None:
@@ -410,12 +473,14 @@ def _round(settings: dict, stop_check, budget: float, client) -> dict:
     with _LOCK:
         stale = _STATE["db"] != base or not _STATE["scanned_at"] or time.monotonic() - _STATE["scanned_at"] > RESCAN
     if stale:
-        queue = _scan(settings)
         with _LOCK:
             if _STATE["db"] != base:
                 _STATE["sites"] = {}
-            _STATE.update(queue=queue, scanned_at=time.monotonic(), db=base)
-    asked = written = 0
+                _STATE["mended"] = set()
+        queue, mend = _scan_all(settings)
+        with _LOCK:
+            _STATE.update(queue=queue, mend=mend, scanned_at=time.monotonic(), db=base)
+    asked = written = mended = 0
     while time.monotonic() - started < budget:
         if stop_check is not None and stop_check():
             break
@@ -460,8 +525,12 @@ def _round(settings: dict, stop_check, budget: float, client) -> dict:
             now = int(time.time())
             with _LOCK:
                 cards = {pid: list(posts.get(pid) or []) for pid in ids}
+                to_mend = _STATE["mend"].get(host) or {}
+                mends = {pid: set(to_mend.pop(pid, set())) for pid in list(found) + list(gone)}
                 for pid in list(found) + list(gone):
                     posts.pop(pid, None)
+                    if mends.get(pid):
+                        _STATE["mended"].add((host, pid))
                 for pid in again:                       # to the end of the queue: asked one by one later
                     if pid in posts:
                         posts[pid] = posts.pop(pid)
@@ -476,8 +545,13 @@ def _round(settings: dict, stop_check, budget: float, client) -> dict:
                         if con.execute("SELECT 1 FROM image_sources WHERE image_id=? AND source_id=?",
                                        (image_id, source_id)).fetchone():
                             written += record(con, image_id, [row], now=now)
+                            if not row.get("gone") and image_id in mends.get(row["post_id"], ()):
+                                mended += _mend(con, site, image_id, row)
         if not progressed:
             break
     with _LOCK:
         more = any(posts for posts in _STATE["queue"].values())
-    return {"asked": asked, "written": written, "more": more}
+    out = {"asked": asked, "written": written, "more": more}
+    if mended:
+        out["mended"] = mended
+    return out

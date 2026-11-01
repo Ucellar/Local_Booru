@@ -19,8 +19,15 @@ class ReverseService(Availability):
     name = "reverse"
     #: similarity at which a hit is accepted without a visual check
     trust_similarity = 93.0
+    #: (v5.44.14) a hit under it needs a preview nearly the file's (``engine._accept`` ``strict``): 0 — never
+    strict_below = 0.0
     #: the host its requests go to: its pace is that host's (core/http_rate_limiter.py)
     host = ""
+    #: (v5.44.18) its name in the journal of answers (``reverse_branch_status``, the old program's ``branch_key``:
+    #: «iqdb», «saucenao»…) and the revision of its answers: a row of an older one is asked again
+    #: (core/parser/reverse_journal.py)
+    journal_key = ""
+    journal_revision = 1
 
     def __init__(self, ctx: ParserContext, sites: list):
         self.ctx = ctx

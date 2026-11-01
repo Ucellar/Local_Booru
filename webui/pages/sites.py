@@ -11,8 +11,10 @@ from webui.html import esc, page_frame
 from webui.server import Request, Response
 
 SAUCENAO_KEY_PAGE = "https://saucenao.com/user.php?page=search-api"
-_SERVICES = (("enable_iqdb", "IQDB", True, "iqdb.org: Danbooru, Gelbooru, Yande.re и другие"),
-             ("enable_e621_iqdb", "e621 IQDB", True, "поиск похожих на e621"),
+_SERVICES = (("enable_fluffle", "Fluffle", True, "e621, FurAffinity, Twitter, Bluesky, Inkbunny — за секунды"),
+             ("enable_e621_iqdb", "e621 IQDB", True,
+              "поиск похожих на самом e621: без логина — раз в минуту, с логином и ключом e621 — раз в 2 секунды"),
+             ("enable_iqdb", "IQDB", True, "iqdb.org: Danbooru, Gelbooru, Yande.re и другие — полминуты и дольше"),
              ("enable_danbooru_iqdb", "Danbooru IQDB", False, "поиск похожих на Danbooru (медленнее)"),
              ("enable_ascii2d", "Ascii2D", False, "японский поиск по картинке, находит pixiv и Twitter"))
 _OPTIONS = (("parser_workers", "Файлов одновременно", 3, 1, 8),
@@ -153,6 +155,7 @@ def sites_page(req: Request) -> Response:
         f'value="{esc(_int(s.get(key), default, lo, hi))}"></label>' for key, label, default, lo, hi in _OPTIONS)
     batch_on = " checked" if s.get("parser_md5_batch_enabled", True) else ""
     skip_on = " checked" if s.get("skip_existing", True) else ""
+    remember_on = " checked" if s.get("parser_reverse_remember", True) else ""
     engines = "".join(f'<option value="{esc(label)}">{esc(label if label != "Свой" else "Свой — определить по сайту")}</option>'
                       for label in ENGINE_TYPES)
     data = {e["_id"]: _site_json(e) for e in rows}
@@ -202,9 +205,9 @@ def sites_page(req: Request) -> Response:
               <option value="iqdb"{"" if s.get("reverse_saucenao_first", False) else " selected"}>IQDB первым, SauceNAO последним — бережёт лимит SauceNAO</option>
               <option value="saucenao"{" selected" if s.get("reverse_saucenao_first", False) else ""}>SauceNAO первым, IQDB последним — быстрее, пока хватает лимита</option>
             </select>
-            <small>файл идёт от сервиса к сервису по очереди, пока какой-нибудь его не найдёт: при «IQDB первым»
-            SauceNAO ищет только то, что не нашли остальные. IQDB отвечает полминуты и дольше, SauceNAO — за секунды,
-            но поисков на сутки у него не больше лимита аккаунта</small></div>
+            <small>файл идёт от сервиса к сервису по очереди, пока какой-нибудь его не найдёт: сначала быстрые
+            (Fluffle, e621 IQDB — секунды), потом IQDB (полминуты и дольше); при «IQDB первым» SauceNAO ищет только
+            то, что не нашли остальные: поисков на сутки у него не больше лимита аккаунта</small></div>
           <div class="field-row"><label for="sauce-spread">Растянуть суточный лимит SauceNAO на, ч</label>
             <input type="number" id="sauce-spread" name="saucenao_spread_hours" min="1" max="24"
               value="{_spread_hours(s)}">
@@ -229,6 +232,10 @@ def sites_page(req: Request) -> Response:
             <label class="check service"><input type="checkbox" class="switch" name="parser_md5_batch_enabled"{batch_on}>
               <span><b>Пакетные MD5-запросы</b> <small>несколько файлов одним запросом — только на сайтах, которые проверенно
               отвечают правильно (проверка — по найденному раньше или по новым постам сайта)</small></span></label>
+            <label class="check service"><input type="checkbox" class="switch" name="parser_reverse_remember"{remember_on}>
+              <span><b>Помнить ответы обратного поиска</b> <small>сервис, который уже искал файл — нашёл или нет, —
+              о нём больше не спрашивается: «Искать снова» Брака спрашивает только тех, кто его ещё не искал (новые,
+              выключенные, со сбоем). Выключите, чтобы спросить всех заново</small></span></label>
           </div>
           <div class="numbers">{options}</div>
           <div class="tool-actions"><button type="submit" class="primary">Сохранить</button><span class="action-status" role="status"></span></div>
@@ -418,5 +425,7 @@ def save_options(req: Request) -> Response:
     changes = {key: _int(body.get(key), default, lo, hi) for key, _l, default, lo, hi in _OPTIONS}
     changes["skip_existing"] = bool(body.get("skip_existing"))
     changes["parser_md5_batch_enabled"] = bool(body.get("parser_md5_batch_enabled"))
+    if "parser_reverse_remember" in body:        # the page's form always sends it; an older caller — not touched
+        changes["parser_reverse_remember"] = bool(body.get("parser_reverse_remember"))
     error = _save(changes)
     return error or Response.json({"ok": True})

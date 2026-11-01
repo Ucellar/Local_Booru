@@ -41,7 +41,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 _LOG = logging.getLogger("local_booru.card_sets")
 
-BUILD_VERSION = 1               # +1 when the rules change: the next run rebuilds
+BUILD_VERSION = 2               # +1 when the rules change: the next run rebuilds (2: v5.44.10, the sites' own tags)
 SET_MAX = 120                   # cards in one сборка (a manga of 60+ pages is one)
 LINK = 85                       # points of two neighbouring posts of one uploader to be one work (see linkScore)
 PTS = {"artist": 15, "artist_other": -10, "size": 10, "aspect": 5, "gap_near": 10, "gap_close": 5, "gap_far": -10}
@@ -291,7 +291,7 @@ _ONE_FILE = ("fa:", "da:", "hf:")
 
 # ── the cards as the builder sees them ─────────────────────────────────────────────────
 class _Card:
-    __slots__ = ("id", "w", "h", "tags", "artists", "chars", "comic", "ai", "keys", "pages")
+    __slots__ = ("id", "w", "h", "tags", "artists", "chars", "comic", "ai", "keys", "pages", "site_tags")
 
     def __init__(self, image_id: int, width: int, height: int):
         self.id = image_id
@@ -302,6 +302,7 @@ class _Card:
         self.comic = self.ai = False
         self.keys: list = []                       # work keys
         self.pages: dict = {}                      # work key -> page number
+        self.site_tags: dict = {}                  # site -> the tags that site itself gave the card (v5.44.10)
 
 
 class _Post:
@@ -342,12 +343,24 @@ def _seq_link(a: _Post, b: _Post) -> bool:
     return any(not k.startswith(_FEW) or abs(a.id - b.id) <= FEW_IMG_SPAN for k in shared)
 
 
+def _compared_tags(a: _Post, b: _Post) -> tuple:
+    """(tags of a, tags of b, artists of a, artists of b) the two posts are compared by: what their site gave each card
+    when both have it — the reference client compares the posts of one site, and a card's tags are of every site that
+    has its file (one card with three sites against one with a single site were «unlike»: v5.44.10); else the cards'."""
+    ta = a.card.site_tags.get(a.site) if a.card.site_tags else None
+    tb = b.card.site_tags.get(b.site) if b.card.site_tags else None
+    if ta and tb:
+        return ta, tb, a.card.artists & ta, b.card.artists & tb
+    return a.card.tags, b.card.tags, a.card.artists, b.card.artists
+
+
 def link_score(a: _Post, b: _Post) -> int:
     """Points of «one work» of two posts of one uploader (the reference client's ``linkScore``)."""
     ca, cb = a.card, b.card
-    score = _jaccard(ca.tags, cb.tags) * 100
-    if ca.artists and cb.artists:
-        score += PTS["artist"] if ca.artists & cb.artists else PTS["artist_other"]
+    ta, tb, aa, ab = _compared_tags(a, b)
+    score = _jaccard(ta, tb) * 100
+    if aa and ab:
+        score += PTS["artist"] if aa & ab else PTS["artist_other"]
     if ca.w > 0 and ca.h > 0 and cb.w > 0 and cb.h > 0:
         if ca.w == cb.w and ca.h == cb.h:
             score += PTS["size"]
@@ -593,6 +606,8 @@ def _load(con) -> dict:
 def _load_tags(con, cards: dict, ids: list) -> None:
     """Tags of the cards that are compared by tags: ids, the artists, the characters, comic and AI marks (joined by
     SQLite per card: 2.6 million tag links of 100 thousand cards in a few seconds)."""
+    from core.site_posts import PAGE_METHODS, canonical_site
+    sites: dict = {}                                # a source's host -> its site as ``site_posts`` names it
     names = sorted(_COMIC | _AI)
     marks = ",".join("?" * len(names))
     comic_ids, ai_ids = set(), set()
@@ -614,6 +629,18 @@ def _load_tags(con, cards: dict, ids: list) -> None:
                     f"SELECT it.image_id, group_concat(it.tag_id) FROM image_tags it JOIN tags t ON t.id=it.tag_id "
                     f"WHERE t.category=? AND it.image_id IN ({marks}) GROUP BY it.image_id", [category, *part]):
                 setattr(cards[image_id], slot, numbers(joined))
+        # (v5.44.10) the tags each site itself gave the card — not what the browser extension saw on a page
+        pages = ",".join("?" * len(PAGE_METHODS))
+        for image_id, host, joined in con.execute(
+                f"SELECT ist.image_id, s.host, group_concat(ist.tag_id) FROM image_source_tags ist "
+                f"JOIN sources s ON s.id=ist.source_id WHERE ist.image_id IN ({marks}) "
+                f"AND ist.acquisition NOT IN ({pages}) GROUP BY ist.image_id, s.host", [*part, *PAGE_METHODS]):
+            host = str(host or "")
+            site = sites.get(host)
+            if site is None:
+                site = sites[host] = canonical_site(host)
+            card = cards[image_id]
+            card.site_tags[site] = card.site_tags.get(site, frozenset()) | numbers(joined)
 
 
 # ── building ───────────────────────────────────────────────────────────────────────────
@@ -731,6 +758,7 @@ def _fold_batch(con, cards: dict, batch: list, union: _Union) -> None:
     for i in ids:                                    # not kept: the next batch reads its own (the comic mark stays)
         card = cards[i]
         card.tags = card.artists = card.chars = frozenset()
+        card.site_tags = {}
 
 
 def _near_on_sites(a_posts: list, b_posts: list) -> bool:
@@ -881,6 +909,14 @@ def _library_signature(con) -> list:
                 "SELECT COUNT(*), COALESCE(MAX(checked_at),0) FROM site_posts",
                 "SELECT COUNT(*), COALESCE(MAX(rowid),0) FROM image_sources"):
         parts.extend(con.execute(sql).fetchone())
+    # (v5.44.10) the cards' tags changed (a site's tags mended, a card tagged again): its сборка is looked at again —
+    # the counter the base's triggers move on every change of the tags of a card (migration 026)
+    try:
+        row = con.execute("SELECT revision FROM derived_source_revision WHERE cache_name='image_effective_tag_category'"
+                          ).fetchone()
+        parts.append(int(row[0] or 0) if row else 0)
+    except Exception:  # an old base without the counter: as before, the tags are not in the signature
+        parts.append(0)
     return parts
 
 
@@ -908,13 +944,14 @@ def _drop_auto(settings: dict) -> dict:
     return {"skipped": True, "removed": int(removed or 0)}
 
 
-def rebuild(settings: dict, *, force: bool = False) -> dict:
+def rebuild(settings: dict, *, force: bool = False, wait: float = 0.0) -> dict:
     """Put the сборки together again when the library or the person's сборки changed since the last time (``force`` —
-    anyway).  {"skipped": True} — nothing changed / switched off / another build is going; else what changed."""
+    anyway).  {"skipped": True} — nothing changed / switched off / another build is going (``wait`` — seconds to wait
+    for it); else what changed."""
     from core.database.connection import db, writes_blocked
     if writes_blocked():
         return {"skipped": True}
-    if not _BUILD_LOCK.acquire(blocking=False):
+    if not (_BUILD_LOCK.acquire(timeout=wait) if wait > 0 else _BUILD_LOCK.acquire(blocking=False)):
         return {"skipped": True}
     try:
         if not auto_enabled(settings):
@@ -1105,6 +1142,58 @@ def gather(settings: dict, ids: list, *, into: int = 0, title: str = "") -> dict
             _write_order(con, set_id, _order_of(con, set_id))
         _drop_small(con, left)
     return {"set": target, "cards": len(order)}
+
+
+def set_id_of(settings: dict, image_id: int) -> int:
+    """The сборка the card is in (0 — none)."""
+    from core.database.connection import db
+    with db(settings, readonly=True) as con:
+        return _set_id_of(con, image_id)
+
+
+def join_part(settings: dict, set_id: int, image_id: int, *, site: str = "", wait: float = 60.0) -> dict:
+    """A part of a сборка downloaded from its page («Скачать» on a part from the site, v5.44.10): in the сборка at once
+    — the сборки are built again now (before, up to three minutes later: the card just downloaded stood alone, «не
+    собирается»); when the rules leave it out of every сборка, it goes into this one all the same, at its place by its
+    post's number on ``site`` — the person downloaded it as a part of it (the сборка becomes the person's: only new
+    parts are added to it).  Not a card the person took out of сборки.  {"set": its сборка, "how": "rules" / "person"
+    / ""}."""
+    from core.database.connection import db, writes_blocked
+    built = rebuild(settings, force=True, wait=wait)
+    if built.get("skipped") or writes_blocked():
+        return {"set": 0, "how": ""}
+    now = int(time.time())
+    with db(settings, write=True) as con:
+        current = _set_id_of(con, image_id)
+        if current:
+            return {"set": current, "how": "rules"}
+        alive = con.execute("SELECT 1 FROM images WHERE id=? AND deleted=0", (int(image_id),)).fetchone()
+        taken_out = con.execute("SELECT 1 FROM card_set_optout WHERE image_id=?", (int(image_id),)).fetchone()
+        row = con.execute("SELECT kind FROM card_sets WHERE set_id=?", (int(set_id),)).fetchone()
+        if not alive or taken_out or row is None:
+            return {"set": 0, "how": ""}
+        order = _order_of(con, set_id)
+        numbers = {}
+        if site:
+            marks = ",".join("?" * (len(order) + 1))
+            for card, number in con.execute(
+                    f"SELECT image_id, MIN(post_id) FROM site_posts WHERE state='ok' AND site=? AND image_id IN ({marks}) "
+                    f"GROUP BY image_id", [site, *order, int(image_id)]):
+                numbers[int(card)] = int(number)
+        mine = numbers.get(int(image_id), 0)
+        at = len(order)
+        if mine:
+            for pos, card in enumerate(order):
+                if numbers.get(card, 0) > mine:
+                    at = pos
+                    break
+        order.insert(at, int(image_id))
+        con.execute("INSERT OR REPLACE INTO card_set_members(image_id, set_id, position) VALUES(?,?,?)",
+                    (int(image_id), int(set_id), at))
+        _write_order(con, set_id, order)
+        _touch(con, set_id, now)
+    _LOG.info("сборки: card %s downloaded as a part of сборка %s put into it", image_id, set_id)
+    return {"set": int(set_id), "how": "person"}
 
 
 # ── for the pages ──────────────────────────────────────────────────────────────────────

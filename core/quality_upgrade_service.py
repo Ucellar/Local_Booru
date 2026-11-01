@@ -12,12 +12,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import time
 from typing import Any, Callable
 
 from core.database.connection import db
-from core.media_revision_service import create_revision_plan, commit_revision_metadata
+from core.media_revision_service import create_revision_plan, commit_revision_metadata, rebind_media_paths
 from core.upgrade_verification import MediaDescriptor, build_verification_plan, compare_quality, ram_budget_allows
 
 
@@ -143,7 +144,7 @@ def _mark(settings: dict, revision_id: int, **values: Any) -> None:
         "status", "staging_path", "retired_path", "swap_state", "verified_identity",
         "verified_quality", "recovery_action", "updated_at", "verified_at", "error",
         "old_file_deleted", "new_md5", "new_path", "new_width", "new_height",
-        "new_file_size", "new_format", "quality_basis", "identity_basis", "journal_id",
+        "new_file_size", "new_format", "quality_basis", "identity_basis", "journal_id", "final_path",
     }
     items = [(k, v) for k, v in values.items() if k in allowed]
     if "updated_at" not in values:
@@ -303,6 +304,8 @@ def recover_quality_upgrade(settings: dict, *, revision_id: int, trace: Callable
             raise KeyError(revision_id)
         row = dict(row)
         image = con.execute("SELECT path,hash_md5 FROM images WHERE id=?", (int(row["image_id"]),)).fetchone()
+    if str(row.get("swap_state") or "") == "renaming":
+        return _recover_rename(settings, row, dict(image) if image else None, trace)
     canonical = Path(str(row["old_path"] or (image["path"] if image else "")))
     incoming = Path(str(row.get("staging_path") or "")) if row.get("staging_path") else None
     retired = Path(str(row.get("retired_path") or "")) if row.get("retired_path") else None
@@ -346,6 +349,106 @@ def recover_quality_upgrade(settings: dict, *, revision_id: int, trace: Callable
     _fsync_parent(canonical)
     trace(f"QUALITY UPGRADE RECOVERED: revision={revision_id} action={action or 'none'} db_md5={db_md5}")
     return {"revision_id": int(revision_id), "action": action or "none", "db_md5": db_md5}
+
+
+# ── (v5.44.13) the name of the new file ────────────────────────────────────────────
+_LIBRARY_TAIL = re.compile(r"__[0-9a-f]{12}$", re.I)
+
+
+def _free_name(folder: Path, name: str) -> Path:
+    """``name`` in ``folder``, or ``<stem>_N<ext>`` when a file is there already (another card's: never over it)."""
+    target = folder / name
+    stem, ext = Path(name).stem, Path(name).suffix
+    n = 1
+    while target.exists() and n < 10000:
+        target = folder / f"{stem}_{n}{ext}"
+        n += 1
+    return target
+
+
+def rename_upgraded(settings: dict, *, revision_id: int, new_name: str,
+                    trace: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """(v5.44.13) The file of a committed upgrade gets the original's name: ``new_name`` is the name it came with (the
+    card's ``original_file_name``), the library's name is made of it as every library name is
+    (``content_addressed_name``: «<name>__<MD5>.<ext>») — an upgraded sample was «sample_<key>__<old MD5>.jpg» with the
+    original's PNG inside.  The plan is written first (``swap_state='renaming'``, ``final_path``), then the file moves
+    in its folder (never over another file: ``move_managed``), then the base follows in one transaction
+    (``images`` and every journal that names the file: ``rebind_media_paths``); a crash in between is finished at the
+    next start (:func:`recover_quality_upgrade`).  {"path": the card's file afterwards, "renamed": it has the new name,
+    "final": nothing to try again (the revision is not this card's last, the name is the same), "why": words}."""
+    trace = trace or (lambda _m: None)
+    from core.services.media_storage_service import content_addressed_name, move_managed
+    with db(settings, readonly=True) as con:
+        rev = con.execute("SELECT * FROM media_revisions WHERE revision_id=?", (int(revision_id),)).fetchone()
+        image = con.execute("SELECT id,path,hash_md5,current_revision_id FROM images WHERE id=? AND deleted=0",
+                            (int(rev["image_id"]),)).fetchone() if rev else None
+    if not rev or not image:
+        return {"path": str(image["path"]) if image else "", "renamed": False, "final": True, "why": "нет карточки"}
+    current = Path(str(image["path"]))
+    md5 = str(image["hash_md5"] or "").lower()
+    if (str(rev["status"] or "") != "committed" or int(image["current_revision_id"] or 0) != int(revision_id)
+            or md5 != str(rev["new_md5"] or "").lower()):
+        return {"path": str(current), "renamed": False, "final": True, "why": "у карточки уже другой файл"}
+    plain = Path(str(new_name or "")).name.strip()
+    if not plain or not Path(plain).suffix:
+        return {"path": str(current), "renamed": False, "final": True, "why": "нет имени"}
+    wanted = content_addressed_name(plain, md5)
+    if wanted.lower() == current.name.lower():
+        return {"path": str(current), "renamed": True, "final": True, "why": ""}
+    if not current.is_file():
+        return {"path": str(current), "renamed": False, "final": False, "why": "файла нет на месте"}
+    target = _free_name(current.parent, wanted)
+    with db(settings, readonly=True) as con:
+        while con.execute("SELECT 1 FROM images WHERE path=? LIMIT 1", (str(target),)).fetchone():
+            target = _free_name(current.parent, f"{target.stem}_1{target.suffix}")
+    _mark(settings, int(revision_id), swap_state="renaming", final_path=str(target))
+    try:
+        if not move_managed(settings, current, target, operation="quality_upgrade.rename"):
+            raise PermissionError("the file is not the library's to move")
+    except Exception as exc:  # a file held open (Windows): the card keeps the old name, the next round tries again
+        _mark(settings, int(revision_id), swap_state="retired_deleted", final_path=str(current),
+              recovery_action=f"rename_failed:{type(exc).__name__}: {exc}"[:500])
+        trace(f"QUALITY UPGRADE RENAME FAILED: revision={revision_id} {type(exc).__name__}: {exc}")
+        return {"path": str(current), "renamed": False, "final": False, "why": f"{type(exc).__name__}: {exc}"}
+    _rename_in_base(settings, rev, current, target, md5, original_name=plain, action="renamed")
+    trace(f"QUALITY UPGRADE RENAMED: image={rev['image_id']} revision={revision_id} {current.name} -> {target.name}")
+    return {"path": str(target), "renamed": True, "final": True, "why": ""}
+
+
+def _rename_in_base(settings: dict, rev, old: Path, new: Path, md5: str, *, original_name: str, action: str) -> None:
+    st = new.stat()
+    with db(settings, write=True) as con:
+        con.execute(
+            "UPDATE images SET path=?, file_name=?, original_file_name=?, mtime_ns=?, size_bytes=? WHERE id=?",
+            (str(new), new.name, original_name, int(st.st_mtime_ns), int(st.st_size), int(rev["image_id"])))
+        rebind_media_paths(con, image_id=int(rev["image_id"]), old_path=str(old), new_path=str(new), new_md5=md5)
+        con.execute(
+            "UPDATE media_revisions SET swap_state='retired_deleted', new_path=?, final_path=?, recovery_action=?, "
+            "updated_at=? WHERE revision_id=?",
+            (str(new), str(new), action, int(time.time()), int(rev["revision_id"])))
+
+
+def _recover_rename(settings: dict, row: dict, image: dict | None, trace: Callable[[str], None]) -> dict[str, Any]:
+    """A rename cut short: the base follows a file that moved; a file that did not move keeps its name."""
+    revision_id = int(row["revision_id"])
+    target = Path(str(row.get("final_path") or ""))
+    current = Path(str(image["path"])) if image else None
+    md5 = str((image or {}).get("hash_md5") or "").lower()
+    if current is not None and str(current) == str(target):
+        action = "renamed"
+    elif (current is not None and str(target) and not current.exists() and target.is_file()
+          and _md5(target) == md5):
+        original = _LIBRARY_TAIL.sub("", target.stem) + target.suffix
+        _rename_in_base(settings, row, current, target, md5, original_name=original, action="rename_finished")
+        trace(f"QUALITY UPGRADE RECOVERED: revision={revision_id} action=rename_finished")
+        return {"revision_id": revision_id, "action": "rename_finished", "db_md5": md5}
+    else:
+        action = "rename_not_done"
+    with db(settings, write=True) as con:
+        con.execute("UPDATE media_revisions SET swap_state='retired_deleted', recovery_action=?, updated_at=? "
+                    "WHERE revision_id=?", (action, int(time.time()), revision_id))
+    trace(f"QUALITY UPGRADE RECOVERED: revision={revision_id} action={action}")
+    return {"revision_id": revision_id, "action": action, "db_md5": md5}
 
 
 def recover_incomplete_quality_upgrades(settings: dict, *, trace: Callable[[str], None] | None = None) -> list[dict[str, Any]]:

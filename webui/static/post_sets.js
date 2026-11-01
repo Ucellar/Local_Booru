@@ -184,17 +184,18 @@
     line.style.color = isError ? "var(--danger)" : "";
   }
 
-  function done(imageId) {
+  function done(imageId, joined) {
     button.hidden = true;
     line.textContent = "";
     const link = document.createElement("a");
     link.href = "/post/" + Number(imageId);
-    link.textContent = "Скачано — открыть карточку";
+    link.textContent = joined && joined.set ? "Скачано, в сборке — открыть карточку" : "Скачано — открыть карточку";
     line.appendChild(link);
   }
 
   async function follow(task) {
     const started = Date.now();
+    let downloaded = 0;                         // when it was done: then it is put into the сборка (a few seconds)
     while (Date.now() - started < 30 * 60 * 1000) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       let state;
@@ -210,7 +211,12 @@
         return;
       }
       if (state.status === "done") {
-        if (state.image_id) done(state.image_id);
+        downloaded = downloaded || Date.now();
+        if (state.image_id && state.joined == null && Date.now() - downloaded < 90 * 1000) {
+          say("Скачано — ставлю в сборку…");
+          continue;
+        }
+        if (state.image_id) done(state.image_id, state.joined);
         else say("Готово" + (state.message ? ": " + state.message : ""));
         return;
       }

@@ -413,13 +413,64 @@ def _remote_groups(card: dict) -> list:
     return [(c, CATEGORY_TITLES.get(c, c), merged[c]) for c in order if merged.get(c)]
 
 
+def _remote_viewer(fam, card: dict, entry: dict) -> str:
+    """The part's picture as a card's picture is shown (``gallery._picture_html``, booru.js ``setupPicture``): its
+    preview stands in, stretched over the place, until the larger copy has come whole; one that does not come — said,
+    with what the site answered (``data-why``), and «Загрузить заново»."""
+    sample = esc(_remote_media(fam, card, "sample"))
+    preview = esc(_remote_media(fam, card, "preview"))
+    if entry.get("video"):
+        return (f'<video class="post-media" src="{sample}" controls loop preload="metadata" poster="{preview}"></video>')
+    width, height = int(entry.get("width") or 0), int(entry.get("height") or 0)
+    dims = f' width="{width}" height="{height}"' if width > 0 and height > 0 else ""
+    return (f'<div class="media-wrap loading remote-media" data-id="" data-why="1">'
+            f'<img class="post-ph" src="{preview}" alt="" aria-hidden="true">'
+            f'<img class="post-media fit" src="{sample}" alt=""{dims} data-action="toggle-fit" '
+            f'title="Щёлкните, чтобы показать в полный размер"></div>'
+            f'<div class="picture-problem" hidden role="alert"><p></p>'
+            f'<button type="button" data-action="picture-retry">Загрузить заново</button></div>')
+
+
+RATING_WORDS = {"s": "безопасный", "safe": "безопасный", "g": "общий", "general": "общий", "q": "сомнительный",
+                "questionable": "сомнительный", "e": "откровенный", "explicit": "откровенный", "sensitive": "чувствительный"}
+
+
+def _remote_info(fam, card: dict, entry: dict, number: int) -> str:
+    """«Информация» of a part from the site, as a card's (``gallery._info_box``): the site's post, its size and file,
+    MD5, the site's rating, the links (the post on the site, the post's own sources)."""
+    rows = [("Сайт", str(entry.get("label") or fam.site)), ("Пост", str(number))]
+    if entry.get("width") and entry.get("height"):
+        rows.append(("Размер", f'{int(entry["width"])}×{int(entry["height"])}'))
+    if entry.get("ext"):
+        rows.append(("Файл", str(entry["ext"])))
+    md5 = str(card.get("md5") or entry.get("md5") or "")
+    if md5:
+        rows.append(("MD5", f'<code class="md5">{esc(md5)}</code>'))
+    rating = str(entry.get("rating") or "").strip().lower()
+    if rating:
+        rows.append(("Рейтинг на сайте", RATING_WORDS.get(rating, rating)))
+    rows.append(("В библиотеке", "в корзине" if card.get("owned") == "trash" else "нет"))
+    table = "".join(f"<tr><th>{esc(k)}</th><td>{v if k == 'MD5' else esc(v)}</td></tr>" for k, v in rows)
+    links, seen = [], set()
+    for u in [entry.get("url") or ""] + list(entry.get("sources") or []):
+        u = str(u or "")
+        if u and u not in seen and u.startswith(("http://", "https://")):
+            seen.add(u)
+            host = (u.split("//", 1)[1].split("/", 1)[0]).removeprefix("www.")
+            links.append(f'<li><a href="{esc(u)}" target="_blank" rel="noopener noreferrer">{esc(host)}</a></li>')
+    sources = f'<h4>Источники</h4><ul class="plain-list sources">{"".join(links)}</ul>' if links else ""
+    return f'<section class="box"><h3>Информация</h3><table class="info">{table}</table>{sources}</section>'
+
+
 def remote_post(req: Request) -> Response:
-    """The page of a part the library has not: the сборка over it (this part marked), its picture from the site, under
-    it «Скачать» (into the library through the parser, the file's MD5 known — as from the browser extension), its
-    tags.  A part downloaded meanwhile — its card's page."""
+    """The page of a part the library has not — as a card's page (v5.44.10: the person expected «как в галерее»): the
+    search and the part's tags (with the library's counts), its «Информация» at the side, the сборка over the picture
+    (this part marked), its picture from the site (the preview stands in until it comes), right under it «Скачать»
+    (into the library through the parser, the file's MD5 known — as from the browser extension).  A part downloaded
+    meanwhile — its card's page."""
     from core import set_remote
-    from webui.html import category_class, page_frame
-    from webui.pages.gallery import _prefs
+    from webui.html import page_frame, search_box
+    from webui.pages.gallery import _prefs, _tag_colors, _tag_groups_html, _top_search
     fam, error = _family(req, req.arg("f"))
     from_id = req.int_arg("from", 0, lo=0)
     index = req.int_arg("i", -1)
@@ -439,11 +490,7 @@ def remote_post(req: Request) -> Response:
         return Response.redirect(url(f"/post/{int(card['image_id'])}", **ctx))
     entry = next((e for e in card["entries"] if e.get("site") == fam.site), card["entries"][0])
     number = set_remote.post_id_of(card, fam.site)
-    sample = _remote_media(fam, card, "sample")
-    if entry.get("video"):
-        picture = f'<video class="remote-picture" src="{esc(sample)}" controls preload="metadata"></video>'
-    else:
-        picture = f'<img class="remote-picture" src="{esc(sample)}" alt="">'
+    picture = _remote_viewer(fam, card, entry)
     blocked = search.blocked_tags(card)
     can = bool(entry.get("original") or entry.get("sample"))
     if blocked:
@@ -461,16 +508,21 @@ def remote_post(req: Request) -> Response:
            f'<span class="remote-api">api</span> <span class="remote-what">Этой части нет в библиотеке — картинка с сайта '
            f'{esc(entry.get("label") or fam.site)} (пост {number}) через его API.{trash}</span> {action}{site_link} '
            f'<span class="action-status" role="status"></span></div>')
-    groups = "".join(
-        f'<div class="remote-group"><span class="remote-group-name">{esc(name)}:</span> '
-        + " ".join(f'<a class="{category_class(cat)}" href="{esc(url("/posts", tags=tag))}">{esc(str(tag).replace("_", " "))}</a>'
-                   for tag in tags) + "</div>" for cat, name, tags in _remote_groups(card))
-    box = box_html(req, from_id, ctx, index, remote_current=card["key"]) if from_id else ""
+    groups = {cat: list(tags) for cat, _name, tags in _remote_groups(card)}
+    tags_html = _tag_groups_html(groups, ctx, data.TAG_COUNTS.get(req.settings), colors=_tag_colors(req))
     back = (f'<p class="remote-back"><a href="{esc(url(f"/post/{from_id}", i=index if index >= 0 else None, **ctx))}">'
             f'← к карточке, с которой пришли</a></p>' if from_id else "")
-    body = (f'<div class="remote-view">{box}<div class="remote-stage">{picture}</div>{bar}'
-            f'<div class="remote-tags">{groups}</div>{back}</div>')
-    return Response.html(page_frame(f"{title}: {fam.site} {number}", body, active="posts", **_prefs(req)))
+    sidebar = (search_box(ctx["tags"], section=ctx["section"], source=ctx["source"], order=ctx["order"])
+               + f'<section class="box"><h3>Теги</h3>{tags_html or "<p class=hint>Тегов нет.</p>"}</section>'
+               + _remote_info(fam, card, entry, number) + back)
+    box = box_html(req, from_id, ctx, index, remote_current=card["key"]) if from_id else ""
+    body = f'<div class="post-view remote-view">{box}<div class="post-stage">{picture}</div>{bar}</div>'
+    from webui import prefs
+    stored = prefs.load()
+    return Response.html(page_frame(f"{title}: {fam.site} {number}", body, active="posts", search=ctx["tags"],
+                                    section=ctx["section"], sidebar=sidebar, top_search=_top_search(ctx), kind="post",
+                                    body_data={"post-fit": stored.get("post_fit") or "fit", "fit-note": "off"},
+                                    **_prefs(req)))
 
 
 def _error_text(error: Response) -> str:
@@ -509,7 +561,40 @@ def remote_download(req: Request) -> Response:
     answer = manager.submit(set_remote.import_item(card))
     if not answer.get("ok") or not answer.get("task_id"):
         return Response.json({"ok": False, "error": f"Не принято: {answer.get('error') or 'неизвестно почему'}"}, 400)
+    _join_when_done(req.settings, manager, str(answer["task_id"]), fam)
     return Response.json({"ok": True, "task": answer["task_id"]})
+
+
+_JOINS: dict = {}                       # task id -> where the card it became went: {"set", "how"} (v5.44.10)
+_JOINS_MAX = 200
+
+
+def _join_when_done(settings: dict, manager, task_id: str, fam) -> None:
+    """The card a «Скачать» became goes into its сборка as soon as it is in the library (``card_sets.join_part``; a
+    family of a lone card — the сборки built again at once), not at the next build three minutes later."""
+    import threading
+    from core import card_sets, set_remote
+    set_id = set_remote.parse_parts_key(fam.key)
+    site = str(getattr(fam, "site", "") or "")
+
+    def run() -> None:
+        joined = {"set": 0, "how": ""}
+        try:
+            state = manager.wait_task(task_id, timeout=3600)
+            image_id = data.image_id_by_path(settings, str(state.get("result_path") or "")) \
+                if str(state.get("status") or "") == "done" else 0
+            if image_id and set_id:
+                joined = card_sets.join_part(settings, set_id, image_id, site=site)
+            elif image_id:
+                card_sets.rebuild(settings, force=True, wait=60)
+                joined = {"set": card_sets.set_id_of(settings, image_id), "how": "rules"}
+        except Exception as exc:  # the card stays in the library; the next build of the сборки looks at it
+            _LOG.warning("a part of a сборка downloaded, not put into it: %s", exc)
+        finally:
+            _JOINS[task_id] = joined
+            while len(_JOINS) > _JOINS_MAX:
+                _JOINS.pop(next(iter(_JOINS)))
+    threading.Thread(target=run, name="set-part-join", daemon=True).start()
 
 
 TASK_WORDS = {"queued": "в очереди", "waiting": "ждёт", "running": "скачивается", "done": "готово",
@@ -528,7 +613,8 @@ def remote_task(req: Request) -> Response:
     image_id = 0
     path = str(state.get("result_path") or "")
     if status == "done" and path:
-        from webui import data
         image_id = data.image_id_by_path(req.settings, path)
+    joined = _JOINS.get(str(req.arg("id") or ""))
     return Response.json({"ok": True, "status": status, "words": TASK_WORDS.get(status, status),
-                          "message": sanitize_text(str(state.get("message") or ""))[:300], "image_id": image_id})
+                          "message": sanitize_text(str(state.get("message") or ""))[:300], "image_id": image_id,
+                          "joined": joined})

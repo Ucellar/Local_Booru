@@ -61,6 +61,26 @@ def create_revision_plan(
     return int(cur.lastrowid)
 
 
+def rebind_media_paths(con, *, image_id: int, old_path: str, new_path: str, new_md5: str = "") -> None:
+    """The journals that name a card's file by its path follow the file to ``new_path`` (inside the caller's
+    transaction; ``images`` itself is the caller's): the source files it came from, the parser's journal, the queue of
+    tag enrichment, Брак, the last check of the file's presence."""
+    old, new = str(old_path), str(new_path)
+    if not old or old == new:
+        return
+    con.execute("UPDATE processed_files SET media_path=? WHERE media_path=?", (new, old))
+    from core.database.storage import rebind_source_originals
+    rebind_source_originals(con, old, new, new_md5=str(new_md5 or ""))
+    con.execute("UPDATE tag_enrichment_queue SET media_path=? WHERE media_path=?", (new, old))
+    con.execute("UPDATE no_match_items SET media_path=? WHERE media_path=?", (new, old))
+    import sqlite3
+    try:
+        con.execute("UPDATE image_file_integrity SET checked_path=? WHERE image_id=? AND checked_path=?",
+                    (new, int(image_id), old))
+    except sqlite3.OperationalError:     # a base from before migration 027: no such journal
+        pass
+
+
 def rebind_site_md5_aliases(
     con,
     *,
@@ -133,15 +153,8 @@ def commit_revision_metadata(
         old_path = str(row["old_path"] or "")
         if old_path and old_path != target_path:
             # Path-bearing caches/journals are rebound inside the same transaction.
-            con.execute("UPDATE processed_files SET media_path=? WHERE media_path=?", (target_path, old_path))
-            from core.database.storage import rebind_source_originals
-            rebind_source_originals(con, old_path, target_path, new_md5=str(canonical or ""))
-            con.execute("UPDATE tag_enrichment_queue SET media_path=? WHERE media_path=?", (target_path, old_path))
-            con.execute("UPDATE no_match_items SET media_path=? WHERE media_path=?", (target_path, old_path))
-            try:
-                con.execute("UPDATE file_presence_checks SET checked_path=? WHERE checked_path=?", (target_path, old_path))
-            except Exception:
-                pass
+            rebind_media_paths(con, image_id=int(image_id), old_path=old_path, new_path=target_path,
+                               new_md5=str(canonical or ""))
     aliases = rebind_site_md5_aliases(
         con, image_id=image_id, new_local_md5=canonical, revision_id=revision_id, rebound_at=now
     )

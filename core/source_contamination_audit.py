@@ -114,9 +114,13 @@ def _site_cfg(settings: dict, host: str) -> dict:
 
 def _api_user_agent(host: str, cfg: dict) -> str:
     configured = str(cfg.get("api_user_agent") or cfg.get("user_agent") or "").strip()
+    login = str(cfg.get("login") or "").strip()
+    from core import site_agent
+    if site_agent.is_own(host):
+        # e621's and Danbooru's rules: the program's name and the account, never a browser's (v5.44.22, v5.44.24)
+        return site_agent.user_agent(host, name=login, user_id=str(cfg.get("user_id") or ""), custom=configured)
     if configured:
         return configured
-    login = str(cfg.get("login") or "").strip()
     identity = f"by {login}" if login else "read-only source audit"
     return f"LocalBooru/4.46 ({identity}; {host})"
 

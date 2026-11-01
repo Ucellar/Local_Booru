@@ -53,14 +53,6 @@ function findProfile(profiles) {
 }
 function querySafe(root, selector) { try { return Array.from((root || document).querySelectorAll(selector)); } catch (_) { return []; } }
 function valueFrom(el, attr) { if (!el) return ''; if (attr === 'textContent') return String(el.textContent || '').trim(); return String(el.getAttribute && el.getAttribute(attr) || '').trim(); }
-function extractByRules(root, rules) {
-  const out = [];
-  for (const rule of rules || []) {
-    if (!rule.selector) continue;
-    for (const el of querySafe(root, rule.selector)) { const v = valueFrom(el, rule.attribute || 'textContent'); if (v) out.push(v); }
-  }
-  return out;
-}
 // MD5 by the profile's selector rules (e.g. Danbooru's data-md5), on the card itself or inside it.
 function md5FromRules(card, rules) {
   for (const rule of rules || []) {
@@ -103,14 +95,44 @@ function genericTagFromLink(a) {
     return normalizeTag(raw || a.getAttribute('data-tag-name') || a.textContent);
   } catch (_) { return ''; }
 }
+// (0.9.1) Not a tag of the post: «all» — every post of a Gelbooru-like site (its menu links tags=all); a grid's link to a
+// post (its tags= is the search the grid was opened with); the links of the site's menu and pages.
+const JUNK_TAGS = new Set(['all']);
+const NOT_TAG_LINKS = 'nav,header,footer,#navbar,#subnavbar,.navbar,.pagination,#paginator,.paginator';
+// The category of a tag by the list item it stands in: Gelbooru-likes and Danbooru mark it (li.tag-type-artist,
+// li.tag-type-1), e621 names it (data-category).
+const TAG_TYPES = { artist: 'artist', character: 'character', copyright: 'copyright', metadata: 'meta', meta: 'meta',
+  general: 'general', species: 'species', lore: 'lore', contributor: 'contributor', invalid: 'invalid',
+  '0': 'general', '1': 'artist', '3': 'copyright', '4': 'character', '5': 'meta' };
+function tagCategory(el) {
+  const holder = el && el.closest ? el.closest('[data-category],[class*="tag-type-"]') : null;
+  if (!holder) return 'general';
+  const named = String(holder.getAttribute('data-category') || '').toLowerCase();
+  const m = String(holder.className || '').match(/tag-type-([a-z0-9]+)/i);
+  return TAG_TYPES[named] || (m && TAG_TYPES[m[1].toLowerCase()]) || 'general';
+}
 function extractGroups(root) {
   const groups = { general: [] };
+  const seen = new Set();
+  const add = (value, el) => {
+    const tag = normalizeTag(value);
+    if (!tag || JUNK_TAGS.has(tag.toLowerCase()) || seen.has(tag)) return;
+    seen.add(tag);
+    const category = tagCategory(el);
+    (groups[category] = groups[category] || []).push(tag);
+  };
   const rules = (LB.profile && LB.profile.selectors && LB.profile.selectors.tags) || [];
-  const values = extractByRules(root, rules);
-  if (!values.length) {
-    for (const a of querySafe(root, "a[href*='tags='],a[href*='/tags/'],[data-tag-name]")) values.push(a.getAttribute('data-tag-name') || genericTagFromLink(a));
+  let found = 0;
+  for (const rule of rules) {
+    if (!rule.selector) continue;
+    for (const el of querySafe(root, rule.selector)) { const v = valueFrom(el, rule.attribute || 'textContent'); if (v) { found += 1; add(v, el); } }
   }
-  for (const value of values) { const tag = normalizeTag(value); if (tag && !groups.general.includes(tag)) groups.general.push(tag); }
+  if (!found) {
+    for (const a of querySafe(root, "a[href*='tags='],a[href*='/tags/'],[data-tag-name]")) {
+      if (a.closest(NOT_TAG_LINKS) || (a.matches('a[href]') && isPostLink(a))) continue;
+      add(a.getAttribute('data-tag-name') || genericTagFromLink(a), a);
+    }
+  }
   return groups;
 }
 function flattenGroups(groups) { return Object.values(groups || {}).flat().filter((x, i, a) => x && a.indexOf(x) === i); }

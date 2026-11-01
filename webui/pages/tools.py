@@ -34,8 +34,8 @@ def _prefs(req: Request) -> dict:
 
 
 # ── what the run will use, in words ────────────────────────────────────────
-_REVERSE = (("enable_iqdb", "IQDB", True), ("enable_danbooru_iqdb", "Danbooru IQDB", False),
-            ("enable_e621_iqdb", "e621 IQDB", True), ("enable_ascii2d", "Ascii2D", False))
+_REVERSE = (("enable_fluffle", "Fluffle", True), ("enable_e621_iqdb", "e621 IQDB", True), ("enable_iqdb", "IQDB", True),
+            ("enable_danbooru_iqdb", "Danbooru IQDB", False), ("enable_ascii2d", "Ascii2D", False))
 
 
 def site_plan(settings: dict) -> tuple[list, list]:
@@ -48,7 +48,10 @@ def site_plan(settings: dict) -> tuple[list, list]:
     for cfg in settings.get("custom_sites") or []:
         if isinstance(cfg, dict) and cfg.get("enabled") and cfg.get("domain"):
             sites.append(str(cfg.get("name") or cfg.get("domain")))
-    reverse = [label for key, label, default in _REVERSE if settings.get(key, default)]
+    e621_on = bool(((settings.get("sites") or {}).get("e621.net") or {}).get("enabled"))
+    # e621 IQDB's hits are e621 posts: without e621 among the sites the run does not ask it (core/parser/reverse)
+    reverse = [label for key, label, default in _REVERSE if settings.get(key, default)
+               and (key != "enable_e621_iqdb" or e621_on)]
     if settings.get("enable_saucenao", True):
         reverse.append("SauceNAO" if str(settings.get("saucenao_api_key") or "").strip() else "SauceNAO (нет ключа — выключен)")
     return sites, reverse

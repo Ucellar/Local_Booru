@@ -13,7 +13,8 @@ import threading
 PAGE_KEYS = frozenset({
     "root", "parser_recheck_new_sites", "parser_recheck_nomatch_only",
     "sites", "custom_sites", "site_manual_order", "deleted_builtin_sites",
-    "enable_iqdb", "enable_danbooru_iqdb", "enable_e621_iqdb", "enable_ascii2d", "enable_saucenao",
+    "enable_iqdb", "enable_danbooru_iqdb", "enable_e621_iqdb", "enable_fluffle", "enable_ascii2d", "enable_saucenao",
+    "parser_reverse_remember",
     "saucenao_api_key", "min_similarity", "iqdb_min_similarity", "saucenao_quota_spread_seconds", "reverse_saucenao_first",
     "parser_workers", "parser_reverse_workers", "parser_md5_batch_enabled", "parser_md5_batch_size",
     "parser_retry_deferred_minutes", "skip_existing",
@@ -25,7 +26,7 @@ PAGE_KEYS = frozenset({
     "light_backup_enabled", "light_backup_include_cookies", "light_backup_interval_hours", "light_backup_keep_last",
     "light_backup_dir", "light_backup_last_at", "light_backup_on_exit",
     "thumb_cleanup_on_exit", "thumb_keep_recent",
-    "large_download_warning_count", "disk_free_reserve_gb", "grabber_cache_limit_mb",
+    "large_download_warning_count", "disk_free_reserve_gb", "grabber_cache_limit_mb", "automatic_quality_upgrade_enabled",
     "session_media_downloads_default", "session_media_downloads_prompt",
     "external_browser_mode", "external_browser_executable",
     "performance_slow_ms", "sqlite_cache_mb", "sqlite_checkpoint_on_exit", "sqlite_idle_checkpoint_enabled",

@@ -8,7 +8,7 @@ from core.parser.models import Post
 from core.parser.util import clean_host, failure_envelope, json_body, looks_like_cloudflare, norm_md5, post_id_from_url, short
 from core.tagger.tag_groups import add_tags_to_groups, empty_tag_groups, groups_to_tags, normalize_tag
 
-API_VERSION = "4.0"
+from core.site_agent import VERSION as API_VERSION  # one name and version of the program in every User-Agent
 
 
 class SiteUnavailable(Exception):

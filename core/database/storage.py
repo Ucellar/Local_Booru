@@ -30,6 +30,33 @@ def _category_for_tag(name: str, category: str) -> str:
     return str(category or "general")
 
 
+def library_categories(con, groups: dict) -> dict:
+    """``groups`` with each «general» tag in the category the library knows it by (the tags table: what the sites said
+    of the tag on other cards) — for tags that came without categories (a page the browser extension read, a site's
+    answer that carried none).  A tag the library does not know, or knows as general, stays general."""
+    general = [t for t in (groups or {}).get("general") or [] if t]
+    if not general:
+        return dict(groups or {})
+    keys = sorted({normalize_tag(str(t)) for t in general} - {""})
+    known: dict = {}
+    for start in range(0, len(keys), 500):
+        part = keys[start:start + 500]
+        marks = ",".join("?" * len(part))
+        for norm, category in con.execute(
+                f"SELECT normalized_name, category FROM tags WHERE normalized_name IN ({marks})", part):
+            category = str(category or "general").lower()
+            if category != "general":
+                known[str(norm)] = category
+    if not known:
+        return dict(groups)
+    out = {cat: list(values) for cat, values in groups.items() if cat != "general" and values}
+    for tag in general:
+        cat = known.get(normalize_tag(str(tag)), "general")
+        if tag not in out.setdefault(cat, []):
+            out[cat].append(tag)
+    return {cat: values for cat, values in out.items() if values}
+
+
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -813,6 +840,23 @@ def found_media_path_by_md5(settings, md5: str, *, exclude_path: str = "") -> st
         media_path_by_md5(settings, md5, preferred_bucket="found", require_bucket=True, exclude_path=exclude_path)
         or media_path_by_md5(settings, md5, preferred_bucket="downloaded_found", require_bucket=True, exclude_path=exclude_path)
     )
+
+
+def replaced_media_path(settings, md5: str) -> str:
+    """(v5.44.13) The live card whose file took the place of these bytes — a quality upgrade put a better copy of its
+    picture there (a site's sample gave way to its post's original: ``retired_media_tombstones``); "" — none.  The
+    parser that meets the old bytes again gives its tags to that card instead of making a new one of a worse copy."""
+    value = str(md5 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", value):
+        return ""
+    with db(settings, readonly=True) as con:
+        rows = con.execute(
+            "SELECT i.path FROM retired_media_tombstones t JOIN images i ON i.id=t.image_id "
+            "WHERE t.old_md5 IN (?,?) AND +i.deleted=0 ORDER BY t.retired_at DESC", (value, value.upper())).fetchall()
+    for row in rows:
+        if Path(str(row["path"] or "")).is_file():
+            return str(row["path"])
+    return ""
 
 
 def md5_exists(settings, md5: str) -> bool:
@@ -1916,6 +1960,26 @@ def mark_reverse_branch_status(settings, original_path, branch_key, *, status="d
             """,
             (original, branch, int(scan_revision or 1), str(status or ""), str(reason or "")[:1000], now),
         )
+
+
+def reverse_branch_rows(settings, original_path) -> list:
+    """(v5.44.18) Every answer of the reverse services kept for one source file: [{branch_key, status,
+    scan_revision, reason, updated_at}] — the journal of the old program and of this one (core/parser/
+    reverse_journal.py).  Read-only; no table yet (a database never migrated past m024) — []."""
+    import sqlite3
+    original = str(Path(original_path))
+    if not original:
+        return []
+    try:
+        with db(settings, readonly=True) as con:
+            rows = con.execute(
+                "SELECT branch_key, status, scan_revision, reason, updated_at FROM reverse_branch_status "
+                "WHERE original_path=?", (original,)).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return []
+        raise
+    return [dict(r) for r in rows]
 
 
 def reverse_branch_status_many(settings, original_paths, branch_keys, *, scan_revision=1):

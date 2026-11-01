@@ -136,7 +136,30 @@ def _host_from_url(url: str) -> str:
         return str(url or "").lower().replace("www.", "")
 
 
+# The sites whose API rules name a pace.  e621: «a hard rate limit of two requests per second … make a best effort not
+# to make more than one request per second over a sustained period»; Danbooru: «a global rate limit on read requests of
+# 10 requests per second … for longer sessions, please try to stay at around 1 request per second».  No setting of the
+# spacing makes the program faster than that with them (v5.44.22, v5.44.24): their spacing is at least
+# ``_RULES_FLOOR`` seconds and their minute budget at most ``_RULES_RPM``.  (The limiter switched off —
+# ``http_rate_limit_enabled`` False — is for the checks of the program and the one request of «Проверить» in «Сайты и
+# ключи»; no page sets it.)
+_RULES_HOSTS = ("e621.net", "e926.net", "danbooru.donmai.us")
+_RULES_FLOOR = 1.0
+_RULES_RPM = 54
+
+
+def _rules_kept(host: str, settings: dict | None) -> bool:
+    return host in _RULES_HOSTS and (settings or {}).get("http_rate_limit_enabled", True) is not False
+
+
 def delay_for(host: str, settings: dict | None = None) -> float:
+    h = (host or "").lower().replace("www.", "")
+    if _rules_kept(h, settings):
+        return max(_RULES_FLOOR, _delay_for(h, settings))
+    return _delay_for(h, settings)
+
+
+def _delay_for(host: str, settings: dict | None = None) -> float:
     settings = settings or {}
     if settings.get("http_rate_limit_enabled", True) is False:
         return 0.0
@@ -159,6 +182,14 @@ def delay_for(host: str, settings: dict | None = None) -> float:
 
 
 def requests_per_minute_for(host: str, settings: dict | None = None) -> int | None:
+    h = (host or "").lower().replace("www.", "")
+    if _rules_kept(h, settings):
+        own = _requests_per_minute_for(h, settings)
+        return min(_RULES_RPM, own) if own else _RULES_RPM
+    return _requests_per_minute_for(h, settings)
+
+
+def _requests_per_minute_for(host: str, settings: dict | None = None) -> int | None:
     settings = settings or {}
     if settings.get("http_rate_limit_enabled", True) is False:
         return None

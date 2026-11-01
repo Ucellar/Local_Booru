@@ -58,18 +58,24 @@ def local_phashes(ctx: ParserContext, path: Path) -> tuple:
 
 def remote_phash(ctx: ParserContext, url: str) -> tuple[str, str, bool]:
     """(hash, why it is missing, transient). A transient miss is a network problem."""
+    value, _aspect, why, transient = remote_preview(ctx, url)
+    return value, why, transient
+
+
+def remote_preview(ctx: ParserContext, url: str) -> tuple[str, float, str, bool]:
+    """(hash, the preview's width / height, why it is missing, transient)."""
     if not url or not url.startswith("http"):
-        return "", "у поста нет превью", False
+        return "", 0.0, "у поста нет превью", False
     from core.download_policy import downloads_enabled
     if not downloads_enabled(ctx.settings):
-        return "", "скачивание отключено в этой сессии", False
+        return "", 0.0, "скачивание отключено в этой сессии", False
     low = url.lower().split("?", 1)[0]
     if low.endswith((".mp4", ".webm", ".mkv", ".mov", ".swf", ".zip")):
-        return "", "превью — видео", False
+        return "", 0.0, "превью — видео", False
     try:
         data = ctx.http.get_bytes(url, max_bytes=6 * 1024 * 1024)
     except HttpFailure as exc:
-        return "", f"превью не скачалось ({exc.detail})", exc.transient
+        return "", 0.0, f"превью не скачалось ({exc.detail})", exc.transient
     try:
         import imagehash
         from PIL import Image
@@ -79,10 +85,11 @@ def remote_phash(ctx: ParserContext, url: str) -> tuple[str, str, bool]:
             img.seek(0)
             picture = img.convert("RGB")
             if flat(picture):
-                return "", "превью однотонное (чёрный кадр?) — сверить нельзя", False
-            return str(imagehash.phash(picture)), "", False
+                return "", 0.0, "превью однотонное (чёрный кадр?) — сверить нельзя", False
+            width, height = picture.size
+            return str(imagehash.phash(picture)), (width / height if width and height else 0.0), "", False
     except Exception as exc:  # broken or unsupported preview image
-        return "", f"превью не читается ({type(exc).__name__})", False
+        return "", 0.0, f"превью не читается ({type(exc).__name__})", False
 
 
 def distance(a: str, b: str) -> int | None:
@@ -114,11 +121,16 @@ class VisualChecker:
         self.ctx = ctx
         self.max_distance = ctx.setting_int("parser_visual_max_distance", 10, 0, 32)
         self._remote = LRUCache(2048, name="parser_preview_phash")
+        self._parts = LRUCache(256, name="parser_window_phash")       # (file, a preview's shape) -> its parts
 
-    def check(self, local, preview_url: str) -> tuple[bool | None, str, bool]:
+    def check(self, local, preview_url: str, *, max_distance: int | None = None,
+              source=None) -> tuple[bool | None, str, bool]:
         """``local`` — a pHash, or ``local_phashes`` of a file (the closest of its frames decides).
         (True, 'd=3', False) — same picture (a video's frame: 'd=3, начало'); (False, 'd=27', False) — different;
-        (None, reason, transient) — could not compare; transient=True means a network problem."""
+        (None, reason, transient) — could not compare; transient=True means a network problem.
+        ``max_distance`` — a stricter limit than the run's (a weak hit: ``engine._accept``).  ``source`` — the local
+        picture's file: a preview of another shape than it (e621's of a part of a wide or a tall picture) is compared
+        with its parts of the preview's shape too (``hashing.window_phashes``) when the whole is not near."""
         pairs = _pairs(local)
         if not pairs:
             return None, "нет локального pHash", False
@@ -129,7 +141,7 @@ class VisualChecker:
             from core.work_timing import PREVIEW_CHECK, PREVIEW_HOST, STEPS
             started = time.perf_counter()
             try:
-                remote, why, transient = remote_phash(self.ctx, preview_url)
+                remote, aspect, why, transient = remote_preview(self.ctx, preview_url)
             finally:                        # the whole look and each host's (v5.35: which site's previews are slow)
                 spent = time.perf_counter() - started
                 if preview_url:             # (v5.35.3) no address — nothing was fetched: «? 14 × 0 мс» said nothing
@@ -137,18 +149,34 @@ class VisualChecker:
                     STEPS.add(PREVIEW_HOST + (host_of(preview_url) or "?"), spent)
             if transient:
                 return None, why, True
-            known = (remote, why)
+            known = (remote, why, aspect)
             if preview_url:
                 self._remote[preview_url] = known
-        remote, why = known
+        remote, why = known[0], known[1]
+        aspect = known[2] if len(known) > 2 else 0.0
         if not remote:
             return None, why, False
+        limit = self.max_distance if max_distance is None else min(self.max_distance, int(max_distance))
         best = None
         for value, where in pairs:
             d = distance(value, remote)
             if d is not None and (best is None or d < best[0]):
                 best = (d, where)
+        if source is not None and aspect and (best is None or best[0] > limit):
+            for value, where in self._windows(source, aspect):
+                d = distance(value, remote)
+                if d is not None and (best is None or d < best[0]):
+                    best = (d, where)
         if best is None:
             return None, "хэши несравнимы", False
         d, where = best
-        return d <= self.max_distance, f"d={d}" + (f", {where}" if where else ""), False
+        return d <= limit, f"d={d}" + (f", {where}" if where else ""), False
+
+    def _windows(self, source, aspect: float) -> list:
+        key = (str(source), round(float(aspect), 2))
+        found = self._parts.get(key)
+        if found is None:
+            from core.tagger.hashing import window_phashes
+            found = window_phashes(source, aspect, settings=self.ctx.settings)
+            self._parts[key] = found
+        return found

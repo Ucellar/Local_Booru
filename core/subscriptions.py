@@ -286,8 +286,28 @@ def _extract_post_groups(post: dict) -> dict[str, list[str]]:
         if isinstance(value, str):
             out[group].extend(value.split())
     if not any(out.values()):
-        out["general"] = _extract_post_tags(post)
+        # (v5.44.11) rule34.xxx sends the category of every tag with the post (``fields=tag_info``: the grabber's and
+        # the subscriptions' searches ask for it) — before, every tag of a download from there was «Общие»
+        kinds = _tag_info_kinds(post)
+        for tag in _extract_post_tags(post):
+            group = kinds.get(tag, "general")
+            out[group if group in out else "general"].append(tag)
     return out
+
+
+def _tag_info_kinds(post: dict) -> dict[str, str]:
+    """{tag: its category} of a rule34.xxx post's ``tag_info`` ([{"tag", "type", "count"}]); {} — none sent."""
+    rows = post.get("tag_info") if isinstance(post, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    from core.tagger.tag_groups import group_from_tag_type
+    kinds: dict[str, str] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("type") is not None:
+            name = str(row.get("tag") or row.get("name") or "").strip()
+            if name:
+                kinds[name] = group_from_tag_type(row.get("type"))
+    return kinds
 
 
 def _post_source_url(site: str, post: dict) -> str:
@@ -364,6 +384,18 @@ def _index_and_tag(dest_path, candidates: list, settings: dict, log) -> None:
         groups = _extract_post_groups(post)
         if page and any(groups.values()):
             source_tag_groups.append({"url": page, "groups": groups, "method": "subscription"})
+
+    # (v5.44.11) a site that sends no categories (Gelbooru's posts, Moebooru): its «general» tags in the categories the
+    # library knows them by (what other sites said of the same tags)
+    try:
+        from core.database.connection import db
+        from core.database.storage import library_categories
+        with db(settings, readonly=True) as con:
+            all_groups = library_categories(con, all_groups)
+            for entry in source_tag_groups:
+                entry["groups"] = library_categories(con, entry["groups"])
+    except Exception as exc:  # the categories are a nicety: the tags are written as the site gave them
+        log(f"  TAG WARN: categories of the library not read: {type(exc).__name__}: {exc}")
 
     from core.site_posts import rows_from_candidates
     try:

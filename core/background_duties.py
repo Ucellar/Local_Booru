@@ -25,6 +25,11 @@
   not while «Обслуживание» has the library, nor while the base is read-only;
 - every 3 minutes: the сборки are put together again when the library changed (``card_sets.rebuild``; the сборки
   the person changed or made are left as they are); not while «Обслуживание» has the library.
+- every 3 minutes: a card whose file is a site's reduced copy of its post (``sample_…``) gets the post's original in its
+  place (``reduced_copies.background_round``, v5.44.13: the site is asked, the original downloaded, checked to be the
+  same picture and larger, swapped in), 40 seconds at most a round, the rest 20 seconds later; while the parser or the
+  subscriptions use the sites — 8 seconds a round, every minute; not while the session's downloads are off, nor while
+  «Обслуживание» has the library, nor while the base is read-only;
 - every 3 minutes: the openings and endings of the series of the tab «Видео» whose episodes are new
   (``video_skips.background_round``: their sound and key frames compared episode to episode), 45 seconds at most a
   round, the rest 10 seconds later; not while a video plays in the window (it would stutter).
@@ -53,15 +58,19 @@ INTERVALS = {                        # seconds between the runs of each duty
     "durations": 2 * 60,
     "site_posts": 2 * 60,
     "card_sets": 3 * 60,
+    "originals": 3 * 60,
     "skips": 3 * 60,
 }
 FIRST_RUN = {"lifecycle": 1.5, "subscriptions": 60, "checkpoint": 30, "stalls": 60, "visual": 45,
-             "durations": 20, "site_posts": 75, "card_sets": 25, "skips": 90}        # seconds after the start
+             "durations": 20, "site_posts": 75, "card_sets": 25, "originals": 150,
+             "skips": 90}                                                            # seconds after the start
 VISUAL_AGAIN = 30                    # seconds to the next round of «фото или рисунок» when the last one was cut short
 DURATIONS_AGAIN = 5                  # seconds to the next round of video lengths when cards are still waiting
 SITE_POSTS_AGAIN = 15                # seconds to the next round of questions to the sites when posts are still waiting
 SITE_POSTS_SHARED_AGAIN = 45         # …while the parser or the subscriptions use the sites (v5.44.4)
 SKIPS_AGAIN = 10                     # seconds to the next round of openings and endings when episodes still wait
+ORIGINALS_AGAIN = 20                 # seconds to the next round of originals when reduced copies still wait
+ORIGINALS_SHARED_AGAIN = 60          # …while the parser or the subscriptions use the sites
 TICK = 1.0
 
 _LOCK = threading.Lock()
@@ -233,10 +242,28 @@ class BackgroundDuties:
         from core import site_posts
         result = site_posts.backfill(settings, stop_check=lambda: self._stopping() or _library_taken())
         if result.get("asked"):
-            _LOG.info("site posts: %d asked, %d card row(s) kept%s", result["asked"], result["written"],
+            _LOG.info("site posts: %d asked, %d card row(s) kept%s%s", result["asked"], result["written"],
+                      f", {result['mended']} card(s) got their site's tags back" if result.get("mended") else "",
                       ", more to come" if result.get("more") else "")
         if result.get("more") and result.get("asked"):
             self._next_in["site_posts"] = SITE_POSTS_SHARED_AGAIN if result.get("busy") else SITE_POSTS_AGAIN
+
+    def _originals(self, settings: dict) -> None:
+        """A card whose file is a site's reduced copy of its post gets the post's original (``core/reduced_copies``);
+        the gallery lets go of the file meanwhile, it gives way at the exit and to a job of «Обслуживание»."""
+        from core.database.connection import writes_blocked
+        if self._stopping() or writes_blocked() or _library_taken():
+            return
+        from core import reduced_copies
+        result = reduced_copies.background_round(settings, hold=self._hold,
+                                                 stop_check=lambda: self._stopping() or _library_taken())
+        if result.get("looked"):
+            _LOG.info("originals: %d card(s) looked at, %d got the original%s", result["looked"], result["done"],
+                      ", more to come" if result.get("more") else "")
+            if result.get("done") and self._changed is not None:
+                self._changed()
+        if result.get("more"):
+            self._next_in["originals"] = ORIGINALS_SHARED_AGAIN if result.get("busy") else ORIGINALS_AGAIN
 
     def _skips(self, settings: dict) -> None:
         """The openings and endings of series' new episodes, by their sound and pictures (``core/video_skips``); not

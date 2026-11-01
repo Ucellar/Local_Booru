@@ -34,6 +34,7 @@ SHORT_WAIT = SHORT_WINDOW + 2.0   # how long a full 30-second window is waited o
 
 class SauceNao(ReverseService):
     name = "SauceNAO"
+    journal_key = "saucenao"
     host = "saucenao.com"
     quota_limited = True          # (v5.44) searches a day: a file passes it over while its queue is long (engine)
 

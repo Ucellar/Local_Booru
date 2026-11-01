@@ -309,7 +309,8 @@ DEFAULT_SETTINGS = {
     "browser_companion_event_wait_seconds": 20,
     "browser_companion_profiles_enabled": True,
     "browser_companion_cookie_handoff_enabled": True,
-    "automatic_quality_upgrade_enabled": True,
+    "automatic_quality_upgrade_enabled": True,   # a better copy takes a card's place: the extension's, and (v5.44.13) a
+                                                 # post's original for a site's reduced copy (core/reduced_copies.py)
     "automatic_family_detection_enabled": True,
     "automatic_family_completion_enabled": True,
     "family_completion_max_items": 100,
@@ -382,6 +383,10 @@ DEFAULT_SETTINGS = {
     "reverse_order_v5443": True,            # the order of v5.44.3 is in (load_settings: a file without it is older)
     "enable_danbooru_iqdb": False,
     "enable_e621_iqdb": True,
+    "enable_fluffle": True,                 # (v5.44.14) Fluffle: e621, FurAffinity, Twitter, Bluesky… (core/parser/reverse)
+    "parser_reverse_remember": True,        # (v5.44.18) a service that answered about a file is not asked again
+                                            # (core/parser/reverse_journal.py; the old program's reverse_branch_status)
+    "e621_iqdb_v54414": True,               # e621 IQDB is on again once (load_settings: a file without it is older)
     "e621_browser_api_fallback": True,
     "e621_browser_api_verify_timeout_seconds": 120,
     "e621_browser_api_backend": "companion_extension",
@@ -675,7 +680,6 @@ _REMOVED_REVERSE_SERVICES_V204 = (
     "fuzzysearch_endpoint",
     "fuzzysearch_api_docs_url",
     "fuzzysearch_max_results",
-    "enable_fluffle",
     "fluffle_api_key",
     "fluffle_endpoint",
     "fluffle_api_docs_url",
@@ -683,7 +687,9 @@ _REMOVED_REVERSE_SERVICES_V204 = (
 )
 
 def _drop_removed_reverse_services(settings):
-    """v204: Fluffle/FuzzySearch removed after false-positive tagging."""
+    """v204: Fluffle/FuzzySearch removed after false-positive tagging.  (v5.44.14) Fluffle is back
+    (core/parser/reverse/fluffle.py) — its hits are never taken on its word: the post's preview or the source's posts
+    are compared with the file — so ``enable_fluffle`` is kept; its old keys still go."""
     fixed = dict(settings or {})
     for key in _REMOVED_REVERSE_SERVICES_V204:
         fixed.pop(key, None)
@@ -757,6 +763,14 @@ def load_settings():
                 if not (isinstance(raw_loaded, dict) and raw_loaded.get("reverse_order_v5443")):
                     loaded["reverse_saucenao_first"] = False
                     loaded["reverse_order_v5443"] = True
+                # v5.44.14: e621's search of similar pictures works without an account — it counted as off without
+                # the e621 login and key, silently, and the person turned it off as «bringing nothing».  On again
+                # once, and Fluffle (new, a word of a far older version may be left) with it; «Сайты и ключи» can
+                # turn them off again.
+                if not (isinstance(raw_loaded, dict) and raw_loaded.get("e621_iqdb_v54414")):
+                    loaded["enable_e621_iqdb"] = True
+                    loaded["enable_fluffle"] = True
+                    loaded["e621_iqdb_v54414"] = True
                 # v5.1: the new gallery and manga go into the menu right before the old ones.
                 if not loaded.get("webui_menu_v51_placed"):
                     order = list(loaded.get("interface_module_order") or [])

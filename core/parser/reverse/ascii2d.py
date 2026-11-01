@@ -14,6 +14,7 @@ BASE = "https://ascii2d.net/"
 
 class Ascii2d(ReverseService):
     name = "Ascii2D"
+    journal_key = "ascii2d"
     host = "ascii2d.net"
 
     def enabled(self) -> bool:

@@ -374,7 +374,7 @@ _CATEGORY_PRIORITY = {
 }
 
 
-def _effective_source_groups(source_groups):
+def _effective_source_groups(source_groups, known=None):
     """Promote a source's ``general`` category from corroborating sources only.
 
     Source tag membership remains isolated: no source receives a tag that it did
@@ -382,6 +382,9 @@ def _effective_source_groups(source_groups):
     ``alan_smithee`` as ``general`` and Danbooru has the same tag as ``artist``
     for the same image, Gelbooru may display/use its existing tag as ``artist``.
     A classified tag is never demoted to ``general`` by another source.
+    ``known`` (v5.44.11): {normalized tag: category} the library knows the tag by (the tags table — what the sites
+    said of it on other cards): a card of one site that sent no categories (a download of the grabber or of the
+    subscriptions from rule34.xxx before 5.44.11: every tag «Общие») shows them too.
     """
     normalized_by_source = {}
     best_classified = {}
@@ -407,6 +410,8 @@ def _effective_source_groups(source_groups):
         groups = defaultdict(list)
         for norm, (cat, name) in own.items():
             promoted = best_classified.get(norm)
+            if promoted is None and known and known.get(norm):
+                promoted = (known[norm], name)
             effective_cat = promoted[0] if cat == "general" and promoted is not None else cat
             groups[effective_cat].append(name)
         for cat in groups:
@@ -463,7 +468,7 @@ def enrich_items(settings, items, tag_source="all"):
                 ORDER BY t.category, t.name COLLATE NOCASE
             """, chunk).fetchall()
             source_rows = con.execute(f"""
-                SELECT ist.image_id, s.host, s.url, t.name, ist.category
+                SELECT ist.image_id, s.host, s.url, t.name, ist.category, t.category AS known
                 FROM image_source_tags ist
                 JOIN sources s ON s.id=ist.source_id
                 JOIN tags t ON t.id=ist.tag_id
@@ -479,11 +484,15 @@ def enrich_items(settings, items, tag_source="all"):
                 legacy_by_image[int(r["image_id"])].append(r)
 
             has_provenance = set()
+            known = {}                      # tag -> the category the library knows it by (v5.44.11)
             for r in source_rows:
                 item = by_id.get(int(r["image_id"]))
                 if item is None:
                     continue
                 cat = str(r["category"] or "general")
+                library_cat = str(r["known"] or "general").lower()
+                if library_cat != "general":
+                    known[normalize_tag(r["name"])] = library_cat
                 if should_hide_tag(r["name"], cat, settings):
                     continue
                 host = str(r["host"] or "").lower().replace("www.", "")
@@ -495,7 +504,7 @@ def enrich_items(settings, items, tag_source="all"):
                     # more informative category from another confirmed source to
                     # promote only this source's existing general tag.
                     item["tag_groups_raw_by_source"] = item.get("tag_groups_by_source", {})
-                    item["tag_groups_by_source"] = _effective_source_groups(item["tag_groups_raw_by_source"])
+                    item["tag_groups_by_source"] = _effective_source_groups(item["tag_groups_raw_by_source"], known)
                     groups = _merged_source_groups(item.get("tag_groups_by_source", {}), selected_source)
                 elif selected_source == "all":
                     groups = defaultdict(list)

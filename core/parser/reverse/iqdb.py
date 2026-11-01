@@ -16,6 +16,7 @@ _RESULT_PAGE_MARKERS = ("your image", "no relevant matches", "% similarity", 'id
 
 class Iqdb(ReverseService):
     name = "IQDB"
+    journal_key = "iqdb"
     host = "iqdb.org"
     endpoint = "https://iqdb.org/"
     setting = "enable_iqdb"
@@ -84,6 +85,7 @@ class Iqdb(ReverseService):
 
 class DanbooruIqdb(Iqdb):
     name = "Danbooru IQDB"
+    journal_key = "danbooru_iqdb"
     host = "danbooru.iqdb.org"
     endpoint = "https://danbooru.iqdb.org/"
     setting = "enable_danbooru_iqdb"

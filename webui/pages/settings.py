@@ -159,6 +159,11 @@ DOWNLOAD = Section("download", "Скачивание", fields=(
           suffix="ГБ", hint="загрузка и копии не займут последнее место; 0 — без запаса"),
     Field("grabber_cache_limit_mb", "int", "Кэш картинок граббера", default=200, lo=0, hi=10_000, suffix="МБ",
           hint="0 — по умолчанию, 200 МБ"),
+    Field("automatic_quality_upgrade_enabled", "bool", "Ставить оригинал вместо уменьшенной копии",
+          "файл карточки — уменьшенная копия с сайта (sample_…, thumbnail_…): программа сама, в фоне, скачивает "
+          "оригинал её поста, сверяет, что это та же картинка и она больше, и ставит его на место копии — теги, "
+          "источники и сборка карточки остаются, файл получает имя оригинала. Так же — лучшая копия, которую "
+          "приносит расширение", default=True),
 ))
 
 COMPANION = Section("companion", "Браузер и расширение",
@@ -338,8 +343,23 @@ def _gallery_extra(settings: dict) -> str:
             'Собрать сборки заново</button><span class="action-status" role="status"></span></div>')
 
 
+def _download_extra(settings: dict) -> str:
+    """(v5.44.13) What became of the reduced copies (``core/reduced_copies``): how many got their original."""
+    from core import reduced_copies
+    st = reduced_copies.status(settings)
+    if not any(st.values()):
+        return ""
+    parts = [f"заменены оригиналами — {st['done']}"]
+    if st["kept"]:
+        parts.append(f"оставлены как есть (у поста нет большего оригинала той же картинки, он уже есть или это "
+                     f"видео) — {st['kept']}")
+    if st["later"]:
+        parts.append(f"ждут сайта или сети — {st['later']}")
+    return f'<p class="hint">Уменьшенные копии: {esc("; ".join(parts))}.</p>'
+
+
 EXTRAS = {"backup": _backup_extra, "thumbs": _thumbs_extra, "companion": _companion_extra, "visual": _visual_extra,
-          "gallery": _gallery_extra}
+          "gallery": _gallery_extra, "download": _download_extra}
 
 
 def _move_html() -> str:

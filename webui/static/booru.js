@@ -853,10 +853,18 @@
       img.hidden = true;
       if (thumb) thumb.hidden = true;
       if (problem) {
-        problem.querySelector("p").textContent = kind === "format"
+        const line = problem.querySelector("p");
+        line.textContent = kind === "format"
           ? "Файл пришёл целиком, но встроенный просмотр его не показывает (формат не поддерживается или файл повреждён)."
           : "Картинка не загрузилась.";
         problem.hidden = false;
+        if (kind !== "format" && holder.dataset.why) {
+          // a picture from a site (a part of a сборка the library has not): what the site answered
+          fetch(base, { cache: "no-store", credentials: "same-origin" })
+            .then((response) => (response.ok ? null : response.json()))
+            .then((answer) => { if (answer && answer.error) line.textContent = "Картинка не загрузилась: " + answer.error + "."; })
+            .catch(() => {});
+        }
       }
       report(kind === "format" ? "format" : "gave_up");
     }

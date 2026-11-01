@@ -27,6 +27,7 @@ from core.database.storage import (
 from core.grabber_md5_cache import upsert_item
 from core.network import is_permanently_disabled_url
 from core.path_utils import path_key as _path_key, same_path as _same_path
+from core.site_posts import PAGE_METHODS
 
 
 def _host(value: Any) -> str:
@@ -118,6 +119,26 @@ def _media_urls(item: dict[str, Any]) -> list[str]:
     return out
 
 
+def _canonical_post_url(site: str, post_url: str, post_id: Any) -> str:
+    """A post's own address on a site of a known engine (v5.44.10): a grid's link to it carries the grid's search too
+    (``…&id=5&tags=some_artist``) — one post, one address among the card's sources."""
+    pid = str(post_id or "").strip()
+    if not post_url or not pid.isdigit():
+        return post_url
+    from core.browser_companion_index import post_key
+    key = post_key(site, post_url)
+    if not key or key[1] != pid:
+        return post_url
+    try:
+        from core.parser.sites import post_page_url
+        canonical = post_page_url(site, pid)
+    except Exception:
+        return post_url
+    if canonical and _host(canonical) == _host(post_url):
+        return canonical
+    return post_url
+
+
 def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     from core.browser_companion_index import resolve_post_identity
     item = dict(item or {})
@@ -133,7 +154,7 @@ def normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     # is never fetched as «the post» (its logo would become the original, its tag list the tags).
     post_url, post_id = resolve_post_identity(site, post_url, item.get("post_id"), trusted=trusted,
                                               is_post_page=bool(item.get("is_post_page")), drop_non_post_url=True)
-    post_url = _url(post_url)
+    post_url = _canonical_post_url(site, _url(post_url), post_id)
     md5 = _md5(item.get("md5"))
     return {
         "site": site,
@@ -208,11 +229,91 @@ def _cleanup_staging(settings: dict, staging_path: str | Path, canonical_path: s
         pass
 
 
+# (v5.44.10) What a page of a site shows is not always what the site says about its post.  A card on a search grid is a
+# link and a thumbnail — the ``tags=`` of its link is the search the grid was opened with («some_artist», ``all`` on the
+# main list); the extension 0.9 and older took that for the post's tags, the program's check of the badges then put it in
+# place of the card's tags of that site (the card lost them all — and its place in a сборка), and a post page gave its
+# tags without categories (all of them «Общие») plus ``all`` of the site's menu.  So: the site's own answer is the tags
+# of a site; what a page shows only fills in what the program has not got from the site.
+JUNK_TAGS = {"all"}                         # «every post» of a Gelbooru-like site (its menu: tags=all) — no tag
+SITE_METHOD = "site_post"                   # a set of tags the site itself gave for its post (the import asked it)
+
+
+def _known_categories(settings: dict, groups: dict[str, list[str]]) -> dict[str, list[str]]:
+    """``groups`` with each «general» tag in the category the library knows it by — the extension sends every tag of a
+    page as general (``storage.library_categories``)."""
+    if not groups.get("general"):
+        return groups
+    try:
+        from core.database.connection import db
+        from core.database.storage import library_categories
+        with db(settings, readonly=True) as con:
+            return library_categories(con, groups)
+    except Exception:
+        return groups
+
+
+def _page_groups(settings: dict, item: dict[str, Any]) -> dict[str, list[str]]:
+    """The tags a post page shows, as the program keeps them: none from a grid's card (its link carries the grid's
+    search, not the post's tags), no :data:`JUNK_TAGS`, «general» in the categories the library knows."""
+    if not item.get("is_post_page"):
+        return {}
+    groups = {}
+    for category, values in (item.get("groups") or {}).items():
+        kept = [t for t in values or [] if str(t).strip().lower() not in JUNK_TAGS]
+        if kept:
+            groups[category] = kept
+    return _known_categories(settings, groups) if groups else {}
+
+
+def _card_site_sets(settings: dict, path: str | Path, site: str) -> str:
+    """Whose tags of ``site`` the card at ``path`` has: "site" — the site's own (the parser, a site's answer), "page" —
+    only what the extension saw on a page, "" — none."""
+    from core.site_posts import canonical_site
+    wanted = canonical_site(site)
+    if not wanted:
+        return ""
+    try:
+        from core.database.connection import db
+        with db(settings, readonly=True) as con:
+            row = con.execute("SELECT id FROM images WHERE deleted=0 AND path=? ORDER BY id DESC LIMIT 1",
+                              (str(Path(path)),)).fetchone()
+            if not row:
+                return ""
+            rows = con.execute(
+                "SELECT DISTINCT s.host, ist.acquisition FROM image_source_tags ist JOIN sources s ON s.id=ist.source_id "
+                "WHERE ist.image_id=?", (int(row[0]),)).fetchall()
+    except Exception:
+        return ""
+    kinds = {("page" if str(acq or "") in PAGE_METHODS else "site") for host, acq in rows
+             if canonical_site(str(host or "")) == wanted}
+    return "site" if "site" in kinds else ("page" if kinds else "")
+
+
+def _site_post_rows(settings: dict, site: str, site_post, remote_post: dict) -> list:
+    """What the site said of the post (its uploader, parent, source links) for ``site_posts`` — from the parser's post
+    (``Post.meta``), else from the post API's raw answer."""
+    from core.site_posts import from_post, rows_from_candidates
+    rows = []
+    if site_post is not None:
+        row = from_post(site_post)
+        if row:
+            rows.append(row)
+    if not rows and remote_post and site:
+        try:
+            rows = rows_from_candidates(settings, [(0, site, remote_post)])
+        except Exception:
+            rows = []
+    return rows
+
+
 def _merge_metadata(settings: dict, path: str | Path, item: dict[str, Any], groups: dict[str, list[str]], *, method: str, md5: str = "") -> None:
     path = str(Path(path))
     tags = _flat(groups)
     if not path or not tags:
         return
+    if item.get("_groups_from") == "site":
+        method = SITE_METHOD
     post_url = str(item.get("post_url") or "")
     file_url = str(item.get("file_url") or ((item.get("media_urls") or [""])[0]) or "")
     upsert_media_metadata(
@@ -322,6 +423,8 @@ class BrowserImportManager:
         item = normalize_item(raw_item)
         if not canonical_path or not item.get("groups") or not item.get("post_url"):
             return {"ok": True, "skipped": True}
+        if not item.get("is_post_page"):          # (v5.44.10) a grid's card: its link's tags= is the grid's search
+            return {"ok": True, "skipped": True}
         key = "metadata:" + _identity(item) + ":" + str(canonical_path)
         return self._enqueue("metadata", item, key, canonical_path=str(canonical_path))
 
@@ -423,25 +526,7 @@ class BrowserImportManager:
                 from core.maintenance_coordinator import get_maintenance_coordinator
                 with self._task_registry.bind(task_id), get_maintenance_coordinator().activity("browser_import"):
                     if kind == "metadata":
-                        groups = item.get("groups") or {}
-                        if not groups and item.get("post_url"):
-                            try:
-                                from core.tagger import Tagger, groups_to_tags
-                                tagger = Tagger(dict(self.settings), lambda m: self.log(f"[Browser page refresh] {m}"))
-                                tags = list(tagger.tags_from_url(str(item.get("post_url") or "")) or [])
-                                groups = tagger.grouped_tags_from_url(str(item.get("post_url") or "")) if tags else {}
-                                if tags and not groups_to_tags(groups or {}):
-                                    groups = {"general": tags}
-                            except Exception as exc:
-                                self.log(f"Browser page metadata refresh warning: {type(exc).__name__}: {exc}")
-                        if groups:
-                            # A page can expose the same post with a different file.
-                            # Never overwrite the canonical row's MD5 while merely
-                            # refreshing source-scoped tags.
-                            _merge_metadata(self.settings, canonical_path, item, groups, method="browser_page_seen", md5="")
-                            self._set(task_id, status="done", message="теги обновлены", result_path=canonical_path)
-                        else:
-                            self._set(task_id, status="done", message="на странице нет новых тегов", result_path=canonical_path)
+                        self._refresh_seen(task_id, item, canonical_path)
                     else:
                         self._process_full(task_id, item)
             except Exception as exc:
@@ -451,6 +536,47 @@ class BrowserImportManager:
                 with self._lock:
                     self._pending_keys.discard(key)
                 self._queue.task_done()
+
+    def _refresh_seen(self, task_id: str, item: dict[str, Any], canonical_path: str) -> None:
+        """A post page of a card the library has, seen in the browser: its tags fill in the card's tags of that site
+        only when the card has none from the site itself (v5.44.10: before, what the page showed replaced them — a
+        grid's search word or the page's tags without categories)."""
+        site = str(item.get("site") or "")
+        if _card_site_sets(self.settings, canonical_path, site) == "site":
+            self._set(task_id, status="done", message="у карточки есть теги этого сайта — не тронуты", result_path=canonical_path)
+            return
+        groups = _page_groups(self.settings, item)
+        if not groups and item.get("post_url"):
+            try:
+                from core.tagger import Tagger
+                tagger = Tagger(dict(self.settings), lambda m: self.log(f"[Browser page refresh] {m}"))
+                post = tagger.site_post_from_url(str(item.get("post_url") or ""))
+                if post is not None and _flat(post.groups or {}):
+                    groups = {k: list(v) for k, v in (post.groups or {}).items() if v}
+                    item["_groups_from"] = "site"
+                    item["site_posts"] = _site_post_rows(self.settings, site, post, {})
+            except Exception as exc:
+                self.log(f"Browser page metadata refresh warning: {type(exc).__name__}: {exc}")
+        if groups:
+            # A page can expose the same post with a different file.  Never overwrite the canonical row's MD5 while
+            # merely refreshing source-scoped tags.
+            _merge_metadata(self.settings, canonical_path, item, groups, method="browser_page_seen", md5="")
+            if item.get("site_posts"):
+                self._persist_site_posts(canonical_path, item)
+            self._set(task_id, status="done", message="теги обновлены", result_path=canonical_path)
+        else:
+            self._set(task_id, status="done", message="на странице нет новых тегов", result_path=canonical_path)
+
+    def _persist_site_posts(self, canonical_path: str | Path, item: dict[str, Any]) -> int:
+        """What the site said of the post (uploader, parent) kept with the card: what сборки are made of."""
+        rows = [r for r in item.get("site_posts") or [] if isinstance(r, dict)]
+        image_id = self._image_id_for_path(canonical_path) if rows else 0
+        if not image_id:
+            return 0
+        from core.database.connection import db
+        from core.site_posts import record
+        with db(self.settings, write=True) as con:
+            return record(con, image_id, rows)
 
     def _finish_alias_conflict(
         self,
@@ -558,6 +684,10 @@ class BrowserImportManager:
                 if role == "mirror_post" and original != post_url:
                     role = "original_source"
                 add_typed_source(con, image_id=image_id, url=original, role=role or "original_source", preferred=True, provenance="browser_companion")
+            rows = [r for r in item.get("site_posts") or [] if isinstance(r, dict)]
+            if rows:                                 # (v5.44.10) uploader and parent: the card's place in сборки
+                from core.site_posts import record as record_site_posts
+                record_site_posts(con, image_id, rows)
             author_id = str(item.get("author_id") or "")
             if author_id and str(item.get("site") or "") == "pixiv.net":
                 add_typed_source(con, image_id=image_id, url=f"https://www.pixiv.net/users/{author_id}", role="author_profile", provenance="pixiv")
@@ -689,34 +819,30 @@ class BrowserImportManager:
             except Exception as exc:
                 self.log(f"Browser import HTML original resolver warning: {type(exc).__name__}: {exc}")
 
-        # The extension's DOM tags are useful immediately, but the post API/page
-        # remains authoritative for explicit manual imports.
-        groups_list: list[dict[str, list[str]]] = []
-        if item.get("groups"):
-            groups_list.append(item["groups"])
+        # The site's own post is the tags of that site (by category), its MD5, its uploader and parent (v5.44.10:
+        # before, the page's tags went first — all of them general, a grid's card only its grid's search — and, merged
+        # with the site's, a tag the site called an artist stayed «general»).  What the page shows fills in only when
+        # the site gave nothing.
+        site_post = None
         if post_url:
             try:
-                live_tags = list(tagger.tags_from_url(post_url) or [])
-                live_groups = tagger.grouped_tags_from_url(post_url) if live_tags else {}
-                if live_tags and not groups_to_tags(live_groups or {}):
-                    live_groups = {"general": live_tags}
-                if live_groups:
-                    groups_list.append(live_groups)
+                site_post = tagger.site_post_from_url(post_url)
             except Exception as exc:
                 self.log(f"Browser import current-site metadata warning: {type(exc).__name__}: {exc}")
-        groups = merge_tag_groups(groups_list)
-        if not groups and item.get("tags"):
-            groups = {"general": list(item["tags"])}
+        site_groups = {k: list(v) for k, v in ((site_post.groups or {}) if site_post is not None else {}).items() if v}
+        if _flat(site_groups):
+            groups = site_groups
+            item["_groups_from"] = "site"
+        else:
+            groups = _page_groups(self.settings, item)
+            item["_groups_from"] = "page" if groups else ""
         item["groups"] = groups
         item["tags"] = _flat(groups)
+        item["site_posts"] = _site_post_rows(self.settings, site, site_post, remote_post)
 
         site_md5 = str(item.get("md5") or "")
-        if not site_md5 and post_url:
-            try:
-                candidates = list(tagger.extract_md5_candidates_from_post_url(post_url) or [])
-                site_md5 = next((str(x).lower() for x in candidates if _md5(x)), "")
-            except Exception:
-                site_md5 = ""
+        if not site_md5 and site_post is not None and _md5(getattr(site_post, "md5", "")):
+            site_md5 = _md5(site_post.md5)
         item["md5"] = site_md5
 
         # Preserve the page metadata for parser reuse before any download starts.

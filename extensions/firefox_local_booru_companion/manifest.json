@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
   "permissions": [
     "storage",

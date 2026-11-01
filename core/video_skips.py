@@ -54,6 +54,8 @@ OPENING_IN = 0.45            # the opening begins in this share of the episode
 ENDING_FROM = 0.55           # the ending begins after this share
 SMOOTH = 32                  # prints in the bit error average (~2 s)
 CHUNK = 2048                 # looks put through the FFT at once (~2 min of sound, ~35 MB)
+THREADS = 4                  # the decoder's threads at most: the work goes on in the background, the computer is the
+                             # person's (all of them took 83 % of a 16-thread processor on the owner's computer)
 SAME_SHIFT = 2.0             # seconds two stretches of one peer may be apart in shift and still be one song
 VERSION = 1
 NOTE = "skips.json"
@@ -222,23 +224,34 @@ class Frames:
     own four — read once, not eight times."""
     PIECE = 20.0
 
-    def __init__(self, stop=None):
+    def __init__(self, stop=None, folder: Path | None = None):
         self.stop = stop
+        self.folder = folder                 # the series folder: the prints of its MKVs kept by their putting together
         self.pieces: dict = {}               # (path, number) → (times, bits) | None (nothing there, does not read)
+        self.whole: dict = {}                # path → its every frame's prints kept already (``video_merge``) | None
 
     def get(self, path: Path, lo: float, hi: float):
-        """(times, bits) of the frames of ``path`` from ``lo`` to ``hi`` (its clock) — None when there are none."""
+        """(times, bits) of the frames of ``path`` from ``lo`` to ``hi`` (its clock) — None when there are none.  An
+        episode's MKV whose voice-overs were put together here has every frame's prints kept already: not read."""
         import numpy as np
         from core import video_merge as G
         lo = max(0.0, lo)
         if hi < lo:
             return None
+        if str(path) not in self.whole:
+            self.whole[str(path)] = G.kept_prints(G._prints_place(Path(self.folder), Path(path)), Path(path)) \
+                if self.folder is not None else None
+        whole = self.whole[str(path)]
+        if whole is not None:
+            kept = (whole.times >= lo) & (whole.times <= hi)
+            return (whole.times[kept], whole.bits[kept]) if kept.any() else None
         times, bits = [], []
         for k in range(int(lo // self.PIECE), int(hi // self.PIECE) + 1):
             key = (str(path), k)
             if key not in self.pieces:
                 try:
-                    got = G.prints_of(path, stop=self.stop, start=k * self.PIECE, end=(k + 1) * self.PIECE)
+                    got = G.prints_of(path, stop=self.stop, start=k * self.PIECE, end=(k + 1) * self.PIECE,
+                                      threads=THREADS)
                     self.pieces[key] = (got.times, got.bits)
                 except G.MergeError as exc:
                     if str(exc) == "остановлено":       # stopped: the episode is not kept as looked at
@@ -488,7 +501,7 @@ def find_series(series, *, stop=None, deadline: float | None = None) -> int:
     prints: dict = {}
 
     pictures: dict = {}
-    frames = Frames(stop)                    # the pieces of frames read for the edges, shared by all the comparisons
+    frames = Frames(stop, folder)            # the pieces of frames read for the edges, shared by all the comparisons
 
     def of(k: int):
         if k not in prints:
@@ -501,7 +514,8 @@ def find_series(series, *, stop=None, deadline: float | None = None) -> int:
         if k not in pictures:
             path = Path(episodes[k].path)
             try:
-                pictures[k] = G.prints_of(path, stop=stop, keys=True, cache=_sound_cache(folder, path).with_suffix(".keys.npz"))
+                pictures[k] = G.prints_of(path, stop=stop, keys=True, threads=THREADS,
+                                          cache=_sound_cache(folder, path).with_suffix(".keys.npz"))
             except G.MergeError as exc:
                 if str(exc) == "остановлено":
                     raise InterruptedError from exc
@@ -609,6 +623,33 @@ def _prune(folder: Path, data: dict) -> None:
     """Entries of files that are gone (put into an episode's MKV, removed) — out of the note."""
     for key in [k for k in data["episodes"] if not (Path(folder) / k).exists()]:
         del data["episodes"][key]
+
+
+def stamp_of(path: Path) -> str:
+    """What an episode file is known by here (its size and time) — before it is changed (``kept_after_merge``)."""
+    return _stamp(Path(path))
+
+
+def kept_after_merge(folder: Path, path: Path, before: str) -> None:
+    """An episode's MKV got another voice-over's track — its picture and its first track are as they were: what was
+    found in it (its opening and ending) and what was read of it (its sound's and key frames' prints) stay, under the
+    file's new stamp; it is not looked at again."""
+    from core import video_merge as G
+    now = _stamp(Path(path))
+    if not before or not now or before == now:
+        return
+    with _LOCK:
+        data = read_note(folder)
+        item = data["episodes"].get(_key(folder, Path(path)))
+        if item is not None and item.get("stamp") == before:
+            item["stamp"] = now
+            hint = item.get("hint")
+            if isinstance(hint, dict) and hint.get("stamp") == before:
+                hint["stamp"] = now
+            _write_note(folder, data)
+    cache = _sound_cache(folder, Path(path))
+    G.restamp(cache, f"{before}-{VERSION}", f"{now}-{VERSION}")
+    G.restamp(cache.with_suffix(".keys.npz"), f"{before}-k{G.PRINTS_VERSION}", f"{now}-k{G.PRINTS_VERSION}")
 
 
 def carry(folder: Path, sources: list, target: Path) -> None:

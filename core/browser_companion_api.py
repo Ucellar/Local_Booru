@@ -499,6 +499,13 @@ def enqueue_e621_browser_fetch(url: str, *, auth_header: str = "", timeout_s: fl
     raw_url = str(url or "").strip()
     if not raw_url.startswith(("https://e621.net/", "https://e926.net/")):
         return None
+    # A browser cannot set the User-Agent: e621's rules ask such a request to carry it in ``_client`` (v5.44.22).
+    from core import site_agent
+    try:
+        settings = load_settings()
+    except Exception:  # the request goes without the login in it
+        settings = None
+    raw_url = site_agent.with_client(raw_url, settings)
     try:
         timeout_s = max(5.0, min(600.0, float(timeout_s or 120.0)))
     except Exception:

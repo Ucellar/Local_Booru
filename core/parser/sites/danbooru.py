@@ -7,6 +7,7 @@ import threading
 import time
 from urllib.parse import urljoin
 
+from core import site_agent
 from core.parser.models import Post
 from core.parser.sites.base import Site, SiteUnavailable, TextBody
 from core.parser.util import norm_md5, post_dicts, short
@@ -42,6 +43,43 @@ class DanbooruSite(Site):
     # ── auth/headers ────────────────────────────────────────────────────────
     def _headers(self) -> dict:
         return {"Accept": "application/json", "User-Agent": self.api_user_agent()}
+
+    def api_user_agent(self) -> str:
+        """Danbooru's rules (its help:api): «a unique User-Agent header that contains your user ID … Don't impersonate
+        browsers» — the program's name, the login and the user's number (core/site_agent.py, v5.44.24).  ATF and the
+        other sites of this engine: as before."""
+        if not site_agent.is_own(self.host):
+            return super().api_user_agent()
+        custom = str(self.cfg.get("user_agent") or self.cfg.get("api_user_agent") or "")
+        return site_agent.user_agent(self.host, self.ctx.settings, name=self.login or None,
+                                     user_id=self.user_id if self.user_id.isdigit() else None, custom=custom)
+
+    def preflight(self) -> None:
+        """Danbooru: its rules ask for the user's number in every request.  The «User ID» of «Сайты и ключи» is it;
+        not written, with the login and the API key — Danbooru's ``/profile.json`` tells it, asked once per start of
+        the program; neither — said once in the journal (the requests go on without it)."""
+        if not site_agent.is_own(self.host) or self.user_id.isdigit():
+            return
+        if site_agent.learned_user_id("danbooru", self.login):
+            return
+        if not (self.login and self.api_key):
+            self.ctx.log(f"  {self.host}: в «Сайтах и ключах» не вписан номер пользователя Danbooru («User ID») — "
+                         "правила Danbooru просят его в запросах программы (он на странице профиля; или впишите логин "
+                         "и API-ключ — номер программа спросит сама)")
+            return
+        if not site_agent.first_try("danbooru", self.login):
+            return
+        try:
+            data = self.get_json(f"{self.root}/profile.json", headers=self._headers(), auth=self._auth(), soft=True)
+        except SiteUnavailable as exc:
+            self.ctx.log(f"  {self.host}: номер пользователя Danbooru не узнан ({short(str(exc), 80)}) — запросы идут "
+                         "с логином")
+            return
+        number = str((data or {}).get("id") or "") if isinstance(data, dict) else ""
+        if number.isdigit():
+            site_agent.remember_user_id("danbooru", self.login, number)
+            self.ctx.log(f"  {self.host}: номер пользователя Danbooru #{number} — в подписи запросов программы "
+                         "(правила Danbooru)")
 
     def _auth(self):
         return (self.login, self.api_key) if self.login and self.api_key else None

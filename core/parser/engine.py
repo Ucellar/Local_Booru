@@ -8,8 +8,9 @@ For every file, in this order, stopping at the first stage that finds tags:
                                                         -> accepted after a visual check
 4. a visually identical, already tagged gallery image   -> reuse its tags (no network)
 5. the same pixels on a Danbooru-like site (pixel_hash) -> the original's MD5 everywhere
-6. reverse image search: IQDB, Danbooru IQDB, e621 IQDB, Ascii2D, SauceNAO, one after another until one finds
-   (in a run every service has its own queue: see runner.py)
+6. reverse image search: Fluffle and e621 IQDB (seconds), IQDB (half a minute), Danbooru IQDB, Ascii2D, SauceNAO
+   (its day's searches last), one after another until one finds (in a run every service has its own queue: see
+   runner.py; the order: core/parser/reverse/__init__.py)
 After a hit, the post's own MD5 is looked up on the remaining sites ("relay"),
 so one reverse-search hit collects tags from every booru that has the same file.
 
@@ -41,7 +42,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.parser import persist
+from core.parser import persist, reverse_journal
 from core.parser.context import ParserContext
 from core.parser.http import Cancelled, HttpFailure
 from core.parser.models import FileResult, Match, ReverseOutcome
@@ -66,10 +67,20 @@ _POST_NAME_PATTERNS = (
 )
 _SITE_ERRORS = (SiteUnavailable, HttpFailure)
 _ART_HOSTS = ("twitter.com", "x.com", "fanbox.cc", "fantia.jp", "deviantart.com", "artstation.com",
-              "nijie.info", "skeb.jp", "patreon.com", "tumblr.com", "baraag.net", "pawoo.net", "misskey.io")
+              "nijie.info", "skeb.jp", "patreon.com", "tumblr.com", "baraag.net", "pawoo.net", "misskey.io",
+              # (v5.44.14) the places Fluffle names
+              "furaffinity.net", "bsky.app", "inkbunny.net", "weasyl.com", "furrynetwork.com", "newgrounds.com")
+_TWEET_RE = re.compile(r"(?:twitter\.com|x\.com|fxtwitter\.com|vxtwitter\.com|fixupx\.com)/[^/?#]+/status(?:es)?/(\d+)",
+                       re.I)
+_BSKY_RE = re.compile(r"bsky\.app/profile/[^/?#]+/post/([a-z0-9]+)", re.I)
+_FA_RE = re.compile(r"furaffinity\.net/(?:view|full)/(\d+)", re.I)
+_SOURCE_RELAY_MAX = 3      # the art sites' pages of a picture looked up on the sites at most
 _MAX_CANDIDATES = 6
 NOMATCH_STATUSES = ("nomatch", "no_match", "downloaded_no_match")   # a file processed before that is in Брак
 _NO_PIXEL_HASH = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".gif"}
+# (v5.44.12) a reduced copy (a site's sample or thumbnail: other pixels than any original) — no pixel_hash question
+_REDUCED_NAME = re.compile(r"^(?:sample|thumbnail)[_-]", re.I)
+KEY_GIVE_UP = 40            # rule34 keys in a row without a post (none found in the run): the run asks no more
 # (v5.44, the order «SauceNAO первым») a file passes over a service with a daily quota (SauceNAO) whose queue would keep
 # it longer than this, when a service after it would answer sooner: those are asked first, the quota's service after
 # them (``reverse_next``).  In the order «IQDB первым» (the default since v5.44.3) it is last: nothing passes it over.
@@ -99,6 +110,7 @@ class ReverseTicket:
     upload: object = None
     later: list = field(default_factory=list)
     held: str = ""
+    remembered: dict | None = None       # (v5.44.18) services that answered about the file before: reverse_journal
 
 
 @dataclass
@@ -113,6 +125,8 @@ class _State:
     searched_md5: set = field(default_factory=set)
     journal: dict = field(default_factory=dict)     # site -> (outcome, md5, url): definite answers only
     adding: list = field(default_factory=list)      # «добор»: the sites added since the file was processed
+    key_asked: bool = False                          # rule34 answered about the key in the name (v5.44.12)
+    key_post: bool = False                           # …with a post (its picture may still be another)
 
     def problem(self, owner, text: str) -> None:
         self.problems.append((owner, text))
@@ -128,6 +142,11 @@ class ParserEngine:
         self._pixel_queues: dict = {}           # host -> PixelQueue (core/parser/pixels.py)
         self._md5_queues: dict = {}             # host -> Md5Queue (core/parser/site_queue.py)
         self._pixel_lock = threading.Lock()
+        # (v5.44.12) rule34's key in a name: how it went in this run — 0 of 370 at the owner (31.10.2026), a file 26 s
+        self._key_lock = threading.Lock()
+        self._key_misses = 0                    # «пост не найден» in a row while none was found
+        self._key_found = 0
+        self._key_off = False
         self.visual = VisualChecker(ctx)
         self.trust_unverified_filename_md5 = ctx.flag("parser_trust_unverified_filename_md5", True)
         self.recheck_new_sites = ctx.flag("parser_recheck_new_sites", False)
@@ -181,9 +200,43 @@ class ParserEngine:
 
     def reverse_prepare(self, ticket: ReverseTicket) -> bool:
         """The picture every service is sent (a video's start, a smaller JPEG), made once; False — the file cannot be
-        searched (its answer is then a miss)."""
+        searched (its answer is then a miss).  (v5.44.18) Every service on answered about it before — nothing is
+        made: ``reverse_next`` gives none, the file goes to its answer (the relay of its sources, Брак)."""
+        if not any(s.enabled() and not self._answered_before(ticket, s) for s in self.services):
+            return True
         ticket.upload = self._upload_copy(ticket.state)
         return ticket.upload is not None
+
+    # ── (v5.44.18) what the services answered before: core/parser/reverse_journal.py ──
+    def _recall(self, ticket: ReverseTicket) -> dict:
+        """The services' answers about the file kept from before (once a file); the source its Брак record keeps
+        goes to the relay again — the service that named it may not be asked."""
+        if ticket.remembered is not None:
+            return ticket.remembered
+        ticket.remembered = {}
+        state = ticket.state
+        try:
+            if self.ctx.flag("parser_reverse_remember", True):
+                ticket.remembered = reverse_journal.remembered(self.ctx.settings, ticket.job.original_path, self.services)
+            kept = reverse_journal.saved_source(self.ctx.settings, ticket.job.original_path)
+        except Exception as exc:  # the memory saves time only: without it every service is asked, as before
+            self._say(state, f"память обратного поиска недоступна ({type(exc).__name__}: {exc})")
+            kept = None
+        if kept and all(str(x.get("url") or "") != kept["url"] for x in state.source_only):
+            state.source_only.append(kept)
+        known = [s.name for s in self.services if s.enabled() and s.journal_key in ticket.remembered]
+        if known:
+            self._say_rev(state, f"уже отвечали о нём раньше, не спрашиваю: {', '.join(known)}")
+        return ticket.remembered
+
+    def _answered_before(self, ticket: ReverseTicket, service) -> bool:
+        return bool(service.journal_key) and service.journal_key in self._recall(ticket)
+
+    def _remember(self, ticket: ReverseTicket, service, status: str, reason: str = "") -> None:
+        try:
+            reverse_journal.record(self.ctx.settings, ticket.job.original_path, service, status, reason)
+        except Exception as exc:  # the memory saves time only: the answer itself is not changed by it
+            self._say(ticket.state, f"ответ {service.name} не записан в память ({type(exc).__name__}: {exc})")
 
     def reverse_next(self, ticket: ReverseTicket, wait_of=None):
         """The next service to ask about the file, or None — none left.  One switched off for the run is passed
@@ -193,11 +246,17 @@ class ParserEngine:
         :data:`PASS_OVER_WAIT` and a service after it would answer sooner — the file comes back to it after them, so
         the day's searches go to the files the others did not find (in the order «SauceNAO первым»; in «IQDB первым»,
         the default since v5.44.3, it is last anyway).  (v5.44.3) A service before it that gave the file no answer
-        (paused, its limit) holds it: :meth:`_held`."""
+        (paused, its limit) holds it: :meth:`_held`.  (v5.44.14) A service that may be throttled (``pass_over``:
+        e621 IQDB without an account) is passed over the same way, and it comes back before a service with a daily
+        quota: those searches go to what the others did not find."""
         while ticket.step < len(self.services):
             service = self.services[ticket.step]
+            if getattr(service, "quota_limited", False):
+                back = self._back_before_quota(ticket)
+                if back is not None:
+                    return back
             ticket.step += 1
-            if not service.enabled():
+            if not service.enabled() or self._answered_before(ticket, service):
                 continue
             if service.paused():
                 ticket.state.problem(service, service.pause_note())
@@ -205,8 +264,8 @@ class ParserEngine:
                 continue
             if self._held(ticket, service):
                 continue
-            if wait_of is not None and getattr(service, "quota_limited", False) and \
-                    self._sooner_after(ticket, service, wait_of):
+            if wait_of is not None and (getattr(service, "quota_limited", False) or getattr(service, "pass_over", False)) \
+                    and self._sooner_after(ticket, service, wait_of):
                 ticket.later.append(service)
                 continue
             return service
@@ -219,6 +278,22 @@ class ParserEngine:
                 continue
             if self._held(ticket, service):
                 continue
+            return service
+        return None
+
+    def _back_before_quota(self, ticket: ReverseTicket):
+        """(v5.44.14) A service passed over for its long queue that has no daily quota (e621 IQDB, throttled), asked
+        before a service that has one; None — none waits."""
+        for i, service in enumerate(ticket.later):
+            if getattr(service, "quota_limited", False):
+                continue
+            del ticket.later[i]
+            if not service.enabled():
+                return self._back_before_quota(ticket)
+            if service.paused():                 # no answer of it: the file's miss is not trusted, the quota waits
+                ticket.state.problem(service, service.pause_note())
+                ticket.held = ticket.held or service.name
+                return self._back_before_quota(ticket)
             return service
         return None
 
@@ -286,17 +361,27 @@ class ParserEngine:
         if outcome.status != "complete":  # bad_input / disabled: no answer, nothing to wait for
             if outcome.detail and outcome.status != "disabled":
                 self._say_rev(state, f"{service.name}: {outcome.status} — {short(outcome.detail, 120)}")
+            if outcome.status == "bad_input":           # not an answer: asked again next time (reverse_journal)
+                self._remember(ticket, service, "skipped", short(outcome.detail, 200))
             return []
         service.note_success()
         state.source_only += outcome.source_only
+        missed = "source_only" if outcome.source_only else "done_miss"
         if not outcome.candidates:
+            self._remember(ticket, service, missed)
             return []
+        troubles = len(state.problems)
         STAGE.prefix = FINDS_SUB                # (v5.35.1) the sites' answers about the hits are timed as its parts
         try:
             with STEPS.timed(FINDS):
-                return self._resolve(outcome.candidates, service, state)
+                matches = self._resolve(outcome.candidates, service, state)
         finally:
             STAGE.prefix = ""
+        if matches:
+            self._remember(ticket, service, "done_match")
+        elif len(state.problems) == troubles:   # its hits checked to the end — not a preview or a site that failed
+            self._remember(ticket, service, missed)
+        return matches
 
     def reverse_finish(self, ticket: ReverseTicket, matches: list) -> FileResult:
         """The file's answer after reverse search: a find — the other sites asked for the post's MD5, the card saved;
@@ -503,7 +588,7 @@ class ParserEngine:
         name_md5 = md5_from_filename(state.path.name)
         if name_md5 and name_md5 != state.md5:
             matches = [m for m in self._md5_everywhere(name_md5, state, method="filename_md5", exclude=exclude)
-                       if self.visual.check(self._phash(state), m.post.preview_url)[0] is True]
+                       if self._looks_like(state, m.post.preview_url)[0] is True]
             if matches:
                 return self._finish_found(job, state, self._one_per_site(matches, state))
         live = list(dict.fromkeys(text for owner, text in state.problems if not getattr(owner, "disabled_reason", "")))
@@ -583,6 +668,11 @@ class ParserEngine:
         if state.phashes is None:
             state.phashes = local_phashes(self.ctx, state.path)
         return state.phashes
+
+    def _looks_like(self, state: _State, preview_url: str, *, max_distance: int | None = None):
+        """``VisualChecker.check`` of the file and a preview — (v5.44.15) with the file itself, so a preview of a
+        part of a wide or a tall picture (e621's) is compared with that part."""
+        return self.visual.check(self._phash(state), preview_url, max_distance=max_distance, source=state.path)
 
     def _md5_everywhere(self, md5: str, state: _State, *, method: str, exclude: set | None = None) -> list:
         """Ask every usable site for this MD5 at once; each host keeps its own rate limit.  (v5.35) A site that takes
@@ -666,11 +756,14 @@ class ParserEngine:
             return
         state.journal[site.host] = (outcome, md5, url, site.engine)
 
-    def _accept(self, post, similarity: float, trust: float, state: _State) -> tuple[bool, str]:
-        """Accept a reverse/hint candidate: high similarity, or a matching preview."""
+    def _accept(self, post, similarity: float, trust: float, state: _State, *, strict: bool = False) -> tuple[bool, str]:
+        """Accept a reverse/hint candidate: high similarity, or a matching preview.  ``strict`` — a weak hit of a
+        service that names other versions of a picture too (Fluffle under ``strict_below``): its preview must be
+        nearly the file's (half the run's distance), another version of the picture does not pass."""
         if similarity >= trust:
             return True, f"{similarity:.0f}%"
-        ok, detail, transient = self.visual.check(self._phash(state), post.preview_url)
+        ok, detail, transient = self._looks_like(state, post.preview_url,
+                                                 max_distance=self.visual.max_distance // 2 if strict else None)
         if ok is True:
             return True, f"{similarity:.0f}% + превью {detail}"
         if ok is False:
@@ -747,13 +840,34 @@ class ParserEngine:
 
     def _rule34_image_key(self, state: _State) -> list:
         """``sample_<40 hex>.jpg``: rule34.xxx's own image key in the name finds the post even
-        though a sample has another MD5 than the original."""
+        though a sample has another MD5 than the original.  (v5.44.12) :data:`KEY_GIVE_UP` keys in a row without a
+        post, none found in the run — not asked any more in it (said once): at the owner 370 keys, no post, up to 26 s
+        a file on the threads after the sites."""
         from core.tagger.filename_hints import extract_rule34_40hex_key
         key = extract_rule34_40hex_key(state.path.name)
-        if not key or not self.ctx.flag("parser_rule34_image_key", True):
+        if not key or not self.ctx.flag("parser_rule34_image_key", True) or self._key_off:
             return []
         with STEPS.timed(AFTER_R34_KEY):
-            return self._rule34_key_post(state, key)
+            found = self._rule34_key_post(state, key)
+        self._key_result(bool(found) or state.key_post, asked=state.key_asked)
+        return found
+
+    def _key_result(self, found: bool, *, asked: bool) -> None:
+        """Count a key's answer: :data:`KEY_GIVE_UP` posts not found in a row (none found in the run) — the run asks
+        no more keys (the site, it seems, no longer finds a post by its picture's key)."""
+        if not asked and not found:
+            return                                  # the site was not asked (paused, an error): not its answer
+        with self._key_lock:
+            if found:
+                self._key_found += 1
+                self._key_misses = 0
+                return
+            self._key_misses += 1
+            if self._key_found or self._key_off or self._key_misses < KEY_GIVE_UP:
+                return
+            self._key_off = True
+        self.ctx.log(f"  ключ rule34 из имени: {KEY_GIVE_UP} файлов подряд — пост не найден, ни одного в этом запуске; "
+                     "дальше в этом запуске не спрашиваю (rule34.xxx, похоже, больше не находит пост по ключу картинки)")
 
     def _rule34_key_post(self, state: _State, key: str) -> list:
         own = state.path.suffix.lower().lstrip(".")
@@ -766,10 +880,12 @@ class ParserEngine:
                 self._site_error(site, exc, state, "ключ rule34 из имени", soft=True)
                 continue
             site.note_success()
+            state.key_asked = True
             if not post or not post.tags:
                 self._say(state, f"ключ rule34 {key[:12]}…: пост не найден")
                 continue
-            ok, detail, _transient = self.visual.check(self._phash(state), post.preview_url)
+            state.key_post = True
+            ok, detail, _transient = self._looks_like(state, post.preview_url)
             if ok is False:
                 self._say(state, f"✖ ключ rule34 → пост {post_id}: превью не похоже ({detail})")
                 continue
@@ -785,7 +901,7 @@ class ParserEngine:
         if not self.ctx.flag("parser_pixel_hash", True):
             return []
         sites = [s for s in self._danbooru_like(state) if not getattr(s, "pixel_hash_refused", "")]
-        if not sites or state.path.suffix.lower() in _NO_PIXEL_HASH:
+        if not sites or state.path.suffix.lower() in _NO_PIXEL_HASH or _REDUCED_NAME.match(state.path.name):
             return []
         from core.tagger.hashing import danbooru_pixel_hash
         with STEPS.timed(AFTER_PIXEL_HASH):
@@ -847,7 +963,7 @@ class ParserEngine:
             return (0, 0) if rpm is None else (1, -int(rpm))
         verdict = (None, "нет превью", False)
         for match in sorted(matches, key=cost):
-            verdict = self.visual.check(self._phash(state), match.post.preview_url)
+            verdict = self._looks_like(state, match.post.preview_url)
             if verdict[0] is not None:
                 return verdict
         return verdict
@@ -929,7 +1045,7 @@ class ParserEngine:
             return out
         pixiv = cand.pixiv_id or _pixiv_id_from_url(cand.url)
         if pixiv:
-            if cand.preview_url and self.visual.check(self._phash(state), cand.preview_url)[0] is False:
+            if cand.preview_url and self._looks_like(state, cand.preview_url)[0] is False:
                 return []
             return self._pixiv_relay(pixiv, state, similarity=cand.similarity, single_ok=cand.similarity >= 90,
                                      hint=cand.url)
@@ -948,7 +1064,8 @@ class ParserEngine:
         site.note_success()
         if not post or not post.tags:
             return []
-        ok, detail = self._accept(post, cand.similarity, trust, state)
+        ok, detail = self._accept(post, cand.similarity, trust, state,
+                                  strict=cand.similarity < float(getattr(service, "strict_below", 0.0) or 0.0))
         return [Match(post, method=method, similarity=cand.similarity, verified=detail)] if ok else []
 
     def _one_per_site(self, matches: list, state: _State) -> list:
@@ -962,7 +1079,7 @@ class ParserEngine:
             if m.post.site in hosts:
                 continue
             if kept and not (m.post.md5 and m.post.md5 in md5s):
-                if self.visual.check(self._phash(state), m.post.preview_url)[0] is not True:
+                if self._looks_like(state, m.post.preview_url)[0] is not True:
                     continue
             kept.append(m)
             hosts.add(m.post.site)
@@ -1030,7 +1147,7 @@ class ParserEngine:
                     break
                 site.note_success()
                 for post in posts:
-                    ok, detail, transient = self.visual.check(self._phash(state), post.preview_url)
+                    ok, detail, transient = self._looks_like(state, post.preview_url)
                     if ok is True:
                         self._say(state, f"✔ {what} → {site.label} {post.post_id} ({detail})")
                         return [Match(post, method=method, verified=detail)]
@@ -1058,7 +1175,7 @@ class ParserEngine:
                     STEPS.add(prefix + PIXIV_SEARCH + str(site.label), time.perf_counter() - started)
             site.note_success()
             for post in posts:
-                ok, detail, transient = self.visual.check(self._phash(state), post.preview_url)
+                ok, detail, transient = self._looks_like(state, post.preview_url)
                 if ok is True or (ok is None and single_ok and len(posts) == 1):
                     out.append(Match(post, method="pixiv_relay", similarity=similarity, verified=f"pixiv {pixiv_id} {detail}"))
                     self._say(state, f"✔ pixiv {pixiv_id} → {site.label} {post.post_id}: {tags_ru(len(post.tags))} ({detail})")
@@ -1068,12 +1185,11 @@ class ParserEngine:
         return out
 
     def _source_relay(self, state: _State) -> list:
-        """Unsupported art-site hits (Twitter, Fanbox…) -> ``source:`` search on every site."""
+        """Unsupported art-site hits (Twitter, Fanbox, FurAffinity, Bluesky…) -> ``source:`` search on every site."""
         urls = [str(x.get("url") or "") for x in sorted(state.source_only, key=lambda x: -float(x.get("similarity") or 0))]
-        urls = [u for u in urls if any(h in host_of(u) for h in _ART_HOSTS)][:2]
+        urls = list(dict.fromkeys(u for u in urls if any(h in host_of(u) for h in _ART_HOSTS)))[:_SOURCE_RELAY_MAX]
         for url in urls:
-            core = re.sub(r"^https?://(www\.)?", "", url).split("?", 1)[0].rstrip("/")
-            found = self._search_sources([f"source:*{core}*"], self.sites, state, method="source_relay",
+            found = self._search_sources(source_queries(url), self.sites, state, method="source_relay",
                                          what=f"источник {url}")
             if found:
                 return found
@@ -1135,6 +1251,25 @@ def tags_ru(n: int) -> str:
     else:
         word = "тегов"
     return f"{n} {word}"
+
+
+def source_queries(url: str) -> list:
+    """The ``source:`` searches that find a post by the page of its picture on an art site.  (v5.44.14) A tweet by its
+    number — a post's source is a twitter.com or an x.com link, a reverse search may give the other one; a Bluesky post
+    by its key — its profile is a name in a post's source and a «did:» in Fluffle's links; a FurAffinity one by its
+    number — its page is …/view/<n>/ or …/full/<n>/; anything else by its address without the scheme.  A post another
+    picture's (a longer number that begins the same) is left out by its preview (``_search_sources``)."""
+    m = _TWEET_RE.search(url or "")
+    if m:
+        return [f"source:*status/{m.group(1)}*"]
+    m = _BSKY_RE.search(url or "")
+    if m:
+        return [f"source:*post/{m.group(1)}*"]
+    m = _FA_RE.search(url or "")
+    if m:
+        return [f"source:*furaffinity.net/*/{m.group(1)}*"]
+    core = re.sub(r"^https?://(www\.)?", "", url or "").split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    return [f"source:*{core}*"] if core else []
 
 
 def _pixiv_id_from_url(url: str) -> str:

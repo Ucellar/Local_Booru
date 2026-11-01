@@ -34,9 +34,10 @@ def processed_status(settings: dict, original_path: str) -> str:
 def library_bundle_for_md5(settings: dict, md5: str) -> dict | None:
     """Tags already stored for identical bytes in the gallery (no network needed)."""
     from core.database.connection import db
-    from core.database.storage import found_media_path_by_md5
+    from core.database.storage import found_media_path_by_md5, replaced_media_path
     from core.tagger.local_phash_match import load_local_match_bundle
-    canonical = found_media_path_by_md5(settings, md5)
+    # (v5.44.13) a copy whose card got a better file (a site's sample → its post's original) is that card too
+    canonical = found_media_path_by_md5(settings, md5) or replaced_media_path(settings, md5)
     if not canonical or not Path(canonical).exists():
         return None
     with db(settings, readonly=True) as con:
@@ -100,14 +101,17 @@ def save_found(settings: dict, path: Path, matches: list, *, md5: str, original_
         STEPS.add(WAIT, time.perf_counter() - asked)
         if still is not None and not still():
             return {"ok": False, "gone": True, "reason": "файл тем временем уже записан другим путём"}
+        # (v5.44.13) these bytes were a card's file before a better copy took their place (a site's sample gave way
+        # to its post's original): the find goes to that card — not a new card of the worse copy
+        replaced = _replaced_by_better(settings, md5)
         with STEPS.timed(COPY):
-            archived = copy_result_files(settings, path, "tagged")
+            archived = Path(replaced) if replaced else copy_result_files(settings, path, "tagged")
         if not valid_archived_media_path(archived):
             return {"ok": False, "reason": "не удалось скопировать файл в рабочую библиотеку"}
         _video_length(archived)
         result = register_media_import(
             settings, archived, tags=tags, groups=groups, sources=lines, status="found",
-            original_path=str(original_path), hash_md5=md5 or None, origin="tagger",
+            original_path=str(original_path), hash_md5=(None if replaced else md5 or None), origin="tagger",
             source_tag_groups=source_groups, merge_existing=True, site_posts=site_posts,
             generate_thumbnail=False,
         )
@@ -118,6 +122,17 @@ def save_found(settings: dict, path: Path, matches: list, *, md5: str, original_
     with STEPS.timed(PREVIEW):              # after the lock: the other files' writes do not wait for it
         make_card_preview(settings, str((result or {}).get("canonical_path") or archived))
     return {"ok": True, "tags": len(tags), "result": result}
+
+
+def _replaced_by_better(settings: dict, md5: str) -> str:
+    """The card a better copy of these bytes is now (``storage.replaced_media_path``) — "" when a live card has these very
+    bytes (the usual merge) or none had them."""
+    if not md5:
+        return ""
+    from core.database.storage import found_media_path_by_md5, replaced_media_path
+    if found_media_path_by_md5(settings, md5):
+        return ""
+    return replaced_media_path(settings, md5)
 
 
 def _video_length(path) -> None:
