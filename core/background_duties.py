@@ -30,9 +30,16 @@
   same picture and larger, swapped in), 40 seconds at most a round, the rest 20 seconds later; while the parser or the
   subscriptions use the sites — 8 seconds a round, every minute; not while the session's downloads are off, nor while
   «Обслуживание» has the library, nor while the base is read-only;
+- every 10 minutes: e621's export of posts as a local MD5 index (``e621_export.tick``, v5.44.25 — when «MD5 на e621 —
+  по его выгрузке» is on): downloaded when missing or old, the posts uploaded after it caught up every hour — in a
+  thread of its own (this one never waits for it), which stops at the exit and when the switch is turned off;
 - every 3 minutes: the openings and endings of the series of the tab «Видео» whose episodes are new
   (``video_skips.background_round``: their sound and key frames compared episode to episode), 45 seconds at most a
-  round, the rest 10 seconds later; not while a video plays in the window (it would stutter).
+  round, the rest 10 seconds later; not while a video plays in the window (it would stutter);
+- every minute: the tags' categories by what most sites say (``tag_consensus``, v5.44.49): once after the upgrade
+  every tag (the library had kept the first category anyone gave a tag — «female» a character on every card), then the
+  tags whose sites' answers may have changed it (8 seconds at most a round); not while «Обслуживание» has the library,
+  nor while the base is read-only.
 
 One daemon thread, so none of this waits in the window's thread (the old window's timers wrote to the base from
 it, and a VACUUM of «Обслуживание» froze the window for the base's busy time).  It ends with the program: the exit
@@ -60,10 +67,12 @@ INTERVALS = {                        # seconds between the runs of each duty
     "card_sets": 3 * 60,
     "originals": 3 * 60,
     "skips": 3 * 60,
+    "e621_export": 10 * 60,
+    "tag_categories": 60,
 }
 FIRST_RUN = {"lifecycle": 1.5, "subscriptions": 60, "checkpoint": 30, "stalls": 60, "visual": 45,
              "durations": 20, "site_posts": 75, "card_sets": 25, "originals": 150,
-             "skips": 90}                                                            # seconds after the start
+             "skips": 90, "e621_export": 60, "tag_categories": 15}                  # seconds after the start
 VISUAL_AGAIN = 30                    # seconds to the next round of «фото или рисунок» when the last one was cut short
 DURATIONS_AGAIN = 5                  # seconds to the next round of video lengths when cards are still waiting
 SITE_POSTS_AGAIN = 15                # seconds to the next round of questions to the sites when posts are still waiting
@@ -277,6 +286,32 @@ class BackgroundDuties:
                       ", more to come" if result.get("more") else "")
         if result.get("more"):
             self._next_in["skips"] = SKIPS_AGAIN
+
+    def _e621_export(self, settings: dict) -> None:
+        """e621's export as a local MD5 index (``core/e621_export``): the work, when something is due, starts in a
+        thread of its own; it reads the live switch (turned off — it stops)."""
+        if self._stopping():
+            return
+        from core import e621_export
+        if e621_export.tick(settings, live=self._settings):
+            _LOG.info("e621 export: work started")
+
+    def _tag_categories(self, settings: dict) -> None:
+        """The tags' categories by what most sites say (``core/database/tag_consensus``): every tag once after the
+        upgrade, then the tags whose sites' answers may have changed it."""
+        from core.database.connection import writes_blocked
+        if self._stopping() or writes_blocked() or _library_taken():
+            return
+        from core.database import tag_consensus
+        changed = False
+        if not tag_consensus.repaired(settings):
+            summary = tag_consensus.repair(settings, log=_LOG.info, stop=self._stopping)
+            changed = bool(summary.get("changed") or summary.get("filled_fixed") or summary.get("slips_fixed"))
+        if self._stopping():
+            return
+        result = tag_consensus.review(settings, budget=8.0, log=_LOG.info)
+        if (changed or result.get("changed")) and self._changed is not None:
+            self._changed()
 
     def _card_sets(self, settings: dict) -> None:
         """The сборки put together again when the library changed since the last time."""

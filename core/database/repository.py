@@ -10,6 +10,7 @@ from functools import wraps
 from core.performance import timed as _perf_timed
 from core.tag_utils import normalize_tag, should_hide_tag
 from .connection import db
+from .tag_consensus import CATEGORY_PRIORITY as _CATEGORY_PRIORITY
 
 _LOG = logging.getLogger(__name__)
 
@@ -367,27 +368,29 @@ def _item_from_row(row, load_details=False):
     }
 
 
-_CATEGORY_PRIORITY = {
-    "artist": 0, "contributor": 1, "character": 2, "copyright": 3,
-    "species": 4, "meta": 5, "lore": 6, "invalid": 7,
-    "parody": 8, "language": 9, "category": 10, "pages": 11, "general": 99,
-}
+def _best(categories) -> str | None:
+    """The most particular of ``categories`` (artist before character … before «general»); None — none."""
+    return min(categories, key=lambda c: (_CATEGORY_PRIORITY.get(c, 50), c)) if categories else None
 
 
 def _effective_source_groups(source_groups, known=None):
-    """Promote a source's ``general`` category from corroborating sources only.
+    """Each site's set of the card as the card's page shows it: a site's «general» tag in another category only by
+    corroboration.
 
-    Source tag membership remains isolated: no source receives a tag that it did
-    not return itself.  Categories are monotonic, however.  When Gelbooru has
-    ``alan_smithee`` as ``general`` and Danbooru has the same tag as ``artist``
-    for the same image, Gelbooru may display/use its existing tag as ``artist``.
-    A classified tag is never demoted to ``general`` by another source.
-    ``known`` (v5.44.11): {normalized tag: category} the library knows the tag by (the tags table — what the sites
-    said of it on other cards): a card of one site that sent no categories (a download of the grabber or of the
-    subscriptions from rule34.xxx before 5.44.11: every tag «Общие») shows them too.
+    Source tag membership remains isolated: no source receives a tag that it did not return itself.  ``known`` —
+    {normalized tag: the category the library knows it by} (``tags.category``: what most sites say of it, v5.44.49);
+    None — the caller has none (then another site's category of the same tag on this card, as before 5.44.11).
+
+    - a set that came without categories (every tag «general»: a download of the grabber or of the subscriptions from
+      rule34.xxx before 5.44.11, a site that sends none) — its tags in the library's categories (v5.44.11);
+    - a set with categories is the site's word: its «general» tag takes the library's category only when another site
+      of this card gives the tag that category (Danbooru's «canine» with e621's «species»).  (5.44.11–5.44.48 gave every
+      «general» tag the library's category — one wrong category of the library, «female» as a character, was on
+      every card.)
     """
     normalized_by_source = {}
-    best_classified = {}
+    said = defaultdict(set)              # tag -> the categories other than «general» the card's sites give it
+    categorized = {}
     for host, groups in (source_groups or {}).items():
         own = {}
         for category, values in (groups or {}).items():
@@ -399,31 +402,43 @@ def _effective_source_groups(source_groups, known=None):
                 previous = own.get(norm)
                 if previous is None or _CATEGORY_PRIORITY.get(cat, 50) < _CATEGORY_PRIORITY.get(previous[0], 50):
                     own[norm] = (cat, name)
-                if cat != "general":
-                    prior = best_classified.get(norm)
-                    if prior is None or _CATEGORY_PRIORITY.get(cat, 50) < _CATEGORY_PRIORITY.get(prior[0], 50):
-                        best_classified[norm] = (cat, name)
+        for norm, (cat, _name) in own.items():
+            if cat != "general":
+                said[norm].add(cat)
+        categorized[str(host)] = any(cat != "general" for cat, _name in own.values())
         normalized_by_source[str(host)] = own
 
     effective = {}
     for host, own in normalized_by_source.items():
         groups = defaultdict(list)
         for norm, (cat, name) in own.items():
-            promoted = best_classified.get(norm)
-            if promoted is None and known and known.get(norm):
-                promoted = (known[norm], name)
-            effective_cat = promoted[0] if cat == "general" and promoted is not None else cat
-            groups[effective_cat].append(name)
+            if cat == "general":
+                cat = _promoted(norm, said.get(norm), known, categorized[host])
+            groups[cat].append(name)
         for cat in groups:
             groups[cat].sort(key=lambda value: value.lower())
         effective[host] = dict(groups)
     return effective
 
 
-def _merged_source_groups(source_groups, selected_source="all"):
+def _promoted(norm, said, known, categorized) -> str:
+    """The category a site's «general» tag is shown in (see :func:`_effective_source_groups`)."""
+    if known is None or norm not in known:
+        return _best(said) or "general"
+    library = str(known.get(norm) or "general").lower()
+    if library == "general":
+        return "general"
+    if not categorized or library in (said or ()):
+        return library
+    return "general"
+
+
+def _merged_source_groups(source_groups, selected_source="all", known=None):
+    """The card's tags of all its sites (or of one): a tag the sites give different categories is in the one most
+    sites give it (``known``, v5.44.49) when one of the card's sites gives it that, else in the most particular one."""
     selected = str(selected_source or "all").lower()
     maps = source_groups.values() if selected == "all" else [source_groups.get(selected, {})]
-    best = {}
+    seen = {}
     for groups in maps:
         for category, values in (groups or {}).items():
             cat = str(category or "general")
@@ -431,11 +446,12 @@ def _merged_source_groups(source_groups, selected_source="all"):
                 norm = normalize_tag(name)
                 if not norm:
                     continue
-                prior = best.get(norm)
-                if prior is None or _CATEGORY_PRIORITY.get(cat, 50) < _CATEGORY_PRIORITY.get(prior[0], 50):
-                    best[norm] = (cat, name)
+                entry = seen.setdefault(norm, [set(), name])
+                entry[0].add(cat)
     out = defaultdict(list)
-    for _norm, (cat, name) in best.items():
+    for norm, (cats, name) in seen.items():
+        library = str((known or {}).get(norm) or "").lower()
+        cat = library if library in cats else _best(cats)
         out[cat].append(name)
     for cat in out:
         out[cat].sort(key=lambda value: value.lower())
@@ -484,15 +500,13 @@ def enrich_items(settings, items, tag_source="all"):
                 legacy_by_image[int(r["image_id"])].append(r)
 
             has_provenance = set()
-            known = {}                      # tag -> the category the library knows it by (v5.44.11)
+            known = {}                      # tag -> the category the library knows it by (v5.44.11; most sites' — 5.44.49)
             for r in source_rows:
                 item = by_id.get(int(r["image_id"]))
                 if item is None:
                     continue
                 cat = str(r["category"] or "general")
-                library_cat = str(r["known"] or "general").lower()
-                if library_cat != "general":
-                    known[normalize_tag(r["name"])] = library_cat
+                known[normalize_tag(r["name"])] = str(r["known"] or "general").lower()
                 if should_hide_tag(r["name"], cat, settings):
                     continue
                 host = str(r["host"] or "").lower().replace("www.", "")
@@ -505,7 +519,7 @@ def enrich_items(settings, items, tag_source="all"):
                     # promote only this source's existing general tag.
                     item["tag_groups_raw_by_source"] = item.get("tag_groups_by_source", {})
                     item["tag_groups_by_source"] = _effective_source_groups(item["tag_groups_raw_by_source"], known)
-                    groups = _merged_source_groups(item.get("tag_groups_by_source", {}), selected_source)
+                    groups = _merged_source_groups(item.get("tag_groups_by_source", {}), selected_source, known)
                 elif selected_source == "all":
                     groups = defaultdict(list)
                     for r in legacy_by_image.get(int(item["id"]), ()):

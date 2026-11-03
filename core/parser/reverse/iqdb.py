@@ -12,6 +12,13 @@ from core.parser.util import host_of, looks_like_cloudflare, norm_md5, page_word
 _SIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%\s*similarity", re.I)
 # Any of these proves we got an IQDB result page (with or without matches).
 _RESULT_PAGE_MARKERS = ("your image", "no relevant matches", "% similarity", 'id="pages"', "id='pages'")
+# iqdb.org's own words on a search it did not finish: «Can't read query result! Please try again.» (the owner's journal
+# of 1.11.2026: five of about a hundred searches).  (v5.44.43) The owner (2.11.2026): «iqdb.org должен работать, так
+# что чини» — it was asked once more and then given up (the file deferred, and a run where iqdb.org was shaky left it
+# in Брак).  Now it is asked again several times, the wait growing (iqdb.org clears it on a retry — the owner's log:
+# «…ещё раз через 5 с» then a 95 % hit); only after :data:`TRY_AGAIN_WAITS` are all spent is it a failure (deferred).
+_TRY_AGAIN = ("can't read query result", "please try again")
+TRY_AGAIN_WAITS = (5.0, 10.0, 20.0)
 
 
 class Iqdb(ReverseService):
@@ -21,6 +28,9 @@ class Iqdb(ReverseService):
     endpoint = "https://iqdb.org/"
     setting = "enable_iqdb"
     default_enabled = True
+    # (v5.44.36) its videos are Danbooru's (their previews: the frame of «thumbnail» over the first 300 frames — two of
+    # the owner's Брак found by it at 87 % and 99 %, by their start not), then Gelbooru's and Sankaku's: the start
+    video_styles = ("danbooru", "start")
 
     def enabled(self) -> bool:
         return self.ctx.flag(self.setting, self.default_enabled) and not self.disabled_reason
@@ -28,7 +38,7 @@ class Iqdb(ReverseService):
     def min_similarity(self) -> float:
         return self.ctx.setting_float("iqdb_min_similarity", 80.0, 0.0, 100.0)
 
-    def search(self, upload_path) -> ReverseOutcome:
+    def search(self, upload_path, *, again: int = 0) -> ReverseOutcome:
         try:
             response = self.http.post_file(self.endpoint, upload_path, data={"forcegray": "on"})
         except HttpFailure as exc:
@@ -46,6 +56,12 @@ class Iqdb(ReverseService):
         if "not an image" in low or "too large" in low or "file is too" in low:
             return ReverseOutcome("bad_input", detail=page_words(html, 160))
         if not any(m in low for m in _RESULT_PAGE_MARKERS):
+            if again < len(TRY_AGAIN_WAITS) and any(words in low for words in _TRY_AGAIN):
+                wait = TRY_AGAIN_WAITS[again]
+                self.ctx.log(f"  {self.name}: «Can't read query result» — спрашиваю ещё раз ({again + 1} из "
+                             f"{len(TRY_AGAIN_WAITS)}) через {wait:.0f} с")
+                self.http.sleep(wait)
+                return self.search(upload_path, again=again + 1)
             # what the page says (its title and text), not the beginning of its markup — whole enough to tell why
             # (v5.27 cut it at «Multi-service image search - Search results — Multi-service image search ( 0…»)
             return ReverseOutcome("failed",
@@ -90,6 +106,7 @@ class DanbooruIqdb(Iqdb):
     endpoint = "https://danbooru.iqdb.org/"
     setting = "enable_danbooru_iqdb"
     default_enabled = False
+    video_styles = ("danbooru",)         # Danbooru's alone
 
 
 def _absolute(href: str, base: str) -> str:

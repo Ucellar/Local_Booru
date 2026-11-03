@@ -69,18 +69,45 @@
     if (key === "skin") root.dataset.gallerySkin = id;
     remember(key, choice);
     markSkin(choice);
+    resetVariant(id, choice === "gallery");
+  }
+
+  // (v5.44.45–46) The side of a look just chosen: its own (dark or light), «как у галереи» — the gallery's; a side
+  // chosen before for this page is forgotten (prefs: "" drops it).  The switch shows only for looks with both sides.
+  function resetVariant(id, follows) {
+    const item = document.querySelector(`.skin-item[data-skin="${CSS.escape(id)}"]`);
+    const toggles = !!item && item.dataset.toggle === "1";
+    const own = (item && item.dataset.variant) || "light";
+    const side = follows && toggles && root.dataset.galleryVariant ? root.dataset.galleryVariant : own;
+    showVariant(side, toggles);
+    if ((root.dataset.skinKey || "skin") === "skin") root.dataset.galleryVariant = side;
+    remember(root.dataset.variantKey || "skin_variant", "");
+  }
+
+  function showVariant(side, toggles) {
+    root.dataset.variant = side;
+    const control = document.querySelector(".skin-variant");
+    if (!control) return;
+    if (toggles !== undefined) control.hidden = !toggles;
+    control.querySelectorAll(".skin-vbtn[data-variant]").forEach((b) => {
+      const on = b.dataset.variant === side;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+    });
   }
 
   // «Это оформление — на всех страницах»: the gallery gets it, the other pages look like the gallery.
   async function skinForAll() {
     const id = root.dataset.skin;
+    const side = root.dataset.variant || "light";        // (v5.44.46) every page gets this side too
     try {
-      await postJson("/api/prefs", { looks_all: id });
+      await postJson("/api/prefs", { looks_all: id, skin_variant: side });
     } catch (err) {
       toast("Не сохранилось: " + err.message, true);
       return;
     }
     root.dataset.gallerySkin = id;
+    root.dataset.galleryVariant = side;
     const follow = document.querySelector(".skin-follow");
     const chosen = document.querySelector(`.skin-item[data-skin="${CSS.escape(id)}"]`);
     if (follow && chosen) {
@@ -210,6 +237,14 @@
       if (button) button.focus();
     },
 
+    // (v5.44.45) the light / dark switch of this page's look — just flips the attribute, the stylesheet has both sides
+    variant(el) {
+      const value = el.dataset.variant;
+      showVariant(value);
+      if ((root.dataset.skinKey || "skin") === "skin") root.dataset.galleryVariant = value;
+      remember(root.dataset.variantKey || "skin_variant", value);
+    },
+
     "skin-all"() {
       openSkinMenu(false);
       skinForAll();
@@ -231,9 +266,16 @@
       requestAnimationFrame(() => fitPageCount(true));    // other cells: another number of pictures fits the window
     },
 
-    "toggle-fit": () => {
+    "toggle-fit": (el, event) => {
       const img = postPicture();
-      if (img) setZoom(img.classList.contains("fit") ? 1 : 0);
+      if (!img) return;
+      if (!img.classList.contains("fit")) { setZoom(0); return; }   // full → fit back to the window
+      // fit → full: show the full size at the very spot the click landed (a click on the button — the centre)
+      const onImg = !!(event && event.target === img);
+      const rect = img.getBoundingClientRect();
+      const fx = onImg && rect.width ? (event.clientX - rect.left) / rect.width : 0.5;
+      const fy = onImg && rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
+      zoomToPoint(fx, fy, onImg ? event : null);
     },
 
     "fit-always-original": () => {
@@ -457,7 +499,7 @@
     if (menu && !menu.contains(event.target)) openSkinMenu(false);
     if (!el || !actions[el.dataset.action]) return;
     event.preventDefault();
-    actions[el.dataset.action](el);
+    actions[el.dataset.action](el, event);
   });
 
   document.addEventListener("keydown", (event) => {
@@ -1304,8 +1346,7 @@
         if (!playing && at > 1 && !state.ended) box.dataset.from = String(at);   // a later start goes on from here
       }
       if (state.ended) box.dataset.from = "0";
-      play.textContent = playing ? "❚❚" : "▶";
-      play.setAttribute("aria-label", playing ? "Пауза" : "Пуск");
+      play.setAttribute("aria-label", playing ? "Пауза" : "Пуск");   // its icon: .native-video.playing (booru.css)
       box.classList.toggle("playing", playing);
       const duration = Number(state.duration) || 0;
       const position = Number(state.position) || 0;
@@ -1313,7 +1354,10 @@
         time.textContent = clock(position) + " / " + clock(duration);
         if (duration > 0) seek.value = String(Math.round(1000 * position / duration));
       }
-      mute.textContent = state.muted ? "🔇" : "🔊";
+      if (mute.dataset.muted !== (state.muted ? "1" : "0")) {          // its icon: data-muted (booru.css)
+        mute.dataset.muted = state.muted ? "1" : "0";
+        mute.setAttribute("aria-label", state.muted ? "Включить звук" : "Выключить звук");
+      }
       if (document.activeElement !== volume && Date.now() - volumeSet > 1500 && state.volume !== undefined) {
         volume.value = String(state.volume);
       }
@@ -1700,6 +1744,31 @@
     const img = postPicture();
     if (!img || !img.naturalWidth) return 1;
     return zoom || img.clientWidth / img.naturalWidth;
+  }
+
+  // (v5.44.40) full size, then bring the clicked part of the picture to where the click was (under the cursor, or
+  // the centre when there is no cursor — the button).  Depending on the layout the picture scrolls inside
+  // ``.post-stage`` or the whole page scrolls (across as well as down), so both are moved: ``.post-stage`` takes what
+  // it can and the page takes the rest.  A big picture then lands on the very part the person pointed at.
+  function zoomToPoint(fx, fy, event) {
+    const img = postPicture();
+    if (!img) return;
+    const stage = img.closest(".post-stage");
+    setZoom(1);
+    if (!img.clientWidth) return;
+    const targetX = fx * img.clientWidth;             // the point on the now-full picture
+    const targetY = fy * img.clientHeight;
+    const anchorX = event ? event.clientX : window.innerWidth / 2;
+    const anchorY = event ? event.clientY : window.innerHeight / 2;
+    // where that point sits in the window right now (reading the rect flushes the full-size layout first)
+    const where = () => { const r = img.getBoundingClientRect(); return [r.left + targetX, r.top + targetY]; };
+    if (stage) {                                      // the stage scrolls what it can (clamped on its own)
+      const [vx, vy] = where();
+      stage.scrollLeft += vx - anchorX;
+      stage.scrollTop += vy - anchorY;
+    }
+    const [vx, vy] = where();                         // whatever the stage could not scroll, the page does
+    window.scrollBy(vx - anchorX, vy - anchorY);
   }
 
   const hotkeyActions = {

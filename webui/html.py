@@ -75,10 +75,13 @@ SEARCH_TIP = ("Пробел — все теги сразу, -тег — без �
               "type:video, size:+5mb, rating:4, tags:0.")
 
 
-def _skin_item(choice: str, name: str, description: str, swatches, on: bool, extra: str = "") -> str:
+def _skin_item(choice: str, name: str, description: str, swatches, on: bool, extra: str = "",
+               natural: str = "light", toggles: bool = True) -> str:
     dots = "".join(f'<i style="background:{esc(color)}"></i>' for color in swatches)
+    # (v5.44.45) data-variant/data-toggle: picking this look resets the page to its own side (booru.js resetVariant)
     return (f'<button type="button" role="menuitemradio" aria-checked="{"true" if on else "false"}" '
-            f'class="skin-item{extra}{" active" if on else ""}" data-action="skin" data-skin="{esc(choice)}">'
+            f'class="skin-item{extra}{" active" if on else ""}" data-action="skin" data-skin="{esc(choice)}" '
+            f'data-variant="{esc(natural)}" data-toggle="{"1" if toggles else "0"}">'
             f'<span class="swatches" aria-hidden="true">{dots}</span>'
             f'<span class="skin-text"><b>{esc(name)}</b><small>{esc(description)}</small></span></button>')
 
@@ -92,12 +95,22 @@ def _skin_menu(look: dict, page: str) -> str:
     if not gallery_page:
         g = BY_ID[look["gallery"]]
         items.append(_skin_item("gallery", "Как у галереи", f"Сейчас там «{g.name}»", g.swatches, look["follows"],
-                                " skin-follow"))
-    items += [_skin_item(s.id, s.name, s.description, s.swatches, not look["follows"] and s.id == look["skin"])
+                                " skin-follow", natural="dark" if g.dark else "light", toggles=g.toggle))
+    items += [_skin_item(s.id, s.name, s.description, s.swatches, not look["follows"] and s.id == look["skin"],
+                         natural="dark" if s.dark else "light", toggles=s.toggle)
               for s in SKINS]
     name = PAGE_NAMES.get(page, PAGE_NAMES["posts"])
     scope = (f'<p class="skin-scope" role="presentation">Оформление страницы «{esc(name)}»'
              + ('<small>его же берут страницы, где выбрано «как у галереи»</small>' if gallery_page else "") + "</p>")
+    # (v5.44.45) light / dark switch for this page only; always in the menu so picking another look can reveal it,
+    # hidden for a one-sided look (the r34 trio).  Each page keeps its own side (prefs: <key>_variant).
+    cur = BY_ID.get(look["skin"])
+    now = look.get("variant", "light")
+    vhidden = "" if (cur and cur.toggle) else " hidden"
+    variant = (f'<div class="skin-variant" role="group" aria-label="Светлая или тёмная"{vhidden}>' + "".join(
+        f'<button type="button" class="skin-vbtn{" active" if now == code else ""}" data-action="variant" '
+        f'data-variant="{code}" aria-pressed="{"true" if now == code else "false"}">{label}</button>'
+        for code, label in (("light", "Светлая"), ("dark", "Тёмная"))) + "</div>")
     every = ('<button type="button" role="menuitem" class="skin-item skin-all" data-action="skin-all">'
              '<span class="skin-text"><b>Это оформление — на всех страницах</b>'
              '<small>у остальных станет «как у галереи»</small></span></button>')
@@ -105,7 +118,7 @@ def _skin_menu(look: dict, page: str) -> str:
             f'aria-haspopup="menu" aria-expanded="false" title="Оформление страницы «{esc(name)}»">'
             f'<span class="skin-icon" aria-hidden="true"></span><span class="skin-label">Оформление</span></button>'
             f'<div class="skin-list" role="menu" aria-label="Оформление страницы «{esc(name)}»" hidden>'
-            f'{scope}{"".join(items)}{every}</div></div>')
+            f'{scope}{variant}{"".join(items)}{every}</div></div>')
 
 
 # A gear drawn here (eight teeth and a ring): no icon font, no picture file.
@@ -176,7 +189,7 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
     data_attrs = "".join(f' data-{esc(k)}="{esc(v)}"' for k, v in (body_data or {}).items())
     sections += _reset_notice() + _archive_notice()
     return f"""<!doctype html>
-<html lang="ru" data-skin="{esc(skin)}" data-thumb="{esc(thumbs)}" data-skin-key="{esc(look["key"])}" data-gallery-skin="{esc(look["gallery"])}">
+<html lang="ru" data-skin="{esc(skin)}" data-thumb="{esc(thumbs)}" data-skin-key="{esc(look["key"])}" data-gallery-skin="{esc(look["gallery"])}" data-variant="{esc(look.get("variant", "light"))}" data-variant-key="{esc(look.get("variant_key", "skin_variant"))}" data-gallery-variant="{esc(look.get("gallery_variant", "light"))}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

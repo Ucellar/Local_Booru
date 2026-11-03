@@ -1,0 +1,495 @@
+@import url("_drawer.css");
+/* «Pixiv» (v5.44.46, made again: the v5.44.44 one was the gallery's grid in blue).  After pixiv.net itself (the
+   owner's screenshots of 3.11.2026, its dark side) and its design system «charcoal» (github.com/pixiv/charcoal: the
+   colour tokens of both sides): the menu down the left side — small icons, the names beside them, groups apart; the
+   header with the name in pixiv's blue, a grey search field with a magnifier in the middle, grey pills at the right;
+   the sections as pixiv's tabs — bold, the chosen one with the blue bar over it; works in square cells, the picture
+   whole on a grey a little lighter than the page, corners of 8 px, the page count over the top right, the title in
+   bold under it and the grey line under that; the tags as pixiv's coloured «#tag» plates; a picture's page as pixiv's
+   work page — the work in a panel with corners of 24 px on the darker page, the tags and the actions beside it, the
+   main action a blue pill.  The system font, as pixiv (Segoe UI on Windows). */
+:root {
+  --bg: #ffffff;
+  --panel: #f5f5f5;
+  --panel-2: #ebebeb;
+  --border: #e8e8e8;
+  --text: #1f1f1f;
+  --muted: #858585;
+  --link: #3d7699;
+  --link-hover: #2a5674;
+  --accent: #0096fa;
+  --accent-ink: #ffffff;
+  --accent-text: var(--link);    /* pixiv's blue is for fills: text in the accent is its link1 */
+  --bar-bg: #ffffff;
+  --bar-ink: #1f1f1f;
+  --bar-active-bg: #0096fa;
+  --bar-active-ink: #ffffff;
+  --thumb-bg: #f5f5f5;
+  --thumb-ring: #0096fa;
+  --danger: #e62e00;
+  --focus: #0096fa;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.16);
+
+  --tag-artist: #c9343a;
+  --tag-character: #17803f;
+  --tag-copyright: #8a4fd0;
+  --tag-general: #3d7699;
+  --tag-meta: #a85d06;
+  --tag-species: #b44c0d;
+  --tag-lore: #0c7c70;
+  --tag-contributor: #b32b6c;
+  --tag-invalid: #767676;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+  --font-size: 14px;
+  --font-head: var(--font);
+  --radius: 8px;
+  --radius-thumb: 8px;
+  --side: 240px;
+  --thumb: 184px;
+  color-scheme: light;
+
+  --px-nav: 200px;               /* the menu's column */
+  --px-text2: #474747;
+  --px-back2: #f5f5f5;           /* charcoal background2: the page under a work's panel */
+  --px-well: #f5f5f5;            /* the grey under a work's picture */
+  --px-ring: rgba(0, 150, 250, 0.32);
+  --px-over: rgba(0, 0, 0, 0.32);/* charcoal surface4: a badge over a picture */
+  --px-heart: #ff4060;
+  /* the colours of the tag plates (white text on them) */
+  --px-plate-artist: #c9343a;
+  --px-plate-character: #2e8a4e;
+  --px-plate-copyright: #8a4fd0;
+  --px-plate-general: #3a78b8;
+  --px-plate-meta: #b0650d;
+  --px-plate-species: #b4520f;
+  --px-plate-lore: #0f8072;
+  --px-plate-contributor: #b32b6c;
+  --px-plate-invalid: #6e6e6e;
+}
+:root[data-thumb="s"] { --thumb: 144px; }
+:root[data-thumb="l"] { --thumb: 240px; }
+/* the icons of the menu: the program's line set (webui/icons.py), small and a little heavier, like pixiv's */
+:root {
+  --px-i-home: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 10.5 12 4l8 6.5V20h-5v-6H9v6H4z'/%3E%3C/svg%3E");
+  --px-i-book: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='3.5' width='16' height='17' rx='2'/%3E%3Cpath d='M12 3.5v17M4 12h8'/%3E%3C/svg%3E");
+  --px-i-videos: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3.5' y='5' width='17' height='14' rx='3'/%3E%3Cpath d='M10.2 9.3v5.4l4.6-2.7z'/%3E%3C/svg%3E");
+  --px-i-grab: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14'/%3E%3C/svg%3E");
+  --px-i-search: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6'/%3E%3Cpath d='m15 15 5 5'/%3E%3C/svg%3E");
+  --px-i-subs: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='9' cy='8.5' r='3.5'/%3E%3Cpath d='M3 19.5c.6-3.3 3-5 6-5s5.4 1.7 6 5M15.5 5.2a3.5 3.5 0 0 1 0 6.6M17.5 14.6c2 .6 3.2 2.3 3.5 4.9'/%3E%3C/svg%3E");
+  --px-i-globe: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='8.5'/%3E%3Cpath d='M3.5 12h17M12 3.5c2.3 2.4 3.5 5.2 3.5 8.5s-1.2 6.1-3.5 8.5c-2.3-2.4-3.5-5.2-3.5-8.5s1.2-6.1 3.5-8.5z'/%3E%3C/svg%3E");
+  --px-i-copy: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='8.5' y='8.5' width='12' height='12' rx='2'/%3E%3Cpath d='M15.5 8.5v-3a2 2 0 0 0-2-2h-8a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3'/%3E%3C/svg%3E");
+  --px-i-pulse: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 12h4l2.5-6 4 12 2.5-6h4'/%3E%3C/svg%3E");
+  --px-i-glass: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='m15.5 15.5 5 5'/%3E%3C/svg%3E");
+}
+
+body { font: 400 var(--font-size)/22px var(--font); }
+
+/* ── the header: the name in pixiv's blue, the grey search field in the middle, the pills at the right ─────── */
+.top {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: 56px;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 24px;
+  padding: 0 24px 0 20px;
+  background: var(--bar-bg);
+  border-bottom: 0;
+}
+.brand { flex: none; min-width: calc(var(--px-nav) - 44px); padding: 0; gap: 0; font: 700 25px/1 var(--font-head); letter-spacing: -1px; }
+.brand, .brand:hover, .bn-1, .bn-2 { color: var(--accent); }
+.top-search { display: block; flex: 0 1 410px; min-width: 200px; margin: 0 auto; }
+.top-search .search-row { display: block; position: relative; }
+.top .top-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px 0 32px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font: 400 13px/22px var(--font);
+  transition: box-shadow 0.2s, background-color 0.2s;
+}
+.top .top-search input::placeholder { color: var(--muted); }
+.top .top-search input:hover { background: var(--panel-2); }
+.top .top-search input:focus { outline: none; box-shadow: 0 0 0 4px var(--px-ring); }
+.top-search .search-row::before {               /* the magnifier inside the field, at its left */
+  content: "";
+  position: absolute;
+  z-index: 1;
+  top: 9px;
+  left: 11px;
+  width: 14px;
+  height: 14px;
+  background: var(--muted);
+  -webkit-mask: var(--px-i-glass) center / 14px no-repeat;
+  mask: var(--px-i-glass) center / 14px no-repeat;
+  pointer-events: none;
+}
+.top-tools { flex: none; margin-left: auto; gap: 8px; }
+.skin-button, .drawer-toggle {
+  height: 32px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font: 700 13px/32px var(--font);
+  transition: background-color 0.2s;
+}
+.skin-button:hover, .drawer-toggle:hover { background: var(--panel-2); color: var(--text); }
+.settings-link.skin-button { width: 32px; padding: 0; justify-content: center; background: transparent; }
+.settings-link.skin-button:hover, .settings-link.active { background: var(--panel); }
+.settings-link .skin-label { display: none; }
+.settings-link .gear-icon { width: 18px; height: 18px; }
+.skin-icon { box-shadow: none; }
+
+/* the menu «Оформление»: pixiv's pop-up */
+.skin-list { border: 0; border-radius: 8px; padding: 8px 0; background: var(--bg); box-shadow: var(--shadow); }
+.skin-scope { margin: 4px 16px 8px; font: 700 14px/22px var(--font); }
+.skin-scope small { font: 400 12px/20px var(--font); }
+.skin-variant { margin: 0 16px 10px; gap: 0; padding: 0; border-radius: 16px; background: var(--panel); }
+.skin-vbtn { height: 32px; border: 0; border-radius: 16px; background: transparent; color: var(--px-text2); font: 700 13px/32px var(--font); }
+.skin-vbtn:hover { background: transparent; color: var(--text); }
+.skin-vbtn.active, .skin-vbtn.active:hover { background: var(--accent); color: var(--accent-ink); }
+.skin-item { padding: 8px 16px; border: 0; border-radius: 0; font: 400 14px/22px var(--font); }
+.skin-item:hover, .skin-item:focus-visible, .skin-item.active { background: var(--panel); outline: none; }
+.skin-item.active b { color: var(--link); }
+.skin-text small { color: var(--muted); font: 400 12px/20px var(--font); }
+.skin-item.skin-all { padding-left: 16px; border-top: 1px solid var(--border); border-radius: 0; }
+
+/* ── the menu down the left side: small icons, the names beside them, groups apart ───────────────────────── */
+.main-nav {
+  position: fixed;
+  z-index: 35;
+  top: 56px;
+  left: 0;
+  bottom: 0;
+  width: var(--px-nav);
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+  padding: 12px 8px;
+  overflow-y: auto;
+  background: var(--bar-bg);
+  scrollbar-width: thin;
+}
+.main-nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 4px;
+  color: var(--px-text2);
+  font: 400 13px/20px var(--font);
+}
+.main-nav a::before {
+  content: "";
+  flex: none;
+  width: 16px;
+  height: 16px;
+  background: currentColor;
+  -webkit-mask: var(--i, var(--px-i-home)) center / 16px no-repeat;
+  mask: var(--i, var(--px-i-home)) center / 16px no-repeat;
+}
+.main-nav a[href="/posts"] { --i: var(--px-i-home); }
+.main-nav a[href="/manga"] { --i: var(--px-i-book); }
+.main-nav a[href="/videos"] { --i: var(--px-i-videos); }
+.main-nav a[href="/grab"] { --i: var(--px-i-grab); margin-top: 24px; }
+.main-nav a[href="/parser"] { --i: var(--px-i-search); }
+.main-nav a[href="/subs"] { --i: var(--px-i-subs); }
+.main-nav a[href="/sites"] { --i: var(--px-i-globe); margin-top: 24px; }
+.main-nav a[href="/dupes"] { --i: var(--px-i-copy); }
+.main-nav a[href="/diag"] { --i: var(--px-i-pulse); }
+.main-nav a:hover { background: var(--panel); color: var(--text); text-decoration: none; }
+.main-nav a.active, .main-nav a.active:hover { background: none; color: var(--text); font-weight: 700; }
+.main-nav a.active::before { background: var(--accent); }
+.sections, .layout, .reset-notice { margin-left: var(--px-nav); }
+/* pixiv's column: 1224 px in the middle of what the menu leaves (100% — the page's width) */
+.sections, .layout { --px-side: max(24px, calc((100% - var(--px-nav) - 1224px) / 2)); }
+
+/* ── the sections: pixiv's tabs, the chosen one with the blue bar over it ───────────────────────────────── */
+.sections {
+  gap: 0 36px;
+  padding: 16px var(--px-side) 0;
+  border: 0;
+}
+.sections a {
+  position: relative;
+  padding: 12px 0 10px;
+  color: var(--muted);
+  font: 700 14px/22px var(--font);
+}
+.sections a:hover { color: var(--text); text-decoration: none; }
+.sections a.active, .sections a.active:hover { color: var(--text); }
+.sections a.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -8px;
+  right: -8px;
+  height: 4px;
+  border-radius: 0 0 4px 4px;
+  background: var(--accent);
+}
+.sections-sep { display: none; }
+
+/* ── the page ─────────────────────────────────────────────────────────────────────────────────────── */
+.layout { padding: 16px var(--px-side) 64px; }
+.result-bar { gap: 4px 16px; margin: 0 0 16px; color: var(--muted); font: 400 12px/20px var(--font); }
+.result-count { color: var(--text); font: 700 16px/24px var(--font); }
+.thumb-sizes button.link { color: var(--muted); font-size: 12px; }
+.thumb-sizes button.link.active { color: var(--text); font-weight: 700; }
+.filter-line { color: var(--muted); font-size: 12px; }
+/* the page's tags: pixiv's coloured «#tag» plates */
+.tag-chips { gap: 8px; margin: 0 0 24px; }
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 14px;
+  border-radius: 4px;
+  background: var(--px-plate, var(--px-plate-general));
+  color: #ffffff;
+  font: 700 13px/22px var(--font);
+}
+.chip::before { content: "#"; margin-right: -4px; }
+.chip:hover { color: #ffffff; text-decoration: none; filter: brightness(1.12); }
+.chip .tag-count { color: rgba(255, 255, 255, 0.85); font-weight: 400; font-size: 11px; }
+a.chip.tag-artist { --px-plate: var(--px-plate-artist); }
+a.chip.tag-character { --px-plate: var(--px-plate-character); }
+a.chip.tag-copyright { --px-plate: var(--px-plate-copyright); }
+a.chip.tag-meta { --px-plate: var(--px-plate-meta); }
+a.chip.tag-species { --px-plate: var(--px-plate-species); }
+a.chip.tag-lore { --px-plate: var(--px-plate-lore); }
+a.chip.tag-contributor { --px-plate: var(--px-plate-contributor); }
+a.chip.tag-invalid { --px-plate: var(--px-plate-invalid); }
+
+/* works: square cells, the picture whole on the grey, the title under it */
+.thumbs { --cell: var(--thumb); gap: 24px 24px; }
+.thumb { display: block; height: auto; width: var(--cell); }
+.thumb-link { display: block; position: relative; line-height: normal; }
+.thumb-link:hover { text-decoration: none; }
+.thumb img {
+  display: block;
+  width: var(--cell);
+  height: var(--cell);
+  max-width: none;
+  max-height: none;
+  object-fit: contain;
+  border: 0;
+  border-radius: 8px;
+  background: var(--px-well);
+  transition: opacity 0.2s;
+}
+.thumb-link:hover img { opacity: 0.8; border-color: transparent; }
+.thumb-link:focus-visible { outline: none; }
+.thumb-link:focus-visible img { box-shadow: 0 0 0 4px var(--px-ring); }
+.thumb.untagged img { border: 0; box-shadow: inset 0 0 0 3px var(--tag-meta); }
+.thumb-caption {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--text);
+  font: 700 14px/22px var(--font);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.thumb.untagged .thumb-caption { color: var(--muted); }
+.thumb-info { display: flex; flex-wrap: wrap; gap: 0 8px; color: var(--muted); font: 400 12px/20px var(--font); }
+.ti-rating { color: var(--muted); }
+.ti-fav { display: none; }                        /* the heart is on the picture */
+.badges { top: 4px; left: auto; right: 4px; gap: 4px; }
+.badge {                                          /* pixiv's page count over a work */
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--px-over);
+  color: #ffffff;
+  font: 700 10px/20px var(--font);
+}
+.badge.fav {                                      /* the bookmarked heart, at the bottom right as on pixiv */
+  position: absolute;
+  top: calc(var(--cell) - 36px);
+  right: 0;
+  padding: 0;
+  background: none;
+  color: var(--px-heart);
+  font: 400 24px/28px var(--font);
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.4);
+}
+
+.paginator { gap: 8px; margin-top: 40px; }
+.paginator a, .paginator b, .paginator .gap {
+  min-width: 40px;
+  height: 40px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  font: 700 14px/40px var(--font);
+}
+.paginator a { background: transparent; color: var(--px-text2); }
+.paginator a:hover { background: var(--panel); color: var(--text); }
+.paginator b { background: var(--text); color: var(--bg); }
+
+/* controls: charcoal's pills and fields */
+button, .button {
+  border: 0;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--px-text2);
+  font-family: var(--font);
+  font-weight: 700;
+}
+button:not([class]):hover, .button:hover, button.danger:hover { background: var(--panel-2); color: var(--text); }
+button.primary, .button.primary { background: var(--accent); color: var(--accent-ink); }
+button.primary:hover, .button.primary:hover { background: #0085e0; color: var(--accent-ink); }
+button.danger, button.danger:hover { color: var(--danger); }
+button.link, button.link:hover { background: none; border-radius: 0; font-weight: 400; }
+button:focus-visible, .button:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--px-ring); }
+input[type="search"], input[type="text"], input[type="number"], input[type="url"], input[type="password"], select, textarea {
+  border: 0;
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: none; box-shadow: 0 0 0 4px var(--px-ring); }
+.star.on { color: #e09a00; }
+.ac-list { border: 0; border-radius: 8px; background: var(--bg); box-shadow: var(--shadow); }
+.ac-list li.active, .ac-list li:hover { background: var(--panel); }
+
+/* the tags: «#tag», kinds by colour */
+.sidebar { background: var(--bg); }
+.sidebar h3 { font: 700 16px/24px var(--font); color: var(--text); }
+.sidebar h4 { margin-top: 16px; font: 700 12px/20px var(--font); color: var(--muted); }
+.tag-list li { padding: 2px 0; }
+.tag-name::before { content: "#"; }
+.tag-list .tag-count { color: var(--muted); font-size: 12px; }
+
+/* ── a work's page: the work in a panel with corners of 24 px on the darker page, the rest beside it ─────── */
+body.page-post { background: var(--px-back2); }
+body.page-post .top, body.page-post .main-nav { background: var(--bar-bg); }
+.page-post .drawer-toggle { display: none; }
+.page-post .layout.with-sidebar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 312px;
+  gap: 24px;
+  align-items: start;
+}
+.page-post .sidebar {
+  position: static;
+  z-index: auto;            /* a grid item keeps its z-index even when static: the drawer's 50 would cover the menu */
+  order: 2;
+  width: auto;
+  transform: none;
+  visibility: visible;
+  overflow: visible;
+  padding: 8px 0 0;
+  background: transparent;
+  box-shadow: none;
+}
+.page-post .drawer-close, .page-post .drawer-backdrop { display: none; }
+.page-post .content { order: 1; padding: 24px; border-radius: 24px; background: var(--bg); }
+.post-view { align-items: stretch; gap: 16px; }
+.post-stage { display: flex; align-items: center; justify-content: center; min-height: 56vh; border-radius: 8px; background: var(--px-well); }
+.post-media { background: transparent; }
+.post-nav { gap: 8px; }
+.post-nav a {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font: 700 13px/22px var(--font);
+}
+.post-nav a:hover { background: var(--panel-2); text-decoration: none; }
+.post-nav .nav-back { margin-right: auto; order: -1; }
+.page-post .actions button, .page-post .actions .button { height: 36px; padding: 0 16px; border-radius: 999px; text-align: center; }
+.page-post .actions [data-action="favorite"] { background: var(--accent); color: var(--accent-ink); }   /* pixiv's blue «Follow» */
+.page-post .actions [data-action="favorite"]:hover { background: #0085e0; color: var(--accent-ink); }
+table.info th { color: var(--muted); }
+
+/* «Видео» and the manga: the same works, tabs and pills */
+.vhead h2, .manga-head h1 { font: 700 16px/24px var(--font); }
+.vsorts a, .manga-sorts a { color: var(--muted); font-weight: 700; }
+.vsorts a.active, .vsorts a:hover { color: var(--text); }
+.vcard-pic, .cover, .vposter { border-radius: 8px; }
+.vcard-pic { background: var(--px-well); }
+.vcard-title { font: 700 14px/22px var(--font); }
+.vcard:hover .vcard-title { color: var(--text); }
+.vcard-sub { color: var(--muted); font-size: 12px; }
+.vbadge, .mbadge { border-radius: 10px; background: var(--px-over); font: 700 10px/20px var(--font); }
+.vbutton, a.vbutton { height: 40px; padding: 0 24px; border: 0; border-radius: 999px; background: var(--panel); color: var(--px-text2); font: 700 14px/22px var(--font); }
+.vbutton:hover, a.vbutton:hover { background: var(--panel-2); color: var(--text); }
+.vbutton.primary, a.vbutton.primary { background: var(--accent); color: var(--accent-ink); }
+.vbutton.primary:hover, a.vbutton.primary:hover { filter: none; background: #0085e0; color: var(--accent-ink); }
+.vchip { border-radius: 4px; background: var(--px-plate-general); color: #ffffff; font-weight: 700; }
+.vchip::before { content: "#"; }
+.vchip:hover { background: var(--px-plate-general); color: #ffffff; filter: brightness(1.12); }
+.vgroups button, .vep { border-radius: 999px; }
+.vgroups button[aria-selected="true"], .vep.current { background: var(--accent); color: var(--accent-ink); }
+.vget > section, .vempty, .vmeta { border-radius: 24px; }
+.manga-sorts a { border-radius: 999px; background: transparent; }
+.manga-sorts a:hover { background: var(--panel); color: var(--text); }
+.manga-sorts a.active { background: var(--accent); color: var(--accent-ink); }
+
+/* a window narrower than pixiv's menu needs: the menu is its icons */
+@media (max-width: 1100px) {
+  :root { --px-nav: 56px; }
+  .main-nav a { justify-content: center; padding: 0; font-size: 0; }
+  .main-nav a::before { width: 18px; height: 18px; -webkit-mask-size: 18px; mask-size: 18px; }
+  .brand { min-width: 0; }
+  .page-post .layout.with-sidebar { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  :root { --px-nav: 0px; }
+  .top { height: auto; flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+  .top-search { order: 3; flex: 1 1 100%; max-width: none; margin: 0; }
+  .main-nav { position: static; order: 4; flex: 1 1 100%; flex-direction: row; width: auto; padding: 0; overflow-x: auto; }
+  .main-nav a { flex: none; width: 40px; margin-top: 0 !important; }
+  .layout { padding: 12px 12px 40px; }
+  .sections { padding: 8px 12px 0; gap: 0 20px; }
+  .skin-button .skin-label, .drawer-toggle { font-size: 0; }
+}
+
+/* ── pixiv's dark side (charcoal «dark»: #1f1f1f, the page under a work black) ───────────────────────── */
+:root[data-variant="dark"] {
+  --bg: #1f1f1f;
+  --panel: #3a3a3a;
+  --panel-2: #4c4c4c;
+  --border: #333333;
+  --text: #f5f5f5;
+  --muted: #9e9e9e;
+  --link: #669fc2;
+  --link-hover: #8cbbd9;
+  --accent: #0096fa;
+  --accent-ink: #ffffff;
+  --bar-bg: #1f1f1f;
+  --bar-ink: #f5f5f5;
+  --bar-active-bg: #0096fa;
+  --bar-active-ink: #ffffff;
+  --thumb-bg: #2b2b2b;
+  --thumb-ring: #0096fa;
+  --danger: #ff6b4d;
+  --focus: #3fb0ff;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+  --tag-artist: #ff7a7f;
+  --tag-character: #5fd18b;
+  --tag-copyright: #c69cff;
+  --tag-general: #7ab4d8;
+  --tag-meta: #f0ae55;
+  --tag-species: #ff9a5c;
+  --tag-lore: #4fc9b9;
+  --tag-contributor: #ff7fb8;
+  --tag-invalid: #9e9e9e;
+  --px-text2: #d6d6d6;
+  --px-back2: #000000;
+  --px-well: #2b2b2b;
+  color-scheme: dark;
+}

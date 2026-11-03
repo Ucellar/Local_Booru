@@ -343,8 +343,9 @@ def _answer(site, ids: list, style: str) -> tuple[dict, bool]:
 
 
 def _site_answer(site, raw) -> tuple[str, dict]:
-    """(the post's page, its tags by category) as the site's answer gave them — no question more to the site: the
-    categories it did not send are put by the library's (``storage.library_categories``, by the caller)."""
+    """(the post's page, its tags by category) as the site's answer gave them — no question more to the site.  A site
+    that sends no categories: every tag «general», as it said (the card's page shows them in the library's categories;
+    v5.44.10–5.44.48 wrote the library's categories into the set — and a wrong one of the library with them)."""
     if not isinstance(raw, dict):
         return "", {}
     try:
@@ -364,11 +365,10 @@ def _site_answer(site, raw) -> tuple[str, dict]:
 def _mend(con, site, image_id: int, row: dict) -> int:
     """The card's tags of the site as the site's answer gave them, in place of what the browser extension wrote (1 —
     mended, 0 — the answer had no tags: they stay)."""
-    from core.database.storage import add_image_source_tag_groups, library_categories
+    from core.database.storage import add_image_source_tag_groups
     url, groups = _site_answer(site, row.get("_raw"))
     if not url or not any(groups.values()):
         return 0
-    groups = library_categories(con, groups)
     add_image_source_tag_groups(con, image_id, [{"url": url, "groups": groups, "method": MEND_METHOD}])
     return 1
 

@@ -90,6 +90,8 @@ def read_sources(path: Path, settings):
 def upsert_tags(con, image_id, groups):
     """Old .tags files' tags onto the card — added: tags the card already has (a site's set, manual tags)
     stay; the one-time import used to replace them all with the file's."""
+    from .storage import _has_categories, _tag_written
+    categorized = _has_categories(groups)
     for category, tags in (groups or {}).items():
         cat = str(category or "general")
         for tag in tags:
@@ -99,9 +101,7 @@ def upsert_tags(con, image_id, groups):
             con.execute("INSERT OR IGNORE INTO tags(name, normalized_name, category) VALUES(?,?,?)", (tag, norm, cat))
             row = con.execute("SELECT id, category FROM tags WHERE normalized_name=?", (norm,)).fetchone()
             if row:
-                old = row["category"] or "general"
-                if (cat == "species" and old != "species") or (cat != "general" and old in ("", "general")):
-                    con.execute("UPDATE tags SET category=? WHERE id=?", (cat, int(row["id"])))
+                _tag_written(con, int(row["id"]), norm, cat, row["category"], categorized=categorized)
                 con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, row["id"]))
     try:
         from .storage import refresh_effective_tag_categories

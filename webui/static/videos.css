@@ -8,7 +8,7 @@
 .vhead h2 .muted, .vepisodes h2 .muted { font-weight: normal; font-size: 0.8em; }
 .vsorts { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; }
 .vsorts a { color: var(--muted); font-weight: bold; }
-.vsorts a.active, .vsorts a:hover { color: var(--accent); text-decoration: none; }
+.vsorts a.active, .vsorts a:hover { color: var(--accent-text, var(--accent)); text-decoration: none; }
 .vmore { margin-left: auto; font-weight: bold; }
 .vnote {
   margin: 0 0 18px;
@@ -64,7 +64,7 @@
   overflow: hidden;
   font: bold 14px/1.3 var(--font-head);
 }
-.vcard:hover .vcard-title { color: var(--accent); }
+.vcard:hover .vcard-title { color: var(--accent-text, var(--accent)); }
 .vcard-sub { margin-top: -3px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* empty folder, folder buttons */
@@ -85,7 +85,7 @@
   font: bold 13px/1.2 var(--font);
   cursor: pointer;
 }
-.vbutton:hover, a.vbutton:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.vbutton:hover, a.vbutton:hover { border-color: var(--accent); color: var(--accent-text, var(--accent)); text-decoration: none; }
 .vbutton.primary, a.vbutton.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
 .vbutton.primary:hover, a.vbutton.primary:hover { filter: brightness(1.1); color: var(--accent-ink); }
 
@@ -141,7 +141,7 @@
 }
 .vchip:hover { background: var(--accent); color: var(--accent-ink); text-decoration: none; }
 .vmore-list { display: inline; }
-.vmore-list summary { display: inline; cursor: pointer; color: var(--accent); font-weight: bold; font-size: 13px; }
+.vmore-list summary { display: inline; cursor: pointer; color: var(--accent-text, var(--accent)); font-weight: bold; font-size: 13px; }
 .vmore-list[open] summary { display: none; }
 .vtags { margin: 0 0 14px; }
 .vdesc { margin: 0 0 18px; max-width: 78ch; font-size: 14px; line-height: 1.6; }
@@ -162,7 +162,7 @@
 .vplayer { margin-top: 0; }
 .vnow { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 10px; font-size: 15px; }
 .vnow b { font: bold 18px/1.2 var(--font-head); }
-.vnote-ep { color: var(--accent); font-weight: bold; }
+.vnote-ep { color: var(--accent-text, var(--accent)); font-weight: bold; }
 .vfile { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .vstage { overflow: hidden; border-radius: calc(var(--radius) + 4px); background: #000000; }
 .vstage .native-video { display: flex; width: 100%; }
@@ -226,9 +226,9 @@
   font: bold 15px/1 var(--font);
   font-variant-numeric: tabular-nums;
 }
-.vep:hover { background: var(--panel-2); color: var(--accent); text-decoration: none; }
+.vep:hover { background: var(--panel-2); color: var(--accent-text, var(--accent)); text-decoration: none; }
 .vep.watched { color: var(--muted); }
-.vep.watched::after { content: "✓"; position: absolute; top: 2px; right: 4px; font-size: 10px; color: var(--accent); }
+.vep.watched::after { content: "✓"; position: absolute; top: 2px; right: 4px; font-size: 10px; color: var(--accent-text, var(--accent)); }
 .vep.current, .vep.current:hover { background: var(--accent); color: var(--accent-ink); }
 .vep.current::after { color: var(--accent-ink); }
 .vep-bar { position: absolute; left: 0; bottom: 0; height: 3px; width: var(--p); background: var(--accent); }
@@ -271,7 +271,7 @@
   border: 1px solid var(--border);
   border-right: 0;
   border-radius: var(--vr) 0 0 var(--vr);
-  background: var(--bg);
+  background: var(--field-bg, var(--bg));
   color: var(--text);
   font: 15px var(--font);
 }
@@ -287,7 +287,7 @@
   margin-top: 14px; font-size: 13px; color: var(--muted); }
 .vget-saved { order: 2; margin: 0; }
 .vget-file { cursor: pointer; }
-.vget-file span { color: var(--accent); font-weight: bold; text-decoration: underline; text-underline-offset: 3px; }
+.vget-file span { color: var(--accent-text, var(--accent)); font-weight: bold; text-decoration: underline; text-underline-offset: 3px; }
 .vget-file:hover span { text-decoration-thickness: 2px; }
 .vget-file input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .vget-file:focus-within span { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -334,9 +334,11 @@
 .vlog summary:hover { color: var(--text); }
 .vget .vlog .job-log { height: auto; min-height: 0; max-height: 40vh; margin-top: 8px; font-size: 12px; }
 
-/* the title's card */
+/* the title's card — under .vget: the list of series on «Видео» has cards of the same name (.vcard: poster, title,
+   genres), which this grid squeezed into a column of a few pixels beside the poster (owner, 02.11.2026: genres in
+   place of the title) */
 .vget .vfound { padding: 24px 26px 0; }
-.vcard {
+.vget .vcard {
   display: grid;
   grid-template: "poster head" auto "poster more" 1fr / 160px minmax(0, 1fr);
   column-gap: 24px;
@@ -362,7 +364,7 @@
   color: var(--muted);
 }
 .vcard-poster img:not([hidden]) + .vcard-initial { display: none; }
-.vfound-head { margin: 0 0 6px; color: var(--accent); font-size: 13px; font-weight: bold; }
+.vfound-head { margin: 0 0 6px; color: var(--accent-text, var(--accent)); font-size: 13px; font-weight: bold; }
 .vget h2.vfound-title { margin: 0; font: bold 26px/1.2 var(--font-head); overflow-wrap: anywhere; }
 .vfound-alt { margin: 6px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .vfound-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
@@ -381,6 +383,19 @@
   overflow-wrap: anywhere;
 }
 .vfound-source.warn { border-left-color: var(--danger); }
+.vfound-order { max-width: 76ch; margin: 0; padding: 9px 13px; border-radius: var(--radius); background: var(--panel-2);
+  font-size: 13px; }
+.vfound-order-label { color: var(--muted); font-size: 12px; }
+.vfound-order-list { margin: 6px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
+.vfound-order-list li { line-height: 1.35; }
+.vfound-order-list li.here .vfound-order-name { color: var(--text); font-weight: 700; }
+.vfound-order-list li.soon .vfound-order-name { color: var(--muted); }
+.vfound-order-go { padding: 0; border: 0; background: none; color: var(--accent-text, var(--accent)); font: inherit; text-align: left;
+  cursor: pointer; }
+.vfound-order-go:hover { text-decoration: underline; }
+.vfound-order-about { margin-left: 8px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.vfound-borrowed-go { margin-left: 2px; padding: 0; border: 0; background: none; color: var(--accent-text, var(--accent)); font: inherit;
+  font-weight: 700; text-decoration: underline; cursor: pointer; }
 .vfound-voices { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; color: var(--muted);
   font-size: 12px; }
 .vfound-voices .voice { padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; }
@@ -411,7 +426,7 @@ details.vgroup { border-top: 1px solid var(--border); padding-top: 10px; }
   background: transparent; color: var(--muted); font: inherit; font-size: 14px; cursor: pointer; }
 .vkind:hover { color: var(--text); }
 .vkind[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #fff); font-weight: bold; }
-.vkind-count { padding: 0 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); font-size: 11px; font-weight: normal; }
+.vkind-count { padding: 0 6px; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); font-size: 11px; font-weight: normal; }
 .vkind.chosen:not([aria-selected="true"]) { color: var(--text); }
 .vplate { position: relative; }
 .vplate-now, .vplate-quality .vquality { display: inline-flex; align-items: center; gap: 8px; min-height: 40px;
@@ -435,7 +450,7 @@ details.vgroup { border-top: 1px solid var(--border); padding-top: 10px; }
 .vplate-note { margin: 0 8px 8px; color: var(--muted); font-size: 12px; }
 .vplate-row { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 10px; padding: 7px 8px;
   border-radius: 6px; cursor: pointer; }
-.vplate-row:hover { background: rgba(255, 255, 255, 0.06); }
+.vplate-row:hover { background: color-mix(in srgb, var(--text) 7%, transparent); }
 .vplate-row input { accent-color: var(--accent); width: 16px; height: 16px; }
 .vplate-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: bold; }
 .vplate-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -483,7 +498,7 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
   position: absolute;
   top: 6px;
   right: 9px;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-size: 14px;
   font-weight: bold;
 }
@@ -501,7 +516,7 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vtile[data-have="whole"] { cursor: default; }
 .vtile[data-have="whole"] .vtile-n, .vtile[data-have="whole"] .vtile-q, .vtile[data-have="whole"] .vtile-t { opacity: 0.55; }
 .vtile[data-have="whole"] .vtile-mark { color: var(--ok); }
-.vtile[data-have="part"] .vtile-mark { color: var(--accent); }
+.vtile[data-have="part"] .vtile-mark { color: var(--accent-text, var(--accent)); }
 .vtile[data-blocked], .vtile[data-have="other"] {
   cursor: not-allowed;
   background: repeating-linear-gradient(135deg, var(--panel-2) 0 7px, var(--panel) 7px 14px);
@@ -513,8 +528,12 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vtiles .vtile[data-dl] { background: var(--panel-2); }
 .vtiles .vtile[data-dl="active"] { border-color: var(--accent); }
 .vtile[data-dl="active"] .vtile-bar { display: block; }
-.vtile[data-dl="active"] .vtile-mark { color: var(--accent); }
+.vtile[data-dl="active"] .vtile-mark { color: var(--accent-text, var(--accent)); }
 .vtile[data-dl="queued"] .vtile-mark { color: var(--muted); }
+.vtiles .vtile[data-dl="paused"] { border-color: var(--muted); }
+.vtile[data-dl="paused"] .vtile-bar { display: block; opacity: 0.55; }
+.vtile[data-dl="paused"] .vtile-mark { color: var(--text); }
+.vbar-run.paused .vmeter progress { opacity: 0.55; }
 .vtiles .vtile[data-dl="done"], .vtiles .vtile[data-dl="whole"] { border-color: var(--ok); }
 .vtile[data-dl="done"] .vtile-mark, .vtile[data-dl="whole"] .vtile-mark { color: var(--ok); }
 .vtiles .vtile[data-dl="failed"], .vtiles .vtile[data-dl="dead"], .vtiles .vtile[data-dl="other"] {
@@ -545,7 +564,12 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vget .vbar-run { padding: 0; border: 0; }
 .vbar-go + .vbar-run:not([hidden]) { margin-top: 14px; }
 .vfound.downloading .vbar-run { margin-top: 0; }
-.vfound.vrun-other .vbar-run { display: none; }
+.vfound.vrun-other:not(.vrun-busy) .vbar-run { display: none; }   /* another list's download that has ended */
+.vqueue { display: flex; flex-direction: column; gap: 4px; margin: 10px 0 0; padding: 0; list-style: none;
+  color: var(--muted); font-size: 13px; }
+.vqueue li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.vqueue li.here .vqueue-what { color: var(--text); }
+.vqueue-drop { font-size: 12px; }
 .vget .vbar-run .job-head { gap: 6px 10px; margin: 0; }
 .vbar-run .job-title { font-size: 14px; }
 .vbar-run .job-status { margin: 0; }
@@ -559,7 +583,7 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vfound.all-had .vbar-go + .vbar-run:not([hidden]) { margin-top: 0; }
 .vget-result { margin: 0; font-weight: bold; overflow-wrap: anywhere; }
 .vget-result.ok { color: var(--ok); }
-.vget-result.part { color: var(--accent); }
+.vget-result.part { color: var(--accent-text, var(--accent)); }
 .vget-result.bad { color: var(--danger); }
 .vget-open { margin: 0; }
 
@@ -569,7 +593,7 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
   .vget-row .vbutton { padding: 0 14px; }
   .vget-saved { margin-left: 0; }
   .vget .vfound { padding: 18px 16px 0; }
-  .vcard { grid-template: "poster head" auto "more more" auto / 88px minmax(0, 1fr); column-gap: 14px; }
+  .vget .vcard { grid-template: "poster head" auto "more more" auto / 88px minmax(0, 1fr); column-gap: 14px; }
   .vcard-head { align-self: center; }
   .vcard-initial { font-size: 40px; }
   .vget h2.vfound-title { font-size: 20px; }
@@ -621,7 +645,7 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
   font: inherit; font-size: 14px; font-weight: bold; cursor: pointer; }
 .vdubs-now:hover, .vdubs-now[aria-expanded="true"] { border-color: var(--accent); }
 .vdubs-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vdubs-count { padding: 1px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: var(--muted);
+.vdubs-count { padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--text) 9%, transparent); color: var(--muted);
   font-size: 11px; font-weight: normal; }
 .vdubs-now::after { content: "▾"; color: var(--muted); font-weight: normal; }
 .vdubs-list { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; display: grid;
@@ -631,5 +655,19 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vdubs-list[hidden] { display: none; }
 .vdub { padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit;
   font-size: 13px; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vdub:hover, .vdub:focus-visible { background: rgba(255, 255, 255, 0.08); outline: none; }
+.vdub:hover, .vdub:focus-visible { background: color-mix(in srgb, var(--text) 9%, transparent); outline: none; }
 .vdub[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #fff); font-weight: bold; }
+
+/* «Порядок просмотра» on a series' page (a title from YummyAnime) — a button under the description, the list under it */
+.vorder { margin: 14px 0 0; }
+.vorder-toggle { display: inline-flex; align-items: center; gap: 10px; }
+.vorder-toggle[aria-expanded="true"] .vorder-arrow { transform: rotate(180deg); }
+.vorder-arrow { display: inline-block; transition: transform 0.15s; }
+.vorder-list { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px 0 0; padding: 10px 14px 10px 34px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); font-size: 14px; }
+.vorder-list li { line-height: 1.4; }
+.vorder-list li.soon { color: var(--muted); }
+.vorder-list a.vorder-name { color: var(--accent-text, var(--accent)); }
+.vorder-mark { float: right; margin-left: 12px; color: var(--muted); font-size: 12px; }
+.vorder-list li.have .vorder-mark, .vorder-list li.here .vorder-mark { color: var(--tag-character, #3f9d4a); }
+.vorder-mark a { color: var(--accent-text, var(--accent)); }

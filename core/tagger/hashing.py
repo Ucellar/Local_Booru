@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +18,7 @@ except Exception:  # pragma: no cover - optional Pillow component
     ImageCms = None
 
 from core.paths import CACHE_DIR
+from core.tagger.site_frames import START   # the search picture of a video: its start (v5.44.36)
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
 _DEFAULT_MAX_FILE_MB = 64.0
@@ -337,6 +339,7 @@ def video_frame_image(path, settings=None, log=None):
 
     try:
         import cv2
+        from core.image_safe import video_frame
         cap = cv2.VideoCapture(str(path))
         try:
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
@@ -344,15 +347,14 @@ def video_frame_image(path, settings=None, log=None):
             if width and height and _skip_big_dimensions(path, width, height, settings, log):
                 return path
             frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-            if frames > 5:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frames // 2))
-            ok, frame = cap.read()
         finally:
             try:
                 cap.release()
             except Exception:
                 pass
-        if not ok or frame is None:
+        # (v5.44.36) through video_frame: a video OpenCV cannot decode (AV1) is read with PyAV
+        frame = video_frame(path, max(0, frames // 2) if frames > 5 else 0)
+        if frame is None:
             return path
         tmp = make_temp_frame_path(path)
         try:
@@ -388,13 +390,19 @@ def _small_rgb(img):
     return picture
 
 
+_FRAMES_KEPT: dict = {}      # (v5.44.36) (path, size, mtime_ns) -> the frames of a video: its pictures for the services
+_FRAMES_KEEP = 8             # are made of them one style after another (engine.reverse_prepare), the check reads them too
+_FRAMES_LOCK = threading.Lock()
+
+
 def video_frames(path, settings=None, log=None) -> list:
     """Frames of a video or a GIF to compare with a site's preview: [(where, RGB picture of at most 512 px)].
 
-    The sites make the preview of a video or a GIF from its start, not from its middle (the frame
-    ``video_frame_image`` takes): the start comes first — when it is black or one colour, the first frame with a
-    picture a second or two in — then a quarter and the middle, in case a site took another.  One-colour frames are
-    left out.  [] — not a video or a GIF, too big for the limits, or nothing readable."""
+    A GIF: its start comes first — when it is black or one colour, the first frame with a picture — then a quarter and
+    the middle.  A video: the start (a black one — a second or two in), a quarter, the middle, and (v5.44.36) the
+    frames e621 and Danbooru make its preview of (core/tagger/site_frames.py; most videos' previews there are none of
+    the others).  One-colour frames are left out.  [] — not a video or a GIF, too big for the limits, or nothing
+    readable."""
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".gif":
@@ -402,20 +410,40 @@ def video_frames(path, settings=None, log=None) -> list:
     if suffix not in VIDEO_EXTS:
         return []
     try:
+        st = path.stat()
+        key = (str(path), int(st.st_size), int(st.st_mtime_ns))
+    except OSError:
+        key = None
+    with _FRAMES_LOCK:
+        known = _FRAMES_KEPT.get(key) if key else None
+    if known is not None:
+        return list(known)
+    found = _video_frames(path, settings, log)
+    if key:
+        with _FRAMES_LOCK:
+            _FRAMES_KEPT[key] = tuple(found)
+            while len(_FRAMES_KEPT) > _FRAMES_KEEP:
+                _FRAMES_KEPT.pop(next(iter(_FRAMES_KEPT)), None)
+    return found
+
+
+def _video_frames(path: Path, settings=None, log=None) -> list:
+    try:
         import cv2
         from core.image_safe import video_frame
     except ImportError:
         return []
     cap = cv2.VideoCapture(str(path))
     try:
-        if not cap.isOpened():
-            return []
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        count = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        opened = cap.isOpened()
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0) if opened else 0
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0) if opened else 0
+        count = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)) if opened else 0
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) if opened else 0.0
     finally:
         cap.release()
+    if not opened:          # (v5.44.36) OpenCV cannot open it: what PyAV reads of its start
+        return _site_frames(path, [], settings, log)
     if width and height and _skip_big_dimensions(path, width, height, settings, log):
         return []
     second = int(round(fps)) if 1.0 <= fps <= 240.0 else 25
@@ -441,6 +469,18 @@ def video_frames(path, settings=None, log=None) -> list:
     if count:
         take("четверть", count // 4)
         take("середина", count // 2)
+    return _site_frames(path, out, settings, log)
+
+
+def _site_frames(path: Path, out: list, settings=None, log=None) -> list:
+    """(v5.44.36) ``out`` and the frames e621 and Danbooru make the video's preview of (core/tagger/site_frames.py:
+    ffmpeg's «thumbnail» over the first 100 / 300 frames) — most videos' previews on those sites are neither the start
+    nor a second in."""
+    from core.tagger.site_frames import WHERE, site_frames
+    for style, picture in site_frames(path, settings, log).items():
+        small = _small_rgb(picture)
+        if not flat(small):
+            out.append((WHERE[style], small))
     return out
 
 
@@ -478,18 +518,25 @@ def _gif_frames(path: Path, settings=None, log=None) -> list:
     return out
 
 
-def search_frame_image(path, settings=None, log=None):
-    """The picture of a video or a GIF to send to reverse search: its start, as the sites show it in their previews
-    (the first frame with a picture of :func:`video_frames`), saved as a temporary JPEG; when none can be read — the
-    middle frame of :func:`video_frame_image`; any other file as it is."""
+def search_frame_image(path, settings=None, log=None, style: str = START):
+    """The picture of a video or a GIF to send to reverse search, saved as a temporary JPEG.  ``style`` — whose
+    previews the service compares it with (v5.44.36, core/tagger/site_frames.py): :data:`START` — the start (the first
+    frame with a picture of :func:`video_frames`: pixiv, Twitter, Gelbooru…), ``"e621"`` / ``"danbooru"`` — the
+    frame that site makes a video's preview of (a GIF: always its start).  When none can be read — the middle frame
+    of :func:`video_frame_image`; any other file as it is."""
     path = Path(path)
     if path.suffix.lower() not in VIDEO_EXTS and path.suffix.lower() != ".gif":
         return path
-    frames = video_frames(path, settings, log)
+    frames = video_frames(path, settings, log)      # (too big for the limits — none: the middle frame below)
     if not frames:
         return video_frame_image(path, settings, log)
+    from core.tagger.site_frames import WHERE
+    wanted = WHERE.get(style, "")
+    picture = next((p for where, p in frames if wanted and where == wanted), None)
+    if picture is None:                             # the start (a one-colour frame of the site's — the start too)
+        style, picture = START, frames[0][1]
     tmp_dir = Path(CACHE_DIR) / "preview_cache" / "local_booru_frames"
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    tmp = tmp_dir / f"{hashlib.md5(str(path).encode('utf-8')).hexdigest()}-start.jpg"
-    frames[0][1].save(tmp, "JPEG", quality=95)
+    tmp = tmp_dir / f"{hashlib.md5(str(path).encode('utf-8')).hexdigest()}-{style}.jpg"
+    picture.save(tmp, "JPEG", quality=95)
     return tmp

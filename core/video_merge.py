@@ -829,7 +829,11 @@ def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Pa
     picture = chosen if chosen is not None else max(sources, key=lambda s: (_height(s[0]), s[1]))[0]
     if stop():
         raise MergeError("остановлено")
-    base = prints_of(picture, stop=stop, cache=_prints_place(folder, picture))
+    # one voice-over and no file yet: nothing to match to its picture — its prints (every frame read: a minute or two
+    # an episode) are not made now (owner, 02.11.2026: a season of one voice-over «скачался», and the next one in
+    # the queue waited for 25 such readings); a voice-over added later reads them then
+    alone = not had and len(fresh) == 1 and fresh[0][1] == picture
+    base = None if alone else prints_of(picture, stop=stop, cache=_prints_place(folder, picture))
     tracks: list[Track] = []
     if had:
         fit = None
@@ -884,8 +888,9 @@ def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Pa
             _LOG.info("%s not removed: %s", track.path.parent, exc)
     # the new file's picture is the picture's: its prints, on the new file's clock — the next voice-over is matched to
     # them without reading the file again
-    keep(_prints_place(folder, target), target, Prints(base.times - origin, base.bits, base.frame, base.width,
-                                                       base.height))
+    if base is not None:
+        keep(_prints_place(folder, target), target, Prints(base.times - origin, base.bits, base.frame, base.width,
+                                                           base.height))
     return result
 
 
@@ -942,7 +947,8 @@ class Merger:
                 continue
             stem = self.stem(remote)
             place = self.folder / remote.group if remote.group else self.folder
-            path = next((place / f"{stem}{ext}" for ext in (".mp4", ".ts") if (place / f"{stem}{ext}").is_file()), None)
+            path = next((place / f"{stem}{ext}" for ext in (".mp4", ".ts", ".aac") if (place / f"{stem}{ext}").is_file()),
+                        None)                    # «.aac»: a voice-over's sound alone (``core/cvh_sound``)
             if path is not None:
                 episodes.setdefault(stem, []).append((self.title(remote), path))
         done = 0
@@ -952,6 +958,8 @@ class Merger:
                 break
             names = ", ".join(name for name, _path in files)
             say(f"Сборка {n}/{len(episodes)}: {stem} — {names}")
+            from core.video_download import _set_meter
+            _set_meter(merging=True, index=n, count=len(episodes), name=stem, file=-1, done=0, total=0, speed=0)
             prefer = None                        # the voice-over chosen for the episode's picture (its file)
             chosen = getattr(self, "pictures", {}).get(stem)
             if chosen is not None:

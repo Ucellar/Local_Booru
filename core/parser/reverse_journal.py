@@ -21,13 +21,22 @@ from __future__ import annotations
 from pathlib import Path
 
 ANSWERED = ("done_match", "done_miss", "source_only")
+# (v5.44.36) an answer about a video counts from this revision on: the services were sent the middle frame (the old
+# program, the parser to v5.23.1), then the start — and the sites know most videos by another frame
+# (core/tagger/site_frames.py); a «нет» about a video given by those is no answer about it now
+VIDEO_REVISION = 3
 
 
-def remembered(settings: dict, original_path: str, services) -> dict:
+def _revision(service, video: bool) -> int:
+    own = int(getattr(service, "journal_revision", 1) or 1)
+    return max(own, VIDEO_REVISION) if video else own
+
+
+def remembered(settings: dict, original_path: str, services, *, video: bool = False) -> dict:
     """{journal_key: (status, unix time)} — the definite answers about the file that still count for these
-    services."""
+    services.  ``video`` — the file is a video: answers of before :data:`VIDEO_REVISION` do not count."""
     from core.database.storage import reverse_branch_rows
-    revisions = {s.journal_key: int(s.journal_revision or 1) for s in services if getattr(s, "journal_key", "")}
+    revisions = {s.journal_key: _revision(s, video) for s in services if getattr(s, "journal_key", "")}
     if not revisions:
         return {}
     out: dict = {}
@@ -42,15 +51,16 @@ def remembered(settings: dict, original_path: str, services) -> dict:
     return out
 
 
-def record(settings: dict, original_path: str, service, status: str, reason: str = "") -> None:
+def record(settings: dict, original_path: str, service, status: str, reason: str = "", *,
+           video: bool = False) -> None:
     """The service's answer about the file: «done_match», «done_miss», «source_only» (or the old program's
-    «skipped» — no answer)."""
+    «skipped» — no answer).  ``video`` — an answer about a video by its pictures of now (:data:`VIDEO_REVISION`)."""
     from core.database.storage import mark_reverse_branch_status
     key = getattr(service, "journal_key", "")
     if not key or not original_path:
         return
     mark_reverse_branch_status(settings, original_path, key, status=status, reason=reason,
-                               scan_revision=int(getattr(service, "journal_revision", 1) or 1))
+                               scan_revision=_revision(service, video))
 
 
 def saved_source(settings: dict, original_path: str) -> dict | None:

@@ -542,7 +542,7 @@ def episode_frame(episode: Episode, width: int, height: int) -> Path | None:
     """A frame of the episode (kept in the thumbnail cache)."""
     from core.image_safe import _cache_name, _video_thumbnail_path, cached_thumbnail_path
     path = Path(episode.path)
-    made = cached_thumbnail_path(path, width, height)
+    made = cached_thumbnail_path(path, width, height, flavor="")     # a series' frame: as before (not a card's)
     if not made:
         out = _cache_name(path, width, height)
         made = _video_thumbnail_path(path, out, width, height)

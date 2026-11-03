@@ -38,6 +38,7 @@ from core.parser.models import FileResult, Match
 from core.parser.pool import READ, PriorityPool
 from core.parser.reverse import build_reverse
 from core.parser.sites import SiteUnavailable, build_sites
+from core.parser.tally import Tally
 from core.parser.util import clean_host, short
 
 __all__ = ["ParserRunner", "OPEN_FILES", "OFF_HOW", "ASKING_AGAIN", "MEDIA_EXTS"]
@@ -213,6 +214,7 @@ class ParserRunner:
         site_pool = ThreadPoolExecutor(max_workers=max(2, min(8, len(sites) or 2)), thread_name_prefix="parser-site")
         batch = self._make_batch(ctx, sites, site_pool)
         engine = ParserEngine(ctx, sites, services, site_pool, batch=batch)
+        engine.tally = Tally()              # (v5.44.27) lines alike about many files: counted, said with «ВРЕМЯ»
         self._engine, self._http = engine, http
         if engine.recheck_new_sites:
             self.log("ДОБОР НОВЫХ САЙТОВ: обработанные раньше файлы проверяются на сайтах, где их ещё не искали")
@@ -637,6 +639,9 @@ class ParserRunner:
         line = work_timing.say(work_timing.STEPS.take(), minutes, work_timing.STEPS.notes())
         if line:
             self.log(line)
+        tally = getattr(self._engine, "tally", None)
+        for counted in (tally.lines(minutes) if tally is not None else ()):    # (v5.44.27) core/parser/tally.py
+            self.log(counted)
 
     def _count(self, total: int) -> None:
         self._done += 1

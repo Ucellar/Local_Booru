@@ -33,15 +33,18 @@ def register(router) -> None:
     router.add("GET", r"/poster/(?P<id>\d+)", poster)
 
 
-def _card_file(req: Request) -> tuple[Path | None, str]:
-    """(file, Cache-Control for the answer)."""
+def _card_file(req: Request, *, picture: bool = False) -> tuple[Path | None, str]:
+    """(file, Cache-Control for the answer).  ``picture`` — its preview or poster (a video's: another version,
+    ``data.picture_version``)."""
     path, version = data.file_and_version_of(req.settings, int(req.params["id"]))
+    if picture and version and path is not None:
+        version = data.picture_version(version, path)
     asked = req.arg("v")
     return path, (KEEP if asked and version and asked == version else FRESH)
 
 
 def thumb(req: Request) -> Response:
-    path, keep = _card_file(req)
+    path, keep = _card_file(req, picture=True)
     if path is None:
         return _placeholder("нет файла")
     from core.image_safe import cached_thumbnail_path, card_thumbnail_size, safe_thumbnail_path
@@ -60,7 +63,7 @@ POSTER_SIZE = 1280
 
 def poster(req: Request) -> Response:
     """A large frame of a video (or a large preview of a picture) for the post page."""
-    path, keep = _card_file(req)
+    path, keep = _card_file(req, picture=True)
     if path is None:
         return _placeholder("нет файла")
     from core.image_safe import safe_thumbnail_path

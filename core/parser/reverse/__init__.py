@@ -12,6 +12,7 @@ and a miss of the others is then not trusted (deferred)."""
 from __future__ import annotations
 
 from core.parser.reverse.ascii2d import Ascii2d
+from core.parser.reverse.atf_iqdb import AtfIqdb
 from core.parser.reverse.base import ReverseService
 from core.parser.reverse.e621_iqdb import E621Iqdb
 from core.parser.reverse.fluffle import Fluffle
@@ -20,8 +21,9 @@ from core.parser.reverse.saucenao import SauceNao
 
 __all__ = ["ReverseService", "build_reverse", "SauceNao", "reverse_order"]
 
-SAUCENAO_FIRST = (SauceNao, Fluffle, E621Iqdb, DanbooruIqdb, Ascii2d, Iqdb)
-IQDB_FIRST = (Fluffle, E621Iqdb, Iqdb, DanbooruIqdb, Ascii2d, SauceNao)
+# (v5.44.39) ATF IQDB after e621 IQDB: both are the sites' own search, quick (1–3 s)
+SAUCENAO_FIRST = (SauceNao, Fluffle, E621Iqdb, AtfIqdb, DanbooruIqdb, Ascii2d, Iqdb)
+IQDB_FIRST = (Fluffle, E621Iqdb, AtfIqdb, Iqdb, DanbooruIqdb, Ascii2d, SauceNao)
 
 
 def reverse_order(settings: dict) -> tuple:

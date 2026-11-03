@@ -43,23 +43,36 @@ PAGE_LOOKS = {
 }
 FOLLOW = "gallery"                                 # a page's choice «как у галереи»
 LOOK_KEYS = tuple(key for key, _default in PAGE_LOOKS.values())
+VARIANT_KEYS = tuple(key + "_variant" for key in LOOK_KEYS)   # (v5.44.45) each page's light/dark side, kept on its own
 
 
 def look(page: str, stored: dict | None = None) -> dict:
     """The look of a page of the menu: {"skin" — what it shows, "key" — where its choice is kept, "follows" — it looks
-    like the gallery, "gallery" — the gallery's look}."""
+    like the gallery, "gallery" — the gallery's look, (v5.44.45) "variant" — «light»/«dark» the page shows now,
+    "variant_key" — where that choice is kept (each page keeps its own, so the gallery and «Видео» switch
+    independently)}."""
     from webui import skins
     stored = load() if stored is None else stored
     gallery = skins.valid(str(stored.get("skin") or skins.DEFAULT))
+    gallery_side = skins.variant_of(gallery, str(stored.get("skin_variant") or ""))
     key, default = PAGE_LOOKS.get(page, PAGE_LOOKS["posts"])
+    vkey = key + "_variant"
+
+    def pack(skin_id: str, follows: bool) -> dict:
+        own = str(stored.get(vkey) or "")
+        if follows and own not in skins.VARIANTS:     # (v5.44.46) «как у галереи» — its side too, until the page has one
+            own = gallery_side
+        return {"skin": skin_id, "key": key, "follows": follows, "gallery": gallery,
+                "variant": skins.variant_of(skin_id, own), "variant_key": vkey, "gallery_variant": gallery_side}
+
     if key == "skin":
-        return {"skin": gallery, "key": key, "follows": False, "gallery": gallery}
+        return pack(gallery, False)
     chosen = str(stored.get(key) or "")
     if chosen in skins.BY_ID:
-        return {"skin": chosen, "key": key, "follows": False, "gallery": gallery}
+        return pack(chosen, False)
     if chosen == FOLLOW or default is None:
-        return {"skin": gallery, "key": key, "follows": True, "gallery": gallery}
-    return {"skin": skins.valid(default), "key": key, "follows": False, "gallery": gallery}
+        return pack(gallery, True)
+    return pack(skins.valid(default), False)
 
 
 def choices(stored: dict | None = None) -> dict:
@@ -95,15 +108,30 @@ def load() -> dict:
 
 
 def save(update: dict) -> dict:
-    """Merge the valid keys of ``update`` into the file; returns what is stored now."""
+    """Merge the valid keys of ``update`` into the file; returns what is stored now.
+
+    (v5.44.46) A page's side (``<key>_variant``) given as "" is forgotten: the page shows its look's own side again
+    or, «как у галереи», the gallery's.  «На всех страницах» (``looks_all``) forgets the other pages' sides for the same
+    reason (``skin_variant`` in the same update — the side every page gets)."""
     from webui import skins
     clean = {}
+    drop: set = set()
     if str(update.get("looks_all") or "") in skins.BY_ID:     # one look for every page (a page named too keeps it)
         clean.update({key: FOLLOW for key in LOOK_KEYS if key != "skin"}, skin=str(update["looks_all"]))
+        drop.update(vkey for vkey in VARIANT_KEYS if vkey != "skin_variant")
     for key in LOOK_KEYS:                              # the look of each page of the menu
         value = str(update.get(key) or "")
         if key in update and (value in skins.BY_ID or (value == FOLLOW and key != "skin")):
             clean[key] = value
+    for vkey in VARIANT_KEYS:                          # (v5.44.45) its light/dark side
+        if vkey not in update:
+            continue
+        value = str(update.get(vkey) or "")
+        if value in skins.VARIANTS:
+            clean[vkey] = value
+            drop.discard(vkey)
+        elif not value:
+            drop.add(vkey)
     if "thumbs" in update and str(update["thumbs"]) in THUMB_SIZES:
         clean["thumbs"] = str(update["thumbs"])
     if "manga_strip" in update and str(update["manga_strip"]) in MANGA_STRIP_PLACES:
@@ -128,6 +156,8 @@ def save(update: dict) -> dict:
         if not isinstance(current, dict):
             current = {}
         current.update(clean)
+        for key in drop:
+            current.pop(key, None)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(current, ensure_ascii=False, indent=1), encoding="utf-8")

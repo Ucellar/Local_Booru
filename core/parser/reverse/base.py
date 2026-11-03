@@ -28,6 +28,14 @@ class ReverseService(Availability):
     #: (core/parser/reverse_journal.py)
     journal_key = ""
     journal_revision = 1
+    #: (v5.44.36) the pictures of a video it is asked with, in order (core/tagger/site_frames.py): «start» — the
+    #: video's start (pixiv, Twitter, Gelbooru…), «e621» / «danbooru» — the frame that site makes its previews of
+    #: (ffmpeg's «thumbnail» over the first 100 / 300 frames).  The next one only when the one before found nothing
+    #: and is another picture (``engine.reverse_take``).  A picture or a GIF — always the file itself / its start.
+    video_styles = ("start",)
+    #: (v5.44.36) hits from this similarity up under the run's are weak (``Candidate.weak``): a video's, nearly the same
+    #: preview only; 100 — none (the service's own threshold decides, as before)
+    weak_floor = 100.0
 
     def __init__(self, ctx: ParserContext, sites: list):
         self.ctx = ctx

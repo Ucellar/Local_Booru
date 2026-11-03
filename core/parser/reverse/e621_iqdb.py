@@ -10,12 +10,15 @@ by file a minute and an account six in ten seconds.  So it was in a run of the p
 open: answers 63–71 s apart, «Throttled» — HTTP 429 — between them); questions each on a connection of its own went
 through a proxy of several addresses and were answered 3 s apart.  At the owner (1.11.2026, searches 3 s apart
 without an account) e621's Cloudflare answered the twentieth one with its own HTTP 429 page.  So without an account the
-searches go :data:`GAP` seconds apart — e621's minute — and with the login and key :data:`GAP_SIGNED`; a «Throttled»
+searches go :data:`GAP` seconds apart — e621's minute — and with the login and key :data:`GAP_SIGNED` (v5.44.25: 6 s,
+not 2 — at the owner's, with the account, Cloudflare answered 2 s apart with its 429); a «Throttled»
 of e621 itself doubles the gap (up to :data:`MAX_GAP`), an answer takes it back a little; it is waited out —
 ``Retry-After``, else the gap after the last answer (at least :data:`THROTTLE_WAIT`, then :data:`THROTTLE_AGAIN`) —
 and asked again, twice at most, before the file is deferred.  Cloudflare's 429 is a limit of the address for all of
-e621: the service is not asked for the rest of the run, so the sites' own lookups on e621 are not closed too (the
-words say so — not «refresh the cookies», which is for its wall: 403/503).  A long queue holds no file: ``pass_over``
+e621: (v5.44.25) the first — :data:`CF_REST` seconds of rest (``pause_for``: the files meanwhile are deferred, not
+Брак), then twice as far apart (at least :data:`CF_GAP`); the second — the service is not asked for the rest of the
+run, so the sites' own lookups on e621 are not closed too (the words say so — not «refresh the cookies», which is for
+its wall: 403/503).  A long queue holds no file: ``pass_over``
 — the file goes on to the next service and comes back to it before the day's searches of SauceNAO
 (``engine.reverse_next``).  With the e621 login and key in «Сайты» it is quick.
 
@@ -41,7 +44,10 @@ from core.parser.util import json_body, looks_like_cloudflare, short
 
 URL = "https://e621.net/iqdb_queries.json"
 GAP = 61.0                # seconds between two searches without an account (e621: one a minute for an address)
-GAP_SIGNED = 2.0          # … with the login and key (e621: six in ten seconds for an account)
+GAP_SIGNED = 6.0          # … with the login and key (e621 itself: six in ten seconds for an account; its Cloudflare
+                          # limits the address sooner — v5.44.25: at the owner's, 2 s apart with the account, HTTP 429)
+CF_REST = 900.0           # seconds of rest after Cloudflare's 429 (the address's limit), then twice as far apart
+CF_GAP = 12.0             # … at least this far apart after it
 MAX_GAP = 240.0           # «Throttled» again and again (an address shared with others: a VPN)
 THROTTLE_WAIT = 12.0      # seconds a «Throttled» answer is waited out when it does not say how long
 THROTTLE_AGAIN = 30.0     # … and the second one in a row
@@ -57,6 +63,13 @@ class E621Iqdb(ReverseService):
     journal_revision = 2      # (v5.44.14) asked without an account: a «нет» of before (it never ran) does not count
     host = "e621.net"
     pass_over = True          # its queue long (throttled) — a file goes on and comes back (engine.reverse_next)
+    # (v5.44.36) e621's previews of videos: ffmpeg's «thumbnail» over the first 100 frames — of 7 public e621 videos
+    # it found 5 by that frame (3 at 80 % and more), 1 by the first frame
+    video_styles = ("e621",)
+    # (v5.44.36) hits from this score up under the run's threshold are kept as weak (``Candidate.weak``): a video's
+    # only, with a nearly same preview — e621 IQDB scored true finds of videos 68–75 % (the owner's Брак: 68.8 %, the
+    # preview its quarter frame, d=0; public videos: 72 %, 75 %, the preview the e621 frame)
+    weak_floor = 65.0
 
     def __init__(self, ctx, sites: list):
         super().__init__(ctx, sites)
@@ -65,6 +78,7 @@ class E621Iqdb(ReverseService):
         self._gap = 0.0                       # learned; 0 — not yet: the account's own
         self._last_ok = 0.0                   # when e621 last answered (its minute counts from it)
         self._errors = 0                      # error answers in a row
+        self._limited = 0                     # Cloudflare's 429 in this run
 
     def _site(self):
         return next((s for s in self.sites if s.engine == "e621" and s.host == "e621.net"), None)
@@ -155,8 +169,14 @@ class E621Iqdb(ReverseService):
         status = response.status_code
         if looks_like_cloudflare(response):
             if status == 429:       # a limit of the address, not a wall: cookies do not lift it, asking more widens it
-                self.disable("e621 ограничил частые поиски по картинке с этого адреса (HTTP 429) — до конца запуска не "
-                             "спрашиваю, чтобы e621 не закрыл и остальное" +
+                self._limited += 1
+                if self._limited == 1:              # (v5.44.25) a rest, then twice as far apart — not the run lost
+                    self._gap = min(MAX_GAP, max(self.gap() * 2.0, CF_GAP))
+                    self.pause_for(CF_REST, f"e621 ограничил частые поиски по картинке с этого адреса (HTTP 429) — "
+                                            f"{int(CF_REST // 60)} минут не спрашиваю, потом раз в {self.gap():.0f} с")
+                    return ReverseOutcome("paused", detail="HTTP 429 — e621 просит реже")
+                self.disable("e621 второй раз ограничил частые поиски по картинке с этого адреса (HTTP 429) — до конца "
+                             "запуска не спрашиваю, чтобы e621 не закрыл и остальное" +
                              ("" if signed else "; с логином и API-ключом e621 («Сайты и ключи») поисков больше"))
                 return ReverseOutcome("disabled", detail="HTTP 429")
             self.disable(f"Cloudflare (HTTP {status}) — открой e621 в браузере и обнови cookies через Companion")
@@ -206,9 +226,9 @@ class E621Iqdb(ReverseService):
                 score = float(row.get("score", row.get("similarity", 0)) or 0)
             except (TypeError, ValueError):
                 score = 0.0
-            if str(post_id).isdigit() and score >= min_sim:
+            if str(post_id).isdigit() and score >= min(min_sim, self.weak_floor):
                 outcome.candidates.append(Candidate(url=f"https://e621.net/posts/{post_id}", similarity=score,
-                                                    service=self.name))
+                                                    service=self.name, weak=score < min_sim))
         for c in outcome.candidates[:5]:
             self.ctx.log(f"  e621 IQDB {c.similarity:.0f}% {c.url}")
         return outcome

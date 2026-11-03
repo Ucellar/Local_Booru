@@ -34,7 +34,8 @@ def _prefs(req: Request) -> dict:
 
 
 # ── what the run will use, in words ────────────────────────────────────────
-_REVERSE = (("enable_fluffle", "Fluffle", True), ("enable_e621_iqdb", "e621 IQDB", True), ("enable_iqdb", "IQDB", True),
+_REVERSE = (("enable_fluffle", "Fluffle", True), ("enable_e621_iqdb", "e621 IQDB", True),
+            ("enable_atf_iqdb", "ATF IQDB", True), ("enable_iqdb", "IQDB", True),
             ("enable_danbooru_iqdb", "Danbooru IQDB", False), ("enable_ascii2d", "Ascii2D", False))
 
 
@@ -49,9 +50,10 @@ def site_plan(settings: dict) -> tuple[list, list]:
         if isinstance(cfg, dict) and cfg.get("enabled") and cfg.get("domain"):
             sites.append(str(cfg.get("name") or cfg.get("domain")))
     e621_on = bool(((settings.get("sites") or {}).get("e621.net") or {}).get("enabled"))
-    # e621 IQDB's hits are e621 posts: without e621 among the sites the run does not ask it (core/parser/reverse)
+    atf_on = bool(((settings.get("sites") or {}).get("booru.allthefallen.moe") or {}).get("enabled"))
+    # a site's own IQDB leads to that site's posts: without the site among the run's it is not asked (core/parser/reverse)
     reverse = [label for key, label, default in _REVERSE if settings.get(key, default)
-               and (key != "enable_e621_iqdb" or e621_on)]
+               and (key != "enable_e621_iqdb" or e621_on) and (key != "enable_atf_iqdb" or atf_on)]
     if settings.get("enable_saucenao", True):
         reverse.append("SauceNAO" if str(settings.get("saucenao_api_key") or "").strip() else "SauceNAO (нет ключа — выключен)")
     return sites, reverse

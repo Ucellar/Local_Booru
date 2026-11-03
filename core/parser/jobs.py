@@ -95,7 +95,7 @@ def channel_of(line: str) -> str:
     m = _SITE_LINE.match(text)
     if m:
         return "site:" + m.group(1).strip()
-    if text.startswith("[REVERSE:"):
+    if text.startswith("[REVERSE:"):        # (v5.44.35) also «[REVERSE:…] … — так же ещё N файлов» (core/parser/tally.py)
         return "final" if "ФИНАЛ" in text else "reverse"
     return "main"
 

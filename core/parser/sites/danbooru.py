@@ -100,6 +100,21 @@ class DanbooruSite(Site):
                 raise SiteUnavailable("страница проверки ATF", transient=False)
         return data
 
+    def iqdb_query(self, upload_path):
+        """This site's own search of similar pictures (Danbooru's ``/iqdb_queries.json``): the picture is uploaded,
+        the site answers with its posts and a score.  ATF is behind its verification page here too — the picture goes
+        through the same proof-of-work gate as the API (one solve shared ten minutes); the raw response goes back so
+        the reverse service reads its status (throttling, errors).  (v5.44.39)"""
+        url = f"{self.root}/iqdb_queries.json"
+        headers = {"Accept": "application/json", "User-Agent": self.api_user_agent()}
+        if self.is_atf:
+            self._atf_apply_shared_cookies()
+        response = self.http.post_file(url, upload_path, field="search[file]", headers=headers, auth=self._auth())
+        if self.is_atf and _response_is_atf_challenge(response):
+            self._atf_unlock(url, response.text)         # the API's own solver, shared; not asked to do more
+            response = self.http.post_file(url, upload_path, field="search[file]", headers=headers, auth=self._auth())
+        return response
+
     # ── interface ───────────────────────────────────────────────────────────
 
     def search_md5(self, md5: str) -> Post | None:
@@ -296,6 +311,17 @@ def _is_atf_challenge(text: str) -> bool:
     head = (text or "")[:20000].lower()
     return ("| verification" in head and "allthefallen" in head) or "x-verification-challenge" in head \
         or "powseed" in head or "challenge-checkbox" in head
+
+
+def _response_is_atf_challenge(response) -> bool:
+    """An answer of the IQDB upload that is ATF's verification page, not its result (v5.44.39): HTML, not JSON."""
+    ctype = str(response.headers.get("content-type", "")).lower()
+    if "json" in ctype:
+        return False
+    try:
+        return _is_atf_challenge(response.text)
+    except Exception:
+        return False
 
 
 def _asset_rows(data) -> list:

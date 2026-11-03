@@ -36,6 +36,25 @@
   --font-head: "Noto Sans", "Segoe UI", Arial, sans-serif;
   --radius: 3px;
   --radius-thumb: 3px;
+  /* the site's own colours under the header (it stays black in both schemes): the strip of sections, fields and
+     their edges, rules, stars, the nhentai list of tags; the light scheme changes only these */
+  --nh-strong: #ffffff;
+  --nh-strip: #161616;
+  --nh-field: #2b2b2b;
+  --nh-line: #4a4a4a;
+  --nh-rule: #2f2f2f;
+  --nh-star-off: #707070;
+  --nh-page: #0d0d0d;
+  --nh-box: #1f1f1f;
+  --nh-col-rule: #333333;
+  --nh-chip-ink: #d9d9d9;
+  --nh-chip-name: #4d4d4d;
+  --nh-chip-count: #333333;
+  --nh-count-ink: #d9d9d9;
+  --nh-sort: #1a1a1a;
+  --nh-hover: #333333;
+  --nh-current: #262626;
+  --nh-target: #404040;
   color-scheme: dark;
 }
 
@@ -65,41 +84,91 @@
   border: 0;
   border-radius: 0 var(--radius) var(--radius) 0;
   background: var(--accent);
-  color: #ffffff;
+  color: var(--accent-ink);
   font-weight: bold;
 }
-.top-search .search-go:hover { color: #ffffff; filter: brightness(1.1); }
+.top-search .search-go:hover { color: var(--accent-ink); filter: brightness(1.1); }
 .top-tools { margin-left: auto; }
 .skin-button { border-color: #3d3d3d; border-radius: var(--radius); color: var(--bar-ink); }
 .sidebar .search { display: none; }
 
-.sections { background: #161616; border-bottom: 0; padding: 8px 20px; }
+.sections { background: var(--nh-strip); border-bottom: 0; padding: 8px 20px; }
 .sections a { color: var(--muted); }
-.sections a.active { color: #ffffff; }
+.sections a.active { color: var(--nh-strong); }
 
 .layout { padding: 16px 20px 48px; }
-button, .button { background: var(--panel-2); border-color: #4a4a4a; color: var(--text); }
-button:hover, .button:hover { border-color: var(--accent); color: #ffffff; }
-input[type="search"], select { background: #2b2b2b; border-color: #4a4a4a; color: var(--text); }
+button, .button { background: var(--panel-2); border-color: var(--nh-line); color: var(--text); }
+button:hover, .button:hover { border-color: var(--accent); color: var(--nh-strong); }
+input[type="search"], select { background: var(--nh-field); border-color: var(--nh-line); color: var(--text); }
 .paginator a { background: var(--panel); border-color: var(--panel); }
 .paginator a:hover { background: var(--panel-2); }
-.paginator b { background: var(--accent); border-color: var(--accent); color: #ffffff; }
-.star { color: #4a4a4a; }
+.paginator b { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.star { color: var(--nh-star-off); }
 .star.on { color: var(--accent); }
-.tag-table td { border-bottom-color: #2f2f2f; }
+.tag-table td { border-bottom-color: var(--nh-rule); }
 
 /* lists of tags as nhentai's own (webui/tag_lists.py): the page darker than the box of the tags, the name on #4d4d4d,
    its count on #333, «Популярные / А–Я» on #1a1a1a with the chosen one on #262626 */
-html:has(.taglist-nh), html:has(.taglist-nh) body { background: #0d0d0d; }
-.taglist-nh .tag-container { background: #1f1f1f; column-rule-color: #333333; }
-.taglist-nh .tagchip { color: #d9d9d9; }
-.taglist-nh .tagchip .name { background: #4d4d4d; }
-.taglist-nh .tagchip .count { background: #333333; color: #d9d9d9; }
-.taglist-nh .sort-type { background: #1a1a1a; }
-.taglist-nh .sort-type a { color: #d9d9d9; }
-.taglist-nh .sort-type a:hover { background: #333333; }
-.taglist-nh .sort-type a.current { background: #262626; }
-.taglist-nh .nh-tabs a.current { background: #262626; }
-.taglist-nh .alphabetical-pagination a { color: #d9d9d9; }
-.taglist-nh .alphabetical-pagination a:hover { background: #383838; }
-.taglist-nh .tag-letter:target { border-color: #404040; background: #262626; }
+html:has(.taglist-nh), html:has(.taglist-nh) body { background: var(--nh-page); }
+.taglist-nh .tag-container { background: var(--nh-box); column-rule-color: var(--nh-col-rule); }
+.taglist-nh .tagchip { color: var(--nh-chip-ink); }
+.taglist-nh .tagchip .name { background: var(--nh-chip-name); }
+.taglist-nh .tagchip .count { background: var(--nh-chip-count); color: var(--nh-count-ink); }
+.taglist-nh .sort-type { background: var(--nh-sort); }
+.taglist-nh .sort-type a { color: var(--nh-chip-ink); }
+.taglist-nh .sort-type a:hover { background: var(--nh-hover); }
+.taglist-nh .sort-type a.current { background: var(--nh-current); }
+.taglist-nh .nh-tabs a.current { background: var(--nh-current); }
+.taglist-nh .alphabetical-pagination a { color: var(--nh-chip-ink); }
+.taglist-nh .alphabetical-pagination a:hover { background: var(--nh-hover); }
+.taglist-nh .tag-letter:target { border-color: var(--nh-target); background: var(--nh-current); }
+
+/* (v5.44.46) «nhentai» на свету: шапка остаётся чёрной, как у сайта, под ней — светлая страница; розово-красный —
+   у кнопки поиска, «Запустить», плашек, звёзд; ссылки и розовый текст — темнее, чтобы читались на белом */
+:root[data-variant="light"] {
+  --bg: #ededed;
+  --panel: #ffffff;
+  --panel-2: #e4e4e4;
+  --border: #d0d0d0;
+  --text: #1f1f1f;
+  --muted: #666666;
+  --link: #c81e46;
+  --link-hover: #ed2553;
+  --accent: #ed2553;
+  --accent-ink: #ffffff;
+  --accent-text: #c81e46;
+  --thumb-bg: #e4e4e4;
+  --thumb-ring: #ed2553;
+  --danger: #c62828;
+  --focus: #c81e46;
+  --shadow: 0 14px 40px rgba(60, 40, 50, 0.18);
+
+  --tag-artist: #c42a52;
+  --tag-character: #23803e;
+  --tag-copyright: #8a45c8;
+  --tag-general: #2a2a2a;
+  --tag-meta: #a5620f;
+  --tag-species: #c0500f;
+  --tag-lore: #0c7a7a;
+  --tag-contributor: #b8306f;
+  --tag-invalid: #707070;
+
+  --nh-strong: #111111;
+  --nh-strip: #e4e4e4;
+  --nh-field: #ffffff;
+  --nh-line: #c8c8c8;
+  --nh-rule: #e2e2e2;
+  --nh-star-off: #9a9a9a;
+  --nh-page: #e6e6e6;
+  --nh-box: #ffffff;
+  --nh-col-rule: #dddddd;
+  --nh-chip-ink: #1f1f1f;
+  --nh-chip-name: #e4e4e4;
+  --nh-chip-count: #f0f0f0;
+  --nh-count-ink: #555555;
+  --nh-sort: #f2f2f2;
+  --nh-hover: #dddddd;
+  --nh-current: #ffffff;
+  --nh-target: #c8c8c8;
+  color-scheme: light;
+}

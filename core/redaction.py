@@ -6,6 +6,8 @@ remain readable; only credentials are removed.
 """
 from __future__ import annotations
 
+import logging
+
 import json
 import re
 from pathlib import Path
@@ -90,23 +92,61 @@ def sanitize_file_in_place(path: str | Path) -> bool:
         return False
 
 
-def sanitize_log_directory(log_dir: str | Path) -> dict[str, int]:
+# (v5.44.35) the logs looked at before — «size:mtime_ns» a line; not «*.log»/«*.json», so it is never one of them
+CHECKED_NAME = "privacy_checked.txt"
+
+
+def sanitize_log_directory(log_dir: str | Path, *, remember: bool = False, skip=()) -> dict[str, int]:
     """Remove secrets from old persisted logs/crash reports in place.
 
     Raw copies are intentionally not preserved: backing up exposed credentials
     would defeat the privacy repair. This touches logs only, never the DB/media.
+
+    (v5.44.35) ``remember`` — a file looked at before and unchanged since (the same size and time; a rotated copy
+    keeps them under its new name) is not read again: at every start this read every log — app.log and its five
+    copies of 10 MB and the others, 7 patterns over each — the owner's start of 2.11.2026 waited 33 s for it before
+    the window.  ``skip`` — names the program writes to now (its handlers redact every line as it is written).
     """
     root = Path(log_dir)
     checked = changed = 0
     if not root.exists():
         return {"checked": 0, "changed": 0}
+    seen = _looked_at(root) if remember else set()
+    still: set = set()
     for pattern in ("*.log", "*.log.*", "*.json", "*.jsonl", "*.jsonl.*"):
         for path in root.glob(pattern):
-            if not path.is_file():
+            if not path.is_file() or path.name in skip:
+                continue
+            key = _stamp(path)
+            if key and key in seen:
+                still.add(key)
                 continue
             checked += 1
             changed += int(sanitize_file_in_place(path))
+            key = _stamp(path)
+            if key:
+                still.add(key)
+    if remember:
+        try:
+            (root / CHECKED_NAME).write_text("\n".join(sorted(still)) + "\n", encoding="utf-8")
+        except OSError as exc:      # without it the next start looks at every log again, as before
+            logging.getLogger("local_booru.redaction").info("old logs: what was looked at is not kept: %s", exc)
     return {"checked": checked, "changed": changed}
+
+
+def _stamp(path: Path) -> str:
+    try:
+        st = path.stat()
+    except OSError:
+        return ""
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def _looked_at(root: Path) -> set:
+    try:
+        return {line.strip() for line in (root / CHECKED_NAME).read_text(encoding="utf-8").splitlines() if line.strip()}
+    except OSError:
+        return set()
 
 
 class RedactingFormatter:

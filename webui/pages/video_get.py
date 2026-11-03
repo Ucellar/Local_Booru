@@ -6,10 +6,22 @@ progress bar: ``/api/videos/download-state`` carries ``meter``).
 The list the page shows is the result of the last «Найти видео» kept by its task (``page_jobs.current``); «Скачать»
 names it by the task's number, so a list read before another search is never downloaded by mistake.  The page gets
 the names of the files only — their addresses stay in the program.
+
+«Скачать» while another download goes (the owner, 02.11.2026: the second season found while the first one downloads —
+no button, and its tiles showed the first season's episodes) puts this one in a queue (``_QUEUE``): it starts by
+itself when the one before it ends (``_next``); «Остановить» stops the download and empties the queue.
+
+The queue and the download going are kept in ``video_queue.json`` (the owner, 03.11.2026: «ещё бы оно очередь
+запоминало»): after the program starts again (``restore``) each one is found again by its page's address and goes on —
+the files there are had, a begun one goes on from its «.part»; a pause stays a pause; «Остановить» keeps nothing.
 """
 from __future__ import annotations
 
+import itertools
+import json
 import logging
+import threading
+import time
 from pathlib import Path
 
 from core import video_library as V
@@ -19,6 +31,17 @@ from webui.server import Request, Response
 _LOG = logging.getLogger("local_booru.video")
 FIND = "video_find"                    # the page task «Найти видео»
 GET = "video_download"                 # the page task «Скачать»
+_QUEUE: list = []                      # downloads asked while one went: {"id", "find", "title", "chosen", "label", "run"}
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_IDS = itertools.count(1)
+_CURRENT: dict = {"saved": None}       # the download going: what it is, to begin it again after a restart
+_USER_STOP = threading.Event()         # «Остановить»: what it stops is not begun again
+_RESTORED = threading.Event()          # the downloads of the last run read (once a run of the program)
+KEEP_NAME = "video_queue.json"
+RESTORE_AFTER = 30.0                   # seconds after the start: the program's own start goes first
+_ORDERS: dict = {}                     # YummyAnime's alias -> (when asked, its viewing order): asked once an hour
+ORDER_TTL = 3600.0
+_ORDERS_LOCK = threading.Lock()
 
 
 def register(router) -> None:
@@ -31,6 +54,11 @@ def register(router) -> None:
     router.add("GET", r"/api/videos/download-state", download_state)
     router.add("GET", r"/api/videos/measure", measure)
     router.add("POST", r"/api/videos/download/stop", download_stop)
+    router.add("POST", r"/api/videos/download/unqueue", download_unqueue)
+    router.add("POST", r"/api/videos/download/pause", download_pause)
+    router.add("GET", r"/api/videos/order/(?P<id>[0-9a-f]{12})", series_order)
+    if not _RESTORED.is_set() and _kept_records():   # the downloads the program was busy with when it closed
+        threading.Thread(target=_restore_later, name="video-download-restore", daemon=True).start()
 
 
 def _root(req: Request) -> tuple[Path | None, str]:
@@ -53,11 +81,13 @@ def page(req: Request) -> Response:
     dubs = video_dubs.enabled(req.settings)
     can_dubs = getattr(video_dubs, "AVAILABLE", True)    # the public copy has none (its core/video_dubs: a stand-in)
     sites = ["hentasis1.top", "hentai-xs.com", "hentaihaven.xxx"]
-    sites += ["YummyAnime — все озвучки (Kodik, CVH)"] if dubs else ["YummyAnime — серии с AniLiberty"] if sources else []
+    sites += [f"YummyAnime — все озвучки (Kodik, CVH{', AniLiberty' if sources else ''})"] if dubs \
+        else ["YummyAnime — серии с AniLiberty"] if sources else []
     sites += ["AniLiberty"] if sources else []
     if dubs:
         frames = ("У YummyAnime программа берёт все озвучки и субтитры тайтла из плееров Kodik (до 720p) и CVH (до "
-                  "1080p): каждая озвучка — своя вкладка сериала. Отметьте нужные серии или «пробную серию» озвучки, "
+                  "1080p)" + (", а озвучку AniLibria — ещё и с её собственного сайта AniLiberty (до 1080p)" if sources else "")
+                  + ": каждая озвучка — своя вкладка сериала. Отметьте нужные серии или «пробную серию» озвучки, "
                   "выберите качество и нажмите «Скачать». Плееры Alloha и Aksor программа не скачивает.")
     elif sources:
         frames = ("У YummyAnime видео в чужом плеере (Kodik) — сейчас программа его не трогает, а серии этого тайтла ищет на "
@@ -70,7 +100,8 @@ def page(req: Request) -> Response:
                   + " — это включается в «Настройки → Вкладка «Видео»».")
     chips = "".join(f'<li>{esc(site)}</li>' for site in sites)
     merge_on = " checked" if req.settings.get("video_dub_merge", True) else ""
-    body = f"""<div class="vget" id="vid-get">
+    autofind = ' data-autofind="1"' if address and req.arg("go") == "1" else ""
+    body = f"""<div class="vget" id="vid-get"{autofind}>
   <section class="vget-ask" aria-labelledby="vget-title">
     <h1 id="vget-title">Скачать с сайта</h1>
     <p class="vget-lead">Вставьте ссылку на тайтл — программа найдёт его серии и скачает их в папку видео вместе с
@@ -143,7 +174,9 @@ def page(req: Request) -> Response:
       <div class="vbar-run job" data-job="download" hidden>
         <div class="job-head tool-actions"><b class="job-title"></b> <span class="job-status"></span>
           <span class="action-status" role="status"></span>
+          <button type="button" class="vbutton" data-action="vid-download-pause" hidden>Пауза</button>
           <button type="button" class="vbutton" data-action="vid-download-stop" hidden>Остановить</button></div>
+        <ul class="vqueue" hidden aria-label="Очередь скачивания"></ul>
         <div class="vmeter" hidden><progress max="1000" value="0"></progress><span class="vmeter-text"></span></div>
         <div class="vbar-end"><p class="vget-result" hidden></p>
           <p class="vget-open" hidden><a class="vbutton primary" href="/videos">Открыть сериал</a></p></div>
@@ -158,71 +191,86 @@ def page(req: Request) -> Response:
 
 # ── «Найти видео» ────────────────────────────────────────────────────────────────────
 def _start_find(req: Request, label: str, get_page, address: str = "") -> Response:
-    from core import page_jobs, video_download, video_dubs, video_sources
-    from core import video_meta_import as I
+    from core import page_jobs
     from webui.pages.videos import _window_fetch
     root, why = _root(req)
     if root is None:
         return Response.json({"ok": False, "error": why}, 409)
     window = _window_fetch()
-    settings = {key: req.settings.get(key) for key in ("video_source_aniliberty", "aniliberty_url", "video_source_dubs",
-                                                       "yummy_api_url")}
+    settings = _find_settings(req.settings)
 
     def run(say, stop_check):
-        try:                                         # a page of AniLiberty: its release, the page is not read
-            found = video_sources.find_alias(address, root, settings=settings, say=say, stop_check=stop_check)
-        except video_sources.SourceError as exc:
-            return {"failed": str(exc)}
-        api_failed = False
-        if found is None:                            # a page of YummyAnime: all its voice-overs, by its API
-            try:
-                found = video_dubs.find_address(address, root, settings=settings, say=say, stop_check=stop_check)
-            except video_dubs.DubError as exc:
-                if stop_check():
-                    return {"stopped": True}
-                say(f"Озвучки из API {video_dubs.NAME} не получены: {exc} — читаю саму страницу")
-                found, api_failed = None, True
-        if found is None:
-            try:
-                got = get_page(say)
-            except I.MetaImportError as exc:
-                return {"failed": str(exc)}
-
-            def fetch(address: str):                 # the pages of the series' episodes, its own page
-                return I.page_from_url(address, progress=lambda _text: None, window_fetch=window)
-            found = video_download.look(got, root, say=say, stop_check=stop_check, fetch=fetch)
-            dubs = None
-            if not found.files and not api_failed:   # its video is another site's player (YummyAnime): its
-                try:                                 # voice-overs from the players, by the site's API
-                    dubs = video_dubs.find(got, root, settings=settings, say=say, stop_check=stop_check)
-                except video_dubs.DubError as exc:
-                    if stop_check():
-                        return {"stopped": True}
-                    say(f"Озвучки из API {video_dubs.NAME} не получены: {exc}")
-            if dubs is not None:
-                found = dubs
-            elif not found.files:                    # … else the title on a site that gives its episodes
-                try:
-                    found = video_sources.find(got, root, settings=settings, say=say, stop_check=stop_check) or found
-                except video_sources.SourceError as exc:
-                    return {"failed": _nothing(found, str(exc))}
-        videos = sum(1 for f in found.files if f.kind == "video")
-        sounds = len(found.files) - videos
-        if found.files and all(f.blocked for f in found.files):
-            return {"failed": "Скачать с этой страницы нечего: " + found.files[0].blocked}
-        if found.files:
-            say(f"Нашлось серий во всех озвучках: {videos}" if found.choose == "dubs" else
-                f"Нашлось видео: {videos}" + (f", звук: {sounds}" if sounds else ""))
-            say(f"Папка: {found.folder}" + (" (новая)" if found.new_folder else " (уже есть — докачается в неё)"))
-            if not stop_check():                     # the poster for the list, written with the description later
-                found.poster = I.poster_of(found.about or found.page, say=say, stop_check=stop_check)
-            return {"found": found, "root": str(root)}
-        return {"failed": _nothing(found, off=not video_sources.enabled(settings))}
+        return _find_with(address, get_page, root, settings, window, say, stop_check)
     try:
         task = page_jobs.start(FIND, label, run)
     except page_jobs.TaskBusy as exc:
         return Response.json({"ok": False, "error": f"{exc}. Дождитесь конца."}, 409)
     return Response.json({"ok": True, "id": task.id})
+
+
+def _find_settings(settings: dict) -> dict:
+    return {key: settings.get(key) for key in ("video_source_aniliberty", "aniliberty_url", "video_source_dubs",
+                                               "yummy_api_url")}
+
+
+def _find_with(address: str, get_page, root: Path, settings: dict, window, say, stop_check) -> dict:
+    """«Найти серии»: what a page (``address``; ``get_page(say)`` reads it — a saved one too) offers →
+    {"found", "root", "address"} | {"failed"} | {"stopped"}."""
+    from core import video_download, video_dubs, video_sources
+    from core import video_meta_import as I
+    if get_page is None:
+        def get_page(say):
+            say(f"Страница: {address}")
+            return I.page_from_url(address, progress=say, window_fetch=window)
+    try:                                         # a page of AniLiberty: its release, the page is not read
+        found = video_sources.find_alias(address, root, settings=settings, say=say, stop_check=stop_check)
+    except video_sources.SourceError as exc:
+        return {"failed": str(exc)}
+    api_failed = False
+    if found is None:                            # a page of YummyAnime: all its voice-overs, by its API
+        try:
+            found = video_dubs.find_address(address, root, settings=settings, say=say, stop_check=stop_check)
+        except video_dubs.DubError as exc:
+            if stop_check():
+                return {"stopped": True}
+            say(f"Озвучки из API {video_dubs.NAME} не получены: {exc} — читаю саму страницу")
+            found, api_failed = None, True
+    if found is None:
+        try:
+            got = get_page(say)
+        except I.MetaImportError as exc:
+            return {"failed": str(exc)}
+
+        def fetch(address: str):                 # the pages of the series' episodes, its own page
+            return I.page_from_url(address, progress=lambda _text: None, window_fetch=window)
+        found = video_download.look(got, root, say=say, stop_check=stop_check, fetch=fetch)
+        dubs = None
+        if not found.files and not api_failed:   # its video is another site's player (YummyAnime): its
+            try:                                 # voice-overs from the players, by the site's API
+                dubs = video_dubs.find(got, root, settings=settings, say=say, stop_check=stop_check)
+            except video_dubs.DubError as exc:
+                if stop_check():
+                    return {"stopped": True}
+                say(f"Озвучки из API {video_dubs.NAME} не получены: {exc}")
+        if dubs is not None:
+            found = dubs
+        elif not found.files:                    # … else the title on a site that gives its episodes
+            try:
+                found = video_sources.find(got, root, settings=settings, say=say, stop_check=stop_check) or found
+            except video_sources.SourceError as exc:
+                return {"failed": _nothing(found, str(exc))}
+    videos = sum(1 for f in found.files if f.kind == "video")
+    sounds = len(found.files) - videos
+    if found.files and all(f.blocked for f in found.files):
+        return {"failed": "Скачать с этой страницы нечего: " + found.files[0].blocked}
+    if found.files:
+        say(f"Нашлось серий во всех озвучках: {videos}" if found.choose == "dubs" else
+            f"Нашлось видео: {videos}" + (f", звук: {sounds}" if sounds else ""))
+        say(f"Папка: {found.folder}" + (" (новая)" if found.new_folder else " (уже есть — докачается в неё)"))
+        if not stop_check():                     # the poster for the list, written with the description later
+            found.poster = I.poster_of(found.about or found.page, say=say, stop_check=stop_check)
+        return {"found": found, "root": str(root), "address": address}
+    return {"failed": _nothing(found, off=not video_sources.enabled(settings))}
 
 
 def _nothing(found, elsewhere: str = "", *, off: bool = False) -> str:
@@ -328,16 +376,176 @@ def download(req: Request) -> Response:
     if root is None:
         return Response.json({"ok": False, "error": why}, 409)
     found = kept["found"]
-
-    def run(say, stop_check):
-        return video_download.download(found, chosen, root, say=say, stop_check=stop_check, quality=quality,
-                                       merge=merge)
+    saved = _saved_of(str(kept.get("address") or ""), found, chosen, quality, merge)
+    run = _job(saved, lambda say, stop_check: video_download.download(found, chosen, root, say=say,
+                                                                      stop_check=stop_check, quality=quality,
+                                                                      merge=merge))
     title = found.title or found.folder.name
+    label = f"Скачать с сайта: «{title}»"
     try:
-        started = page_jobs.start(GET, f"Скачать с сайта: «{title}»", run, about=task.id)
-    except page_jobs.TaskBusy as exc:
-        return Response.json({"ok": False, "error": f"{exc}. Дождитесь конца или остановите."}, 409)
+        started = page_jobs.start(GET, label, run, about=task.id)
+    except page_jobs.TaskBusy:
+        with _QUEUE_LOCK:                            # the same list asked again: its choice now, its place kept
+            entry = next((q for q in _QUEUE if q["find"] == task.id), None)
+            if entry is None:
+                entry = {"id": next(_QUEUE_IDS), "find": task.id}
+                _QUEUE.append(entry)
+            entry.update(title=title, chosen=list(chosen), label=label, run=run, saved=saved)
+            entry.pop("count", None)
+            place = _QUEUE.index(entry) + 1
+        _persist()
+        going = page_jobs.current(GET)               # one ending just now: the next starts (not after a stop)
+        threading.Thread(target=_next, kwargs={"after": going.id if going is not None else None},
+                         name="video-download-queue", daemon=True).start()
+        return Response.json({"ok": True, "queued": place, "queue_id": entry["id"]})
     return Response.json({"ok": True, "id": started.id})
+
+
+# ── the downloads kept between runs of the program ────────────────────────────────────
+def _keep_file() -> Path:
+    from core.paths import SETTINGS_DIR
+    return Path(SETTINGS_DIR) / KEEP_NAME
+
+
+def _saved_of(address: str, found, chosen: list, quality: str, merge: bool) -> dict | None:
+    """What a download is, to begin it again after a restart: its page's address and its files by their sub-folder
+    and title (the file's extension is its player's — it may be another then); None for a saved page (no address)."""
+    if not address.startswith(("http://", "https://")):
+        return None
+    files = [[found.files[n].group or "", found.files[n].title or found.files[n].name]
+             for n in chosen if 0 <= n < len(found.files)]
+    return {"address": address, "title": found.title or found.folder.name, "files": files, "quality": quality,
+            "merge": bool(merge)}
+
+
+def _persist() -> None:
+    """``video_queue.json``: the download going (when it is to be begun again) and the queue after it."""
+    from core.file_safety import write_json_kept
+    with _QUEUE_LOCK:
+        records = ([_CURRENT["saved"]] if _CURRENT.get("saved") else []) + [q["saved"] for q in _QUEUE if q.get("saved")]
+    try:
+        write_json_kept(_keep_file(), json.dumps({"downloads": records}, ensure_ascii=False), dict)
+    except OSError as exc:
+        _LOG.warning("the queue of downloads not kept: %s", exc)
+
+
+def _job(saved: dict | None, work):
+    """A download as a page task: kept as the one going while it goes; when it ends, the next of the queue starts.
+    Ended by the program closing (its stop, not «Остановить») — kept, to be begun again at the next start."""
+    def run(say, stop_check):
+        _USER_STOP.clear()
+        with _QUEUE_LOCK:
+            _CURRENT["saved"] = dict(saved) if saved is not None else None
+        _persist()
+        try:
+            return work(say, stop_check)
+        finally:
+            leaving = stop_check() and not _USER_STOP.is_set()
+            with _QUEUE_LOCK:
+                if not leaving:
+                    _CURRENT["saved"] = None
+            _persist()
+            if not stop_check():                     # the next one in the queue, when this one has ended
+                threading.Thread(target=_next, name="video-download-queue", daemon=True).start()
+    return run
+
+
+def _restore_later() -> None:
+    try:
+        from core.settings import load_settings
+        time.sleep(RESTORE_AFTER)
+        restore(load_settings())
+    except Exception as exc:   # noqa: BLE001 - a queue that is not restored: the program goes on without it
+        _LOG.warning("the queue of downloads not restored: %s: %s", type(exc).__name__, exc)
+
+
+def _kept_records() -> list:
+    """The downloads ``video_queue.json`` keeps (those with a page's address and their files); [] when none or it
+    cannot be read now."""
+    from core.file_safety import read_json_kept
+    try:
+        data = read_json_kept(_keep_file(), dict, what="video queue")
+    except OSError as exc:
+        _LOG.warning("the queue of downloads cannot be read now: %s", exc)
+        return []
+    return [r for r in (data or {}).get("downloads") or [] if isinstance(r, dict)
+            and str(r.get("address") or "").startswith(("http://", "https://")) and isinstance(r.get("files"), list)]
+
+
+def restore(settings: dict) -> int:
+    """The downloads of the last run (``video_queue.json``) put in the queue again and the first begun — each found
+    again by its address (``_find_with``), its files by sub-folder and title.  Once a run.  -> how many."""
+    from core import video_download, video_dubs
+    if _RESTORED.is_set():
+        return 0
+    _RESTORED.set()
+    records = _kept_records()
+    root = Path(V.video_root(settings)) if V.video_root(settings) else None
+    if not records or root is None or not root.is_dir():
+        return 0
+    from webui.pages.videos import _window_fetch
+    window = _window_fetch()
+    found_settings = _find_settings(settings)
+
+    def work_of(record: dict):
+        def work(say, stop_check):
+            say(f"С прошлого запуска программы: «{record.get('title') or record['address']}» — ищу его серии заново")
+            got = _find_with(str(record["address"]), None, root, found_settings, window, say, stop_check)
+            if got.get("found") is None:
+                return got if got.get("failed") or got.get("stopped") else {"failed": "Серии не нашлись"}
+            found = got["found"]
+            wanted = {(str(pair[0]), str(pair[1])) for pair in record["files"] if isinstance(pair, list) and len(pair) == 2}
+            chosen = [n for n, f in enumerate(found.files) if (f.group or "", f.title or f.name) in wanted]
+            if not chosen:
+                return {"failed": "Серий из очереди на странице больше нет"}
+            quality = str(record.get("quality") or "")
+            quality = quality if quality in ("", *getattr(video_dubs, "QUALITIES", ())) else ""
+            return video_download.download(found, chosen, root, say=say, stop_check=stop_check, quality=quality,
+                                           merge=bool(record.get("merge")) and found.after is not None,
+                                           start_paused=bool(record.get("paused")))
+        return work
+    with _QUEUE_LOCK:
+        for n, record in enumerate(records):
+            title = str(record.get("title") or record["address"])
+            _QUEUE.append({"id": next(_QUEUE_IDS), "find": f"saved{n}", "title": title, "chosen": [],
+                           "count": len(record["files"]), "label": f"Скачать с сайта: «{title}»",
+                           "run": _job(record, work_of(record)), "saved": record})
+    _LOG.info("downloads of the last run: %d — begun again", len(records))
+    _persist()
+    _next()
+    return len(records)
+
+
+def _next(wait: float = 10.0, after=None) -> None:
+    """The first download of the queue started — once the one going has ended (the one that ends calls this before
+    its task says so: it is waited for a while; one still going after that starts the queue itself at its end).
+    ``after`` — the task going when one was put in the queue: stopped (the program closing) — nothing starts."""
+    from core import page_jobs
+    deadline = time.monotonic() + wait
+    while True:
+        task = page_jobs.current(GET)
+        if task is None or not task.running:
+            break
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.1)
+    if after is not None and task is not None and task.id == after and task.status == "stopped":
+        return
+    with _QUEUE_LOCK:
+        if not _QUEUE:
+            return
+        entry = _QUEUE.pop(0)
+    try:
+        page_jobs.start(GET, entry["label"], entry["run"], about=entry["find"])
+    except page_jobs.TaskBusy:                       # another started meanwhile («Скачать» of the list shown)
+        with _QUEUE_LOCK:
+            _QUEUE.insert(0, entry)
+
+
+def queue_public() -> list:
+    with _QUEUE_LOCK:
+        return [{"id": q["id"], "find": q["find"], "title": q["title"], "files": q.get("count", len(q["chosen"])),
+                 "chosen": list(q["chosen"])} for q in _QUEUE]
 
 
 def measure(req: Request) -> Response:
@@ -369,11 +577,13 @@ def download_state(req: Request) -> Response:
     from core import page_jobs, video_download
     task = page_jobs.current(GET)
     if task is None:
-        return Response.json({"ok": True, "status": "idle"})
-    state = {"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0)), "find": task.about}
+        return Response.json({"ok": True, "status": "idle", "queue": queue_public()})
+    state = {"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0)), "find": task.about,
+             "queue": queue_public()}
     result = task.result if isinstance(task.result, dict) else {}
     if task.running:
         state["meter"] = video_download.meter()
+        state["paused"] = video_download.paused()
         state["states"] = dict(state["meter"].get("states") or {})
     else:                                            # how each file ended, and the sum of it
         state["states"] = dict(result.get("states") or {})
@@ -386,9 +596,101 @@ def download_state(req: Request) -> Response:
 
 
 def download_stop(req: Request) -> Response:
+    """«Остановить»: the download going, and the queue after it (a stop that the next one would undo is no stop)."""
     from core import page_jobs
+    task = page_jobs.current(GET)
+    _USER_STOP.set()
+    with _QUEUE_LOCK:
+        dropped = [q["title"] for q in _QUEUE]
+        _QUEUE.clear()
+        _CURRENT["saved"] = None
+    _persist()
+    if task is None or not task.running:
+        if dropped:
+            return Response.json({"ok": True, "dropped": len(dropped)})
+        return Response.json({"ok": False, "error": "Скачивание не идёт"}, 409)
+    if dropped:
+        task._say("Очередь убрана: " + ", ".join(f"«{t}»" for t in dropped))
+    task.stop()
+    from core import video_download
+    video_download.resume()                          # a stop while paused: not paused any more
+    return Response.json({"ok": True, "dropped": len(dropped)})
+
+
+def series_order(req: Request) -> Response:
+    """«Порядок просмотра» on a series' page (owner, 02.11.2026: «а порядок просмотра с самого сериала, а не только
+    скачивания?»): YummyAnime's viewing order of the title the series was downloaded from (its ``source_url``) —
+    the seasons, films and extras, each with the series of the library that is it (by the same YummyAnime page), or
+    the address to find and download it; and its ratings as they are now (its own people's first — the page puts
+    them in «Оценки»).  [] for a series from elsewhere (and in the public copy)."""
+    from core import video_dubs
+    from webui.html import url
+    root = V.video_root(req.settings)
+    series = V.LIBRARY.get(root, req.params["id"]) if Path(root).is_dir() else None
+    if series is None:
+        return Response.json({"ok": False, "error": "Такого сериала нет"}, 404)
+    source = str(series.info.get("source_url") or "")
+    yummy = getattr(video_dubs, "is_yummy", None)
+    if not getattr(video_dubs, "AVAILABLE", True) or yummy is None or not yummy(source) \
+            or not video_dubs.alias_of(source):
+        return Response.json({"ok": True, "order": []})
+    alias = video_dubs.alias_of(source)
+    with _ORDERS_LOCK:
+        kept = _ORDERS.get(alias)
+    if kept is None or time.monotonic() - kept[0] > ORDER_TTL:
+        try:
+            anime = video_dubs.Api(video_dubs.api_of(req.settings)).anime(alias)
+        except (video_dubs.DubError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            _LOG.info("viewing order of %s: %s", alias, exc)
+            return Response.json({"ok": False, "error": f"{video_dubs.NAME} не ответил — порядок просмотра не получен"})
+        kept = (time.monotonic(), video_dubs.order_of(anime, source) if isinstance(anime, dict) else [],
+                [[name, value] for name, _address, value in video_dubs.ratings_of(anime, source) if value]
+                if isinstance(anime, dict) and hasattr(video_dubs, "ratings_of") else [])
+        with _ORDERS_LOCK:
+            _ORDERS[alias] = kept
+    mine = {}                                        # the library's series by the YummyAnime page they came from
+    for other in V.LIBRARY.items(root):
+        page = str(other.info.get("source_url") or "")
+        if yummy(page) and video_dubs.alias_of(page):
+            mine.setdefault(video_dubs.alias_of(page), other)
+    order = []
+    for item in kept[1]:
+        have = mine.get(item.get("alias") or "")
+        order.append(dict(item, here=have is not None and have.id == series.id or bool(item.get("here")),
+                          series=have.id if have is not None else "",
+                          episodes=len(have.episodes) if have is not None and not have.single else 0,
+                          get=url("/videos/get", url=item.get("address") or "", go="1") if item.get("address") else ""))
+    return Response.json({"ok": True, "order": order, "ratings": kept[2]})
+
+
+def download_pause(req: Request) -> Response:
+    """«Пауза» / «Продолжить» of the download going: its file stops where it is and waits (the queue waits too)."""
+    from core import page_jobs, video_download
     task = page_jobs.current(GET)
     if task is None or not task.running:
         return Response.json({"ok": False, "error": "Скачивание не идёт"}, 409)
-    task.stop()
+    if req.json().get("pause"):
+        if not video_download.paused():
+            video_download.pause()
+            task._say("ПАУЗА: текущий файл остановится, где он есть, — «Продолжить» докачает его с этого места")
+    elif video_download.paused():
+        video_download.resume()
+        task._say("ПРОДОЛЖАЮ")
+    with _QUEUE_LOCK:                                # a pause stays a pause after a restart
+        if _CURRENT.get("saved"):
+            _CURRENT["saved"] = dict(_CURRENT["saved"], paused=video_download.paused())
+    _persist()
+    return Response.json({"ok": True, "paused": video_download.paused()})
+
+
+def download_unqueue(req: Request) -> Response:
+    """«Убрать» a download from the queue (it has not begun)."""
+    wanted = req.json().get("id")
+    with _QUEUE_LOCK:
+        entry = next((q for q in _QUEUE if q["id"] == wanted), None)
+        if entry is not None:
+            _QUEUE.remove(entry)
+    _persist()
+    if entry is None:
+        return Response.json({"ok": False, "error": "Его уже нет в очереди — возможно, оно уже началось"}, 409)
     return Response.json({"ok": True})

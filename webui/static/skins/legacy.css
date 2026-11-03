@@ -1,8 +1,7 @@
 /* «Legacy»: the old program's window (ui/styles/themes.py, theme «Abyss» — the default of the old window).
    The menu is the old sidebar on the left with its icons, controls are rounded and dark, the main buttons are
    purple gradients, switches are orange squares, groups of settings are framed with their title on the frame,
-   tabs are rounded like the old QTabBar.  Every colour is a variable: «Legacy: Сакура» (legacy-sakura.css)
-   loads this file and changes only the variables. */
+   tabs are rounded like the old QTabBar.  Every colour is a variable. */
 :root {
   --bg: #0d0f16;
   --panel: #0f1220;
@@ -55,7 +54,7 @@
   --lg-logo: #9080e0;
   --lg-line: #1e2235;
   --lg-head: #0d0f16;
-  --lg-head-ink: #5a6080;
+  --lg-head-ink: #666d90;
   --lg-alt: #11131c;
   --lg-btn: #151824;
   --lg-btn-ink: #a0accc;
@@ -79,6 +78,21 @@
   --lg-card-line: rgba(130, 140, 170, 0.22);
   --lg-hover: rgba(100, 90, 180, 0.12);
   --warn: #ff9000;
+  /* (v5.44.46) what the old theme painted with fixed colours, as tokens for the light scheme */
+  --lg-tick: #1a1206;
+  --lg-check-off-line: #303030;
+  --lg-check-off-bg: #181818;
+  --lg-off-ink: rgba(255, 255, 255, 0.24);
+  --lg-off-line: rgba(130, 130, 130, 0.16);
+  --lg-off-bg: rgba(255, 255, 255, 0.025);
+  --lg-danger-off-ink: rgba(255, 220, 220, 0.22);
+  --lg-danger-off-line: rgba(140, 80, 80, 0.14);
+  --lg-badge: rgba(9, 11, 18, 0.82);
+  --lg-badge-ink: #c0b0ff;
+  --lg-star-off: #4a5072;
+  --lg-star-on: #ff9000;
+  --lg-percent-ink: #ffffff;
+  --lg-percent-glow: rgba(0, 0, 0, 0.8);
 }
 :root[data-thumb="s"] { --thumb: 130px; }
 :root[data-thumb="l"] { --thumb: 230px; }
@@ -237,8 +251,8 @@ button.primary, button[type="submit"].primary, .button.primary {
   font-weight: 800;
 }
 button.primary:hover, .button.primary:hover { color: #ffffff; border-color: var(--lg-a2); background: linear-gradient(90deg, var(--lg-a2), var(--lg-a1)); filter: none; }
-button.primary:disabled, button.primary:disabled:hover { color: rgba(255, 255, 255, 0.24); border-color: rgba(130, 130, 130, 0.16);
-  background: rgba(255, 255, 255, 0.025); font-weight: 600; }
+button.primary:disabled, button.primary:disabled:hover { color: var(--lg-off-ink); border-color: var(--lg-off-line);
+  background: var(--lg-off-bg); font-weight: 600; }
 button.danger {
   color: #ffecec;
   border-color: rgba(255, 90, 90, 0.72);
@@ -246,8 +260,8 @@ button.danger {
   font-weight: 800;
 }
 button.danger:hover { color: #ffffff; border-color: rgba(255, 140, 140, 0.95); background: linear-gradient(90deg, #991b1b, #dc2626); }
-button.danger:disabled, button.danger:disabled:hover { color: rgba(255, 220, 220, 0.22); border-color: rgba(140, 80, 80, 0.14);
-  background: rgba(255, 255, 255, 0.02); }
+button.danger:disabled, button.danger:disabled:hover { color: var(--lg-danger-off-ink); border-color: var(--lg-danger-off-line);
+  background: var(--lg-off-bg); }
 button.danger.confirming { background: linear-gradient(90deg, #b91c1c, #ef4444); border-color: #ffb4b4; color: #ffffff; }
 button.link, button.link:hover { min-height: 0; padding: 0; border: 0; background: none; font-weight: 600; }
 button.link { color: var(--link); }
@@ -283,11 +297,11 @@ input[type="checkbox"] {
   place-items: center;
   vertical-align: -3px;
 }
-input[type="checkbox"]::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border: solid #1a1206;
+input[type="checkbox"]::before { content: ""; width: 8px; height: 4px; margin-top: -2px; border: solid var(--lg-tick);
   border-width: 0 0 2px 2px; transform: rotate(-45deg); opacity: 0; }
 input[type="checkbox"]:checked { background: var(--lg-check); border-color: var(--lg-check); }
 input[type="checkbox"]:checked::before { opacity: 1; }
-input[type="checkbox"]:disabled { border-color: #303030; background: #181818; cursor: default; }
+input[type="checkbox"]:disabled { border-color: var(--lg-check-off-line); background: var(--lg-check-off-bg); cursor: default; }
 input[type="checkbox"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 input[type="radio"] {
   appearance: none;
@@ -322,7 +336,7 @@ label.check { font-weight: 600; color: var(--lg-btn-ink); }
 .thumb img { border: 2px solid transparent; border-radius: var(--radius-thumb); background: var(--thumb-bg); }
 .thumb-link:hover img { border-color: var(--lg-a2); }
 .thumb.untagged img { border-color: var(--tag-meta); }
-.badge { border-radius: 5px; background: rgba(9, 11, 18, 0.82); color: var(--lg-selected-ink); }
+.badge { border-radius: 5px; background: var(--lg-badge); color: var(--lg-badge-ink); }
 
 .paginator a, .paginator b { min-width: 34px; padding: 6px 10px; border-radius: 8px; }
 .paginator a { background: var(--lg-btn); border-color: var(--border); color: var(--lg-btn-ink); font-weight: 600; }
@@ -336,8 +350,8 @@ label.check { font-weight: 600; color: var(--lg-btn-ink); }
 .post-stage { padding: 10px; background: var(--panel); border: 1px solid var(--lg-line); border-radius: 10px; }
 .post-media { background: transparent; border-radius: 4px; }
 table.info th { color: var(--lg-head-ink); font-weight: 700; }
-.star { color: var(--lg-scroll); }
-.star.on { color: var(--lg-check); }
+.star { color: var(--lg-star-off); }
+.star.on { color: var(--lg-star-on); }
 .actions button, .actions .button { text-align: left; }
 
 /* tables: the old QTableWidget — a rounded box, bold quiet headers, faint row lines, alternate rows */
@@ -439,7 +453,7 @@ table.visual-check {
 .plan-chip { background: var(--lg-btn); border-color: var(--lg-line); color: var(--lg-btn-ink); }
 .run-bar { height: 18px; border: 0; border-radius: 8px; background: var(--field-bg); }
 .seg-tagged, .lg-tagged dt::before { background: linear-gradient(90deg, var(--lg-a1), var(--lg-a2)); }
-.run-percent { color: #ffffff; font-weight: 800; text-shadow: 0 0 3px rgba(0, 0, 0, 0.8); }
+.run-percent { color: var(--lg-percent-ink); font-weight: 800; text-shadow: 0 0 3px var(--lg-percent-glow); }
 .flight-card { background: var(--panel); border-color: var(--lg-line); border-radius: 10px; }
 .flight-pic { border-radius: 8px; }
 .lane-found { background: linear-gradient(90deg, var(--lg-a1), var(--lg-a2)); border-color: var(--lg-ring); color: #ffffff; }
@@ -479,4 +493,91 @@ table.visual-check {
   .tool-head { margin: 0 -10px 12px; padding: 12px 10px; }
   .settings-block .field-row > label:first-child { min-width: 0; flex-basis: 100%; }
   .page-tool .layout { padding: 0 10px 40px; }
+}
+
+/* (v5.44.46) «Legacy» в светлой схеме — светлая тема старой программы (ui/styles/themes.py «LIGHT»): окно #f4f5f8,
+   боковая панель #eceef8, рамки #c8cce0, белые кнопки с тёмно-лиловым текстом, выбранное — #d8d4f8 / #4030a0,
+   галочки лиловые (#6050c0), полоса — #6050c0 → #9080e0; красные кнопки — те же, что в тёмной (так было и там);
+   выключенные кнопки видны (в старой программе на светлом они пропадали) */
+:root[data-variant="light"] {
+  --bg: #f4f5f8;
+  --panel: #ffffff;
+  --panel-2: #eceef8;
+  --border: #c8cce0;
+  --text: #1a1c2a;
+  --muted: #5e6484;
+  --link: #6050c0;
+  --link-hover: #4030a0;
+  --accent: #6050c0;
+  --accent-ink: #ffffff;
+  --bar-bg: #eceef8;
+  --bar-ink: #1a1c2a;
+  --bar-active-bg: rgba(96, 80, 192, 0.12);
+  --bar-active-ink: #4030a0;
+  --thumb-bg: #eceef8;
+  --thumb-ring: #6050c0;
+  --danger: #b91c1c;
+  --focus: #6050c0;
+  --shadow: 0 12px 34px rgba(40, 40, 90, 0.16);
+  --field-bg: #ffffff;
+  --dialog-bg: #ffffff;
+
+  /* the old tag colours, a step darker: #ff9900, #00a000 and the like do not read on white */
+  --tag-artist: #e02424;
+  --tag-character: #0a8a0a;
+  --tag-copyright: #d6338a;
+  --tag-general: #2f6bf0;
+  --tag-meta: #b86e00;
+  --tag-species: #128895;
+  --tag-lore: #8a4aa8;
+  --tag-contributor: #c0611a;
+  --tag-invalid: #6b7778;
+
+  --lg-window: #f4f5f8;
+  --lg-side: #eceef8;
+  --lg-side-line: #c8cce0;
+  --lg-nav-box: #f4f5f8;
+  --lg-nav-ink: #737b9c;
+  --lg-logo: #4030a0;
+  --lg-line: #dcdfee;
+  --lg-head: #f4f5f8;
+  --lg-head-ink: #737b9c;
+  --lg-alt: #f7f5ff;
+  --lg-btn: #ffffff;
+  --lg-btn-ink: #3a3c60;
+  --lg-btn-hover: #eceeff;
+  --lg-btn-hover-line: #8070d0;
+  --lg-btn-hover-ink: #1a1c2a;
+  --lg-a1: #6050c0;
+  --lg-a2: #9080e0;
+  --lg-selected: #d8d4f8;
+  --lg-selected-ink: #4030a0;
+  --lg-soft: rgba(96, 80, 192, 0.12);
+  --lg-ring: rgba(96, 80, 192, 0.42);
+  --lg-check: #6050c0;
+  --lg-check-line: #a8aec8;
+  --lg-scroll: #b8bcd4;
+  --lg-danger-a: #7f1d1d;
+  --lg-danger-b: #b91c1c;
+  --lg-tab: #ffffff;
+  --lg-tab-line: #c8cce0;
+  --lg-card: #ffffff;
+  --lg-card-line: #c8cce0;
+  --lg-hover: rgba(96, 80, 192, 0.08);
+  --warn: #c47000;
+  --lg-tick: #ffffff;
+  --lg-check-off-line: #c8cce0;
+  --lg-check-off-bg: #ececf4;
+  --lg-off-ink: #a0a4c0;
+  --lg-off-line: #e0e2f0;
+  --lg-off-bg: #ffffff;
+  --lg-danger-off-ink: #c99a9a;
+  --lg-danger-off-line: #ecd6d6;
+  --lg-badge: rgba(255, 255, 255, 0.92);
+  --lg-badge-ink: #4030a0;
+  --lg-star-off: #a8aec8;
+  --lg-star-on: #e08600;
+  --lg-percent-ink: #111111;
+  --lg-percent-glow: rgba(255, 255, 255, 0.85);
+  color-scheme: light;
 }

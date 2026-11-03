@@ -13,7 +13,7 @@ from pathlib import Path
 from core import video_library
 from core.external_browser import is_web_url
 from core.tag_utils import normalize_tag
-from webui import data
+from webui import data, icons
 from webui.html import (
     CATEGORY_ORDER, CATEGORY_TITLES, THUMB_SIZES, category_class, esc, human_count, human_size, page_frame,
     paginator, search_box, url,
@@ -229,8 +229,8 @@ def posts(req: Request) -> Response:
                                      page=req.int_arg("page", 1, lo=1)))
     per_page = _per_page(req)
     page = req.int_arg("page", 1, lo=1)
-    items, total = data.search_page(req.settings, ctx["tags"], section=ctx["section"], source=ctx["source"],
-                                    order=ctx["order"], page=page, per_page=per_page)
+    items, total, files_total = data.search_page(req.settings, ctx["tags"], section=ctx["section"], source=ctx["source"],
+                                                 order=ctx["order"], page=page, per_page=per_page)
     add_to = _add_to(req) if ctx["section"] not in {"trash", "no_match"} else None
     keep = {"add_to": add_to["id"]} if add_to else {}         # choosing cards for a сборка goes on over the pages
     pages = max(1, (total + per_page - 1) // per_page)
@@ -245,7 +245,7 @@ def posts(req: Request) -> Response:
         grid = '<div class="thumbs">' + "".join(_thumb(it, ctx, first + n) for n, it in enumerate(items)) + "</div>"
     else:
         grid = _empty_result(ctx)
-    summary = _result_bar(total, req) if total else ""
+    summary = _result_bar(total, files_total, req) if total else ""
     summary += _long_videos_note(req, ctx)
     labels = data.split_query(ctx["tags"])[3]
     if labels:
@@ -358,7 +358,7 @@ def _top_search(ctx: dict, keep: dict | None = None) -> str:
                       keep=keep)
 
 
-def _result_bar(total: int, req: Request) -> str:
+def _result_bar(total: int, files_total: int, req: Request) -> str:
     current = _prefs(req)["thumbs"]
     sizes = "".join(
         f'<button type="button" class="link{" active" if code == current else ""}" data-action="thumb-size" '
@@ -370,7 +370,14 @@ def _result_bar(total: int, req: Request) -> str:
               f'title="Теги и источники всех найденных картинок в файл JSON или CSV">экспорт тегов</button>')
     lucky = (f'<a class="random-link" href="{esc(url("/random", **ctx))}" '
              f'title="Открыть случайную карточку из найденных">случайная</a>')
-    return (f'<div class="result-bar"><p class="result-count">{total} шт.</p>'
+    # (v5.44.46) the files found come first (the owner: «число плиток должно показывать число файлов найденных с
+    # тегами»); when a сборка stands as one tile for several files, the tiles follow — the pages are counted by them
+    from webui.pages.post_sets import FILES, TILES, plural
+    count = (f'{plural(files_total, FILES)} · {plural(total, TILES)}' if files_total > total
+             else plural(files_total, FILES))
+    tip = (' title="Найдено файлов · плиток в галерее: сборка (серия, дочерние одного поста) — одна плитка"'
+           if files_total > total else "")
+    return (f'<div class="result-bar"><p class="result-count"{tip}>{count}</p>'
             f'<div class="thumb-sizes" role="group" aria-label="Размер превью">{sizes}</div>{lucky}{export}</div>')
 
 
@@ -533,15 +540,18 @@ def native_video_box(req: Request, attrs: dict, poster_url: str, *, width: int =
             f'<span class="nv-resume-at"></span></button>'
             + (f'<div class="nv-title" aria-hidden="true">{esc(title)}</div>' if title else "") + '</div>'
             f'<div class="nv-bar" role="group" aria-label="Видео">'
+            # (v5.44.26) line icons of one set (webui/icons.py), not emoji: the button holds both states, CSS shows one
             f'<button type="button" class="nv-play" data-action="nv-toggle" title="Пауза / пуск (пробел)" '
-            f'aria-label="Пуск">▶</button>'
+            f'aria-label="Пуск">{icons.PLAY}{icons.PAUSE}</button>'
             f'<span class="nv-time">0:00 / 0:00</span>'
             f'<input type="range" class="nv-seek" min="0" max="1000" step="1" value="0" aria-label="Место в видео">'
-            f'<button type="button" class="nv-mute" data-action="nv-mute" title="Звук (E)" '
-            f'aria-label="Звук">{"🔇" if muted else "🔊"}</button>'
+            f'<button type="button" class="nv-mute" data-action="nv-mute" data-muted="{1 if muted else 0}" '
+            f'title="Звук (E)" aria-label="{"Включить звук" if muted else "Выключить звук"}">'
+            f'{icons.SOUND}{icons.MUTED}</button>'
             f'<input type="range" class="nv-volume" min="0" max="100" step="1" value="{volume}" aria-label="Громкость">'
             f'{bar}<button type="button" class="nv-full" data-action="nv-full" {full} '
-            f'title="Во весь экран (F, двойной щелчок; Esc — выйти)" aria-label="Во весь экран">⛶</button></div>'
+            f'title="Во весь экран (F, двойной щелчок; Esc — выйти)" aria-label="Во весь экран">'
+            f'{icons.FULL}{icons.UNFULL}</button></div>'
             # the voice-overs and subtitles of the file (and subtitle files next to it): shown when there is a choice
             f'<div class="nv-tracks" hidden><label class="nv-track" hidden>Озвучка <select class="nv-audio">'
             f'</select></label><label class="nv-track" hidden>Субтитры <select class="nv-subs"></select></label>'
@@ -566,7 +576,7 @@ def _picture_html(item: dict, path: Path, media_url: str) -> str:
     return (f'<div class="media-wrap loading" data-id="{image_id}">'
             f'<img class="post-ph" src="{esc(data.media_url("thumb", item))}" alt="" aria-hidden="true">'
             f'<img class="post-media fit" src="{media_url}" alt=""{dims} data-bytes="{size}" data-action="toggle-fit" '
-            f'title="Щёлкните, чтобы показать в полный размер">{_notes_html(item)}</div>'
+            f'title="Щёлкните по нужному месту — покажу его в полный размер">{_notes_html(item)}</div>'
             f'<div class="picture-problem" hidden role="alert"><p></p>'
             f'<button type="button" data-action="picture-retry">Загрузить заново</button> '
             f'<button type="button" data-action="open-external" data-id="{image_id}">Открыть в программе Windows</button></div>')

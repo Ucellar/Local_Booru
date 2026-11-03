@@ -30,7 +30,7 @@ order. Everything stays on your computer.
 - **Browser extension** (Chrome, Edge, Firefox). Cards on the sites show what your library already has. A post goes
   to the program in one click, you can subscribe to a search right from the site, and posts with tags from your
   blocklist are blurred.
-- **11 looks**, and every page can have its own.
+- **14 looks**, each with a light and a dark side, and every page can have its own.
 
 <img src="screenshots/post.png" width="360" alt="Picture page"> <img src="screenshots/gallery_hub.png" width="360" alt="Gallery in another look">
 <img src="screenshots/tags.png" width="360" alt="Tag list"> <img src="screenshots/dupes.png" width="360" alt="Duplicates">

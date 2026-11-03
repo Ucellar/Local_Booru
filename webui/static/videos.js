@@ -271,6 +271,84 @@
   }
   setupDubs();
 
+  // ── «Порядок просмотра» on a series' page (a title from YummyAnime): its seasons, films and extras — the ones in
+  // the library open there, the others are found and downloaded on «Скачать с сайта» (/api/videos/order/<id>) ──
+  function setupOrder(box) {
+    fetch("/api/videos/order/" + encodeURIComponent(box.dataset.order), { credentials: "same-origin" })
+      .then((r) => r.json()).then((reply) => {
+        showRatings((reply && reply.ratings) || []);
+        const order = (reply && reply.order) || [];
+        if (order.length < 2) return;
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "vbutton primary vorder-toggle";
+        toggle.setAttribute("aria-expanded", "false");
+        toggle.innerHTML = '<span>Порядок просмотра</span><span class="vorder-arrow" aria-hidden="true">▾</span>';
+        const list = document.createElement("ol");
+        list.className = "vorder-list";
+        list.hidden = true;
+        for (const o of order) {
+          const li = document.createElement("li");
+          li.className = o.here ? "here" : o.series ? "have" : o.soon ? "soon" : "";
+          let name;
+          if (o.series && !o.here) {
+            name = document.createElement("a");
+            name.href = "/videos/s/" + encodeURIComponent(o.series);
+          } else {
+            name = document.createElement(o.here ? "b" : "span");
+          }
+          name.className = "vorder-name";
+          name.textContent = o.title;
+          li.append(name);
+          const about = [o.type, o.kind, o.year].filter(Boolean).join(", ");
+          if (about) li.append(document.createTextNode(" — " + about));
+          const mark = document.createElement("span");
+          mark.className = "vorder-mark";
+          if (o.here) mark.textContent = "это";
+          else if (o.series) mark.textContent = "есть" + (o.episodes ? ": " + o.episodes + " " + (o.episodes % 10 === 1 && o.episodes % 100 !== 11 ? "серия" : [2, 3, 4].includes(o.episodes % 10) && ![12, 13, 14].includes(o.episodes % 100) ? "серии" : "серий") : "");
+          else if (o.soon) mark.textContent = "анонс";
+          else if (o.get) {
+            const get = document.createElement("a");
+            get.href = o.get;
+            get.textContent = "найти и скачать";
+            mark.append(get);
+          }
+          li.append(mark);
+          list.append(li);
+        }
+        toggle.addEventListener("click", () => {
+          list.hidden = !list.hidden;
+          toggle.setAttribute("aria-expanded", String(!list.hidden));
+        });
+        box.append(toggle, list);
+        box.hidden = false;
+      }).catch(() => {});
+  }
+  document.querySelectorAll(".vorder[data-order]").forEach(setupOrder);
+
+  // the title's ratings as YummyAnime has them now (its own people's first): «Оценки» of the series written then
+  function showRatings(list) {
+    const facts = document.querySelector(".vhero .vfacts");
+    if (!facts || !list.length) return;
+    let dd = null;
+    for (const dt of facts.querySelectorAll("dt")) if (dt.textContent.trim() === "Оценки") dd = dt.nextElementSibling;
+    if (!dd) {
+      const dt = document.createElement("dt");
+      dt.textContent = "Оценки";
+      dd = document.createElement("dd");
+      const files = [...facts.querySelectorAll("dt")].find((x) => x.textContent.trim() === "Файлов");
+      if (files) { facts.insertBefore(dt, files); facts.insertBefore(dd, files); } else facts.append(dt, dd);
+    }
+    dd.textContent = "";
+    list.forEach(([name, value], n) => {
+      if (n) dd.append(" · ");
+      dd.append(name + " ");
+      const b = document.createElement("b");
+      b.textContent = value;
+      dd.append(b);
+    });
+  }
+
   function setupSkips(holder) {
     let skips = {};
     try { skips = JSON.parse(holder.dataset.skips || "{}") || {}; } catch (_) { skips = {}; }
@@ -532,8 +610,8 @@
 
   // the state of a file on its tile: what is in the folder, why it cannot be had, how its download goes
   const HAVE_MARKS = { whole: "есть", part: "докачается", other: "свой файл" };
-  const RUN_MARKS = { queued: "в очереди", active: "качается", done: "скачана", whole: "уже была", other: "свой файл",
-    failed: "не скачалась", dead: "пустая на сайте", stopped: "остановлена" };
+  const RUN_MARKS = { queued: "в очереди", active: "качается", paused: "пауза", done: "скачана", whole: "уже была",
+    other: "свой файл", failed: "не скачалась", dead: "пустая на сайте", stopped: "остановлена" };
   const RUNNING = ["starting", "running", "stopping"];
 
   function setupGet(box) {
@@ -546,9 +624,11 @@
     const sum = foundBox.querySelector(".vbar-sum");
     const getJob = foundBox.querySelector('[data-job="download"]');
     const stopButton = getJob.querySelector('[data-action="vid-download-stop"]');
+    const pauseButton = getJob.querySelector('[data-action="vid-download-pause"]');
     const meterBox = getJob.querySelector(".vmeter");
     const result = getJob.querySelector(".vget-result");
     const openLink = getJob.querySelector(".vget-open");
+    const queueBox = getJob.querySelector(".vqueue");
     const fileInput = box.querySelector("#vid-find-file");
     const qualityBox = foundBox.querySelector(".vquality");
     const qualityPick = qualityBox.querySelector("select");
@@ -560,11 +640,15 @@
     let lastPicked = -1;             // shift+click: the tiles from this one to the clicked one
     let runStates = {};              // file number -> how its download went (the download of this list)
     let runActive = { file: -1, part: 0 };
+    let runMine = false;             // the download going (or last) is of this list
+    let queueHere = null;            // this list's place in the queue of downloads (another one goes first)
     let findWatch = null;
     let getWatch = null;
 
     const findButtons = () => box.querySelectorAll('.vget-ask button[type="submit"], .vget-ask input[type="file"]');
     const downloading = () => RUNNING.includes(getJob.dataset.status || "");
+    const busyHere = () => downloading() && runMine;            // the download going is of this list
+    const keepQueued = () => busyHere() || !!queueHere;          // «в очереди» stays: its turn will come
     const tiles = () => [...list.querySelectorAll(".vtile")];
     const manyDubs = () => !!found && found.choose === "dubs";   // every voice-over of a title: nothing ticked at first
     // every voice-over of a title: the voice-overs and the subtitles' releases chosen in their plates, the episodes as
@@ -623,6 +707,44 @@
             : "Описание и постер — тоже с " + x.site + ".")
           + (x.ongoing ? " Тайтл ещё выходит: новые серии докачаются, если потом снова найти и скачать." : ""));
         sourceBox.append(line);
+        // a related title's episodes the site hung on this page (a recap with the whole season): not offered here
+        for (const other of x.borrowed || []) {
+          const warn = element("p", "vfound-source warn vfound-borrowed");
+          warn.append(element("b", "", "Не этого тайтла: "), x.site + " приложил к этой странице видео тайтла «"
+            + other.title + "» (" + other.videos + " шт.) — их здесь нет, чтобы под этим именем не скачались чужие серии. ");
+          if (other.address) {
+            const go = element("button", "vfound-borrowed-go", "Искать серии «" + other.title + "»");
+            go.type = "button";
+            go.dataset.address = other.address;
+            go.addEventListener("click", () => findOther(other.address));
+            warn.append(go);
+          }
+          sourceBox.append(warn);
+        }
+        // the site's «Порядок просмотра»: the franchise's seasons, films and extras; a click searches that one
+        const order = x.order || [];
+        if (order.length > 1) {
+          const block = element("div", "vfound-order");
+          block.append(element("span", "vfound-order-label", "Порядок просмотра на " + x.site + ":"));
+          const items = element("ol", "vfound-order-list");
+          for (const o of order) {
+            const li = element("li", o.here ? "here" : o.soon ? "soon" : "");
+            const about = [o.type, o.year, o.kind, o.soon ? "анонс" : ""].filter(Boolean).join(" · ");
+            if (o.here || o.soon || !o.address) {
+              li.append(element("span", "vfound-order-name", o.title + (o.here ? " — эта страница" : "")));
+            } else {
+              const go = element("button", "vfound-order-go", o.title);
+              go.type = "button";
+              go.title = "Найти серии: " + o.address;
+              go.addEventListener("click", () => findOther(o.address));
+              li.append(go);
+            }
+            if (about) li.append(element("span", "vfound-order-about", about));
+            items.append(li);
+          }
+          block.append(items);
+          sourceBox.append(block);
+        }
       }
       const voices = found.voices || [];
       if (manyDubs() && voices.length) {
@@ -881,16 +1003,18 @@
       for (const tile of list.querySelectorAll(".vep-tile")) {
         const mine = Object.keys(runStates).filter((i) => (found.files[Number(i)] || {}).label === tile.dataset.label);
         if (!mine.length) { delete tile.dataset.dl; tile.style.setProperty("--p", "0%"); continue; }
-        const states = mine.map((i) => runStates[i]).map((s) => (s === "queued" && !downloading() ? "" : s));
-        const active = mine.find((i) => runStates[i] === "active");
-        const left = states.filter((s) => s === "queued" || s === "active").length;
+        const states = mine.map((i) => runStates[i]).map((s) => (s === "queued" && !keepQueued() ? "" : s));
+        const active = mine.find((i) => runStates[i] === "active" || runStates[i] === "paused");
+        const pausedHere = active && runStates[active] === "paused";
+        const left = states.filter((s) => s === "queued" || s === "active" || s === "paused").length;
         const bad = states.filter((s) => s === "failed" || s === "dead").length;
         const state = active ? "active" : left ? "queued" : bad ? "failed" : states.every((s) => !s) ? "" : "done";
-        if (state) tile.dataset.dl = state; else delete tile.dataset.dl;
+        if (state) tile.dataset.dl = state === "active" && pausedHere ? "paused" : state; else delete tile.dataset.dl;
         const part = active && runActive.file === Number(active) ? runActive.part : 0;
         const done = states.filter((s) => s === "done" || s === "whole").length;
         const mark = tile.querySelector(".vtile-mark");
-        if (state === "active") mark.textContent = "качается " + (done + 1) + " из " + mine.length + (part ? " · " + Math.floor(part * 100) + "%" : "");
+        if (state === "active") mark.textContent = (pausedHere ? "пауза " : "качается ") + (done + 1) + " из " + mine.length
+          + (part ? " · " + Math.floor(part * 100) + "%" : "");
         else if (state === "queued") mark.textContent = "в очереди";
         else if (state === "failed") mark.textContent = "не скачались: " + bad;
         else if (state === "done") mark.textContent = "скачана";
@@ -920,7 +1044,7 @@
         const h = heights.find((x) => x <= Math.min(cap, limit)) || heights[heights.length - 1];
         return m.sizes[String(h)] || 0;
       };
-      const limitOf = (f) => (/CVH/.test(f.note || "") ? 1e9 : 720);
+      const limitOf = (f) => (/CVH/.test(f.note || "") ? 1e9 : /AniLiberty/.test(f.note || "") ? 1080 : 720);
       const sound = 14000 * m.seconds;          // a voice-over's sound alone: ~110 kbit/s
       const merge = mergeTick.checked;
       let total = 0;
@@ -973,6 +1097,9 @@
       return [...list.querySelectorAll(".vtile input:checked")].map((t) => Number(t.value));
     }
 
+    // another title downloads now: this one goes after it
+    const goWord = () => (downloading() && !runMine ? "В очередь: " : "Скачать ");
+
     function countChosen() {
       if (!found) return;
       if (manyDubs()) {
@@ -981,8 +1108,8 @@
         const said = [["dub", ["дубляж", "дубляжа", "дубляжей"]], ["voice", ["озвучка", "озвучки", "озвучек"]],
           ["subs", ["релиз субтитров", "релиза субтитров", "релизов субтитров"]]]
           .map(([kind, forms]) => [chosenOf(kind).length, forms]).filter(([n]) => n).map(([n, forms]) => plural(n, forms));
-        goButton.disabled = !files.length || downloading();
-        goButton.textContent = files.length ? "Скачать " + plural(files.length, ["файл", "файла", "файлов"])
+        goButton.disabled = !files.length || busyHere();
+        goButton.textContent = files.length ? goWord() + plural(files.length, ["файл", "файла", "файлов"])
           : !dubs.groups.size ? "Выберите озвучку" : "Отметьте серии";
         const folderName = String(found.folder || "").split(/[\\/]/).filter(Boolean).pop() || "";
         const weight = files.length ? estimate(files) : 0;
@@ -998,8 +1125,8 @@
       const videos = files.filter((f) => f.kind === "video").length;
       const what = videos === files.length ? plural(files.length, ["серию", "серии", "серий"])
         : plural(files.length, ["файл", "файла", "файлов"]);
-      goButton.disabled = !files.length || downloading();
-      goButton.textContent = files.length ? "Скачать " + what : "Отметьте серии";
+      goButton.disabled = !files.length || busyHere();
+      goButton.textContent = files.length ? goWord() + what : "Отметьте серии";
       const bytes = files.reduce((total, f) => total + (Number(f.size) || 0), 0);
       const folderName = String(found.folder || "").split(/[\\/]/).filter(Boolean).pop() || "";
       sum.textContent = (bytes ? (files.some((f) => f.stream) ? "≈ " : "") + megabytes(bytes) + ", " : "")
@@ -1129,18 +1256,18 @@
       for (const t of tiles()) {
         const i = t.dataset.i;
         let state = runStates[i] || "";
-        if (state === "queued" && !downloading()) state = "";       // stopped before its turn: as it was
+        if (state === "queued" && !keepQueued()) state = "";       // stopped before its turn: as it was
         if (state) t.dataset.dl = state; else delete t.dataset.dl;
         const mark = t.querySelector(".vtile-mark");
         const f = found && found.files[Number(i)];
-        if (state === "active" && runActive.file === Number(i) && runActive.part) {
-          mark.textContent = "качается " + Math.floor(runActive.part * 100) + "%";
+        if ((state === "active" || state === "paused") && runActive.file === Number(i) && runActive.part) {
+          mark.textContent = (state === "paused" ? "пауза " : "качается ") + Math.floor(runActive.part * 100) + "%";
         } else if (state) {
           mark.textContent = RUN_MARKS[state] || state;
         } else if (f) {
           mark.textContent = f.blocked && !f.have ? "нет видео" : HAVE_MARKS[f.have] || "";
         }
-        t.style.setProperty("--p", state === "active" ? Math.round(runActive.part * 100) + "%" : "0%");
+        t.style.setProperty("--p", state === "active" || state === "paused" ? Math.round(runActive.part * 100) + "%" : "0%");
       }
     }
 
@@ -1151,23 +1278,31 @@
         return;
       }
       meterBox.hidden = false;
+      if (m.merging) {                 // after the downloads: each episode's voice-overs into its file
+        runActive = { file: -1, part: 0 };
+        meterBox.querySelector("progress").value = Math.round(((Number(m.index) || 1) - 1) / m.count * 1000);
+        meterBox.querySelector(".vmeter-text").textContent = "Собираю в общие файлы серий: " + (m.name || "")
+          + ". Всего: " + m.index + " из " + m.count;
+        return;
+      }
       const part = m.total ? Math.min(1, m.done / m.total) : 0;
       runActive = { file: Number(m.file), part };
       const whole = Math.min(1, ((Number(m.index) || 1) - 1 + part) / m.count);
       meterBox.querySelector("progress").value = Math.round(whole * 1000);
-      const f = found && found.files[Number(m.file)];
-      const name = f && f.kind === "video" && f.label ? "Серия " + f.label : "Файл";
+      const f = runMine && found && found.files[Number(m.file)];
+      const name = f && f.kind === "video" && f.label ? "Серия " + f.label
+        : !runMine && m.name ? String(m.name).replace(/\.[^.]+$/, "") : "Файл";
       const bits = [];
       if (m.total) bits.push(Math.floor(part * 100) + "% (" + megabytes(m.done) + " из " + megabytes(m.total) + ")");
       else if (m.done) bits.push(megabytes(m.done));
       if (m.speed) bits.push(megabytes(m.speed) + "/с");
-      meterBox.querySelector(".vmeter-text").textContent = name + (bits.length ? ": " + bits.join(", ") : "")
-        + ". Всего: " + m.index + " из " + m.count;
+      meterBox.querySelector(".vmeter-text").textContent = (m.paused ? "Пауза — " : "") + name
+        + (bits.length ? ": " + bits.join(", ") : "") + ". Всего: " + m.index + " из " + m.count;
     }
 
     function showResult(st, busy) {
       const sumUp = st.summary || {};
-      if (busy || !st.id || !["done", "stopped", "failed"].includes(st.status)) {
+      if (busy || !st.id || !runMine || !["done", "stopped", "failed"].includes(st.status)) {
         result.hidden = true;
         return;
       }
@@ -1201,16 +1336,28 @@
     function watchGet() {
       getWatch = getWatch || LB.watchTask(getJob, "/api/videos/download-state", {
         onState(st, busy) {
-          // a download of a list from before another search is not this list's
-          const mine = busy || !st.find || String(st.find) === String(findId);
+          // a download of another list (another title found while it goes) is not this list's: its tiles stay
+          // as they are, the bar says what goes; this list waiting in the queue — its tiles «в очереди»
+          const mine = !!st.id && !!st.find && String(st.find) === String(findId);
+          const queue = st.queue || [];
+          runMine = mine;
+          queueHere = queue.find((q) => String(q.find) === String(findId)) || null;
           foundBox.classList.toggle("vrun-other", !!st.id && !mine);
-          foundBox.classList.toggle("downloading", busy);
+          foundBox.classList.toggle("vrun-busy", busy);
+          foundBox.classList.toggle("downloading", busy && mine);
           stopButton.hidden = !busy;
+          stopButton.textContent = busy && queue.length ? "Остановить всё" : "Остановить";
+          pauseButton.hidden = !busy || st.status === "stopping";
+          pauseButton.textContent = st.paused ? "Продолжить" : "Пауза";
+          pauseButton.classList.toggle("primary", !!st.paused);
+          getJob.classList.toggle("paused", busy && !!st.paused);
           showMeter(busy ? st.meter : null);
           runStates = mine ? Object.assign({}, st.states || {}) : {};
+          if (queueHere) queueHere.chosen.forEach((i) => { if (!runStates[i]) runStates[i] = "queued"; });
           paintRun();
+          showQueue(queue);
           showResult(st, busy);
-          openLink.hidden = busy || !st.series_url;
+          openLink.hidden = busy || !mine || !st.series_url;
           if (st.series_url) openLink.querySelector("a").href = st.series_url;
           countChosen();
         },
@@ -1225,6 +1372,22 @@
       return getWatch;
     }
 
+    function showQueue(queue) {
+      queueBox.textContent = "";
+      queueBox.hidden = !queue.length;
+      queue.forEach((q, n) => {
+        const li = element("li", String(q.find) === String(findId) ? "here" : "");
+        li.append(element("span", "vqueue-what", (n ? "Потом" : "Дальше") + ": «" + q.title + "» — "
+          + plural(q.files, ["файл", "файла", "файлов"]) + (String(q.find) === String(findId) ? " (этот список)" : "")));
+        const drop = element("button", "link vqueue-drop", "убрать");
+        drop.type = "button";
+        drop.addEventListener("click", () => postJson("/api/videos/download/unqueue", { id: q.id })
+          .then(() => { queueHere = null; watchGet().poll(); }).catch((err) => say(drop, err.message, true)));
+        li.append(drop);
+        queueBox.append(li);
+      });
+    }
+
     function searching(button) {
       lastLine = "";
       step.textContent = "Читаю страницу…";
@@ -1234,6 +1397,14 @@
       findJob.hidden = false;
       watchFind().started();
       say(button, "");
+    }
+
+    // another title of the franchise (the viewing order, a season hung on a recap): its address searched as if pasted
+    function findOther(address) {
+      const form = box.querySelector('[data-form="vid-find-url"]');
+      form.url.value = address;
+      form.requestSubmit();
+      form.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
 
     box.querySelector('[data-form="vid-find-url"]').addEventListener("submit", async (event) => {
@@ -1275,7 +1446,17 @@
       const quality = manyDubs() ? qualityPick.value : "";
       const merge = manyDubs() && mergeTick.checked;
       try {
-        await postJson("/api/videos/download", { find: findId, files, quality, merge });
+        const reply = await postJson("/api/videos/download", { find: findId, files, quality, merge });
+        if (reply && reply.queued) {               // another download goes: this one waits for its turn
+          say(el, (reply.queued > 1 ? "В очереди " + reply.queued + "-м" : "В очереди следующим")
+            + ": начнётся само, когда закончится текущее скачивание");
+          queueHere = { id: reply.queue_id, find: findId, chosen: files };
+          files.forEach((i) => { runStates[i] = "queued"; });
+          paintRun();
+          getJob.hidden = false;
+          watchGet().poll();
+          return;
+        }
         say(el, "");
         runStates = {};
         files.forEach((i) => { runStates[i] = "queued"; });
@@ -1298,12 +1479,26 @@
       try { localStorage.setItem("lb.video-dub-quality", qualityPick.value); } catch (_) { /* only this time */ }
     });
 
+    actions["vid-download-pause"] = (el) => postJson("/api/videos/download/pause", { pause: el.textContent !== "Продолжить" })
+      .then((reply) => {
+        el.textContent = reply.paused ? "Продолжить" : "Пауза";
+        say(el, reply.paused ? "Ставлю на паузу…" : "");
+        if (getWatch) getWatch.poll();
+      }).catch((err) => say(el, err.message, true));
+
     actions["vid-download-stop"] = (el) => postJson("/api/videos/download/stop", {})
       .then(() => say(el, "Останавливаю…")).catch((err) => say(el, err.message, true));
 
-    // a search or a download that goes on (or just ended) when the page opens
+    // a search or a download that goes on (or just ended) when the page opens; a title to find from another page
+    // («Порядок просмотра» of a series: «найти и скачать») — searched at once, unless a search goes
     fetch("/api/videos/find-state", { credentials: "same-origin" }).then((r) => r.json())
-      .then((st) => { if (st.id) { findJob.hidden = false; watchFind(); } }).catch(() => {});
+      .then((st) => {
+        if (st.id) { findJob.hidden = false; watchFind(); }
+        if (box.dataset.autofind === "1" && !RUNNING.includes(st.status || "")) {
+          delete box.dataset.autofind;
+          box.querySelector('[data-form="vid-find-url"]').requestSubmit();
+        }
+      }).catch(() => {});
     fetch("/api/videos/download-state", { credentials: "same-origin" }).then((r) => r.json())
       .then((st) => { if (st.id) { getJob.hidden = false; watchGet(); } }).catch(() => {});
   }

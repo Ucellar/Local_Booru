@@ -108,6 +108,7 @@ class BackgroundLane:
         self.owner = f"{self.lane}-{uuid.uuid4().hex[:12]}"
         self.generation = int(time.time() * 1000)
         self._last_recovery_at = 0.0
+        self._empty_said = False      # (v5.44.35) «EMPTY» said once until the lane has work again
 
     @staticmethod
     def _default_retry_policy(job: LaneJob, exc: BaseException) -> tuple[bool, int, str]:
@@ -281,13 +282,18 @@ class BackgroundLane:
         jobs, report = self.scan_eligible(context, target=target)
         if not jobs:
             self._registry(state="waiting", detail=f"{self.lane}-no-eligible", progress_text=f"{self.lane}: waiting; fetched={report.fetched}")
-            self.trace(f"BACKGROUND LANE EMPTY: lane={self.lane} fetched={report.fetched} pages={report.pages} reasons={report.reasons}; backoff={self.empty_backoff_seconds:.2f}s")
+            # (v5.44.35) once until the lane has work again, not every backoff: the owner's log of 2.11.2026 — 455 of its
+            # 1037 lines were the family-completion lane saying «EMPTY» every 30 seconds for two hours
+            if not self._empty_said:
+                self._empty_said = True
+                self.trace(f"BACKGROUND LANE EMPTY: lane={self.lane} fetched={report.fetched} pages={report.pages} reasons={report.reasons}; backoff={self.empty_backoff_seconds:.2f}s (said once until there is work)")
             deadline = time.monotonic() + self.empty_backoff_seconds
             while time.monotonic() < deadline:
                 if should_stop and should_stop():
                     break
                 time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
             return report
+        self._empty_said = False
         self._registry(state="running", detail=f"{self.lane}-drain", progress_text=f"{self.lane}: processing {len(jobs)}")
         for job in jobs:
             if should_stop and should_stop():

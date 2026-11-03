@@ -166,7 +166,9 @@
 .reader-count select { padding: 3px 4px; }
 .reader-title { margin: 0 0 8px; font: 13px/1.3 var(--font); color: var(--muted); }
 .reader-stage { display: flex; justify-content: center; cursor: pointer; user-select: none; }
-.reader-image { display: block; max-width: 100%; max-height: calc(100vh - 175px); height: auto; }
+.reader-image { display: block; max-width: 100%; max-height: calc(100vh - 175px); height: auto;
+  /* a white page on a light look keeps its edge (v5.44.46: on «Хаб», «nhentai», «Legacy» днём её не было видно) */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 14%, transparent), 0 6px 22px rgba(0, 0, 0, 0.16); }
 .reader.fit-width .reader-image { max-height: none; }
 
 /* the strip of page thumbnails: under the page or at its side */
@@ -182,7 +184,8 @@
 }
 .strip-page { position: relative; flex: none; display: block; opacity: 0.62; }
 .strip-page:hover, .strip-page.current { opacity: 1; text-decoration: none; }
-.strip-page img { display: block; width: 84px; height: 120px; object-fit: cover; border-radius: var(--radius); background: var(--thumb-bg); }
+.strip-page img { display: block; width: 84px; height: 120px; object-fit: cover; border-radius: var(--radius); background: var(--thumb-bg);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 12%, transparent); }
 .strip-page.current img { outline: 2px solid var(--accent); outline-offset: 1px; }
 .strip-page span {
   position: absolute;
@@ -223,7 +226,7 @@
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--mr);
-  background: var(--bg);
+  background: var(--field-bg, var(--bg));
   color: var(--text);
   font: 15px/1.5 var(--font);
   resize: vertical;
@@ -294,7 +297,7 @@
 .mget-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .mget-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .mget-title { overflow: hidden; font-weight: bold; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-a.mget-title:hover { color: var(--accent); }
+a.mget-title:hover { color: var(--accent-text, var(--accent)); }
 .mget-facts { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .mget-state { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 0; font-size: 12px;
   text-align: right; }
@@ -311,7 +314,7 @@ a.mget-title:hover { color: var(--accent); }
 .mget-end:has(> :not([hidden])) { margin-top: 16px; }
 .mget-result { margin: 0; font-weight: bold; overflow-wrap: anywhere; }
 .mget-result.ok { color: var(--ok); }
-.mget-result.part { color: var(--accent); }
+.mget-result.part { color: var(--accent-text, var(--accent)); }
 .mget-result.bad { color: var(--danger); }
 .mget-open { margin: 0; }
 .mlog { margin-top: 14px; font-size: 12px; }

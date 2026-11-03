@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -20,6 +21,8 @@ from typing import Any, Callable
 from core.database.connection import db
 from core.media_revision_service import create_revision_plan, commit_revision_metadata, rebind_media_paths
 from core.upgrade_verification import MediaDescriptor, build_verification_plan, compare_quality, ram_budget_allows
+
+_LOG = logging.getLogger("local_booru.quality_upgrade")
 
 
 class QualityUpgradeRejected(RuntimeError):
@@ -120,8 +123,15 @@ def _sibling_path(canonical: Path, revision_id: int, kind: str, suffix: str | No
 
 
 def _fsync_file(path: Path) -> None:
-    with path.open("rb") as fh:
-        os.fsync(fh.fileno())
+    """The swapped file once more to disk — its bytes were flushed when the incoming copy was written, so a refusal
+    is said and the swap goes on.  (v5.44.35) Through a handle open for writing (``file_safety.fsync_path``): on
+    Windows an fsync of a handle open for reading is «[Errno 9] Bad file descriptor» — every upgrade failed here after
+    its swap and was put back; a viewer that holds the file without letting others write — PermissionError."""
+    from core.file_safety import fsync_path
+    try:
+        fsync_path(path)
+    except OSError as exc:
+        _LOG.info("quality upgrade: %s not flushed once more (%s: %s)", path.name, type(exc).__name__, exc)
 
 
 def _fsync_parent(path: Path) -> None:

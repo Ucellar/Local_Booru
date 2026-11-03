@@ -383,9 +383,12 @@ DEFAULT_SETTINGS = {
     "reverse_order_v5443": True,            # the order of v5.44.3 is in (load_settings: a file without it is older)
     "enable_danbooru_iqdb": False,
     "enable_e621_iqdb": True,
+    "enable_atf_iqdb": True,                # (v5.44.39) ATF's own search of similar pictures (core/parser/reverse)
     "enable_fluffle": True,                 # (v5.44.14) Fluffle: e621, FurAffinity, Twitter, Bluesky… (core/parser/reverse)
     "parser_reverse_remember": True,        # (v5.44.18) a service that answered about a file is not asked again
                                             # (core/parser/reverse_journal.py; the old program's reverse_branch_status)
+    "e621_export_enabled": False,           # (v5.44.25) MD5 on e621 from its daily export (core/e621_export.py, ~2 GB)
+    "e621_export_refresh_days": 30,         # …downloaded again after this many days (new posts: every hour by the API)
     "e621_iqdb_v54414": True,               # e621 IQDB is on again once (load_settings: a file without it is older)
     "e621_browser_api_fallback": True,
     "e621_browser_api_verify_timeout_seconds": 120,

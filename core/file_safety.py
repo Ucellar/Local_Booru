@@ -35,6 +35,15 @@ def _replace_after_flush(part: Path, destination: Path) -> None:
             raise exc
 
 
+def fsync_path(path: str | Path) -> None:
+    """Flush a written file's bytes to disk by its name.  (v5.44.35) Through a handle open for writing: on Windows
+    ``os.fsync`` of a handle open only for reading is «OSError: [Errno 9] Bad file descriptor» (FlushFileBuffers needs
+    write access) — the owner's journal of 2.11.2026: every original of «Уменьшенная копия → оригинал» failed so after
+    its swap and was put back (207 in two hours), and the derived caches never got published."""
+    with Path(path).open("rb+") as fh:
+        os.fsync(fh.fileno())
+
+
 def atomic_write_bytes(destination: str | Path, data: bytes) -> Path:
     dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)

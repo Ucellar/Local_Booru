@@ -1,6 +1,6 @@
 from __future__ import annotations
 from .connection import db, db_path
-from .storage import _safe_ident
+from .storage import _safe_ident, _tag_written
 
 
 def _checkpoint_truncate(settings) -> str:
@@ -187,7 +187,9 @@ def repair_e621_tag_metadata(settings):
                     if not tag_row:
                         continue
                     if str(tag_row['category'] or '') != category:
-                        con.execute("UPDATE tags SET category=? WHERE id=?", (category, int(tag_row['id'])))
+                        # (v5.44.49) the library's category of the tag is what most sites say: e621's word on this
+                        # card is one answer among them (it overwrote the category of every tag of the card)
+                        _tag_written(con, int(tag_row['id']), name, category, tag_row['category'], categorized=True)
                         fixed_categories += 1
                     # the category in the site's own set too: effective categories are taken from the sets
                     con.execute(f"UPDATE image_source_tags SET category=? WHERE image_id=? AND tag_id=? AND source_id IN ({e621_sources})",

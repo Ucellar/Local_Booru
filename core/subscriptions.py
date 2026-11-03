@@ -385,17 +385,9 @@ def _index_and_tag(dest_path, candidates: list, settings: dict, log) -> None:
         if page and any(groups.values()):
             source_tag_groups.append({"url": page, "groups": groups, "method": "subscription"})
 
-    # (v5.44.11) a site that sends no categories (Gelbooru's posts, Moebooru): its «general» tags in the categories the
-    # library knows them by (what other sites said of the same tags)
-    try:
-        from core.database.connection import db
-        from core.database.storage import library_categories
-        with db(settings, readonly=True) as con:
-            all_groups = library_categories(con, all_groups)
-            for entry in source_tag_groups:
-                entry["groups"] = library_categories(con, entry["groups"])
-    except Exception as exc:  # the categories are a nicety: the tags are written as the site gave them
-        log(f"  TAG WARN: categories of the library not read: {type(exc).__name__}: {exc}")
+    # (v5.44.49) a site that sends no categories (Gelbooru's posts, Moebooru): its tags are written «general», as it said
+    # — the card's page shows them in the categories most sites give them (5.44.11 wrote the library's categories into
+    # the set, and a wrong category of the library went into every download with them)
 
     from core.site_posts import rows_from_candidates
     try:

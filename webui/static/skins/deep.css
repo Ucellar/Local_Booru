@@ -38,13 +38,28 @@
   --radius-thumb: 4px;
   --side: 250px;
   --thumb: 176px;
+  /* the header and the strip of sections under it stay deep blue in both schemes: their own colours */
+  --dp-head-ink: #dbe5f2;
+  --dp-head-muted: #8fa7c7;
+  --dp-head-accent: #f2b233;
+  --dp-head-field: #0f2749;
+  --dp-head-line: #24497e;
+  --dp-head-rule: #16335e;
+  --dp-strip: #0e2647;
+  /* the body: fields, the look menu, marks; the light scheme changes only these */
+  --dp-field: #0f2749;
+  --dp-menu: #0f2749;
+  --dp-untagged: #9a6a2c;
+  --dp-fav: #ff7096;
+  --dp-star-off: #6b8fbf;
+  --dp-star-on: #f2b233;
   color-scheme: dark;
 }
 :root[data-thumb="s"] { --thumb: 136px; }
 :root[data-thumb="l"] { --thumb: 232px; }
 
 /* header: brand, menu underlined in amber, a round search field in the middle */
-.top { align-items: stretch; min-height: 54px; padding: 0 18px; gap: 4px 18px; border-bottom: 1px solid #16335e; }
+.top { align-items: stretch; min-height: 54px; padding: 0 18px; gap: 4px 18px; border-bottom: 1px solid var(--dp-head-rule); }
 .brand { font-size: 19px; font-weight: 700; letter-spacing: -0.2px; }
 .brand-mark {
   display: block;
@@ -61,30 +76,32 @@
   padding: 0 10px;
   border-radius: 0;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--dp-head-muted);
   border-bottom: 3px solid transparent;
   border-top: 3px solid transparent;
 }
-.main-nav a.active { background: none; color: var(--text); border-bottom-color: var(--accent); }
-.main-nav a:hover, .main-nav a.active:hover { background: none; color: var(--text); text-decoration: none; }
+.main-nav a.active { background: none; color: var(--dp-head-ink); border-bottom-color: var(--dp-head-accent); }
+.main-nav a:hover, .main-nav a.active:hover { background: none; color: var(--dp-head-ink); text-decoration: none; }
 .top-search { display: block; align-self: center; flex: 1 1 200px; max-width: 520px; }   /* wraps only below 200 px */
 .top-search .search-go { display: none; }
 .top .top-search input {
   width: 100%;
   padding: 8px 14px;
   border-radius: 20px;
-  border: 1px solid var(--border);
-  background: #0f2749;
-  color: var(--text);
+  border: 1px solid var(--dp-head-line);
+  background: var(--dp-head-field);
+  color: var(--dp-head-ink);
 }
-.top .top-search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(242, 178, 51, 0.18); }
+.top .top-search input::placeholder { color: var(--dp-head-muted); }
+.top .top-search input:focus { outline: none; border-color: var(--dp-head-accent); box-shadow: 0 0 0 3px rgba(242, 178, 51, 0.18); }
 .top-tools { margin-left: auto; }
-.skin-button { border-color: var(--border); border-radius: 16px; padding: 5px 12px; }
+.skin-button { border-color: var(--dp-head-line); border-radius: 16px; padding: 5px 12px; }
 .sidebar .search { display: none; }
 
-.sections { background: #0e2647; padding: 8px 18px; gap: 4px 18px; border-bottom: 1px solid var(--border); }
-.sections a { color: var(--muted); }
-.sections a.active { color: var(--accent); font-weight: 600; }
+.sections { background: var(--dp-strip); padding: 8px 18px; gap: 4px 18px; border-bottom: 1px solid var(--border); }
+.sections a { color: var(--dp-head-muted); }
+.sections a:hover { color: var(--dp-head-ink); }
+.sections a.active { color: var(--dp-head-accent); font-weight: 600; }
 
 .layout { padding: 16px 18px 40px; }
 .layout.with-sidebar { gap: 20px; }
@@ -122,7 +139,7 @@
 .thumb-link { height: var(--thumb); display: flex; align-items: center; justify-content: center; }
 .thumb img { max-width: 100%; border: 0; border-radius: var(--radius-thumb); background: transparent; }
 .thumb-link:hover img { border-color: transparent; }
-.thumb.untagged { border-color: #9a6a2c; border-style: dashed; }
+.thumb.untagged { border-color: var(--dp-untagged); border-style: dashed; }
 .thumb.untagged img { border: 0; }
 .thumb-info {
   display: flex;
@@ -134,8 +151,8 @@
   color: var(--muted);
 }
 .ti-kind { margin-left: auto; }
-.ti-rating { color: var(--accent); }
-.ti-fav { color: #ff7096; }
+.ti-rating { color: var(--accent-text, var(--accent)); }
+.ti-fav { color: var(--dp-fav); }
 .badges { top: 6px; left: 6px; }
 .badge { background: rgba(7, 20, 40, 0.82); color: var(--accent); }
 .badge.fav { color: #ff7096; }
@@ -145,18 +162,18 @@
 
 button, .button { background: var(--panel-2); border-color: var(--border); color: var(--text); border-radius: 6px; }
 button:hover, .button:hover { border-color: var(--accent); color: var(--text); }
-input[type="search"], select { background: #0f2749; border-color: var(--border); color: var(--text); border-radius: 6px; }
+input[type="search"], select { background: var(--dp-field); border-color: var(--border); color: var(--text); border-radius: 6px; }
 
 /* post page */
 .post-nav { gap: 8px; }
 .post-nav a { padding: 4px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; color: var(--text); }
-.post-nav a:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.post-nav a:hover { border-color: var(--accent); color: var(--accent-text, var(--accent)); text-decoration: none; }
 .post-stage { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
 .post-media { background: transparent; border-radius: 4px; }
-.star { color: #2d5891; }
-.star.on { color: var(--accent); }
+.star { color: var(--dp-star-off); }
+.star.on { color: var(--dp-star-on); }
 .tag-table td { border-bottom-color: var(--border); }
-.skin-list { background: #0f2749; }
+.skin-list { background: var(--dp-menu); }
 
 @media (max-width: 760px) {
   :root[data-thumb] { --thumb: 118px; }
@@ -164,4 +181,43 @@ input[type="search"], select { background: #0f2749; border-color: var(--border);
   .top-search { order: 10; flex: 1 1 100%; max-width: none; margin: 0 0 10px; }
   .sidebar { padding: 0; border: 0; background: none; }
   .layout.with-sidebar .box { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+}
+
+/* (v5.44.46) «Глубина» на свету: шапка и полоса разделов остаются тёмно-синими (свои токены выше), тело — светлая
+   голубая бумага с белыми карточками; янтарные плашки и кнопки — те же, янтарный текст темнее */
+:root[data-variant="light"] {
+  --bg: #eaf1f9;
+  --panel: #ffffff;
+  --panel-2: #dde8f5;
+  --border: #c6d8ec;
+  --text: #13294a;
+  --muted: #51698a;
+  --link: #9a5b00;
+  --link-hover: #c27a12;
+  --accent: #f2b233;
+  --accent-ink: #1a1405;
+  --accent-text: #9a5b00;
+  --thumb-bg: #e4edf8;
+  --thumb-ring: #d98a1e;
+  --danger: #c62828;
+  --focus: #9a5b00;
+  --shadow: 0 12px 34px rgba(30, 60, 110, 0.18);
+
+  --tag-artist: #a35f00;
+  --tag-character: #1d7f40;
+  --tag-copyright: #9a3fa3;
+  --tag-general: #2a5db0;
+  --tag-meta: #5f5326;
+  --tag-species: #c0500f;
+  --tag-lore: #0c7a5f;
+  --tag-contributor: #5a4bc4;
+  --tag-invalid: #c62828;
+
+  --dp-field: #ffffff;
+  --dp-menu: #ffffff;
+  --dp-untagged: #b07a2a;
+  --dp-fav: #c2185b;
+  --dp-star-off: #8aa2c4;
+  --dp-star-on: #d38518;
+  color-scheme: light;
 }

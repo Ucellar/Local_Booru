@@ -325,9 +325,10 @@ def _create_generation_db(
             raise ExternalCacheInvalid("new external generation failed quick_check")
     finally:
         con.close()
-    # fsync the immutable generation before main.db can point at it.
-    with target.open("rb") as handle:
-        os.fsync(handle.fileno())
+    # fsync the immutable generation before main.db can point at it — (v5.44.35) through a handle open for writing:
+    # on Windows an fsync of one open for reading is «[Errno 9] Bad file descriptor» (no generation got published)
+    from core.file_safety import fsync_path
+    fsync_path(target)
 
 
 def publish_stage_generation(

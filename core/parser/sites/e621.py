@@ -41,6 +41,9 @@ class E621Site(Site):
 
 
     def search_md5(self, md5: str) -> Post | None:
+        answered = self._from_export([md5])
+        if answered is not None:
+            return answered.get(md5)
         data = self.get_json(f"{self.root}/posts.json", params={"tags": f"md5:{md5}", "limit": 1},
                              headers=self._headers(), auth=self._auth())
         for raw in post_dicts(data, keys=("posts",)):
@@ -49,10 +52,47 @@ class E621Site(Site):
         return None
 
     def search_md5_many(self, md5s: list, style: str = "", probe: bool = False) -> tuple[dict, bool]:
+        answered = self._from_export(md5s)
+        if answered is not None:
+            return answered, True
+        return self._md5_api(md5s)
+
+    def _md5_api(self, md5s: list) -> tuple[dict, bool]:
         data = self.get_json(f"{self.root}/posts.json", params={"tags": "md5:" + ",".join(md5s), "limit": len(md5s)},
                              headers=self._headers(), auth=self._auth())
         return self._map_md5_answer(post_dicts(data, keys=("posts",)), md5s,
                                     lambda raw: (raw.get("file") or {}).get("md5"), self.parse)
+
+    def _from_export(self, md5s: list) -> dict | None:
+        """(v5.44.25) The MD5s answered from e621's export (core/e621_export.py; e621's rules: «tens of thousands of
+        lookups» — its exports, not the API), or None — it cannot answer (off, not made yet).  A post it knows is
+        asked by its number (``posts_by_ids``, a hundred in a request: its tags fresh); a deleted one is not on e621;
+        what it does not know is not on e621 while it is current, else asked by MD5 as before."""
+        from core import e621_export
+        answer = e621_export.lookup(self.ctx.settings, md5s)
+        if answer is None:
+            return None
+        if not getattr(self, "_export_said", False):
+            self._export_said = True
+            self.ctx.log(f"  {self.host}: MD5 — по выгрузке e621 от {e621_export.as_day(answer.export_date)} "
+                         f"({e621_export.as_count(answer.rows)} постов); по API — посты, которые она знает"
+                         + ("" if answer.current else ", и остальные, пока новые посты не догружены"))
+        alive = {m: post for m, (post, flags) in answer.known.items() if not flags & e621_export.DELETED}
+        found: dict = {}
+        ids = sorted(set(alive.values()))
+        raws: list = []
+        for i in range(0, len(ids), max(1, self.id_batch_limit)):
+            raws += self.posts_by_ids(ids[i:i + max(1, self.id_batch_limit)])
+        if raws:
+            got, _whole = self._map_md5_answer(raws, list(alive), lambda raw: (raw.get("file") or {}).get("md5"),
+                                               self.parse)
+            found.update(got)
+        unknown = [m for m in md5s if m not in answer.known]
+        if unknown and not answer.current:
+            for i in range(0, len(unknown), max(1, self.md5_batch_limit)):
+                got, _whole = self._md5_api(unknown[i:i + max(1, self.md5_batch_limit)])
+                found.update(got)
+        return found
 
     def fetch_post(self, post_id: str) -> Post | None:
         if not str(post_id).isdigit():

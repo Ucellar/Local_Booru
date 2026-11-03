@@ -586,7 +586,7 @@
       done: "закончен", failed: "остановлен ошибкой", idle: "", busy: "занят",
     };
     const OUTCOME = {
-      tagged: ["найдено", "✓"], nomatch: ["в Брак", "?"], deferred: ["отложен", "⏸"],
+      tagged: ["найдено", "✓"], nomatch: ["в Брак", "?"], deferred: ["отложен", "‖"],   // text marks, not emoji
       skip: ["пропущен", "–"], error: ["ошибка", "!"],
     };
     const thumbUrl = (id) => `/api/parser/thumb/${shownJob}/${id}`;

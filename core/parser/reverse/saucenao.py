@@ -37,6 +37,9 @@ class SauceNao(ReverseService):
     journal_key = "saucenao"
     host = "saucenao.com"
     quota_limited = True          # (v5.44) searches a day: a file passes it over while its queue is long (engine)
+    # (v5.44.36) its Gelbooru found the owner's videos by their start (93–95 %); its Danbooru knows them by the frame
+    # Danbooru makes its previews of — asked with it when the start found nothing
+    video_styles = ("start", "danbooru")
 
     def __init__(self, ctx, sites: list):
         super().__init__(ctx, sites)
@@ -150,8 +153,11 @@ class SauceNao(ReverseService):
         message = str(header.get("message") or data.get("message") or "")
         low = message.lower()
         if api_status > 0:
+            # SauceNAO's own example: a positive status — «one or more indexes are having an issue»; the search is
+            # counted, waiting is its advice.  (v5.44.35) Without words of its own the reason is said (was empty: «SauceNAO:
+            # отложено — » in the owner's journal of 2.11.2026)
             return ReverseOutcome("deferred", retry_after=self._set_cooldown(f"сбой сервера {api_status}", 300),
-                                  detail=short(message))
+                                  detail=short(message) or f"сбой сервера {api_status}")
         if api_status < 0:
             if any(w in low for w in _AUTH_WORDS):
                 self.disable("неверный API-ключ")

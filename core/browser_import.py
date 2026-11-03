@@ -239,23 +239,11 @@ JUNK_TAGS = {"all"}                         # «every post» of a Gelbooru-like 
 SITE_METHOD = "site_post"                   # a set of tags the site itself gave for its post (the import asked it)
 
 
-def _known_categories(settings: dict, groups: dict[str, list[str]]) -> dict[str, list[str]]:
-    """``groups`` with each «general» tag in the category the library knows it by — the extension sends every tag of a
-    page as general (``storage.library_categories``)."""
-    if not groups.get("general"):
-        return groups
-    try:
-        from core.database.connection import db
-        from core.database.storage import library_categories
-        with db(settings, readonly=True) as con:
-            return library_categories(con, groups)
-    except Exception:
-        return groups
-
-
 def _page_groups(settings: dict, item: dict[str, Any]) -> dict[str, list[str]]:
     """The tags a post page shows, as the program keeps them: none from a grid's card (its link carries the grid's
-    search, not the post's tags), no :data:`JUNK_TAGS`, «general» in the categories the library knows."""
+    search, not the post's tags), no :data:`JUNK_TAGS`, the categories the page gave (a page without them — every tag
+    «general»: the card's page shows them in the categories most sites give them; 5.44.10–5.44.48 wrote the library's
+    categories into the set)."""
     if not item.get("is_post_page"):
         return {}
     groups = {}
@@ -263,7 +251,7 @@ def _page_groups(settings: dict, item: dict[str, Any]) -> dict[str, list[str]]:
         kept = [t for t in values or [] if str(t).strip().lower() not in JUNK_TAGS]
         if kept:
             groups[category] = kept
-    return _known_categories(settings, groups) if groups else {}
+    return groups
 
 
 def _card_site_sets(settings: dict, path: str | Path, site: str) -> str:

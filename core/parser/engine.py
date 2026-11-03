@@ -36,19 +36,21 @@ do not hold files back; the run summary lists them.  See core/parser/availabilit
 from __future__ import annotations
 
 import re
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.parser import persist, reverse_journal
+from core.parser import persist, reverse_journal, tally
 from core.parser.context import ParserContext
 from core.parser.http import Cancelled, HttpFailure
 from core.parser.models import FileResult, Match, ReverseOutcome
 from core.parser.sites import SiteUnavailable, site_for_url
 from core.parser.util import host_of, md5_from_filename, norm_md5, post_id_from_url, short
-from core.parser.verify import VisualChecker, local_phashes
+from core.parser.verify import VisualChecker, distance, local_phashes
+from core.tagger.site_frames import START, WORDS
 from core.work_timing import (AFTER, AFTER_GALLERY, AFTER_NAME_MD5, AFTER_NAME_POST, AFTER_PIXEL_HASH,
                               AFTER_PIXEL_SITE, AFTER_PIXELS, AFTER_PIXIV, AFTER_R34_KEY, AFTER_RELAY, AFTER_SOURCE_MD5,
                               AFTER_SUB, FINDS, FINDS_POST, FINDS_SUB, JOURNAL, PIXIV_ORIGINALS, PIXIV_SEARCH, READ,
@@ -85,6 +87,32 @@ KEY_GIVE_UP = 40            # rule34 keys in a row without a post (none found in
 # it longer than this, when a service after it would answer sooner: those are asked first, the quota's service after
 # them (``reverse_next``).  In the order «IQDB первым» (the default since v5.44.3) it is last: nothing passes it over.
 PASS_OVER_WAIT = 120.0
+# (v5.44.29) a file no run finished (deferred, a run stopped, the program closed): a site that said «нет» about its MD5
+# within these days is not asked about it again (the old program kept every site's answer, ``site_scan_status``, and
+# never asked again; at the owner after a restart 4255 such files waited for gelbooru.com one by one — 1 h 16 min — and
+# as long for rule34.xxx, ATF and the checks after the sites)
+SITE_MISS_KEEP_DAYS = 7
+# (v5.44.36) two pictures of a video for a service this near (pHash) are one picture: it is asked once
+ALIKE = 6
+
+
+def _picture_hash(path) -> str:
+    """The pHash of a picture made for the services ("" — it cannot be read: then it is not compared)."""
+    try:
+        import imagehash
+        from PIL import Image
+        with Image.open(path) as picture:
+            return str(imagehash.phash(picture.convert("RGB")))
+    except Exception as exc:  # an odd copy: the service is still asked with it
+        import logging
+        logging.getLogger("local_booru.parser").info("pHash картинки для поиска не посчитан: %s: %s",
+                                                     type(exc).__name__, exc)
+        return ""
+
+
+def _alike(a: str, b: str) -> bool:
+    near = distance(a, b) if a and b else None
+    return near is not None and near <= ALIKE
 
 
 @dataclass
@@ -111,6 +139,14 @@ class ReverseTicket:
     later: list = field(default_factory=list)
     held: str = ""
     remembered: dict | None = None       # (v5.44.18) services that answered about the file before: reverse_journal
+    # (v5.44.36) a video's pictures by style (``ReverseService.video_styles``: its start, the frame e621 or Danbooru
+    # makes its previews of) and their pHashes; the styles each service was asked with; a service to ask once more
+    # with its next picture (it found nothing by the one before); the services that named sources of it
+    uploads: dict = field(default_factory=dict)
+    upload_hashes: dict = field(default_factory=dict)
+    asked: dict = field(default_factory=dict)
+    again: object = None
+    sourced: set = field(default_factory=set)
 
 
 @dataclass
@@ -127,6 +163,7 @@ class _State:
     adding: list = field(default_factory=list)      # «добор»: the sites added since the file was processed
     key_asked: bool = False                          # rule34 answered about the key in the name (v5.44.12)
     key_post: bool = False                           # …with a post (its picture may still be another)
+    resumed: bool = False                            # (v5.44.29) no run finished it: the sites' «нет» is kept
 
     def problem(self, owner, text: str) -> None:
         self.problems.append((owner, text))
@@ -154,6 +191,9 @@ class ParserEngine:
         self.recheck_nomatch_only = ctx.flag("parser_recheck_nomatch_only", False)
         # Browser-companion imports pass the MD5 published by the post they came from.
         self.authoritative_md5s = [m for m in (norm_md5(x) for x in ctx.settings.get("_authoritative_site_md5s") or []) if m]
+        # (v5.44.27) a run's counts of what would be said about every file in the same words (core/parser/tally.py):
+        # the run sets it and says them every five minutes; None — every line is said (one file, ``process``)
+        self.tally = None
 
     # ── entry points ────────────────────────────────────────────────────────
     def process(self, job: FileJob) -> FileResult:
@@ -199,13 +239,63 @@ class ParserEngine:
         return [s for s in self.services if s.enabled()]
 
     def reverse_prepare(self, ticket: ReverseTicket) -> bool:
-        """The picture every service is sent (a video's start, a smaller JPEG), made once; False — the file cannot be
-        searched (its answer is then a miss).  (v5.44.18) Every service on answered about it before — nothing is
-        made: ``reverse_next`` gives none, the file goes to its answer (the relay of its sources, Брак)."""
-        if not any(s.enabled() and not self._answered_before(ticket, s) for s in self.services):
+        """The picture every service is sent (a smaller JPEG), made once; False — the file cannot be searched (its
+        answer is then a miss).  (v5.44.36) A video — a picture of each style its services are asked with
+        (``ReverseService.video_styles``: its start, the frame e621 or Danbooru makes its previews of), the start —
+        ``upload``.  (v5.44.18) Every service on answered about it before — nothing is made: ``reverse_next`` gives
+        none, the file goes to its answer (the relay of its sources, Брак)."""
+        services = [s for s in self.services if s.enabled() and not self._answered_before(ticket, s)]
+        if not services:
             return True
-        ticket.upload = self._upload_copy(ticket.state)
+        styles = [START]
+        if self._is_video(ticket.state):
+            for service in services:
+                styles += [st for st in service.video_styles if st not in styles]
+        for style in styles:
+            made = self._upload_copy(ticket.state, style)
+            if made is not None:
+                ticket.uploads[style] = made
+                ticket.upload_hashes[style] = _picture_hash(made)
+        ticket.upload = ticket.uploads.get(START) or next(iter(ticket.uploads.values()), None)
         return ticket.upload is not None
+
+    @staticmethod
+    def _is_video(state: "_State") -> bool:
+        from core.tagger.hashing import VIDEO_EXTS
+        return state.path.suffix.lower() in VIDEO_EXTS
+
+    def _style_now(self, service, ticket: ReverseTicket) -> str:
+        """(v5.44.36) The picture of the file to send the service now: the first of its ``video_styles`` it was not
+        asked with that is another picture than those it was (pHash farther than :data:`ALIKE`); a picture or a GIF —
+        the file itself (:data:`START`).  "" — none left."""
+        asked = ticket.asked.get(service.name, [])
+        if not self._is_video(ticket.state):
+            return "" if asked else START
+        sent = [ticket.upload_hashes.get(st) for st in asked]
+        for style in [st for st in service.video_styles if st in ticket.uploads] or [START]:
+            if style in asked:
+                continue
+            if any(_alike(ticket.upload_hashes.get(style, ""), other or "") for other in sent):
+                continue
+            return style
+        return ""
+
+    def _ask_again(self, ticket: ReverseTicket, service) -> bool:
+        """(v5.44.36) A video the service found nothing about by one picture is asked with its next one (another
+        frame — the one another site makes its previews of): True — it goes to the service once more, nothing is
+        remembered yet."""
+        if not self._is_video(ticket.state):
+            return False
+        style = self._style_now(service, ticket)
+        if not style:
+            return False
+        ticket.again = service
+        if self.tally is not None:              # a run: counted, said every five minutes
+            self.tally.count(tally.AGAIN, (service.name,))
+        else:
+            self._say_rev(ticket.state, f"{service.name}: этим кадром видео не нашёл — спрашиваю другим "
+                                        f"({WORDS.get(style, style)})")
+        return True
 
     # ── (v5.44.18) what the services answered before: core/parser/reverse_journal.py ──
     def _recall(self, ticket: ReverseTicket) -> dict:
@@ -217,7 +307,8 @@ class ParserEngine:
         state = ticket.state
         try:
             if self.ctx.flag("parser_reverse_remember", True):
-                ticket.remembered = reverse_journal.remembered(self.ctx.settings, ticket.job.original_path, self.services)
+                ticket.remembered = reverse_journal.remembered(self.ctx.settings, ticket.job.original_path, self.services,
+                                                               video=self._is_video(state))
             kept = reverse_journal.saved_source(self.ctx.settings, ticket.job.original_path)
         except Exception as exc:  # the memory saves time only: without it every service is asked, as before
             self._say(state, f"память обратного поиска недоступна ({type(exc).__name__}: {exc})")
@@ -225,16 +316,25 @@ class ParserEngine:
         if kept and all(str(x.get("url") or "") != kept["url"] for x in state.source_only):
             state.source_only.append(kept)
         known = [s.name for s in self.services if s.enabled() and s.journal_key in ticket.remembered]
-        if known:
+        if known and self.tally is not None:        # (v5.44.27) a run: counted, said every five minutes
+            self.tally.known(known)
+        elif known:
             self._say_rev(state, f"уже отвечали о нём раньше, не спрашиваю: {', '.join(known)}")
         return ticket.remembered
+
+    def _say_rev_first(self, state: _State, text: str) -> None:
+        """(v5.44.27) A line a run says about many files in the same words (a service's rest, its limit): said for the
+        first file, counted for the rest — the run says how many more (core/parser/tally.py)."""
+        if self.tally is None or self.tally.first(text, "[REVERSE:…]"):
+            self._say_rev(state, text)
 
     def _answered_before(self, ticket: ReverseTicket, service) -> bool:
         return bool(service.journal_key) and service.journal_key in self._recall(ticket)
 
     def _remember(self, ticket: ReverseTicket, service, status: str, reason: str = "") -> None:
         try:
-            reverse_journal.record(self.ctx.settings, ticket.job.original_path, service, status, reason)
+            reverse_journal.record(self.ctx.settings, ticket.job.original_path, service, status, reason,
+                                   video=self._is_video(ticket.state))
         except Exception as exc:  # the memory saves time only: the answer itself is not changed by it
             self._say(ticket.state, f"ответ {service.name} не записан в память ({type(exc).__name__}: {exc})")
 
@@ -248,7 +348,15 @@ class ParserEngine:
         the default since v5.44.3, it is last anyway).  (v5.44.3) A service before it that gave the file no answer
         (paused, its limit) holds it: :meth:`_held`.  (v5.44.14) A service that may be throttled (``pass_over``:
         e621 IQDB without an account) is passed over the same way, and it comes back before a service with a daily
-        quota: those searches go to what the others did not find."""
+        quota: those searches go to what the others did not find.  (v5.44.36) A service that found nothing about a
+        video by one of its pictures (``ticket.again``, :meth:`_ask_again`) comes first — with the next."""
+        if ticket.again is not None:
+            service, ticket.again = ticket.again, None
+            if service.enabled() and service.paused():      # its next picture not asked: the miss is not trusted
+                ticket.state.problem(service, service.pause_note())
+                ticket.held = ticket.held or service.name
+            elif service.enabled():
+                return service
         while ticket.step < len(self.services):
             service = self.services[ticket.step]
             if getattr(service, "quota_limited", False):
@@ -303,7 +411,7 @@ class ParserEngine:
         deferred (the others' trouble is noted) and both are asked again later."""
         if not ticket.held or not getattr(service, "quota_limited", False):
             return False
-        self._say_rev(ticket.state, f"{service.name}: не спрашиваю, пока {ticket.held} не ответил — файл отложен")
+        self._say_rev_first(ticket.state, f"{service.name}: не спрашиваю, пока {ticket.held} не ответил — файл отложен")
         return True
 
     def _sooner_after(self, ticket: ReverseTicket, service, wait_of) -> bool:
@@ -334,7 +442,9 @@ class ParserEngine:
             return ReverseOutcome("paused", detail=service.pause_note())
         self.ctx.http.check_cancel()
         self.ctx.activity(service.name, "поиск", str(ticket.state.path))
-        return service.search(ticket.upload)
+        style = self._style_now(service, ticket) or START          # (v5.44.36) a video: the picture of its style
+        ticket.asked.setdefault(service.name, []).append(style)
+        return service.search(ticket.uploads.get(style) or ticket.upload)
 
     def reverse_take(self, service, ticket: ReverseTicket, outcome: ReverseOutcome) -> list:
         """What a service's answer gives the file: its accepted finds (the posts behind the hits), or [] — the next
@@ -347,7 +457,9 @@ class ParserEngine:
         if outcome.status == "deferred":
             state.deferred_until = max(state.deferred_until, float(outcome.retry_after or 0))
             state.problem(service, f"{service.name}: {outcome.detail or 'лимит'}")
-            self._say_rev(state, f"{service.name}: отложено — {outcome.detail}")
+            # (v5.44.27) a rest of the service (SauceNAO's after its server failed) defers every file that comes to it
+            # in the same words: said for the first, counted for the rest
+            self._say_rev_first(state, f"{service.name}: отложено — {outcome.detail}")
             ticket.held = ticket.held or service.name
             return []
         if outcome.status == "failed":
@@ -366,9 +478,14 @@ class ParserEngine:
             return []
         service.note_success()
         state.source_only += outcome.source_only
-        missed = "source_only" if outcome.source_only else "done_miss"
+        if outcome.source_only:
+            ticket.sourced.add(service.name)
+        missed = "source_only" if service.name in ticket.sourced else "done_miss"
+        if not self._is_video(state):           # (v5.44.36) weak hits (under the threshold) are for videos only
+            outcome.candidates = [c for c in outcome.candidates if not getattr(c, "weak", False)]
         if not outcome.candidates:
-            self._remember(ticket, service, missed)
+            if not self._ask_again(ticket, service):        # (v5.44.36) a video: its next picture first
+                self._remember(ticket, service, missed)
             return []
         troubles = len(state.problems)
         STAGE.prefix = FINDS_SUB                # (v5.35.1) the sites' answers about the hits are timed as its parts
@@ -380,7 +497,8 @@ class ParserEngine:
         if matches:
             self._remember(ticket, service, "done_match")
         elif len(state.problems) == troubles:   # its hits checked to the end — not a preview or a site that failed
-            self._remember(ticket, service, missed)
+            if not self._ask_again(ticket, service):
+                self._remember(ticket, service, missed)
         return matches
 
     def reverse_finish(self, ticket: ReverseTicket, matches: list) -> FileResult:
@@ -424,7 +542,34 @@ class ParserEngine:
         if not self.ctx.flag("enable_md5_lookup", True):
             return state, []
         state.searched_md5.add(state.md5)
-        return state, self._usable(list(state.adding or self.sites), state)
+        # (v5.44.29) a site that said «нет» before is left out before the pauses are looked at: its pause now does not
+        # hold the file (``_usable`` notes a paused site as the file's problem — the file would be deferred)
+        on = [site for site in (state.adding or self.sites) if not site.disabled_reason]
+        return state, self._usable(self._not_asked_again(job, state, on), state)
+
+    def _not_asked_again(self, job: FileJob, state: _State, sites: list) -> list:
+        """(v5.44.29) The sites to ask about a file no run finished (``state.resumed``): without those that said «нет»
+        about this very MD5 within :data:`SITE_MISS_KEEP_DAYS` (the site journal, ``site_scan_status`` — a failure
+        leaves no line there, so a site that could not answer is asked).  A run counts them (said every five minutes),
+        without a run the file's line says them."""
+        if not sites or state.adding or not state.resumed:
+            return sites
+        from core.database.storage import site_misses
+        try:
+            said = site_misses(self.ctx.settings, job.original_path, state.md5,
+                               since=time.time() - SITE_MISS_KEEP_DAYS * 86400)
+        except sqlite3.Error as exc:    # the journal only saves questions: without it every site is asked, as before
+            self._say(state, f"журнал сайтов не прочитан ({type(exc).__name__}: {exc}) — спрашиваю все сайты")
+            return sites
+        kept = [site for site in sites if site.host not in said]
+        if len(kept) == len(sites):
+            return sites
+        names = [site.label for site in sites if site.host in said]
+        if self.tally is not None:
+            self.tally.count(tally.SITES, names)
+        else:
+            self._say(state, f"сайты уже ответили «нет» об этом MD5 недавно — не спрашиваю снова: {', '.join(names)}")
+        return kept
 
     def ask(self, site, md5: str, state: "_State"):
         """One site's answer about one MD5 of a file: its post, or None (not there, a problem — noted in
@@ -486,7 +631,7 @@ class ParserEngine:
         queues ask the new sites); without them «добор» is done here at once."""
         path = job.path
         log = lambda text: self.ctx.log(f"[MD5:{path.name}] #{job.index} {text}")
-        status = self._existing_status(job)
+        status, resumed = self._status_of(job)
         if status:
             missing = self._sites_to_add(job) if self._adds_to(status) else []
             if not missing:
@@ -498,10 +643,14 @@ class ParserEngine:
             return FileResult(path, "error", "файл не читается")
         blocked = self._blocked(md5)
         if blocked:
-            log(f"пропуск — {blocked}")
+            if self.tally is None or self.tally.first(f"пропуск — {blocked}", "[MD5:…]"):   # (v5.44.29) counted
+                log(f"пропуск — {blocked}")
             return FileResult(path, "skip", blocked)
-        log(f"▶ md5={md5}")
-        state = _State(md5=md5, path=path, tag=f"#{job.index}")
+        if self.tally is not None:              # (v5.44.29) a run: counted, said every five minutes
+            self.tally.count(tally.FILES)
+        else:
+            log(f"▶ md5={md5}")
+        state = _State(md5=md5, path=path, tag=f"#{job.index}", resumed=resumed)
         started.append(state)
 
         bundle = persist.library_bundle_for_md5(self.ctx.settings, md5) if self.ctx.flag("skip_existing", True) else None
@@ -563,7 +712,10 @@ class ParserEngine:
             return FileResult(path, "skip", blocked)
         state = _State(md5=md5, path=path, tag=f"#{job.index}", adding=list(sites))
         started.append(state)
-        self._say(state, f"▶ добор новых сайтов ({', '.join(s.label for s in sites)}) md5={md5}")
+        if self.tally is not None:              # (v5.44.29) a run: counted, said every five minutes
+            self.tally.count(tally.ADDING, [s.label for s in sites])
+        else:
+            self._say(state, f"▶ добор новых сайтов ({', '.join(s.label for s in sites)}) md5={md5}")
         return state
 
     def _add_sites(self, job: FileJob, sites: list, started: list) -> FileResult:
@@ -636,16 +788,19 @@ class ParserEngine:
             state.problem(self.visual, f"превью {post.label} {post.post_id}: {detail}")
 
     # ── stage helpers ───────────────────────────────────────────────────────
-    def _existing_status(self, job: FileJob) -> str:
+    def _status_of(self, job: FileJob) -> tuple[str, bool]:
+        """(the result of the file's earlier processing that stands — "" when it is processed again, resumed): resumed —
+        no run finished the file (deferred, a run stopped, the program closed), so the sites' «нет» about its MD5 is
+        kept (v5.44.29, ``_not_asked_again``); not with «обрабатывать всё заново» nor for Брак asked again on purpose."""
         s = self.ctx.settings
         if not (s.get("skip_existing", True) or s.get("tag_only_untagged", True)):
-            return ""
+            return "", False
         status = persist.processed_status(s, job.original_path)
         if not status:
-            return ""
+            return "", True
         if status in NOMATCH_STATUSES and s.get("retry_nomatch"):
-            return ""
-        return status
+            return "", False
+        return status, False
 
     def _file_md5(self, path: Path) -> str:
         from core.file_hash_cache import get_or_compute_md5
@@ -751,8 +906,13 @@ class ParserEngine:
 
     @staticmethod
     def _journal(state: _State, site, outcome: str, md5: str, url: str) -> None:
-        """One line per site and file: a find is never overwritten by a later «not there»."""
-        if state.journal.get(site.host, ("",))[0] == "match" and outcome != "match":
+        """One line per site and file: a find is never overwritten by a later «not there»; (v5.44.29) nor the site's
+        «нет» about the file's own MD5 by its «нет» about another one (the MD5 in the name, a hit's post): a file no run
+        finished is not asked about its MD5 again where the line says «нет» (``_not_asked_again``)."""
+        before = state.journal.get(site.host)
+        if before and before[0] == "match" and outcome != "match":
+            return
+        if before and outcome != "match" and before[1] == state.md5 and md5 != state.md5:
             return
         state.journal[site.host] = (outcome, md5, url, site.engine)
 
@@ -995,15 +1155,16 @@ class ParserEngine:
         self._say(state, f"в галерее есть визуально тот же файл (d={hit['distance']}) — беру его теги")
         return persist.matches_from_bundle(bundle, "local_phash")
 
-    def _upload_copy(self, state: _State):
+    def _upload_copy(self, state: _State, style: str = START):
         from core.tagger.hashing import VIDEO_EXTS, search_frame_image
         from core.tagger.reverse_upload import reverse_upload_image
         source = state.path
         if source.suffix.lower() in VIDEO_EXTS or source.suffix.lower() == ".gif":
-            # the start of a video, as the sites show it in their previews — what IQDB and SauceNAO compare with
-            source = search_frame_image(source, settings=self.ctx.settings, log=None)
+            # (v5.44.36) the frame of a video the service's sites make their previews of (its start, e621's, Danbooru's)
+            source = search_frame_image(source, settings=self.ctx.settings, log=None, style=style)
             if source == state.path and state.path.suffix.lower() in VIDEO_EXTS:
-                self._say(state, "кадр из видео не извлечён — обратный поиск пропущен")
+                if style == START:
+                    self._say(state, "кадр из видео не извлечён — обратный поиск пропущен")
                 return None
         try:
             return reverse_upload_image(source, self.ctx.settings, None)
@@ -1065,7 +1226,8 @@ class ParserEngine:
         if not post or not post.tags:
             return []
         ok, detail = self._accept(post, cand.similarity, trust, state,
-                                  strict=cand.similarity < float(getattr(service, "strict_below", 0.0) or 0.0))
+                                  strict=getattr(cand, "weak", False)
+                                  or cand.similarity < float(getattr(service, "strict_below", 0.0) or 0.0))
         return [Match(post, method=method, similarity=cand.similarity, verified=detail)] if ok else []
 
     def _one_per_site(self, matches: list, state: _State) -> list:
@@ -1229,7 +1391,9 @@ class ParserEngine:
         if live or state.deferred_until:
             when = time.strftime(" до %H:%M", time.localtime(state.deferred_until)) if state.deferred_until else ""
             reason = "; ".join(live[:3]) or "лимит сервиса"
-            self._say_rev(state, f"ФИНАЛ ⏸ отложен{when} — {reason}")
+            # (v5.44.35) the files a service's rest defers end alike: said for the first, counted for the rest (the
+            # owner's journal of 2.11.2026: 385 of its 999 lines «ФИНАЛ ⏸ отложен до … — SauceNAO: пауза (сбой сервера 3)»)
+            self._say_rev_first(state, f"ФИНАЛ ⏸ отложен{when} — {reason}")
             return FileResult(job.path, "deferred", reason, retry_at=float(state.deferred_until or 0.0))
         best = max(state.source_only, key=lambda x: float(x.get("similarity") or 0), default=None)
         saved = persist.save_nomatch(self.ctx.settings, job.path, original_path=job.original_path,

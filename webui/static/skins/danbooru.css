@@ -1,0 +1,293 @@
+/* «Danbooru» (v5.44.46, made again: the v5.44.44 one had a dark slate header Danbooru never had).  After Danbooru's
+   own source (github.com/danbooru/danbooru — app/javascript/src/styles/base/040_colors.scss, the navbar component,
+   the post previews): Verdana for the text and Tahoma for the headings; the site's name large and bold, the menu a row
+   of blue links under it, the page you are on lit pale blue — the same blue as the strip of the sections under the
+   menu, so the two read as one tab; the tags in a column on the left — «?», the name in the colour of its kind, the
+   count in grey; pictures without frames or corners at their own proportions, a 2 px border by what the post is (a
+   сборка green like a parent post, a picture without tags blue like a pending one); the notice «уменьшено» above a
+   picture in Danbooru's pale yellow.  Light and dark are Danbooru's own themes (light: white; dark: #1e1e2c). */
+:root {
+  --bg: #ffffff;
+  --panel: #f4f6ff;              /* blue-0: the strip of the sections, the page you are on */
+  --panel-2: #e8e8ec;            /* grey-1: buttons */
+  --border: #d1d1da;             /* grey-2 */
+  --text: #000000;
+  --muted: #777892;              /* grey-5 */
+  --link: #0075f8;               /* blue-5 */
+  --link-hover: #4b8cff;
+  --accent: #0075f8;
+  --accent-ink: #ffffff;
+  --bar-bg: #ffffff;
+  --bar-ink: #1e1e2c;            /* grey-9: the headings */
+  --bar-active-bg: #f4f6ff;
+  --bar-active-ink: #0075f8;
+  --thumb-bg: transparent;
+  --thumb-ring: #0075f8;
+  --danger: #ed2426;             /* red-5 */
+  --focus: #0075f8;
+  --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+
+  --tag-artist: #c00004;         /* red-6 */
+  --tag-copyright: #a800aa;      /* magenta-6 */
+  --tag-character: #008e23;      /* green-5 (Danbooru's green-4 is too pale to read on white) */
+  --tag-general: #0075f8;        /* blue-5 */
+  --tag-meta: #b56700;           /* orange-5 (orange-3 the same) */
+  --tag-species: #b8480c;
+  --tag-lore: #0a7d6e;
+  --tag-contributor: #b8006e;
+  --tag-invalid: #777892;
+
+  --font: Verdana, Helvetica, sans-serif;
+  --font-size: 14px;
+  --font-head: Tahoma, Verdana, Helvetica, sans-serif;
+  --radius: 4px;
+  --radius-thumb: 0;
+  --side: 245px;
+  --thumb: 180px;
+  color-scheme: light;
+
+  --db-form-bg: #ffffff;         /* form-input-background */
+  --db-button: #e8e8ec;          /* form-button-background: grey-1 */
+  --db-button-ink: #000000;
+  --db-button-line: #d1d1da;
+  --db-button-hover: #f6f6f8;
+  --db-parent: #35c64a;          /* preview-has-children-color: green-3 */
+  --db-pending: #0075f8;         /* preview-pending-color */
+  --db-notice: #fdf6e6;          /* notice-info-background: yellow-0 */
+  --db-notice-line: #f7e7c3;     /* notice-info-border-color: yellow-1 */
+  --db-icon-bg: rgba(0, 0, 0, 0.7);
+}
+:root[data-thumb="s"] { --thumb: 150px; }
+:root[data-thumb="l"] { --thumb: 225px; }
+
+body { font: var(--font-size)/1.25em var(--font); }
+h1, h2, h3, h4, h5, h6 { font-family: var(--font-head); color: var(--bar-ink); }
+
+/* ── the header: the name, then the menu; the page you are on in pale blue, joined to the sections' strip ──── */
+.top {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+  padding: 8px 32px 0;
+  background: var(--bg);
+  color: var(--text);
+  border-bottom: 0;
+}
+.brand { order: 1; padding: 0; gap: 0; font: 700 28px/40px var(--font-head); letter-spacing: 0; color: var(--bar-ink); }
+.brand:hover { color: var(--bar-ink); filter: brightness(1.25); }
+.bn-1, .bn-2 { color: var(--bar-ink); }
+.top-search { display: none; }
+.top-tools { order: 2; margin-left: auto; gap: 8px; }
+.main-nav {
+  order: 3;
+  flex: 1 1 100%;
+  align-items: stretch;
+  gap: 0;
+  margin: 8px -12px 0;
+}
+.main-nav a {
+  padding: 6px 12px;
+  border-radius: 0;
+  background: none;
+  color: var(--link);
+  font: 400 14px/20px var(--font);
+}
+.main-nav a:hover { background: none; color: var(--link-hover); text-decoration: none; }
+.main-nav a.active, .main-nav a.active:hover { background: var(--bar-active-bg); color: var(--link); font-weight: 700; }
+.skin-button, .drawer-toggle {
+  padding: 3px 10px;
+  border: 1px solid var(--db-button-line);
+  border-radius: 4px;
+  background: var(--db-button);
+  color: var(--db-button-ink);
+  font: 400 13px/20px var(--font);
+}
+.skin-button:hover, .drawer-toggle:hover { background: var(--db-button-hover); color: var(--db-button-ink); border-color: var(--muted); }
+.settings-link.active { border-color: var(--link); }
+.skin-icon { box-shadow: none; }
+
+/* the menu «Оформление» */
+.skin-list { border: 1px solid var(--border); border-radius: 4px; background: var(--bg); box-shadow: var(--shadow); }
+.skin-scope { font: 700 13px/1.4 var(--font-head); color: var(--bar-ink); }
+.skin-scope small { font: 400 11px/1.4 var(--font); }
+.skin-vbtn { border: 1px solid var(--db-button-line); border-radius: 4px; background: var(--db-button); color: var(--db-button-ink); font: 400 13px/1.4 var(--font); }
+.skin-vbtn:hover { background: var(--db-button-hover); color: var(--db-button-ink); border-color: var(--muted); }
+.skin-vbtn.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.skin-item { border-radius: 0; font: 400 13px/1.4 var(--font); }
+.skin-item:hover, .skin-item.active { background: var(--panel); border-color: transparent; }
+.skin-item.active b { color: var(--link); }
+.skin-text small { font: 400 11px/1.4 var(--font); }
+
+/* the sections: Danbooru's subnav — a pale blue strip of links */
+.sections {
+  gap: 0;
+  padding: 0 20px;
+  border: 0;
+  background: var(--panel);
+}
+.sections a { padding: 6px 12px; color: var(--link); font: 400 14px/20px var(--font); }
+.sections a:hover { color: var(--link-hover); text-decoration: none; }
+.sections a.active { color: var(--text); font-weight: 700; }
+.sections-sep { width: 1px; margin: 6px 4px; background: var(--border); }
+
+/* ── the page: the tag column on the left ─────────────────────────────────────────────────────────── */
+.layout { padding: 16px 32px 48px; }
+.layout.with-sidebar { gap: 24px; }
+.sidebar h3 { margin: 0 0 6px; font: 700 16px/1.5em var(--font-head); color: var(--bar-ink); }
+.sidebar h4 { margin: 12px 0 2px; font: 700 14px/1.5em var(--font-head); color: var(--bar-ink); }
+.box { margin-bottom: 16px; }
+.search-row input { border: 1px solid var(--border); border-radius: 0; }
+.search-row button { border-radius: 0; }
+.hint { color: var(--muted); font-size: 11px; }
+.tag-list li { padding: 1px 0; gap: 4px; }
+.tag-wiki { display: inline; flex: none; font-weight: 700; color: inherit; }   /* Danbooru's «?» before a tag */
+.tag-artist .tag-wiki { color: var(--tag-artist); }
+.tag-character .tag-wiki { color: var(--tag-character); }
+.tag-copyright .tag-wiki { color: var(--tag-copyright); }
+.tag-general .tag-wiki { color: var(--tag-general); }
+.tag-meta .tag-wiki { color: var(--tag-meta); }
+.tag-species .tag-wiki { color: var(--tag-species); }
+.tag-lore .tag-wiki { color: var(--tag-lore); }
+.tag-contributor .tag-wiki { color: var(--tag-contributor); }
+.tag-invalid .tag-wiki { color: var(--tag-invalid); }
+.tag-op { color: var(--muted); }
+.tag-name { flex: 0 1 auto; }
+.tag-count { color: var(--muted); font-size: 12px; }
+
+.result-bar { color: var(--muted); font-size: 12px; }
+.result-count { color: var(--text); }
+.thumb-sizes button.link { font-size: 12px; }
+
+/* pictures: no frame, no corners, their own proportions; a border by what the post is */
+.thumbs { --cell: calc(var(--thumb) + 8px); gap: 8px; }
+.thumb img { border: 2px solid transparent; border-radius: 0; background: transparent; }
+.thumb-link:hover img { border-color: transparent; filter: brightness(1.08); }
+.thumb-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.thumb.is-set img { border-color: var(--db-parent); }
+.thumb.untagged img { border-color: var(--db-pending); }
+.badges { top: 6px; left: 6px; }
+.badge { padding: 0 4px; border-radius: 3px; background: var(--db-icon-bg); color: #ffffff; font: 700 11px/18px var(--font); }
+.badge.fav { color: #ff8a8b; }
+
+/* the pages: links, the one you are on in bold */
+.paginator { gap: 2px; margin-top: 24px; }
+.paginator a, .paginator b, .paginator .gap { min-width: 0; padding: 4px 8px; border: 0; border-radius: 0; font: 400 14px/20px var(--font); }
+.paginator a { color: var(--link); }
+.paginator a:hover { background: none; color: var(--link-hover); }
+.paginator b { color: var(--text); font-weight: 700; }
+
+/* forms: Danbooru's grey buttons, the main one blue */
+button, .button {
+  border: 1px solid var(--db-button-line);
+  border-radius: 4px;
+  background: var(--db-button);
+  color: var(--db-button-ink);
+  font-family: var(--font);
+}
+button:not([class]):hover, .button:hover, button.danger:hover {
+  border-color: var(--db-button-line);
+  background: var(--db-button-hover);
+  box-shadow: 0 0 2px var(--muted);
+  color: var(--db-button-ink);
+}
+button.primary, .button.primary { border-color: var(--link); background: var(--link); color: #ffffff; }
+button.primary:hover, .button.primary:hover { border-color: var(--link-hover); background: var(--link-hover); color: #ffffff; }
+/* a dangerous button: red-6 on the grey button (the buttons stay light at night too); its second press — red */
+button.danger, button.danger:hover { color: #c00004; }
+button.danger.confirming, button.danger.confirming:hover { border-color: #ed2426; background: #ed2426; color: #ffffff; }
+button.link, button.link:hover { border: 0; background: none; box-shadow: none; }
+input[type="search"], input[type="text"], input[type="number"], input[type="url"], input[type="password"], select, textarea {
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--db-form-bg);
+  color: var(--text);
+}
+.star.on { color: #c79a00; }
+.ac-list { border: 1px solid var(--border); border-radius: 0; background: var(--bg); box-shadow: var(--shadow); }
+.ac-list li.active, .ac-list li:hover { background: var(--panel); }
+
+/* ── a picture's page: the tags on the left; «уменьшено» in Danbooru's pale yellow notice ──────────────── */
+.resize-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 8px 12px;
+  border: 1px solid var(--db-notice-line);
+  border-radius: 4px;
+  background: var(--db-notice);
+  color: var(--text);
+  font: 400 13px/1.4 var(--font);
+}
+.resize-note button.link { color: var(--link); font: inherit; }
+.post-nav { gap: 16px; }
+.post-nav a { color: var(--link); }
+.post-stage { background: transparent; }
+.post-media { background: transparent; }
+table.info th { color: var(--muted); }
+
+/* «Видео» and the manga: the same plain links and grey buttons */
+.vsorts a, .manga-sorts a { color: var(--link); font-weight: 400; }
+.vsorts a.active, .vsorts a:hover { color: var(--text); font-weight: 700; }
+.vhead h2, .manga-head h1 { font: 700 16px/1.5em var(--font-head); color: var(--bar-ink); }
+.vbutton, a.vbutton { border: 1px solid var(--db-button-line); border-radius: 4px; background: var(--db-button); color: var(--db-button-ink); font: 400 13px/1.4 var(--font); }
+.vbutton:hover, a.vbutton:hover { border-color: var(--muted); background: var(--db-button-hover); color: var(--db-button-ink); }
+.vbutton.primary, a.vbutton.primary { border-color: var(--link); background: var(--link); color: #ffffff; }
+.vbutton.primary:hover, a.vbutton.primary:hover { filter: none; background: var(--link-hover); color: #ffffff; }
+.vcard-pic, .cover, .vposter { border-radius: 0; }
+.vcard-title { font: 700 13px/1.4 var(--font); }
+.vchip { border-radius: 0; background: none; color: var(--link); font-weight: 400; padding: 0 6px 0 0; }
+.vchip:hover { background: none; color: var(--link-hover); }
+.vbadge, .mbadge { border-radius: 3px; background: var(--db-icon-bg); }
+.manga-sorts a { border-radius: 0; background: none; padding: 4px 8px; }
+.manga-sorts a.active { background: var(--panel); color: var(--text); font-weight: 700; }
+.vget > section, .vempty, .vmeta { border-radius: 4px; }
+
+@media (max-width: 760px) {
+  .top { padding: 6px 12px 0; }
+  .layout { padding: 10px 12px 40px; }
+  .sections { padding: 0 2px; }
+}
+
+/* ── Danbooru's dark theme ──────────────────────────────────────────────────────────────────────── */
+:root[data-variant="dark"] {
+  --bg: #1e1e2c;                 /* grey-9 */
+  --panel: #2c2d3f;              /* grey-8: the subnav, cards */
+  --panel-2: #3f4058;            /* grey-7 */
+  --border: #3f4058;
+  --text: #d1d1da;               /* grey-2 */
+  --muted: #9192a7;              /* grey-4 */
+  --link: #009be6;               /* azure-4 */
+  --link-hover: #4bb4ff;         /* azure-3 */
+  --accent: #009be6;
+  --accent-ink: #ffffff;
+  --bar-bg: #1e1e2c;
+  --bar-ink: #e8e8ec;            /* grey-1: the headings */
+  --bar-active-bg: #2c2d3f;
+  --bar-active-ink: #009be6;
+  --thumb-ring: #009be6;
+  --danger: #ff5a5b;             /* red-4 */
+  --focus: #009be6;
+  --shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+  --tag-artist: #ff8a8b;         /* red-3 */
+  --tag-copyright: #c797ff;      /* purple-3 */
+  --tag-character: #35c64a;      /* green-3 */
+  --tag-general: #009be6;        /* azure-4 */
+  --tag-meta: #ead084;           /* yellow-2 */
+  --tag-species: #fd9200;
+  --tag-lore: #3cc6b0;
+  --tag-contributor: #fd78ff;
+  --tag-invalid: #9192a7;
+  --db-form-bg: #3f4058;         /* grey-7 */
+  --db-button: #d1d1da;          /* grey-2: Danbooru's buttons stay light at night */
+  --db-button-ink: #1e1e2c;
+  --db-button-line: #9192a7;
+  --db-button-hover: #f6f6f8;
+  --db-parent: #35c64a;
+  --db-pending: #009be6;
+  --db-notice: #00314d;          /* notice-info-background: azure-8 */
+  --db-notice-line: #006496;     /* azure-6 */
+  color-scheme: dark;
+}

@@ -30,31 +30,20 @@ def _category_for_tag(name: str, category: str) -> str:
     return str(category or "general")
 
 
-def library_categories(con, groups: dict) -> dict:
-    """``groups`` with each «general» tag in the category the library knows it by (the tags table: what the sites said
-    of the tag on other cards) — for tags that came without categories (a page the browser extension read, a site's
-    answer that carried none).  A tag the library does not know, or knows as general, stays general."""
-    general = [t for t in (groups or {}).get("general") or [] if t]
-    if not general:
-        return dict(groups or {})
-    keys = sorted({normalize_tag(str(t)) for t in general} - {""})
-    known: dict = {}
-    for start in range(0, len(keys), 500):
-        part = keys[start:start + 500]
-        marks = ",".join("?" * len(part))
-        for norm, category in con.execute(
-                f"SELECT normalized_name, category FROM tags WHERE normalized_name IN ({marks})", part):
-            category = str(category or "general").lower()
-            if category != "general":
-                known[str(norm)] = category
-    if not known:
-        return dict(groups)
-    out = {cat: list(values) for cat, values in groups.items() if cat != "general" and values}
-    for tag in general:
-        cat = known.get(normalize_tag(str(tag)), "general")
-        if tag not in out.setdefault(cat, []):
-            out[cat].append(tag)
-    return {cat: values for cat, values in out.items() if values}
+def _has_categories(groups) -> bool:
+    """The tags came with categories: at least one is not «general» (a site that sends none gives every tag so)."""
+    return any(str(cat or "general").lower() != "general" and values for cat, values in (groups or {}).items())
+
+
+def _tag_written(con, tag_id: int, norm: str, category: str, known: str, *, categorized: bool) -> None:
+    """A write gave a tag a category: the library's category of the tag follows what most sites say
+    (``tag_consensus.written``, v5.44.49) — it was the first category other than «general» anyone gave, for good."""
+    if norm in _META_TAG_OVERRIDES:
+        if str(known or "general").lower() != "meta":
+            con.execute("UPDATE tags SET category='meta' WHERE id=?", (int(tag_id),))
+        return
+    from .tag_consensus import written
+    written(con, int(tag_id), category, known, categorized=categorized)
 
 
 
@@ -170,6 +159,7 @@ def add_image_tags(con, image_id, groups):
     groups = groups or {}
     if isinstance(groups, list):
         groups = {"general": groups}
+    categorized = _has_categories(groups)
     for category, tags in groups.items():
         for raw in tags or []:
             name = normalize_tag(str(raw))
@@ -181,9 +171,7 @@ def add_image_tags(con, image_id, groups):
             row = con.execute("SELECT id, category FROM tags WHERE normalized_name=?", (norm,)).fetchone()
             if not row:
                 continue
-            old_cat = (row["category"] or "general")
-            if cat and ((cat == "species" and old_cat != "species") or (cat != "general" and old_cat in ("", "general"))):
-                con.execute("UPDATE tags SET category=? WHERE id=?", (cat, int(row["id"])))
+            _tag_written(con, int(row["id"]), norm, cat, row["category"], categorized=categorized)
             con.execute("INSERT OR IGNORE INTO image_tags(image_id, tag_id) VALUES(?,?)", (image_id, int(row["id"])))
 
 
@@ -473,6 +461,7 @@ def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sou
             con.execute(f"DELETE FROM image_source_tags WHERE image_id=? AND source_id IN ({marks})",
                         (image_id, *same_host))
         touched_hosts.add(host)
+        categorized = _has_categories(groups)
         for category, values in (groups or {}).items():
             for raw in values or []:
                 name = normalize_tag(str(raw))
@@ -485,9 +474,7 @@ def add_image_source_tag_groups(con, image_id, source_tag_groups, *, replace_sou
                 if not row:
                     continue
                 tag_id = int(row["id"])
-                old_cat = str(row["category"] or "general")
-                if cat and ((cat == "species" and old_cat != "species") or (cat != "general" and old_cat in ("", "general")) or norm in _META_TAG_OVERRIDES):
-                    con.execute("UPDATE tags SET category=? WHERE id=?", (cat, tag_id))
+                _tag_written(con, tag_id, norm, cat, row["category"], categorized=categorized)
                 con.execute("""
                     INSERT INTO image_source_tags(image_id, source_id, tag_id, category, acquisition, updated_at)
                     VALUES(?,?,?,?,?,?)
@@ -998,9 +985,7 @@ def refine_source_tag_categories(settings, media_path, source_url, groups, *, me
                 con.execute("UPDATE image_source_tags SET category=?, acquisition=?, updated_at=? WHERE image_id=? AND source_id=? AND tag_id=?",
                             (cat, str(method or "category_refine"), now, image_id, source_id, tag_id))
                 old = con.execute("SELECT category FROM tags WHERE id=?", (tag_id,)).fetchone()
-                old_cat = str(old["category"] or "general") if old else "general"
-                if cat != "general" and old_cat in ("", "general"):
-                    con.execute("UPDATE tags SET category=? WHERE id=?", (cat, tag_id))
+                _tag_written(con, tag_id, norm, cat, old["category"] if old else "general", categorized=True)
                 updated += 1
         if updated:
             refresh_effective_tag_categories(con, image_id)
@@ -1234,6 +1219,20 @@ def site_scan_hosts(settings, original_path) -> set:
     with db(settings, readonly=True) as con:
         rows = con.execute("SELECT DISTINCT site_key FROM site_scan_status WHERE original_path=?",
                            (str(Path(str(original_path))),)).fetchall()
+    return {str(row[0]).split("::", 1)[0].strip().lower().replace("www.", "") for row in rows if row[0]}
+
+
+def site_misses(settings, original_path, md5, *, since=0) -> set:
+    """(v5.44.29) Sites that said «нет» about this very MD5 of this source file at ``since`` (seconds) or later — the
+    parser does not ask them again about a file no run finished.  By the path's index only: the other conditions are
+    ``+`` (rule 17: without statistics the planner would take the index by outcome and time — the whole table)."""
+    md5 = str(md5 or "").strip().lower()
+    if not md5:
+        return set()
+    with db(settings, readonly=True) as con:
+        rows = con.execute(
+            "SELECT site_key FROM site_scan_status WHERE original_path=? AND +outcome='miss' AND +checked_md5=? "
+            "AND +checked_at>=?", (str(Path(str(original_path))), md5, int(since or 0))).fetchall()
     return {str(row[0]).split("::", 1)[0].strip().lower().replace("www.", "") for row in rows if row[0]}
 
 

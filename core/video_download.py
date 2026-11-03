@@ -648,6 +648,28 @@ def _sizes(files: list, referer: str, say, stop) -> None:
 _METER_LOCK = threading.Lock()
 _METER: dict = {}
 _BUSY: list = []                    # one item while ``download`` runs (work in the background waits for its end)
+_PAUSE = threading.Event()          # «Пауза» of the download going (one at a time; the owner, 02.11.2026: «паузы нет на
+                                    # скачивании»): its file stops where it is, the download waits; «Продолжить» goes
+                                    # on with the same file from the same place (its ``.part``)
+
+
+def pause() -> None:
+    _PAUSE.set()
+
+
+def resume() -> None:
+    _PAUSE.clear()
+
+
+def paused() -> bool:
+    return _PAUSE.is_set()
+
+
+def _halt_words(have_text: str) -> str:
+    """What a file stopped half-way says: on a pause it goes on from here; else from the next «Скачать»."""
+    if _PAUSE.is_set():
+        return f"пауза на {have_text} — продолжится с этого места по «Продолжить»"
+    return f"остановлено на {have_text} — продолжится со следующего «Скачать»"
 
 
 def busy() -> bool:
@@ -766,6 +788,8 @@ def download_file(session, remote: Remote, folder: Path, referer: str, *, say, s
     target = target_of(folder, remote)
     part = target.with_name(target.name + ".part")
     label = f"{number}{remote.name}"
+    if plan is not None and callable(getattr(plan, "fetch", None)) and not target.is_file():
+        return plan.fetch(session, remote, target, say=say, stop=stop, label=label, referer=remote.page or referer)
     if remote.stream == "hls" and not target.is_file():
         return _download_stream(session, remote, target, remote.page or referer, plan, say=say, stop=stop, label=label)
     if target.is_file():
@@ -824,7 +848,7 @@ def download_file(session, remote: Remote, folder: Path, referer: str, *, say, s
             say(f"{label}: не записался в папку — {exc}")
             return "failed"
         if state == "stopped":
-            say(f"{label}: остановлено на {_mb(have)}" + (f" из {_mb(total)}" if total else "") + " — продолжится со следующего «Скачать»")
+            say(f"{label}: " + _halt_words(_mb(have) + (f" из {_mb(total)}" if total else "")))
             return "stopped"
         if state == "done":
             break
@@ -903,7 +927,7 @@ def _download_stream(session, remote: Remote, target: Path, referer: str, plan, 
             return "failed"
     if state == "stopped":
         have = part.stat().st_size if part.is_file() else 0
-        say(f"{label}: остановлено на {_mb(have)} — продолжится со следующего «Скачать»")
+        say(f"{label}: " + _halt_words(_mb(have)))
         return "stopped"
     final = part
     if plan.audio is not None:
@@ -999,10 +1023,12 @@ def _describe(found: Found, say, stop) -> None:
         say(f"Описание не записано: {exc}")
 
 
-def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality: str = "", merge: bool = False) -> dict:
+def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality: str = "", merge: bool = False,
+             start_paused: bool = False) -> dict:
     """Download the chosen files of a page into the series folder: {"done", "whole", "failed", "folder", "series"}.
     ``quality`` — «Качество» of the page for addresses asked right before a file (``Found.resolve``); ``merge`` — then
-    ``Found.after`` (the voice-overs of each episode into one file)."""
+    ``Found.after`` (the voice-overs of each episode into one file); ``start_paused`` — begun on «Пауза» (one paused
+    when the program closed)."""
     from core.video_meta_import import _session
     places = [n for n in dict.fromkeys(chosen) if isinstance(n, int) and 0 <= n < len(found.files)]
     files = [found.files[n] for n in places]
@@ -1026,45 +1052,77 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
         sound = sum(1 for role in roles.values() if role == "sound")
         if sound:
             say(f"Озвучки собираются в один файл: картинку серии даёт одна озвучка, остальные ({sound}) качаются "
-                "ради звука — в 360p у Kodik, 480p у CVH: звук тот же, скачивать в разы меньше. Сначала — картинки")
+                "ради звука — у CVH только звук (без картинки), у Kodik в 360p: звук тот же, скачивать в разы меньше. "
+                "Сначала — картинки")
         if roles:   # the pictures first: one that does not come is given by another voice-over, not yet downloaded
             pairs = sorted(zip(places, files), key=lambda pair: roles.get(id(pair[1])) == "sound")
             places, files = [p for p, _f in pairs], [f for _p, f in pairs]
     _BUSY.append(1)
+    if start_paused:                               # paused when the program closed: paused again
+        _PAUSE.set()
+        say("ПАУЗА с прошлого запуска — «Продолжить», чтобы качать дальше")
+    else:
+        _PAUSE.clear()                             # a download begins going (a pause of one before is not its)
+
+    def halt() -> bool:                            # what stops a file half-way: «Остановить» or «Пауза»
+        return stop_check() or _PAUSE.is_set()
+
+    def wait_paused(place) -> bool:
+        """While «Пауза»: the file's tile «пауза», the meter says it; True — «Продолжить», False — «Остановить»."""
+        states[place] = "paused"
+        _set_meter(states=dict(states), paused=True, speed=0)
+        while _PAUSE.is_set() and not stop_check():
+            time.sleep(0.25)
+        _set_meter(paused=False)
+        return not stop_check()
+
+    def one(n: int, place: int, remote) -> str:
+        """One file: its address asked (``Found.resolve``), then its bytes — its end ("done", "stopped" …)."""
+        states[place] = "active"
+        _set_meter(index=n, count=len(files), name=remote.name, file=place, states=dict(states), done=remote.part,
+                   total=remote.size, speed=0)
+        number = f"{n}/{len(files)} " if len(files) > 1 else ""
+        plan = found.plans.get(remote.url)
+        state = ""
+        if found.had is not None and not target_of(found.folder, remote).is_file() and found.had(remote) \
+                and roles.get(id(remote)) != "picture":   # its sound is in the file, its picture is wanted
+            say(f"{number}{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
+                + ": уже есть в общем файле серии")
+            state = "whole"
+        if not state and found.resolve is not None and not target_of(found.folder, remote).is_file():
+            try:
+                plan = found.resolve(remote, session=session, quality=quality, say=say, stop=halt,
+                                     role=roles.get(id(remote), "")) or plan
+            except DownloadError as exc:
+                state = "stopped" if halt() else "failed"
+                say(f"{number}{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
+                    + ((": пауза" if _PAUSE.is_set() else ": остановлено") if state == "stopped"
+                       else f": не скачан — {exc}"))
+        if not state:
+            state = download_file(session, remote, found.folder, found.page.url, say=say, stop=halt,
+                                  number=number, plan=plan)
+        if found.resolve is not None and hasattr(found.resolve, "finished"):
+            found.resolve.finished(remote, state)
+        if roles.get(id(remote)) == "picture" and state in ("failed", "dead") and hasattr(found.resolve, "instead"):
+            other = found.resolve.instead(remote, roles)
+            if other is not None:
+                say(f"{remote.title or remote.name}: картинку серии даст {other.group or other.name} — "
+                    "она скачается в выбранном качестве")
+        return state
     try:
         for n, (place, remote) in enumerate(zip(places, files), 1):
+            if _PAUSE.is_set() and not stop_check():   # «Пауза» between two files
+                wait_paused(place)
             if stop_check():
                 counts["stopped"] += 1
                 break
-            states[place] = "active"
-            _set_meter(index=n, count=len(files), name=remote.name, file=place, states=dict(states), done=remote.part,
-                       total=remote.size, speed=0)
-            number = f"{n}/{len(files)} " if len(files) > 1 else ""
-            plan = found.plans.get(remote.url)
-            state = ""
-            if found.had is not None and not target_of(found.folder, remote).is_file() and found.had(remote) \
-                    and roles.get(id(remote)) != "picture":   # its sound is in the file, its picture is wanted
-                say(f"{number}{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
-                    + ": уже есть в общем файле серии")
-                state = "whole"
-            if found.resolve is not None and not target_of(found.folder, remote).is_file():
-                try:
-                    plan = found.resolve(remote, session=session, quality=quality, say=say, stop=stop_check,
-                                         role=roles.get(id(remote), "")) or plan
-                except DownloadError as exc:
-                    state = "stopped" if stop_check() else "failed"
-                    say(f"{number}{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
-                        + (": остановлено" if state == "stopped" else f": не скачан — {exc}"))
-            if not state:
-                state = download_file(session, remote, found.folder, found.page.url, say=say, stop=stop_check,
-                                      number=number, plan=plan)
-            if found.resolve is not None and hasattr(found.resolve, "finished"):
-                found.resolve.finished(remote, state)
-            if roles.get(id(remote)) == "picture" and state in ("failed", "dead") and hasattr(found.resolve, "instead"):
-                other = found.resolve.instead(remote, roles)
-                if other is not None:
-                    say(f"{remote.title or remote.name}: картинку серии даст {other.group or other.name} — "
-                        "она скачается в выбранном качестве")
+            state = one(n, place, remote)
+            while state == "stopped" and _PAUSE.is_set() and not stop_check():
+                if not wait_paused(place):             # «Остановить» while paused
+                    break
+                say(f"{remote.title or remote.name}" + (f" ({remote.group})" if remote.group else "")
+                    + ": продолжаю с того же места")
+                state = one(n, place, remote)
             states[place] = state
             _set_meter(states=dict(states))
             counts[state] += 1
@@ -1078,6 +1136,7 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
             counts["merged"] = int(merged.get("episodes") or 0)
     finally:
         _BUSY.pop()
+        _PAUSE.clear()
         _set_meter(clear=True)
         video_library.LIBRARY.invalidate()
     summary = [f"скачано {counts['done']}"]

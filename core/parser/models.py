@@ -48,6 +48,10 @@ class Candidate:
     title: str = ""
     pixiv_id: str = ""
     preview_url: str = ""     # thumbnail of the hit, when the service shows one
+    # (v5.44.36) under the run's similarity (``ReverseService.weak_floor`` and up): only a video's hit, and only with
+    # a preview nearly the same as one of its frames (``engine._accept`` ``strict``) — e621 IQDB scores a video by the
+    # frame of its preview, and the sites' previews of old posts were made of other frames (68–75 % for true finds)
+    weak: bool = False
 
 
 @dataclass

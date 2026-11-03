@@ -39,6 +39,15 @@
   --radius: 2px;
   --radius-thumb: 0;
   --thumb: 230px;
+  /* the hall's own colours: the stage of an open picture, the arrows at its edges and their shade, the chip over it,
+     the gold of the labels over the pictures (it stays gold: they lie on the dark fade of a picture), stars */
+  --cn-stage: #000000;
+  --cn-arrow: rgba(255, 255, 255, 0.5);
+  --cn-shade: rgba(0, 0, 0, 0.35);
+  --cn-chip: rgba(0, 0, 0, 0.55);
+  --cn-gold: #e8c27a;
+  --cn-star-off: #6d6860;
+  --cn-gutter: 22px;
   color-scheme: dark;
 }
 :root[data-thumb="s"] { --thumb: 170px; }
@@ -89,7 +98,7 @@
   color: var(--text);
   letter-spacing: 0.4px;
 }
-.drawer-toggle:hover, .skin-button:hover { border-color: var(--accent); color: var(--accent); }
+.drawer-toggle:hover, .skin-button:hover { border-color: var(--accent); color: var(--accent-text, var(--accent)); }
 
 .sidebar { left: 0; right: auto; transform: translateX(-104%); }
 .drawer-open .sidebar { transform: none; }
@@ -98,10 +107,10 @@
 .sections { padding: 12px 22px 8px; gap: 4px 22px; border: 0; }
 .sections a { color: var(--muted); letter-spacing: 0.4px; }
 .sections a:hover { color: var(--text); text-decoration: none; }
-.sections a.active { color: var(--accent); font-weight: 400; }
+.sections a.active { color: var(--accent-text, var(--accent)); font-weight: 400; }
 
-.layout { padding: 0 0 56px; }
-.tag-chips { gap: 8px; margin: 2px 22px 14px; }
+.layout { padding: 0 var(--cn-gutter) 56px; }
+.tag-chips { gap: 8px; margin: 2px 0 14px; }
 .chip {
   display: inline-flex;
   align-items: baseline;
@@ -114,11 +123,11 @@
   letter-spacing: 0.3px;
 }
 .chip:hover { text-decoration: none; color: var(--chip); border-color: var(--chip); }
-.result-bar { margin: 0 22px 12px; font-size: 12px; letter-spacing: 0.3px; }
-.content > .empty { margin: 0 22px; }
+.result-bar { margin: 0 0 12px; font-size: 12px; letter-spacing: 0.3px; }
 
 /* squares edge to edge */
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--thumb), 1fr)); gap: 2px; }
+.page-posts .thumbs { margin: 0 calc(-1 * var(--cn-gutter)); }    /* the gallery's squares: from edge to edge */
 .thumb { display: block; height: auto; overflow: hidden; background: var(--thumb-bg); }
 .thumb-link { display: block; position: relative; aspect-ratio: 1; overflow: hidden; }
 .thumb img {
@@ -153,20 +162,20 @@
   transition: transform 0.25s ease;
 }
 .thumb-link:hover .thumb-caption, .thumb-link:focus-visible .thumb-caption { transform: none; }
-.thumb.untagged .thumb-caption { transform: none; color: var(--accent); }
+.thumb.untagged .thumb-caption { transform: none; color: var(--cn-gold); }
 .badges { top: 10px; left: 10px; }
-.badge { background: rgba(0, 0, 0, 0.72); color: var(--accent); border-radius: var(--radius); font-weight: 600; }
+.badge { background: rgba(0, 0, 0, 0.72); color: var(--cn-gold); border-radius: var(--radius); font-weight: 600; }
 .badge.fav { color: #ff8fab; }
 
-.paginator { margin: 30px 22px 0; gap: 6px; }
+.paginator { margin: 30px 0 0; gap: 6px; }
 .paginator a { border-color: var(--border); border-radius: var(--radius); }
 .paginator a:hover { background: var(--panel-2); }
-.paginator b { border-color: var(--accent); color: var(--accent); border-radius: var(--radius); }
+.paginator b { border-color: var(--accent); color: var(--accent-text, var(--accent)); border-radius: var(--radius); }
 
 button, .button { background: var(--panel-2); border-color: var(--border); color: var(--text); }
 button:hover, .button:hover { border-color: var(--accent); color: var(--text); }
 input[type="search"], select { background: var(--panel-2); border-color: var(--border); color: var(--text); }
-.star { color: #3a3a40; }
+.star { color: var(--cn-star-off); }
 .star.on { color: var(--accent); }
 
 /* a picture's page: the picture alone on black, arrows at the screen edges */
@@ -178,7 +187,7 @@ input[type="search"], select { background: var(--panel-2); border-color: var(--b
   align-items: center;
   justify-content: center;
   min-height: var(--fit-h, calc(100vh - 57px));   /* the window below the header (booru.js), the picture centred in it */
-  background: #000;
+  background: var(--cn-stage);
 }
 /* the picture: fitted to the window by booru.js (the base rule) */
 video.post-media { max-height: calc(100vh - 57px); }
@@ -195,12 +204,12 @@ video.post-media { max-height: calc(100vh - 57px); }
   height: 140px;
   font-size: 56px;
   font-weight: 300;
-  color: rgba(255, 255, 255, 0.5);
-  background: linear-gradient(90deg, rgba(0, 0, 0, 0.35), transparent);
+  color: var(--cn-arrow);
+  background: linear-gradient(90deg, var(--cn-shade), transparent);
 }
-.post-nav .nav-next { right: 0; background: linear-gradient(270deg, rgba(0, 0, 0, 0.35), transparent); }
+.post-nav .nav-next { right: 0; background: linear-gradient(270deg, var(--cn-shade), transparent); }
 .post-nav .nav-prev { left: 0; }
-.post-nav .nav-prev:hover, .post-nav .nav-next:hover { color: var(--accent); text-decoration: none; }
+.post-nav .nav-prev:hover, .post-nav .nav-next:hover { color: var(--accent-text, var(--accent)); text-decoration: none; }
 .post-nav .nav-text {
   position: absolute;
   width: 1px;
@@ -216,16 +225,57 @@ video.post-media { max-height: calc(100vh - 57px); }
   left: 22px;
   padding: 5px 12px;
   border: 1px solid var(--border);
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--cn-chip);
   color: var(--text);
   letter-spacing: 0.4px;
 }
-.post-nav .nav-back:hover { border-color: var(--accent); color: var(--accent); text-decoration: none; }
+.post-nav .nav-back:hover { border-color: var(--accent); color: var(--accent-text, var(--accent)); text-decoration: none; }
 
 @media (max-width: 760px) {
   :root[data-thumb] { --thumb: 120px; }
   .top { padding: 8px 12px; }
   .main-nav { gap: 14px; }
-  .tag-chips, .result-bar, .paginator { margin-left: 10px; margin-right: 10px; }
+  :root { --cn-gutter: 10px; }
   .post-nav .nav-prev, .post-nav .nav-next { width: 44px; font-size: 40px; }
+}
+
+/* (v5.44.46) «Кинозал» днём — белый выставочный зал: светлые стены, те же квадраты встык, бронзовые подписи и
+   кнопки; сцена открытой картинки — светло-серая стена, стрелки по краям тёмные */
+:root[data-variant="light"] {
+  --bg: #f6f5f2;
+  --panel: #ffffff;
+  --panel-2: #eceae5;
+  --border: #d8d5cd;
+  --text: #1a1814;
+  --muted: #6e6a60;
+  --link: #8a5d14;
+  --link-hover: #5e3f0c;
+  --accent: #9a6a1e;
+  --accent-ink: #ffffff;
+  --accent-text: #8a5d14;
+  --bar-bg: rgba(246, 245, 242, 0.9);
+  --bar-ink: #1a1814;
+  --bar-active-ink: #1a1814;
+  --thumb-bg: #e6e3dc;
+  --thumb-ring: #9a6a1e;
+  --danger: #b3261e;
+  --focus: #8a5d14;
+  --shadow: 0 24px 70px rgba(60, 50, 30, 0.22);
+
+  --tag-artist: #c2410c;
+  --tag-character: #2e7d32;
+  --tag-copyright: #8a3cb0;
+  --tag-general: #4a453c;
+  --tag-meta: #8a5d14;
+  --tag-species: #b0410c;
+  --tag-lore: #0c7a5e;
+  --tag-contributor: #be1558;
+  --tag-invalid: #757575;
+
+  --cn-stage: #e9e7e2;
+  --cn-arrow: rgba(0, 0, 0, 0.45);
+  --cn-shade: rgba(0, 0, 0, 0.1);
+  --cn-chip: rgba(255, 255, 255, 0.8);
+  --cn-star-off: #a8a39a;
+  color-scheme: light;
 }

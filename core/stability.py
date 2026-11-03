@@ -31,15 +31,16 @@ def setup_logging(log_dir: Path | None = None) -> logging.Logger:
     except Exception:
         _log_dir = Path.cwd() / "Local_Booru_Archive" / "settings" / "output" / "logs"
     _log_dir.mkdir(parents=True, exist_ok=True)
-    # Privacy repair for historical logs created by older versions. No raw
-    # secret-bearing backup is kept; this affects logs only, not media or DB.
-    try:
-        sanitize_log_directory(_log_dir)
-    except Exception:
-        pass
-
     log_file = _log_dir / "app.log"
     error_file = _log_dir / "errors.log"
+    # Privacy repair for historical logs created by older versions. No raw
+    # secret-bearing backup is kept; this affects logs only, not media or DB.
+    # (v5.44.35) In the background, and only the logs not looked at before: it read every log before the window (33 s
+    # at the owner, every start); the files of the handlers below are left out — every line is redacted as it is
+    # written («Диагностика → убрать ключи из старых логов» still looks at all of them).
+    import threading
+    threading.Thread(target=_repair_old_logs, args=(_log_dir, {log_file.name, error_file.name}),
+                     name="old-logs-privacy", daemon=True).start()
 
     from core.redaction import RedactingFormatter
     fmt = RedactingFormatter(logging.Formatter(
@@ -69,6 +70,14 @@ def setup_logging(log_dir: Path | None = None) -> logging.Logger:
         root.addHandler(eh)
 
     return logging.getLogger("local_booru")
+
+
+def _repair_old_logs(log_dir: Path, writing: set) -> None:
+    try:
+        sanitize_log_directory(log_dir, remember=True, skip=writing)
+    except Exception as exc:  # the repair is for old logs only: the program goes on without it
+        logging.getLogger("local_booru.stability").warning("old logs not checked for keys: %s: %s",
+                                                           type(exc).__name__, exc)
 
 
 # Lazy import for RotatingFileHandler

@@ -228,12 +228,11 @@ def _still_source_all_general(settings: dict, image_id: int, source_id: int) -> 
 
 
 def _fast_refine_general_only_from_local_hints(settings: dict, row: dict, *, method: str = "maintenance_general_only_fast_local") -> dict:
-    """Fix obvious general-only bundles without network.
-
-    First uses global tag categories already learned from other sources, then
-    site-scoped tag_category_cache.  If either gives at least one informative
-    category, the source bundle stops being all-general and does not need the
-    slow post/category request in this maintenance pass.
+    """Fix obvious general-only bundles without network: the site's own categories of the tags from its
+    tag_category_cache.  If it gives at least one informative category, the source bundle stops being all-general and
+    does not need the slow post/category request in this maintenance pass.  (v5.44.49: not the library's categories —
+    they put the library's guess into the site's set, a wrong one of the library with it; the card's page shows a set
+    without categories in the categories most sites give its tags.)
     """
     from core.database.storage import cached_tag_categories, refine_source_tag_categories
     image_id = int(row.get("image_id") or 0)
@@ -245,17 +244,10 @@ def _fast_refine_general_only_from_local_hints(settings: dict, row: dict, *, met
     if not tag_rows:
         return {"updated": 0, "source": "none", "still_general": True, "remaining_general": []}
     mapping: dict[str, str] = {}
-    for tr in tag_rows:
-        name = str(tr.get("name") or "").strip()
-        cat = str(tr.get("global_category") or "general").strip().lower() or "general"
-        if name and cat != "general":
-            mapping[name] = cat
     cache_hits = cached_tag_categories(settings, host, [r.get("name") for r in tag_rows])
     for name, cat in dict(cache_hits or {}).items():
         category = str(cat or "general").strip().lower() or "general"
-        # Source-specific cache should win over generic global category when it
-        # has an informative value; never use it to demote anything to general.
-        if category != "general":
+        if category != "general":                       # never used to demote anything to general
             mapping[str(name)] = category
     groups = _groups_from_tag_category_map(mapping)
     if not groups:

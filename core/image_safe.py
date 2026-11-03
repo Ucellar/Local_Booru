@@ -14,6 +14,13 @@ _LOG = logging.getLogger("local_booru.thumbs")
 
 SAFE_MAX_IMAGE_PIXELS = 300_000_000
 THUMB_CACHE_VERSION = "v2_q94_hires"
+VIDEO_SUFFIXES = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
+# (v5.44.37) the preview of a single video (a card: the gallery, «Длинные видео», the post page) is the frame Danbooru
+# makes its previews of — the one whose colours are closest to the average of the first 300 frames
+# (core/tagger/site_frames.py; the owner: «превью видео (одиночных а не сериалов) надо сделать таким … «средним»»),
+# not a frame at a twentieth of the video.  Its own name in the cache: the old pictures are not taken for it.  The
+# frames of the «Видео» tab's series stay as they were (``video_library.episode_frame``: flavour "").
+AVERAGE = "average300"
 
 def configure_pillow():
     try:
@@ -53,7 +60,7 @@ def _remember_thumb_source(out: Path, source: Path) -> None:
     except Exception:
         pass
 
-def _cache_name(path, width, height):
+def _cache_name(path, width, height, flavor: str = ""):
     p = Path(path)
     try:
         st = p.stat()
@@ -62,8 +69,14 @@ def _cache_name(path, width, height):
     except Exception:
         stamp = "0_0"
         rp = p
-    key = hashlib.md5(f"{THUMB_CACHE_VERSION}|{rp}|{stamp}|{width}x{height}".encode("utf-8", "ignore")).hexdigest()
+    extra = f"|{flavor}" if flavor else ""
+    key = hashlib.md5(f"{THUMB_CACHE_VERSION}|{rp}|{stamp}|{width}x{height}{extra}".encode("utf-8", "ignore")).hexdigest()
     return _cache_root() / f"{key}.jpg"
+
+
+def card_flavor(path) -> str:
+    """The cache flavour of a card's preview: :data:`AVERAGE` for a video, "" for a picture."""
+    return AVERAGE if Path(path).suffix.lower() in VIDEO_SUFFIXES else ""
 
 def _temp_name(out: Path) -> Path:
     return out.with_name(f"{out.stem}.{os.getpid()}.{threading.get_ident()}.tmp.jpg")
@@ -102,12 +115,29 @@ def video_frame(path, number: int):
     """The ``number``-th frame of a video (BGR, as OpenCV gives it), or None — the video unreadable, or the place out
     of reach.  OpenCV cannot seek in some files (an MPEG-TS whose clock starts past zero: every read after a seek
     fails — by its number or by its time alike): then the place is reached by reading on from the start, up to
-    :data:`READ_ON` frames.  ImportError — no OpenCV."""
+    :data:`READ_ON` frames.  (v5.44.36) A video OpenCV cannot decode at all — AV1 (its FFmpeg has no AV1 decoder of
+    its own: «Your platform doesn't support hardware accelerated AV1 decoding»; a video of the owner's Брак had no
+    frame for the parser, no thumbnail in the gallery) — is read with PyAV (:func:`pyav_frame`).  ImportError — no
+    OpenCV."""
     import cv2
     number = max(0, int(number))
+    frame = _opencv_frame(cv2, path, number)
+    if frame is None:
+        frame = pyav_frame(path, number)
+    return frame
+
+
+def _fourcc(cv2, cap) -> str:
+    code = int(cap.get(cv2.CAP_PROP_FOURCC) or 0)
+    return "".join(chr((code >> (8 * i)) & 0xFF) for i in range(4)).strip("\0 ").lower()
+
+
+def _opencv_frame(cv2, path, number: int):
     cap = cv2.VideoCapture(str(path))
     try:
         if not cap.isOpened():
+            return None
+        if _fourcc(cv2, cap) == "av01":     # AV1: PyAV straight away (OpenCV fails on it, a line of errors a frame)
             return None
         if number:
             cap.set(cv2.CAP_PROP_POS_FRAMES, number)
@@ -129,8 +159,52 @@ def video_frame(path, number: int):
         cap.release()
 
 
-def _video_thumbnail_path(p: Path, out: Path, width: int, height: int, quality: int = 94) -> str:
-    """Create a JPEG thumbnail for a video.
+def pyav_frame(path, number: int):
+    """(v5.44.36) The ``number``-th frame (BGR) read with PyAV — FFmpeg's own decoders, AV1 too; a place past the
+    start by its time (``number`` / the frame rate) from the key frame before it.  None — no PyAV, no video in the
+    file, or unreadable for it too."""
+    try:
+        import av
+    except ImportError:
+        return None
+    number = max(0, int(number))
+    try:
+        with av.open(str(path)) as container:
+            if not container.streams.video:
+                return None
+            stream = container.streams.video[0]
+            stream.thread_type = "AUTO"
+            rate = float(stream.average_rate or stream.guessed_rate or 0) or 25.0
+            base = stream.time_base
+            start = float(stream.start_time * base) if stream.start_time is not None and base else 0.0
+            target = start + number / rate
+            if number and base:
+                container.seek(int(target / base), stream=stream, backward=True, any_frame=False)
+            last = None
+            for frame in container.decode(stream):
+                last = frame
+                when = frame.time
+                if not number or when is None or when + 0.5 / rate >= target:
+                    return _upright_bgr(frame)
+            return _upright_bgr(last) if last is not None else None
+    except Exception as exc:  # unreadable for PyAV too: the caller has no frame, as before
+        _LOG.debug("video frame by PyAV failed for %s: %s", path, exc)
+        return None
+
+
+def _upright_bgr(frame):
+    """A PyAV frame as BGR, turned as FFmpeg and OpenCV turn it (a phone's video «lying on its side»)."""
+    import numpy as np
+    from core.tagger.site_frames import turn_of
+    picture = frame.to_ndarray(format="bgr24")
+    turns = turn_of(frame) // 90
+    return np.ascontiguousarray(np.rot90(picture, k=-turns)) if turns else picture
+
+
+def _video_thumbnail_path(p: Path, out: Path, width: int, height: int, quality: int = 94, *,
+                          average: bool = False) -> str:
+    """Create a JPEG thumbnail for a video.  ``average`` (v5.44.37: a card's) — the frame Danbooru makes its preview
+    of (:data:`AVERAGE`); else, or when it cannot be read, a frame at a twentieth of the video.
 
     Prefer OpenCV because it is already in the project stack; fall back to ffmpeg
     if the user has it installed. Returns empty string on failure.  The picture is written to a
@@ -138,6 +212,20 @@ def _video_thumbnail_path(p: Path, out: Path, width: int, height: int, quality: 
     """
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = _temp_name(out)
+    if average:
+        try:
+            from PIL import Image
+
+            from core.tagger.site_frames import DANBOORU, site_frame
+            picture = site_frame(p, DANBOORU)
+            if picture is not None:
+                picture.thumbnail((width, height), Image.Resampling.LANCZOS)
+                picture.save(tmp, "JPEG", quality=quality, optimize=True)
+                return str(out) if swap_in(tmp, out) else ""
+        except Exception as exc:  # unreadable that way: the frame at a twentieth below
+            _LOG.debug("average video thumbnail failed for %s: %s", p, exc)
+            with contextlib.suppress(OSError):
+                tmp.unlink()
     try:
         import cv2
         frames = video_frame_count(p)
@@ -186,12 +274,13 @@ def card_thumbnail_size(settings) -> tuple[int, int]:
 _TOUCH_EVERY = 24 * 3600   # seconds; "last used" for cache trimming needs no finer clock
 
 
-def cached_thumbnail_path(path, width=256, height=256):
-    """The thumbnail if it is already in the cache, else "" (never makes one)."""
+def cached_thumbnail_path(path, width=256, height=256, flavor=None):
+    """The thumbnail if it is already in the cache, else "" (never makes one).  ``flavor`` — of the cache name; None —
+    a card's (:func:`card_flavor`: a video's preview is its average frame)."""
     p = Path(path)
     width = max(32, int(width or 256))
     height = max(32, int(height or 256))
-    out = _cache_name(p, width, height)
+    out = _cache_name(p, width, height, card_flavor(p) if flavor is None else flavor)
     try:
         st = out.stat()
     except OSError:
@@ -216,10 +305,10 @@ def safe_thumbnail_path(path, width=256, height=256, quality=94):
     cached = cached_thumbnail_path(p, width, height)
     if cached:
         return cached
-    out = _cache_name(p, width, height)
+    out = _cache_name(p, width, height, card_flavor(p))
 
-    if p.suffix.lower() in {".mp4", ".webm", ".mkv", ".mov", ".avi"}:
-        made = _video_thumbnail_path(p, out, width, height, quality)
+    if p.suffix.lower() in VIDEO_SUFFIXES:          # (v5.44.37) a card's preview: the average frame
+        made = _video_thumbnail_path(p, out, width, height, quality, average=True)
         if made:
             _remember_thumb_source(out, p)
         return made

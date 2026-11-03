@@ -174,6 +174,10 @@ def search_page(settings: dict, query: str, *, section: str = "all", source: str
     collapse = collapses(settings, section)
     total = count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params,
                                collapse_sets=collapse)
+    # (v5.44.40) tiles vs files: a сборка is one tile but many files — the gallery shows both, so count the files too
+    # (only when sets are collapsed; without collapsing a tile is a file, and in the trash / Брак sets never collapse)
+    files_total = total if not collapse else count_search_items(
+        settings, tags, source, bucket, extra_where=extra, extra_params=params, collapse_sets=False)
     offset = max(0, (page - 1) * per_page)
     items = search_items(settings, tags, source, bucket, limit=per_page, offset=offset,
                          order=order if order in ORDERS else "newest", extra_where=extra, extra_params=params,
@@ -181,7 +185,7 @@ def search_page(settings: dict, query: str, *, section: str = "all", source: str
     enrich_items(settings, items, tag_source=source or "all")
     if collapse:
         mark_tiles(settings, items)
-    return items, total
+    return items, total, files_total
 
 
 def item_at(settings: dict, query: str, *, section: str, source: str, order: str, index: int) -> dict | None:
@@ -421,10 +425,25 @@ def media_version(item: dict) -> str:
         return "0-0"
 
 
+# (v5.44.37) a video's preview and poster are its average frame now (core/image_safe.AVERAGE): their addresses are
+# other than before, or the window keeps the old pictures it was allowed to keep for a year
+VIDEO_PICTURE_MARK = ".a300"
+
+
+def picture_version(version: str, path) -> str:
+    """The version in ``/thumb/<id>`` and ``/poster/<id>`` of a card whose file is ``path``: a video's carries
+    :data:`VIDEO_PICTURE_MARK`."""
+    from core.image_safe import VIDEO_SUFFIXES
+    return version + VIDEO_PICTURE_MARK if Path(str(path or "")).suffix.lower() in VIDEO_SUFFIXES else version
+
+
 def media_url(kind: str, item: dict) -> str:
     """``/media/<id>?v=…`` (``kind`` "media", "thumb" or "poster") for a card dict with id, hash_md5, size_bytes,
-    mtime_ns."""
-    return f"/{kind}/{int(item['id'])}?v={media_version(item)}"
+    mtime_ns (and path: a video's preview and poster have their own version — :func:`picture_version`)."""
+    version = media_version(item)
+    if kind in ("thumb", "poster"):
+        version = picture_version(version, item.get("path"))
+    return f"/{kind}/{int(item['id'])}?v={version}"
 
 
 def media_file_of(settings: dict, image_id: int, *, video: bool = False) -> tuple[Path | None, str]:

@@ -280,8 +280,8 @@ def _long_section(req: Request, tags: str, order: str, source: str, page: int) -
                 'библиотеки остаются в галерее: так выбрано в «<a href="/settings#set-videos">Настройки → Вкладка '
                 '«Видео»</a>».</p></section>')
     per_page = long_per_page(req)
-    items, total = data.search_page(req.settings, tags, section=data.VIDEO_SECTION, source=source, order=order,
-                                    page=page, per_page=per_page)
+    items, total, _files_total = data.search_page(req.settings, tags, section=data.VIDEO_SECTION, source=source,
+                                                  order=order, page=page, per_page=per_page)
     pages = max(1, (total + per_page - 1) // per_page)
     ctx = {"tags": tags, "section": data.VIDEO_SECTION, "source": source, "order": order}
     from webui.pages.gallery import _thumb
@@ -401,7 +401,7 @@ def _hero(req: Request, series: V.Series, episode: V.Episode, resume: float) -> 
         buttons.append(f'<a class="vbutton" href="{esc(source)}" target="_blank" rel="noopener noreferrer">'
                        f'{esc(info.get("site") or "На сайте")}</a>')
         from core.video_download import is_frame_site
-        if not series.single and not is_frame_site(source):
+        if not series.single and (not is_frame_site(source) or _yummy(req, source)):
             buttons.append(f'<a class="vbutton" href="{esc(url("/videos/get", url=source))}" '
                            f'title="Скачать серии с этой страницы сайта (те, которых ещё нет)">Скачать с сайта</a>')
     where = ""
@@ -417,8 +417,18 @@ def _hero(req: Request, series: V.Series, episode: V.Episode, resume: float) -> 
             f'<div class="vabout"><h1>{esc(series.title)}</h1>'
             + (f'<p class="valt">{alt}</p>' if alt else "") + _rating_box(series)
             + (f'<dl class="vfacts">{"".join(facts)}</dl>' if facts else "")
-            + f'{tag_html}{desc}<div class="vactions">{"".join(buttons)}<span class="action-status" role="status"></span></div>'
+            + f'{tag_html}{desc}' + (f'<div class="vorder" data-order="{series.id}" hidden></div>' if _yummy(req, source) else "")
+            + f'<div class="vactions">{"".join(buttons)}<span class="action-status" role="status"></span></div>'
             f'{where}</div></section>')
+
+
+def _yummy(req: Request, source: str) -> bool:
+    """The series came from a YummyAnime page and its voice-overs are taken from there: «Скачать с сайта» and its
+    «Порядок просмотра» (``video_get.series_order``) — not in the public copy (its ``core/video_dubs``: a stand-in)."""
+    from core import video_dubs
+    yummy = getattr(video_dubs, "is_yummy", None)
+    return bool(getattr(video_dubs, "AVAILABLE", True) and yummy is not None and yummy(source)
+                and video_dubs.enabled(req.settings))
 
 
 def _value(key: str, value) -> str:
@@ -488,8 +498,9 @@ def _player(req: Request, series: V.Series, episode: V.Episode, before, after, r
         if other:
             attrs["other"] = other
         title = series.title if series.single else f"{series.title} · Серия {episode.label}"
+        from webui import icons
         go_on = (f'<a class="nv-next" href="{esc(next_href)}" title="Следующая серия" aria-label="Следующая серия">'
-                 f'⏭</a>' if next_href else "")
+                 f'{icons.NEXT}</a>' if next_href else "")
         viewer = native_video_box(req, attrs, poster, frame_class="vframe", full=f'data-episode="{episode.id}"',
                                   external=f'<button type="button" data-action="vid-open" data-id="{episode.id}">'
                                            f'Открыть в видеоплеере</button>', overlay=slides + skip_buttons,

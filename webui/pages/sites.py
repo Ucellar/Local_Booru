@@ -13,7 +13,9 @@ from webui.server import Request, Response
 SAUCENAO_KEY_PAGE = "https://saucenao.com/user.php?page=search-api"
 _SERVICES = (("enable_fluffle", "Fluffle", True, "e621, FurAffinity, Twitter, Bluesky, Inkbunny — за секунды"),
              ("enable_e621_iqdb", "e621 IQDB", True,
-              "поиск похожих на самом e621: без логина — раз в минуту, с логином и ключом e621 — раз в 2 секунды"),
+              "поиск похожих на самом e621: без логина — раз в минуту, с логином и ключом e621 — раз в 6 секунд"),
+             ("enable_atf_iqdb", "ATF IQDB", True,
+              "поиск похожих на самом ATF (All The Fallen) — нужны логин и API-ключ ATF в таблице сайтов"),
              ("enable_iqdb", "IQDB", True, "iqdb.org: Danbooru, Gelbooru, Yande.re и другие — полминуты и дольше"),
              ("enable_danbooru_iqdb", "Danbooru IQDB", False, "поиск похожих на Danbooru (медленнее)"),
              ("enable_ascii2d", "Ascii2D", False, "японский поиск по картинке, находит pixiv и Twitter"))
@@ -156,6 +158,9 @@ def sites_page(req: Request) -> Response:
     batch_on = " checked" if s.get("parser_md5_batch_enabled", True) else ""
     skip_on = " checked" if s.get("skip_existing", True) else ""
     remember_on = " checked" if s.get("parser_reverse_remember", True) else ""
+    from core import e621_export
+    export_on = " checked" if s.get("e621_export_enabled", False) else ""
+    export_now = esc(e621_export.status(s)["text"])
     engines = "".join(f'<option value="{esc(label)}">{esc(label if label != "Свой" else "Свой — определить по сайту")}</option>'
                       for label in ENGINE_TYPES)
     data = {e["_id"]: _site_json(e) for e in rows}
@@ -236,6 +241,11 @@ def sites_page(req: Request) -> Response:
               <span><b>Помнить ответы обратного поиска</b> <small>сервис, который уже искал файл — нашёл или нет, —
               о нём больше не спрашивается: «Искать снова» Брака спрашивает только тех, кто его ещё не искал (новые,
               выключенные, со сбоем). Выключите, чтобы спросить всех заново</small></span></label>
+            <label class="check service"><input type="checkbox" class="switch" name="e621_export_enabled"{export_on}>
+              <span><b>MD5 на e621 — по его выгрузке</b> <small>e621 просит не искать десятки тысяч MD5 через API, а брать
+              его ежедневную выгрузку: программа скачает её (около 2 ГБ, на диск с архивом, раз в 30 дней) и будет
+              знать, какие файлы есть на e621, сама — сайт спрашивается только о найденных и о новых постах (раз в
+              час). Сейчас: <span data-e621-export>{export_now}</span></small></span></label>
           </div>
           <div class="numbers">{options}</div>
           <div class="tool-actions"><button type="submit" class="primary">Сохранить</button><span class="action-status" role="status"></span></div>
@@ -427,5 +437,7 @@ def save_options(req: Request) -> Response:
     changes["parser_md5_batch_enabled"] = bool(body.get("parser_md5_batch_enabled"))
     if "parser_reverse_remember" in body:        # the page's form always sends it; an older caller — not touched
         changes["parser_reverse_remember"] = bool(body.get("parser_reverse_remember"))
+    if "e621_export_enabled" in body:            # (v5.44.25) the same
+        changes["e621_export_enabled"] = bool(body.get("e621_export_enabled"))
     error = _save(changes)
     return error or Response.json({"ok": True})
