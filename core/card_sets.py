@@ -20,7 +20,11 @@ loaded (``foldLocal`` of its ``sets.js``) — on every site separately:
   AI pictures of different days never.  **Comics**: pages with a comic tag, the same artist, the same canvas (or the
   same proportions, uploaded near) and a character the found pages have (or half of the tags) — over up to
   :data:`MISS_COMIC` other cards of the uploader between them;
-- what links two cards links their сборки: one card — one сборка.
+- what links two cards links their сборки: one card — one сборка;
+- (v5.44.111; the owner, of a comic found on e621 page by page: «они обязанны были войти в мангу или хотя бы в
+  сборку») **a pool of e621** of the category «series» — a comic — is one work: its cards (any uploader), in the
+  order of the pool's pages (``site_posts.pools``, ``site_pools``: :func:`pool_key`).  A pool of the category
+  «collection» (a theme) is not, nor one the site has not described yet.
 
 Videos are never in a сборка; a card in the trash leaves its automatic сборка (and comes back with the card).
 
@@ -41,7 +45,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 _LOG = logging.getLogger("local_booru.card_sets")
 
-BUILD_VERSION = 2               # +1 when the rules change: the next run rebuilds (2: v5.44.10, the sites' own tags)
+BUILD_VERSION = 3               # +1 when the rules change: the next run rebuilds (2: v5.44.10, the sites' own tags;
+                                # 3: v5.44.111, the pools of e621)
 SET_MAX = 120                   # cards in one сборка (a manga of 60+ pages is one)
 LINK = 85                       # points of two neighbouring posts of one uploader to be one work (see linkScore)
 PTS = {"artist": 15, "artist_other": -10, "size": 10, "aspect": 5, "gap_near": 10, "gap_close": 5, "gap_far": -10}
@@ -539,6 +544,27 @@ def _chunks(values: list, size: int = 800):
         yield values[start:start + size]
 
 
+def pool_key(site: str, pool_id: int) -> str:
+    """(v5.44.111) The work key of a pool of a site («pool:e621.net:15766»)."""
+    return f"pool:{site}:{int(pool_id)}"
+
+
+def _series_pools(con) -> dict:
+    """(v5.44.111) (site, pool) -> {post id: its place} of the pools the sites called «series» (a comic)."""
+    out: dict = {}
+    try:
+        rows = con.execute("SELECT site, pool_id, post_ids FROM site_pools WHERE state='ok' AND category='series'")
+        for site, pool_id, post_ids in rows:
+            try:
+                numbers = json.loads(post_ids or "[]")
+            except ValueError:
+                numbers = []
+            out[(str(site), int(pool_id))] = {int(n): k for k, n in enumerate(numbers) if str(n).isdigit()}
+    except Exception as exc:  # an old base without the pools: nothing from there
+        _LOG.debug("pools not read: %s", exc)
+    return out
+
+
 def _load(con) -> dict:
     """What the build needs: the live picture cards, their posts, work keys and (of the uploaders' cards) tags."""
     cards: dict = {}
@@ -557,14 +583,23 @@ def _load(con) -> dict:
                 card.pages[key] = int(m.group(2))
     posts: list = []
     links: dict = {}                                # image id -> [links of its posts and of the card]
-    for image_id, site, post_id, parent, owner, source in con.execute(
-            "SELECT image_id, site, post_id, parent_id, uploader, source FROM site_posts WHERE state='ok'"):
+    series = _series_pools(con)
+    for image_id, site, post_id, parent, owner, source, pools in con.execute(
+            "SELECT image_id, site, post_id, parent_id, uploader, source, pools FROM site_posts WHERE state='ok'"):
         card = cards.get(int(image_id))
         if card is None:
             continue
         posts.append(_Post(card, str(site), int(post_id), int(parent or 0), str(owner or "")))
         if source:
             links.setdefault(card.id, []).extend(str(source).split("\n"))
+        for text in str(pools or "").split(","):    # (v5.44.111) a comic of e621: its pool, the page's place in it
+            places = series.get((str(site), int(text))) if text.isdigit() else None
+            if places is None:
+                continue
+            key = pool_key(str(site), int(text))
+            if key not in card.keys:
+                card.keys.append(key)
+            card.pages.setdefault(key, places.get(int(post_id), 100000 + int(post_id)))
     hosts = [str(r[0]) for r in con.execute("SELECT DISTINCT host FROM sources")
              if r[0] and not any(mark in str(r[0]).lower() for mark in _BOORU_HOSTS)]
     for part in _chunks(hosts, 400):
@@ -909,6 +944,10 @@ def _library_signature(con) -> list:
                 "SELECT COUNT(*), COALESCE(MAX(checked_at),0) FROM site_posts",
                 "SELECT COUNT(*), COALESCE(MAX(rowid),0) FROM image_sources"):
         parts.extend(con.execute(sql).fetchone())
+    try:                                             # (v5.44.111) a pool described: its cards are one сборка
+        parts.extend(con.execute("SELECT COUNT(*), COALESCE(MAX(checked_at),0) FROM site_pools").fetchone())
+    except Exception:  # an old base without the pools
+        parts.extend([0, 0])
     # (v5.44.10) the cards' tags changed (a site's tags mended, a card tagged again): its сборка is looked at again —
     # the counter the base's triggers move on every change of the tags of a card (migration 026)
     try:

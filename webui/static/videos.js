@@ -629,6 +629,11 @@
     const result = getJob.querySelector(".vget-result");
     const openLink = getJob.querySelector(".vget-open");
     const queueBox = getJob.querySelector(".vqueue");
+    // no list on the page (a download begun again after a restart, or of a list of before): the download is shown
+    // on its own, under the search — in the list's bar again once a list is shown
+    const going = box.querySelector(".vget-going");
+    const goingNote = going.querySelector(".vget-going-note");
+    const jobHome = getJob.parentElement;
     const fileInput = box.querySelector("#vid-find-file");
     const qualityBox = foundBox.querySelector(".vquality");
     const qualityPick = qualityBox.querySelector("select");
@@ -687,13 +692,23 @@
       }
       for (const genre of facts.genres || []) factList.append(element("li", "genre", genre));
       factList.hidden = !factList.children.length;
+      const about = foundBox.querySelector(".vfound-about");       // a few lines of its description; a click — all
+      about.textContent = facts.about || "";
+      about.hidden = !facts.about;
+      about.classList.remove("open");
       const poster = foundBox.querySelector(".vcard-poster img");
       const initial = foundBox.querySelector(".vcard-initial");
       initial.textContent = (found.title || "?").trim().charAt(0).toUpperCase();
       poster.hidden = true;
       poster.removeAttribute("src");
+      foundBox.classList.remove("has-poster");          // the title's colours under its head: its poster's
+      foundBox.style.removeProperty("--vposter");
       if (found.poster) {
-        poster.onload = () => { poster.hidden = false; };
+        poster.onload = () => {
+          poster.hidden = false;
+          foundBox.style.setProperty("--vposter", 'url("' + poster.src + '")');
+          foundBox.classList.add("has-poster");
+        };
         poster.onerror = () => { poster.hidden = true; };
         poster.src = "/api/videos/find-poster?find=" + encodeURIComponent(st.id);
       }
@@ -1281,6 +1296,7 @@
       if (m.merging) {                 // after the downloads: each episode's voice-overs into its file
         runActive = { file: -1, part: 0 };
         meterBox.querySelector("progress").value = Math.round(((Number(m.index) || 1) - 1) / m.count * 1000);
+        meterBox.querySelector(".vmeter-pct").textContent = "";
         meterBox.querySelector(".vmeter-text").textContent = "Собираю в общие файлы серий: " + (m.name || "")
           + ". Всего: " + m.index + " из " + m.count;
         return;
@@ -1289,6 +1305,7 @@
       runActive = { file: Number(m.file), part };
       const whole = Math.min(1, ((Number(m.index) || 1) - 1 + part) / m.count);
       meterBox.querySelector("progress").value = Math.round(whole * 1000);
+      meterBox.querySelector(".vmeter-pct").textContent = Math.floor(whole * 100) + "%";
       const f = runMine && found && found.files[Number(m.file)];
       const name = f && f.kind === "video" && f.label ? "Серия " + f.label
         : !runMine && m.name ? String(m.name).replace(/\.[^.]+$/, "") : "Файл";
@@ -1302,7 +1319,7 @@
 
     function showResult(st, busy) {
       const sumUp = st.summary || {};
-      if (busy || !st.id || !runMine || !["done", "stopped", "failed"].includes(st.status)) {
+      if (busy || !st.id || !(runMine || foundBox.hidden) || !["done", "stopped", "failed"].includes(st.status)) {
         result.hidden = true;
         return;
       }
@@ -1357,7 +1374,8 @@
           paintRun();
           showQueue(queue);
           showResult(st, busy);
-          openLink.hidden = busy || !mine || !st.series_url;
+          showRestoring(st);
+          openLink.hidden = busy || !(mine || foundBox.hidden) || !st.series_url;
           if (st.series_url) openLink.querySelector("a").href = st.series_url;
           countChosen();
         },
@@ -1370,6 +1388,31 @@
         },
       });
       return getWatch;
+    }
+
+    foundBox.querySelector(".vfound-about").addEventListener("click", (event) => {
+      event.currentTarget.classList.toggle("open");
+    });
+
+    function placeJob() {
+      const alone = foundBox.hidden;
+      if (alone && getJob.parentElement !== going) going.append(getJob);
+      if (!alone && getJob.parentElement !== jobHome) jobHome.append(getJob);
+      going.hidden = !alone || (getJob.hidden && goingNote.hidden);
+    }
+    new MutationObserver(placeJob).observe(foundBox, { attributes: true, attributeFilter: ["hidden"] });
+    new MutationObserver(placeJob).observe(getJob, { attributes: true, attributeFilter: ["hidden"] });
+
+    // the downloads of the last run of the program, before they are begun again (some seconds after its start)
+    function showRestoring(st) {
+      const soon = st.restoring || null;
+      goingNote.hidden = !soon;
+      if (soon) {
+        goingNote.textContent = "С прошлого запуска программы продолжится: "
+          + soon.titles.map((t) => "«" + t + "»").join(", ")
+          + (soon.in > 0 ? " — через " + soon.in + " с" : " — сейчас");
+      }
+      placeJob();
     }
 
     function showQueue(queue) {
@@ -1406,6 +1449,17 @@
       form.requestSubmit();
       form.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
+
+    // a link pasted into the empty field: searched at once (the page is only for this)
+    const urlField = box.querySelector("#vid-find-url");
+    urlField.addEventListener("paste", (event) => {
+      const text = (event.clipboardData && event.clipboardData.getData("text") || "").trim();
+      const whole = !urlField.value.trim() || (urlField.selectionStart === 0 && urlField.selectionEnd === urlField.value.length);
+      if (!whole || !/^https?:\/\/\S+$/i.test(text)) return;
+      event.preventDefault();
+      urlField.value = text;
+      if (!findButtons()[0].disabled) urlField.form.requestSubmit();
+    });
 
     box.querySelector('[data-form="vid-find-url"]').addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -1500,6 +1554,6 @@
         }
       }).catch(() => {});
     fetch("/api/videos/download-state", { credentials: "same-origin" }).then((r) => r.json())
-      .then((st) => { if (st.id) { getJob.hidden = false; watchGet(); } }).catch(() => {});
+      .then((st) => { if (st.id || st.restoring || (st.queue || []).length) watchGet(); }).catch(() => {});
   }
 })();

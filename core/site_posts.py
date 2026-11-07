@@ -16,6 +16,11 @@ round): the pace of every site is shared by all who ask it (``core/http_rate_lim
 and a few packs are nothing to a parser's run — which at the owner's took days, the questions waited all the time, and
 the cards from before stayed without their uploader and parent: in no сборка.
 
+(v5.44.111) e621 says which pools a post is in (``pools``: a comic is a pool of the category «series», its pages in
+their order) — kept with the post; a post kept before is asked again once for them (its row's ``pools`` is NULL).  A
+pool itself — its name, category and pages (``site_pools``) — is asked once too (:func:`_ask_pools`, ``pools.json``
+by numbers, :data:`POOLS_PACK` at a time).  The сборки put a pool's cards together (``core/card_sets.py``).
+
 (v5.44.10) The same questions mend the tags the browser extension wrote over a site's own (:data:`PAGE_METHODS`): the
 check of the badges put a grid's search word («some_artist», ``all``) in place of a card's tags of that site — the card lost
 them, and its place in a сборка — and a post page's tags without categories.  A card whose tags of a site are such is
@@ -40,6 +45,8 @@ ATTEMPTS = 2                    # tries of one request
 SOURCE_MAX = 2000               # characters of a post's source links kept
 PAGE_METHODS = ("browser_page_seen", "browser_manual_import", "browser_quality_upgrade")   # tags the extension wrote
 MEND_METHOD = "site_answer"     # a card's tags of a site as the site's answer gave them (they mended the extension's)
+POOLS_PACK = 50                 # (v5.44.111) pools asked of e621 at a time
+POOLS_AGAIN = 7 * 24 * 3600     # …a pool asked again after this long (a comic goes on: new pages)
 _URL_RE = re.compile(r"https?://[^\s|<>\"']+", re.I)
 
 
@@ -85,7 +92,8 @@ def _engine_of(raw: dict, engine: str) -> str:
 def fields(raw, engine: str = "") -> dict:
     """{"post_id", "parent_id", "uploader", "source"} of a site's raw post ({} — not a post).  ``uploader`` is the
     uploader's number ("#123") on the engines that always give it (Danbooru, e621, Moebooru) and the name on Gelbooru
-    and rule34.xxx (their JSON has only the name) — the same person is the same text on one site."""
+    and rule34.xxx (their JSON has only the name) — the same person is the same text on one site.  (v5.44.111) e621:
+    "pools" too — its pools' numbers, «15766,3001» ("" — none)."""
     if not isinstance(raw, dict):
         return {}
     post_id = _number(raw.get("id"))
@@ -97,6 +105,8 @@ def fields(raw, engine: str = "") -> dict:
         parent = _number(rel.get("parent_id"))
         who = f"#{_number(raw.get('uploader_id'))}" if _number(raw.get("uploader_id")) else ""
         source = _sources(raw.get("sources") or [])
+        pools = raw.get("pools") if isinstance(raw.get("pools"), list) else []
+        pools = ",".join(dict.fromkeys(str(_number(x)) for x in pools if _number(x)))
     elif kind == "danbooru":
         parent = _number(raw.get("parent_id"))
         who = f"#{_number(raw.get('uploader_id'))}" if _number(raw.get("uploader_id")) else ""
@@ -113,7 +123,13 @@ def fields(raw, engine: str = "") -> dict:
         source = _sources(raw.get("source"))
     if parent == post_id:
         parent = 0
-    return {"post_id": post_id, "parent_id": parent, "uploader": who[:100], "source": source}
+    out = {"post_id": post_id, "parent_id": parent, "uploader": who[:100], "source": source}
+    if kind == "e621":
+        out["pools"] = pools[:400]
+    rating = str(raw.get("rating") or "").strip().lower()[:1]        # (v5.44.111) «s»/«q»/«e»/«g» as the site says
+    if rating in ("s", "q", "e", "g"):
+        out["rating"] = rating
+    return out
 
 
 def canonical_site(host: str) -> str:
@@ -173,11 +189,15 @@ def record(con, image_id: int, rows, *, now: int | None = None) -> int:
         post_id = _number(row.get("post_id"))
         if not site or not post_id:
             continue
+        pools = row.get("pools")                    # (v5.44.111) e621's; None — the site does not say (NULL)
+        rating = row.get("rating")                  # …the post's rating, None — not said
         con.execute(
-            "INSERT OR REPLACE INTO site_posts(image_id, site, post_id, parent_id, uploader, source, state, checked_at) "
-            "VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO site_posts(image_id, site, post_id, parent_id, uploader, source, state, checked_at, "
+            "pools, rating) VALUES(?,?,?,?,?,?,?,?,?,?)",
             (int(image_id), site, post_id, _number(row.get("parent_id")), str(row.get("uploader") or "")[:100],
-             str(row.get("source") or "")[:SOURCE_MAX], "gone" if row.get("gone") else "ok", stamp))
+             str(row.get("source") or "")[:SOURCE_MAX], "gone" if row.get("gone") else "ok", stamp,
+             None if pools is None or row.get("gone") else str(pools)[:400],
+             str(rating)[:1] if rating else None))
         written += 1
     return written
 
@@ -231,11 +251,20 @@ def _scan_all(settings: dict) -> tuple[dict, dict]:
     with db(settings, readonly=True) as con:
         hosts = [str(r[0] or "") for r in con.execute("SELECT DISTINCT host FROM sources")]
         wanted = {}
+        pooled: set = set()                         # (v5.44.111) sites that say a post's pools (e621)
         for host in hosts:
-            if host and engine_of_host(settings, host):
+            engine = engine_of_host(settings, host) if host else ""
+            if engine:
                 wanted[host] = canonical_site(host)
-        known = {(int(r[0]), str(r[1]), int(r[2])): str(r[3] or "ok")
-                 for r in con.execute("SELECT image_id, site, post_id, state FROM site_posts")}
+                if engine == "e621":
+                    pooled.add(wanted[host])
+        known = {}
+        for image_id, site, post_id, state, pools in con.execute(
+                "SELECT image_id, site, post_id, state, pools FROM site_posts"):
+            state = str(state or "ok")
+            # a post of e621 kept before its pools were: asked once more (its answer is written as a new one)
+            known[(int(image_id), str(site), int(post_id))] = "pools" if (
+                state == "ok" and pools is None and str(site) in pooled) else state
         marks = ",".join("?" * len(PAGE_METHODS))
         paged: set = set()                          # (image id, site): its tags of the site are the extension's
         for image_id, host in con.execute(
@@ -260,7 +289,7 @@ def _scan_all(settings: dict) -> tuple[dict, dict]:
                 site, image_id, post = wanted[str(host)], int(image_id), int(post)
                 state = known.get((image_id, site, post))
                 again = ((image_id, site) in paged and state != "gone" and (site, post) not in mended)
-                if state is not None and not again:
+                if state is not None and state != "pools" and not again:
                     continue
                 cards = queue.setdefault(site, {}).setdefault(post, [])
                 if all(card != image_id for card, _source in cards):
@@ -549,9 +578,88 @@ def _round(settings: dict, stop_check, budget: float, client) -> dict:
                                 mended += _mend(con, site, image_id, row)
         if not progressed:
             break
+    pools_asked, pools_more = 0, False
+    if time.monotonic() - started < budget and not (stop_check is not None and stop_check()):
+        if client is None:
+            client = _Client(settings)
+        pools_asked, pools_more = _ask_pools(settings, client, started, budget, stop_check)
     with _LOCK:
-        more = any(posts for posts in _STATE["queue"].values())
+        more = any(posts for posts in _STATE["queue"].values()) or pools_more
     out = {"asked": asked, "written": written, "more": more}
+    if pools_asked:
+        out["pools"] = pools_asked
     if mended:
         out["mended"] = mended
     return out
+
+
+# ── (v5.44.111) the pools: a comic of e621 ──────────────────────────────────────────────────────────────────────────
+def _pools_wanted(settings: dict) -> dict:
+    """site -> [pool numbers] the posts name that ``site_pools`` does not know yet (or knew :data:`POOLS_AGAIN` ago)."""
+    from core.database.connection import db
+    now = time.time()
+    with db(settings, readonly=True) as con:
+        named = con.execute("SELECT DISTINCT site, pools FROM site_posts WHERE state='ok' AND pools IS NOT NULL "
+                            "AND pools != ''").fetchall()
+        known = {(str(site), int(pid)): (str(state or ""), int(at or 0))
+                 for site, pid, state, at in con.execute("SELECT site, pool_id, state, checked_at FROM site_pools")}
+    out: dict = {}
+    for site, pools in named:
+        for text in str(pools or "").split(","):
+            pid = _number(text)
+            if not pid:
+                continue
+            seen = known.get((str(site), pid))
+            if seen is None or (seen[0] == "ok" and now - seen[1] > POOLS_AGAIN):
+                out.setdefault(str(site), set()).add(pid)
+    return {site: sorted(ids) for site, ids in out.items()}
+
+
+def _ask_pools(settings: dict, client, started: float, budget: float, stop_check) -> tuple:
+    """(pools asked, whether some are left): the pools the posts name, asked of their sites (their name, category and
+    pages in order) — ``site_pools``; one the site has not — «gone»."""
+    import json
+    from core.database.connection import db
+    from core.parser.http import Cancelled, HttpFailure
+    from core.parser.sites import SiteUnavailable
+    from core.redaction import sanitize_text
+    asked, left = 0, False
+    for host, ids in _pools_wanted(settings).items():
+        with _LOCK:
+            st = _site_state(host)
+            paused = st["paused_until"] > time.monotonic()
+        try:
+            site = None if paused else client.site(host)
+        except Exception:  # noqa: BLE001 - a broken row of the site table: its pools wait
+            site = None
+        if site is None or not hasattr(site, "pools_by_ids") or getattr(site, "disabled_reason", ""):
+            left = left or bool(ids)
+            continue
+        for start in range(0, len(ids), POOLS_PACK):
+            if (stop_check is not None and stop_check()) or time.monotonic() - started >= budget:
+                return asked, True
+            part = ids[start:start + POOLS_PACK]
+            try:
+                pools = site.pools_by_ids(part)
+            except (SiteUnavailable, HttpFailure, Cancelled, OSError, ValueError) as exc:
+                with _LOCK:
+                    st["note"] = f"пулы не ответил: {sanitize_text(str(exc))[:200]}"
+                    st["paused_until"] = time.monotonic() + FAILED_PAUSE
+                left = True
+                break
+            got = {_number(p.get("id")): p for p in pools if isinstance(p, dict) and _number(p.get("id"))}
+            now = int(time.time())
+            with db(settings, write=True) as con:
+                for pid in part:
+                    pool = got.get(pid)
+                    if pool is None:
+                        con.execute("INSERT OR REPLACE INTO site_pools(site, pool_id, name, category, post_ids, state, "
+                                    "checked_at) VALUES(?,?,?,?,?,?,?)", (host, pid, "", "", "[]", "gone", now))
+                        continue
+                    posts = [_number(x) for x in (pool.get("post_ids") or []) if _number(x)]
+                    con.execute("INSERT OR REPLACE INTO site_pools(site, pool_id, name, category, post_ids, state, "
+                                "checked_at) VALUES(?,?,?,?,?,?,?)",
+                                (host, pid, str(pool.get("name") or "")[:300], str(pool.get("category") or "")[:40],
+                                 json.dumps(posts[:5000]), "ok", now))
+            asked += len(part)
+    return asked, left

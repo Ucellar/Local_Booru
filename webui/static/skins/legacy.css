@@ -155,7 +155,7 @@ a:hover { text-decoration: none; }
 .main-nav a[href="/tags"]::before { content: "🏷"; }
 .main-nav a[href="/manga"]::before { content: "📖"; }
 .main-nav a[href="/videos"]::before { content: "🎬"; }
-.main-nav a[href="/grab"]::before { content: "⬇"; }
+.main-nav a[href="/get"]::before { content: "⬇"; }
 .main-nav a[href="/parser"]::before { content: "🔍"; }
 .main-nav a[href="/subs"]::before { content: "🔄"; }
 .main-nav a[href="/sites"]::before { content: "🌐"; }

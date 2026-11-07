@@ -15,6 +15,12 @@ from core import video_download
 AVAILABLE = False
 NAME = "YummyAnime"
 QUALITIES = ("best", "1080", "720", "480", "360")          # «Качество» on the page (the same values as the owner's copy)
+# (v5.44.114) the other names the program asks for (``core/video_watch.py``, ``core/catalog.py``…): a page of that site
+# is never one of its titles here (``is_yummy``), so nothing below is asked of a player
+SITE = ""
+ORDER: tuple = ()
+PLAYERS: dict = {}
+SORTS: tuple = ()
 
 
 class DubError(video_download.DownloadError):
@@ -32,3 +38,62 @@ def find_address(address: str, root: Path, *, settings: dict, say, stop_check=No
 
 def find(page, root: Path, *, settings: dict, say, stop_check=None):
     return None
+
+
+# ── (v5.44.114) the names other modules ask for — nothing of the players: a title of that site is never found here ──
+def is_yummy(address: str) -> bool:
+    return False
+
+
+def alias_of(address: str) -> str:
+    return ""
+
+
+def api_of(settings: dict) -> str:
+    return ""
+
+
+def absolute(address: str) -> str:
+    return str(address or "")
+
+
+def ratings_of(anime, address: str = "") -> list:
+    return []
+
+
+def order_of(*_args, **_kwargs) -> list:
+    return []
+
+
+def cap_of(quality: str) -> int:
+    return 0
+
+
+def order(links, cap: int = 0, **_kwargs) -> list:
+    return []
+
+
+def within(every, cap: int = 0) -> list:
+    return []
+
+
+def direct(session):
+    return session
+
+
+def title_page(anime, page=None):
+    return None
+
+
+def _unavailable(*_args, **_kwargs):
+    raise DubError("Озвучки из плееров сайтов в этой версии программы недоступны")
+
+
+Api = Resolver = Merger = _found = stream_way = _unavailable
+
+
+def __getattr__(name: str):
+    """Any other name of the owner's module (the code of the players) — not here: asked for, it says so."""
+    if name.startswith("__"):
+        raise AttributeError(name)
+    return _unavailable

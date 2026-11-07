@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
   "permissions": [
     "storage",
@@ -29,7 +29,32 @@
     "*://www.tineye.com/*",
     "*://ascii2d.net/*",
     "*://www.ascii2d.net/*",
-    "*://nhentai.net/*"
+    "*://nhentai.net/*",
+    "*://*.allhen.online/*",
+    "*://*.allhentai.online/*",
+    "*://*.allhentai.ru/*",
+    "*://*.com-x.life/*",
+    "*://*.desu.city/*",
+    "*://*.desu.me/*",
+    "*://*.desu.uno/*",
+    "*://*.desu.win/*",
+    "*://*.h-chan.me/*",
+    "*://*.henchan.pro/*",
+    "*://*.hentaichan.live/*",
+    "*://*.hentailib.me/*",
+    "*://*.hentailib.org/*",
+    "*://*.mangabuff.ru/*",
+    "*://*.mangadex.org/*",
+    "*://*.mangalib.me/*",
+    "*://*.mangalib.org/*",
+    "*://*.readmanga.io/*",
+    "*://*.readmanga.live/*",
+    "*://*.readmanga.me/*",
+    "*://*.readmanga.org/*",
+    "*://*.readmanga.ru/*",
+    "*://*.recomics.org/*",
+    "*://*.remanga.org/*",
+    "*://*.zazaza.me/*"
   ],
   "background": {
     "service_worker": "service_worker.js"

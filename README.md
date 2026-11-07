@@ -2,9 +2,10 @@
 
 **English** · [Русский](README_RU.md)
 
-Local Booru is a booru-style gallery for your own archive of pictures, videos and manga. It is a Windows program
-that finds tags for your files by itself, keeps a gallery you search by tags, and helps keep a large archive in
-order. Everything stays on your computer.
+Local Booru is a booru-style gallery for your own archive of pictures, videos, manga and manhwa. It is a Windows
+program that finds tags for your files by itself, keeps a gallery you search by tags, reads and downloads manga and
+manhwa from their sites, shows your library on your phone, and helps keep a large archive in order. Everything stays
+on your computer.
 
 **[Download the latest version](https://github.com/Ucellar/Local_Booru/releases/latest)**
 
@@ -18,9 +19,24 @@ order. Everything stays on your computer.
 - **Gallery.** Tag search: a space means all tags, `-tag` excludes one, `a/b` means either. Sections for new, found,
   downloaded, favorite and deleted pictures. Every picture has its own page with each site's tags, and the gallery
   has a tag list. Series and the pages of one work are shown as a single tile.
-- **Manga and videos.** A manga reader; the parts of one title are stacked as one. A video tab with series by
-  folders, resume where you stopped, «Skip opening / ending» buttons (found by the program itself), audio and
-  subtitle tracks, ratings.
+- **Manga and manhwa.** Two tabs with readers of their own: manga page by page, manhwa as one long strip. The
+  program remembers where you stopped; the parts of one title are stacked as one.
+- **Titles from manga sites.** Find a title by its name or paste a link: read it right in the program without
+  downloading anything, or download every chapter or only the ones you tick, with a queue and a pause. Paid chapters
+  are never bought or bypassed: a chapter another site has for free is taken from there, otherwise it waits. The
+  program checks the titles you downloaded for new chapters once a day.
+- **The feed.** The sites' catalogs as one list with filters: genres, tags, type, status, chapter count, rating, year.
+  Every title has its own page: description, chapters, «Read» and «Download».
+- **Manga in your folders.** The program recognizes the titles in your archive folders by itself — by their files,
+  names and pictures — and adds the description, the cover and the missing chapters. Comics from the gallery (15 pages
+  and more) move to the manga: each into a folder of its own, the pages in order.
+- **Videos.** Series by folders, resume where you stopped, «Skip opening / ending» buttons (found by the program
+  itself), audio and subtitle tracks, ratings. «Download from a site» takes the files and open streams a page gives.
+- **One download field.** Paste a link or type a name: the program tells by itself whether it is a post for the
+  gallery, manga, manhwa or a video. All downloads are in one list: pause, queue, carry on after a restart.
+- **Phone.** The gallery, manga, manhwa and videos on your phone, at home or anywhere — through Tailscale or your
+  own server, with pages made for touch.
+- **What to show.** A «SFW / All / NSFW» switch at the top of every page.
 - **Grabber and subscriptions.** Search several sites by tags at once, with previews. Subscriptions to tags and
   artists check themselves and download only what is new: originals, nothing you already have.
 - **Duplicates.** Similar pictures are shown in pairs: the better one stays, the other goes to the trash, and its

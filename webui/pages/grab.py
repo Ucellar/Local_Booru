@@ -1,12 +1,12 @@
-"""The page «Граббер»: search booru sites by tags (the parser's sites that can do it), see what was
-found as previews — one card per file, «есть» when the library has it — open a post, download
-one or many (originals only, tags of every site of the file), hide what you never want to see,
-subscribe to the query.  The work is done by ``core/grabber``; downloads are subscription jobs."""
+"""The page «Граббер» — (v5.44.75) «Скачать → Галерея» (``get_hub.py``): search booru sites by tags (the parser's sites
+that can do it), see what was found as previews — one card per file, «есть» when the library has it — open a post,
+download one or many (originals only, tags of every site of the file), hide what you never want to see, subscribe to
+the query.  The work is done by ``core/grabber``; downloads are subscription jobs."""
 from __future__ import annotations
 
 import json
 
-from webui.html import CATEGORY_ORDER, CATEGORY_TITLES, esc, page_frame
+from webui.html import CATEGORY_ORDER, CATEGORY_TITLES, esc
 from webui.server import Request, Response
 
 MAX_KEYS = 2000                  # cards one request may download or hide
@@ -108,8 +108,9 @@ def grab_page(req: Request) -> Response:
 </section>"""
     sidebar = ('<section class="box grab-tags"><h3>Теги найденного</h3><div class="grab-tag-list">'
                '<p class="hint">Здесь появятся теги найденных постов.</p></div></section>')
-    return Response.html(page_frame("Граббер", body, active="grab", subnav=False, kind="grab", sidebar=sidebar,
-                                    body_data={"tool": "grab"}, **_prefs()))
+    from webui.pages import get_hub
+    return get_hub.frame(req, "Скачать в галерею", body, part="gallery", kind="grab", assets=("grab",),
+                         sidebar=sidebar, body_data={"tool": "grab"}, **_prefs())
 
 
 # ── cards for the page ─────────────────────────────────────────────────────

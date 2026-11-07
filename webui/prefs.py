@@ -11,6 +11,7 @@ chosen (nhentai, «Хаб»).  ``{"looks_all": id}`` gives one look to every pag
 from __future__ import annotations
 
 import json
+import re
 import logging
 import threading
 from pathlib import Path
@@ -25,6 +26,10 @@ POST_FIT = ("fit", "original")                     # a card's picture: fitted to
 FIT_NOTE = ("on", "off")                           # the box «Картинка уменьшена под окно» (the «r34» look)
 VIDEO_AUTONEXT = ("on", "off")                     # the tab «Видео»: the next episode starts by itself
 SETS_BOX = ("shown", "hidden")                     # the сборка over a card's picture: its previews or only its line
+CONTENT_MODES = ("sfw", "all", "nsfw")             # (v5.44.53) the switch in the header (webui/content_mode.py)
+MOTION = ("on", "off")                             # (v5.44.55) «Плавные переходы» (static/motion.js)
+GET_KINDS = ("gallery", "manga", "manhwa", "video", "archive")  # (v5.44.75) the part of «Скачать» opened last
+MANHWA_WIDTHS = ("720", "900", "1200", "full")     # (v5.44.59) the width of the strip of «Манхва»
 
 # the page of the menu (``page_frame``'s ``active``) -> (its key in the file, its look when none is chosen: None — the
 # gallery's); the gallery's own key is "skin"
@@ -32,8 +37,9 @@ PAGE_LOOKS = {
     "posts": ("skin", "auto"),
     "tags": ("tags_skin", None),
     "manga": ("manga_skin", "nhentai"),
+    "manhwa": ("manhwa_skin", "deep"),                 # (v5.44.59) the strips of «Манхва»
     "videos": ("video_skin", "hub"),
-    "grab": ("grab_skin", None),
+    "get": ("grab_skin", None),                         # (v5.44.75) «Скачать» — the grabber's look goes on
     "parser": ("parser_skin", None),
     "subs": ("subs_skin", None),
     "sites": ("sites_skin", None),
@@ -73,6 +79,13 @@ def look(page: str, stored: dict | None = None) -> dict:
     if chosen == FOLLOW or default is None:
         return pack(gallery, True)
     return pack(skins.valid(default), False)
+
+
+def motion(stored: dict | None = None) -> str:
+    """(v5.44.55) «Плавные переходы»: "on" (until turned off) or "off"."""
+    stored = load() if stored is None else stored
+    value = str(stored.get("motion") or "on")
+    return value if value in MOTION else "on"
 
 
 def choices(stored: dict | None = None) -> dict:
@@ -146,6 +159,23 @@ def save(update: dict) -> dict:
         clean["video_autonext"] = str(update["video_autonext"])
     if "sets_box" in update and str(update["sets_box"]) in SETS_BOX:
         clean["sets_box"] = str(update["sets_box"])
+    if "content_mode" in update and str(update["content_mode"]) in CONTENT_MODES:
+        clean["content_mode"] = str(update["content_mode"])
+    if "motion" in update and str(update["motion"]) in MOTION:
+        clean["motion"] = str(update["motion"])
+    if "manhwa_width" in update and str(update["manhwa_width"]) in MANHWA_WIDTHS:
+        clean["manhwa_width"] = str(update["manhwa_width"])
+    if "get_kind" in update and str(update["get_kind"]) in GET_KINDS:
+        clean["get_kind"] = str(update["get_kind"])
+    # (v5.44.83) «Манхва → Лента»: the site and the order seen last (``core/manhwa_feed``)
+    if "manhwa_feed_site" in update and re.fullmatch(r"[a-z]{2,20}", str(update["manhwa_feed_site"])):
+        clean["manhwa_feed_site"] = str(update["manhwa_feed_site"])
+    if "manhwa_feed_how" in update and str(update["manhwa_feed_how"]) in ("new", "popular"):
+        clean["manhwa_feed_how"] = str(update["manhwa_feed_how"])
+    # (v5.44.90) «Лента» of «Манга», «Манхва», «Видео»: what was chosen there last (the address's words)
+    for key in ("feed_manga", "feed_manhwa", "feed_video"):
+        if key in update and len(str(update[key])) <= 4000 and not re.search(r"[\s<>\"']", str(update[key])):
+            clean[key] = str(update[key])
     path = _file()
     with _LOCK:
         current = {}

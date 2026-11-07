@@ -14,3 +14,8 @@ cloudscraper==1.2.71
 watchdog==6.0.0
 onnxruntime==1.31.1
 av==18.1.0
+paramiko==5.1.0
+cryptography==50.0.2
+bcrypt==5.0.0
+PyNaCl==1.6.2
+invoke==3.0.3

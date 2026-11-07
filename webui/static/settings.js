@@ -229,6 +229,21 @@
     });
   }
 
+  // (v5.44.113) «Комиксы и манга — в папку манги → Проверить сейчас»: its journal; at its end — the counts anew
+  const comicJob = page.querySelector("[data-comic-job]");
+  let comicWatcher = null;
+  if (comicJob && LB.watchTask) {
+    const button = comicJob.parentElement.querySelector('[data-act="comic_manga_check"]');
+    comicWatcher = LB.watchTask(comicJob, "/api/settings/comic/state", {
+      onState(st, busy) { if (button) button.disabled = busy; },
+      onEnd(st) {
+        if (st.status === "failed") { say(button, st.error || "Не получилось — см. журнал", true); return; }
+        say(button, st.status === "stopped" ? "Остановлено" : "Готово — обновляю");
+        if (st.status !== "stopped") setTimeout(() => location.reload(), 2500);
+      },
+    });
+  }
+
   // «Брак: фото или рисунок»: one task of the page at a time (install, download, the check, Брак again), its journal
   const visualJob = page.querySelector("[data-visual-job]");
   if (visualJob && LB.watchTask) {
@@ -332,6 +347,7 @@
         if (out && r.show) { out.hidden = false; out.textContent = r.show; }
         say(el, r.message || "Готово");
         if (r.reload) setTimeout(() => location.reload(), 900);
+        else if (comicWatcher && el.dataset.act === "comic_manga_check") comicWatcher.started();
         else if (moveWatcher && el.dataset.act.startsWith("move_")) {
           if (r.id) moveWatcher.started();
           else moveWatcher.poll();
@@ -343,4 +359,122 @@
       }
     },
   });
+})();
+
+// (v5.44.64) «Телефон» (webui/pages/phone.py): what Tailscale on this computer is — asked after the page is shown
+// (/api/phone/state: the command takes seconds), «Пускать телефон» / «Не пускать телефон», the address and its QR code.
+(() => {
+  "use strict";
+  const LB = window.LocalBooru;
+  const panel = document.getElementById("set-phone");
+  if (!LB || !panel) return;
+  const { actions, postJson, say } = LB;
+  const box = panel.querySelector("[data-phone-status]");
+  const open = panel.querySelector("[data-phone-open]");
+  const onButton = panel.querySelector('[data-action="phone-switch"][data-on="1"]');
+  const offButton = panel.querySelector('[data-action="phone-switch"][data-on=""]');
+  const el = (tag, cls, text) => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+  const link = (href, text) => {
+    const a = el("a", "", text);
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener";
+    return a;
+  };
+
+  function render(st) {
+    const t = st.tailscale || {};
+    box.textContent = "";
+    if (!t.installed) {
+      box.append(el("p", "tool-warn", "Tailscale на этом компьютере не установлен."));
+      const p = el("p", "hint");
+      p.append("Скачайте его с ", link("https://tailscale.com/download", "tailscale.com/download"),
+        ", установите и войдите тем же аккаунтом, что на телефоне. Потом нажмите «Проверить снова».");
+      box.append(p);
+    } else if (!t.running) {
+      box.append(el("p", "tool-warn", t.words || "Tailscale пока не готов"));
+    } else {
+      box.append(el("p", "", `Tailscale работает: этот компьютер в вашей сети — ${t.name}, аккаунт ${t.account}.`));
+      if (!t.https && !st.on) {
+        box.append(el("p", "hint", "При «Пускать телефон» Tailscale может один раз попросить включить HTTPS для " +
+          "вашей сети — программа даст ссылку."));
+      }
+    }
+    if (st.on) {
+      box.append(el("p", st.serving ? "" : "tool-warn", st.serving ? "Телефон пускается." :
+        "Телефон пускается, но Tailscale сейчас не ведёт к программе — когда он заработает, нажмите «Проверить снова»."));
+      if (st.renamed) box.append(el("p", "hint", "Имя компьютера в Tailscale поменялось — адрес обновится сам."));
+    }
+    onButton.hidden = !!st.on || !t.running;
+    offButton.hidden = !st.on;
+    open.hidden = !(st.on && st.address);
+    if (st.on && st.address) {
+      const a = open.querySelector("[data-phone-address]");
+      a.href = st.address;
+      a.textContent = st.address;
+      open.querySelector("[data-phone-copy]").dataset.copy = st.address;
+      const qr = open.querySelector("[data-phone-qr]");
+      qr.hidden = !st.qr;
+      if (st.qr) qr.src = "/api/phone/qr.svg?t=" + Date.now();
+    }
+  }
+
+  async function load() {
+    box.textContent = "";
+    box.append(el("p", "hint", "Спрашиваю Tailscale…"));
+    try {
+      const r = await fetch("/api/phone/state", { credentials: "same-origin" });
+      render(await r.json());
+    } catch (err) {
+      box.textContent = "";
+      box.append(el("p", "tool-warn", "Программа не ответила: " + err.message));
+    }
+  }
+
+  actions["phone-check"] = () => load();
+  actions["phone-switch"] = async (button) => {
+    const on = !!button.dataset.on;
+    button.disabled = true;
+    say(button, on ? "Говорю Tailscale пускать телефон…" : "Выключаю…");
+    try {
+      const r = await postJson("/api/phone/switch", { on });
+      say(button, r.message || "Готово");
+      await load();
+    } catch (err) {
+      say(button, err.message, true);
+      const where = err.data && err.data.link;
+      if (where) {
+        const p = el("p", "tool-warn");
+        p.append("Ссылка: ", link(where, where));
+        box.append(p);
+      }
+    } finally {
+      button.disabled = false;
+    }
+  };
+  // asked only when the tab «Телефон» is opened and (v5.44.71) its part «Через Tailscale» is open: the command of
+  // Tailscale takes seconds
+  const part = panel.querySelector("[data-phone-tailscale]");
+  let asked = false;
+  const ask = () => {
+    if (asked || (part && !part.open)) return;
+    asked = true;
+    load();
+  };
+  if (part) part.addEventListener("toggle", ask);
+  if ("IntersectionObserver" in window) {
+    const seen = new IntersectionObserver((entries) => {
+      if (!entries.some((e) => e.isIntersecting)) return;
+      seen.disconnect();
+      ask();
+    });
+    seen.observe(panel);
+  } else {
+    ask();
+  }
 })();

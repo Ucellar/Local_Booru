@@ -3,13 +3,13 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames, m023_effective_tag_categories, m024_reverse_branch_status, m025_site_md5_aliases, m026_derived_cache_state, m027_file_presence_integrity, m028_duplicate_candidate_relations, m029_hash_integrity_recovery, m030_external_derived_cache, m031_saucenao_quota_governor, m032_archive_enrichment_foundation, m033_auto_heal_runtime, m034_quality_upgrade_runtime, m035_companion_family_workflows, m036_pixiv_ugoira_assets, m037_source_originals, m038_normalize_source_hosts, m039_missing_file_cards, m040_tag_search_and_category_cache, m041_variant_families, m042_downloaded_bucket, m043_card_sets, m044_drop_duplicate_indexes, m045_reduced_copies, m046_tag_category_review
+from . import m014_database_health_maintenance, m015_saucenao_quota_snapshot, m016_source_tag_provenance, m017_invalid_navigation_sources, m018_unverified_source_cleanup, m019_performance_indexes, m020_nomatch_reasons_source_only, m021_v158_maintenance_indexes, m022_v159_content_safe_filenames, m023_effective_tag_categories, m024_reverse_branch_status, m025_site_md5_aliases, m026_derived_cache_state, m027_file_presence_integrity, m028_duplicate_candidate_relations, m029_hash_integrity_recovery, m030_external_derived_cache, m031_saucenao_quota_governor, m032_archive_enrichment_foundation, m033_auto_heal_runtime, m034_quality_upgrade_runtime, m035_companion_family_workflows, m036_pixiv_ugoira_assets, m037_source_originals, m038_normalize_source_hosts, m039_missing_file_cards, m040_tag_search_and_category_cache, m041_variant_families, m042_downloaded_bucket, m043_card_sets, m044_drop_duplicate_indexes, m045_reduced_copies, m046_tag_category_review, m047_site_pools
 
 # Version 13 is the consolidated SQLite schema shipped before the numbered
 # runner existed.  v130 records that existing working state as a baseline and
 # applies only subsequent migrations.
 BASELINE_VERSION = 13
-CURRENT_SCHEMA_VERSION = 46
+CURRENT_SCHEMA_VERSION = 47
 MIGRATIONS = {
     14: m014_database_health_maintenance,
     15: m015_saucenao_quota_snapshot,
@@ -44,6 +44,7 @@ MIGRATIONS = {
     44: m044_drop_duplicate_indexes,
     45: m045_reduced_copies,
     46: m046_tag_category_review,
+    47: m047_site_pools,
 }
 
 

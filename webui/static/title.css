@@ -1,0 +1,128 @@
+/* Local Booru — the page of a title of «Лента» (v5.44.102, webui/pages/title.py, title.js): the owner's approved
+   mockup «Тайтл из «Онлайн»» — the cover and the facts, «Продолжить» / «Читать с начала» / «Скачать всё», the chapters
+   as rows.  Every look gets its colours from its own tokens (--panel, --accent…); every rule starts with .tt: the
+   looks style button, input and a:hover by their tags, a class alone would lose to «button:hover». */
+.tt {
+  --tt-line: color-mix(in srgb, var(--text) 18%, transparent);
+  max-width: 1240px; margin: 0 auto; padding: 24px 24px 48px; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 28px; color: var(--text);
+}
+.tt [hidden] { display: none !important; }
+.tt :is(button, a, input):focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+.tt .tt-back { align-self: flex-start; color: var(--muted); font-size: 13px; text-decoration: none; }
+.tt .tt-back:hover { color: var(--text); text-decoration: underline; }
+.tt .tt-icon { flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round;
+  stroke-linejoin: round; }
+
+/* ── the cover and the facts ── */
+.tt .tt-hero { display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-start; }
+.tt .tt-cover { flex: 0 0 250px; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 12px;
+  background: var(--panel-2, var(--panel)); }
+.tt .tt-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.tt .tt-hero[aria-busy="true"] .tt-cover:empty { animation: tt-wait 1.4s ease-in-out infinite alternate; }
+@keyframes tt-wait { from { opacity: 0.55; } to { opacity: 1; } }
+.tt .tt-about { flex: 999 1 420px; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.tt .tt-facts { margin: 0; color: var(--muted); font-size: 13px; }
+.tt .tt-name { margin: 0; font: 800 36px/1.12 var(--font-head, inherit); letter-spacing: -0.01em; color: var(--text);
+  overflow-wrap: anywhere; }
+.tt .tt-alt { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.tt .tt-numbers { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; color: var(--muted); }
+.tt .tt-numbers:empty { display: none; }
+.tt .tt-rate { font-size: 20px; font-weight: 800; color: var(--text); }
+.tt .tt-have { color: var(--text); }
+.tt .tt-wait { margin: 0; color: var(--muted); }
+.tt .tt-wait.bad { padding-left: 10px; border-left: 3px solid var(--danger, #b8615c); color: var(--text); }
+.tt .tt-extra { display: flex; flex-direction: column; gap: 14px; }
+
+/* the chapters' language or translators */
+.tt .tt-branches { display: flex; flex-direction: column; gap: 8px; }
+.tt .tt-label { color: var(--muted); font-size: 13px; }
+.tt .tt-pick { display: flex; flex-wrap: wrap; gap: 8px; }
+.tt .tt-chip-btn { padding: 9px 14px; border: 1px solid var(--tt-line); border-radius: 10px;
+  background: var(--panel-2, var(--panel)); color: var(--text); font: inherit; cursor: pointer; }
+.tt .tt-chip-btn:hover { border-color: var(--accent); background: var(--panel-2, var(--panel)); color: var(--text); }
+.tt .tt-chip-btn[aria-pressed="true"], .tt .tt-chip-btn[aria-pressed="true"]:hover { border-color: transparent;
+  background: var(--accent); color: var(--accent-ink, #1b1305); font-weight: 700; cursor: default; }
+
+/* the buttons */
+.tt .tt-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.tt .tt-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px;
+  padding: 11px 22px; box-sizing: border-box; border: 1px solid var(--tt-line); border-radius: 10px;
+  background: var(--panel-2, var(--panel)); color: var(--text); font: inherit; font-weight: 600; line-height: 1.2;
+  text-decoration: none; cursor: pointer; }
+.tt .tt-btn:hover { border-color: var(--accent); background: var(--panel-2, var(--panel)); color: var(--text);
+  text-decoration: none; }
+.tt .tt-btn:disabled { cursor: default; opacity: 0.55; border-color: var(--tt-line); }
+.tt .tt-btn.primary, .tt .tt-btn.primary:hover { border-color: transparent; background: var(--accent);
+  color: var(--accent-ink, #1b1305); font-weight: 700; }
+.tt .tt-btn.primary:hover { filter: brightness(1.08); }
+.tt .tt-btn.quiet { background: transparent; }
+.tt .tt-btn.small { min-height: 36px; padding: 7px 12px; font-size: 13px; }
+.tt .tt-link { padding: 0; border: 0; background: transparent; color: var(--accent-text, var(--accent)); font: inherit;
+  font-size: 13px; text-decoration: underline; cursor: pointer; }
+.tt .tt-link:hover { background: transparent; color: var(--text); }
+.tt .tt-status { margin: 0; min-height: 1.4em; color: var(--muted); font-size: 13px; }
+.tt .tt-status:empty { min-height: 0; }
+.tt .tt-note { margin: 0; max-width: 80ch; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.tt .tt-note.warn { padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+
+/* the description and the genres */
+.tt .tt-desc { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 80ch; }
+.tt .tt-desc-text { margin: 0; color: var(--text); line-height: 1.55; white-space: pre-line; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+.tt .tt-desc.open .tt-desc-text { display: block; -webkit-line-clamp: unset; }
+.tt .tt-desc-from { margin: 0; color: var(--muted); font-size: 13px; }   /* (v5.44.112) whose description */
+.tt .tt-more { padding: 0; border: 0; background: transparent; color: var(--accent-text, var(--accent)); font: inherit;
+  font-size: 13px; cursor: pointer; }
+.tt .tt-more:hover { background: transparent; color: var(--text); text-decoration: underline; }
+.tt .tt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.tt .tt-chips li { padding: 3px 10px; border: 1px solid var(--tt-line); border-radius: 999px; color: var(--text);
+  font-size: 13px; }
+.tt .tt-tags { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.tt .tt-tags .tt-label { min-width: 90px; }
+
+/* ── the chapters ── */
+.tt .tt-list { padding: 8px 0; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; }
+.tt .tt-list-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; padding: 12px 20px; }
+.tt .tt-list-head h2 { margin: 0; font-size: 18px; color: var(--text); }
+.tt .tt-count { color: var(--muted); font-weight: 500; }
+.tt .tt-list-tools { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.tt .tt-running { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin: 0 20px 8px;
+  padding: 8px 12px; border-radius: 10px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.tt .tt-running-words { font-weight: 600; }
+.tt .tt-rows { margin: 0; padding: 0; list-style: none; }
+.tt .tt-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 14px;
+  padding: 10px 20px; border-top: 1px solid var(--tt-line); }
+.tt .tt-row input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.tt .tt-row input[type="checkbox"]:disabled { opacity: 0.35; cursor: default; }
+.tt .tt-row-name { min-width: 0; }
+.tt .tt-row-title { font-weight: 600; overflow-wrap: anywhere; }
+.tt .tt-row-state { min-width: 88px; color: var(--muted); font-size: 13px; text-align: right; }
+.tt .tt-row-state.have { color: var(--good, #3fa86b); }
+.tt .tt-row-state.from, .tt .tt-row-state.going { color: var(--accent-text, var(--accent)); }
+.tt .tt-row-state.bad { color: var(--danger, #b8615c); }
+.tt .tt-read-none { min-width: 1px; }
+
+/* the pages of a gallery */
+.tt .tt-pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 14px;
+  margin: 0; padding: 8px 20px 12px; list-style: none; }
+.tt .tt-page { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px;
+  text-align: center; }
+.tt .tt-page img { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 8px;
+  background: var(--panel-2, var(--panel)); }
+
+/* ── a narrow window: the cover above, a chapter's state under its name ── */
+@media (max-width: 640px) {
+  .tt { padding: 16px 16px 40px; gap: 20px; }
+  .tt .tt-cover { flex-basis: 160px; }
+  .tt .tt-name { font-size: 26px; }
+  .tt .tt-list-head, .tt .tt-row { padding-left: 14px; padding-right: 14px; }
+  .tt .tt-row { grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 2px; }
+  .tt .tt-row-state { grid-column: 2; grid-row: 2; text-align: left; min-width: 0; }
+  .tt .tt-read, .tt .tt-read-none { grid-column: 3; grid-row: 1 / span 2; }
+  .tt .tt-list-tools { margin-left: 0; }
+}
+
+/* a link the program cannot show */
+.tt.tt-problem h1 { margin: 0; font-size: 28px; }
+.tt.tt-problem p { margin: 0; color: var(--muted); }

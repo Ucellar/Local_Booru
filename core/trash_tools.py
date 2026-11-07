@@ -25,6 +25,7 @@ LABELS = {
     "delete_by_source": "«Удаление и сброс»: по источнику",
     "delete_by_buckets": "«Удаление и сброс»: результаты парсера или скачанное",
     "missing_file": "файл пропал с диска",
+    "moved_to_manga": "перенесено в мангу",                 # (v5.44.111) a comic of the gallery: core/comic_manga.py
     "unknown": "неизвестно (старая версия программы)",
 }
 

@@ -204,6 +204,19 @@ def _choice(body: dict, kind: str, value) -> dict | None:
     return out if any(out.get(k) for k in ("name", "title", "lang")) else None
 
 
+def _stream_address(req: Request, token: str):
+    """(v5.44.106) (the address the window's own player plays, why not) of a stream of «Смотреть» — only the program's
+    own address of a token it gave (``core/video_watch``), never one the page names."""
+    from core import video_watch
+    try:
+        stream = video_watch.stream_of(token)
+    except video_watch.WatchError as exc:
+        return None, str(exc)
+    if req.server is None:
+        return None, "Сервер страниц не запущен"
+    return req.server.base_url + stream.address, ""
+
+
 def _video_payload(req: Request, body: dict):
     """A video played inside the page (webui/video_relay.py): «start» looks the file up and makes the play's
     token (the page shows ``/video/live/<token>``); the other commands go to the play of their token."""
@@ -220,6 +233,9 @@ def _video_payload(req: Request, body: dict):
         if body.get("episode"):                  # an episode of the tab «Видео»: by its id, never by a path
             path, why = _episode_file(req, str(body.get("episode")))
             image_id = 0
+        elif body.get("stream"):                 # (v5.44.106) an episode of «Смотреть»: the program's own address of
+            path, why = _stream_address(req, str(body.get("stream")))     # its stream (core/video_watch), by token
+            image_id = 0
         else:
             try:
                 image_id = int(body.get("id"))
@@ -233,6 +249,10 @@ def _video_payload(req: Request, body: dict):
         payload = {"cmd": "start", "id": image_id, "path": str(path), "token": token,
                    "w": int(number("w", 16, 4096, 960)), "h": int(number("h", 16, 4096, 540)),
                    "from": number("from", 0, 10 ** 7), "loop": body.get("loop") is not False}
+        if body.get("stream") and not body.get("episode"):
+            payload["stream"] = str(body.get("stream"))
+            payload["loop"] = False                  # an episode watched: once (the page goes on to the next)
+            payload.pop("id", None)
         if body.get("episode"):
             payload["episode"] = str(body.get("episode"))
             payload.pop("id")

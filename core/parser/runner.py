@@ -101,6 +101,25 @@ class ParserRunner:
             return False
 
     # ── input ───────────────────────────────────────────────────────────────
+    def _without_manga(self, root: Path, files: list) -> list:
+        """(v5.44.84) The folders of manga and manhwa in the parser's folder (``core/manga_detect.py``: pages named by
+        numbers, chapters, ComicInfo.xml) are not sent to the booru sites — «Скачать → Из архива» finds out what they
+        are (the owner: «парсер должен проверить эта папка манга если да то пытаться найти что это за манга а если нет
+        то просто пропарсить через обычные боору»)."""
+        from core import manga_detect
+        from core.manhwa_download import roots
+        libraries = tuple(roots(self.settings).values())          # the program's own manga and manhwa
+        try:
+            kept, titles = manga_detect.split(root, files, libraries)
+        except OSError as exc:                        # a folder that went away while it was looked at: all parsed
+            self.log(f"  манга в папке не проверена: {exc}")
+            return files
+        if len(kept) < len(files):
+            names = ", ".join(f"«{Path(t.path).name}»" for t in list(titles.values())[:5])
+            self.log(f"МАНГА И МАНХВА: {len(files) - len(kept)} страниц не на booru-сайты — тайтлы узнаёт «Скачать → "
+                     f"Из архива»" + (f" ({names}{' …' if len(titles) > 5 else ''})" if names else ""))
+        return kept
+
     def collect(self) -> list:
         s = self.settings
         explicit = [Path(str(p)) for p in s.get("_parser_explicit_paths") or []]
@@ -119,6 +138,8 @@ class ParserRunner:
             return []
         files = sorted(set(files), key=lambda p: str(p).lower())
         self.log(f"НАЙДЕНО ФАЙЛОВ: {len(files)}")
+        if not explicit and s.get("parser_skip_manga", True):
+            files = self._without_manga(root, files)
 
         from core.tagger.results import has_copy_suffix, result_output_base
         out_base = result_output_base(s).resolve()

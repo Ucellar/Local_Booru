@@ -11,9 +11,11 @@ CATEGORY_TITLES = {
     "species": "Виды", "general": "Общие", "meta": "Мета", "lore": "Лор", "invalid": "Прочее",
 }
 
-# The pages of the main menu: (the page — ``page_frame``'s ``active`` —, its name, its address).
-MENU = (("posts", "Галерея", "/posts"), ("manga", "Манга", "/manga"),
-        ("videos", "Видео", "/videos"), ("grab", "Граббер", "/grab"), ("parser", "Парсер", "/parser"),
+# The pages of the main menu: (the page — ``page_frame``'s ``active`` —, its name, its address).  (v5.44.75) «Скачать»
+# — the grabber renamed; (v5.44.87) its parts: «По ссылке» (every kind by one field) and «Галерея (booru)» —
+# ``webui/pages/get_hub.py``.
+MENU = (("posts", "Галерея", "/posts"), ("manga", "Манга", "/manga"), ("manhwa", "Манхва", "/manhwa"),
+        ("videos", "Видео", "/videos"), ("get", "Скачать", "/get"), ("parser", "Парсер", "/parser"),
         ("subs", "Подписки", "/subs"), ("sites", "Сайты", "/sites"), ("dupes", "Дубли", "/dupes"),
         ("diag", "Диагностика", "/diag"))
 # Pages that live inside a menu item (v5.39: «Теги» are the gallery's tags — a tab of «Галерея» after its sections,
@@ -86,9 +88,18 @@ def _skin_item(choice: str, name: str, description: str, swatches, on: bool, ext
             f'<span class="skin-text"><b>{esc(name)}</b><small>{esc(description)}</small></span></button>')
 
 
-def _skin_menu(look: dict, page: str) -> str:
+def _motion_item(motion: str) -> str:
+    """(v5.44.55) «Плавные переходы» at the foot of the menu «Оформление»: on every page at once (``prefs.motion``)."""
+    on = motion != "off"
+    said = ("включены — страницы и картинки появляются мягко" if on else "выключены — всё сменяется сразу")
+    return (f'<button type="button" role="menuitemcheckbox" aria-checked="{"true" if on else "false"}" '
+            f'class="skin-item skin-motion" data-action="motion"><span class="skin-text"><b>Плавные переходы</b>'
+            f'<small>{esc(said)}</small></span></button>')
+
+
+def _skin_menu(look: dict, page: str, motion: str = "on") -> str:
     """The menu «Оформление»: the look of this page only (``prefs.look``); «как у галереи» on the other pages; one
-    look for all pages."""
+    look for all pages; (v5.44.55) «Плавные переходы» for all pages."""
     from webui.skins import BY_ID, SKINS
     gallery_page = look["key"] == "skin"
     items = []
@@ -118,7 +129,7 @@ def _skin_menu(look: dict, page: str) -> str:
             f'aria-haspopup="menu" aria-expanded="false" title="Оформление страницы «{esc(name)}»">'
             f'<span class="skin-icon" aria-hidden="true"></span><span class="skin-label">Оформление</span></button>'
             f'<div class="skin-list" role="menu" aria-label="Оформление страницы «{esc(name)}»" hidden>'
-            f'{scope}{variant}{"".join(items)}{every}</div></div>')
+            f'{scope}{variant}{"".join(items)}{every}{_motion_item(motion)}</div></div>')
 
 
 # A gear drawn here (eight teeth and a ring): no icon font, no picture file.
@@ -135,21 +146,59 @@ def _settings_link(active: str) -> str:
             f'{current}>{_GEAR}<span class="skin-label">Настройки</span></a>')
 
 
+# The stylesheet and the script of a page of the menu (``page_frame``'s ``assets``, else its ``active``)
+PAGE_CSS = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
+            "manhwa": '\n<link rel="stylesheet" href="/static/manhwa.css">',
+            "videos": '\n<link rel="stylesheet" href="/static/videos.css">',
+            "grab": '\n<link rel="stylesheet" href="/static/grab.css">',
+            "archive": '\n<link rel="stylesheet" href="/static/archive.css">',
+            "online": '\n<link rel="stylesheet" href="/static/online.css">',       # (v5.44.82) read from a site
+            "getlink": '\n<link rel="stylesheet" href="/static/get-link.css">',    # (v5.44.87) «Скачать → По ссылке»
+            "catalog": '\n<link rel="stylesheet" href="/static/catalog.css">',     # (v5.44.90) «Лента» of the tabs
+            "title": '\n<link rel="stylesheet" href="/static/title.css">',        # (v5.44.102) a title of «Лента»
+            "watch": '\n<link rel="stylesheet" href="/static/watch.css">'}        # (v5.44.106) «Смотреть» a series
+PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
+           "manga": '\n<script src="/static/manga.js" defer></script>',
+           "manhwa": '\n<script src="/static/manhwa.js" defer></script>',
+           "videos": '\n<script src="/static/videos.js" defer></script>',
+           "grab": '\n<script src="/static/grab.js" defer></script>',
+           "get": '\n<script src="/static/get-hub.js" defer></script>',
+           "getlink": '\n<script src="/static/get-link.js" defer></script>',    # (v5.44.87) «Скачать → По ссылке»
+           "catalog": '\n<script src="/static/catalog.js" defer></script>',     # (v5.44.90) «Лента» of the tabs
+           "title": '\n<script src="/static/title.js" defer></script>',         # (v5.44.102) a title of «Лента»
+           # (v5.44.106) «Смотреть»: hls.js for a browser that does not play HLS itself (the window: its own player)
+           "hls": '\n<script src="/static/vendor/hls.light.min.js" defer></script>',
+           "watch": '\n<script src="/static/watch.js" defer></script>',
+           "archive": '\n<script src="/static/archive.js" defer></script>',
+           "online": '\n<script src="/static/online.js" defer></script>',     # (v5.44.82) read from a site
+           "dupes": '\n<script src="/static/dupes.js" defer></script>',
+           "diag": '\n<script src="/static/diag.js" defer></script>',
+           "settings": '\n<script src="/static/settings.js" defer></script>'
+                       '\n<script src="/static/phone-relay.js" defer></script>'
+                       '\n<script src="/static/manga-sites.js" defer></script>'}
+
+
 def page_frame(title: str, body: str, *, active: str = "posts", search: str = "", section: str = "all",
                sidebar: str = "", subnav: bool = True, thumbs: str = "m", top_search: str = "", kind: str = "",
-               body_data: dict | None = None, tabs: tuple = ()) -> str:
+               body_data: dict | None = None, tabs: tuple = (), assets: tuple = ()) -> str:
     """The frame of every page: header (brand, menu, search, look), section bar, sidebar, content.
 
     Every look gets the same HTML: the header search and the sidebar search both exist, and the look's
     stylesheet shows the one it uses; the sidebar is a column in some looks and a drawer in others.  The look is the
     page's own (``active`` — the page of the menu: ``prefs.look``).
     ``tabs`` — ((label, href, current), …): the pages of one menu item, in the section bar.
+    ``assets`` — (v5.44.75) the pages whose stylesheets and scripts this one takes (:data:`PAGE_CSS`,
+    :data:`PAGE_JS`), else those of ``active``: a part of «Скачать» is the page of another tab under its frame.
     """
-    from webui import prefs
+    from webui import content_mode, motion_script, prefs
     look = prefs.look(active)
+    mode = content_mode.mode()                    # (v5.44.53) «SFW / Всё / NSFW»: the gallery's pages leave the menu
+    motion = prefs.motion()                       # (v5.44.55) «Плавные переходы» (static/motion.js)
     nav = []
     item = MENU_OF.get(active, active)
     for key, label, href in MENU:
+        if not content_mode.page_shown(key, mode):
+            continue
         cls = ' class="active"' if key == item else ""
         nav.append(f'<a href="{href}"{cls}>{label}</a>')
     sections = ""
@@ -176,24 +225,18 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
                          'aria-expanded="false">Теги и фильтры</button>')
     layout_cls = "layout with-sidebar" if sidebar else "layout"
     skin = look["skin"]
-    manga_css = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
-                 "videos": '\n<link rel="stylesheet" href="/static/videos.css">',
-                 "grab": '\n<link rel="stylesheet" href="/static/grab.css">'}.get(active, "")
-    page_js = {"subs": '\n<script src="/static/subs.js" defer></script>',
-               "manga": '\n<script src="/static/manga.js" defer></script>',
-               "videos": '\n<script src="/static/videos.js" defer></script>',
-               "grab": '\n<script src="/static/grab.js" defer></script>',
-               "dupes": '\n<script src="/static/dupes.js" defer></script>',
-               "diag": '\n<script src="/static/diag.js" defer></script>',
-               "settings": '\n<script src="/static/settings.js" defer></script>'}.get(active, "")
+    taken = tuple(assets) if assets else (active,)
+    manga_css = "".join(PAGE_CSS.get(key, "") for key in taken)
+    page_js = "".join(PAGE_JS.get(key, "") for key in taken)
     data_attrs = "".join(f' data-{esc(k)}="{esc(v)}"' for k, v in (body_data or {}).items())
     sections += _reset_notice() + _archive_notice()
     return f"""<!doctype html>
-<html lang="ru" data-skin="{esc(skin)}" data-thumb="{esc(thumbs)}" data-skin-key="{esc(look["key"])}" data-gallery-skin="{esc(look["gallery"])}" data-variant="{esc(look.get("variant", "light"))}" data-variant-key="{esc(look.get("variant_key", "skin_variant"))}" data-gallery-variant="{esc(look.get("gallery_variant", "light"))}">
+<html lang="ru" data-skin="{esc(skin)}" data-thumb="{esc(thumbs)}" data-skin-key="{esc(look["key"])}" data-gallery-skin="{esc(look["gallery"])}" data-variant="{esc(look.get("variant", "light"))}" data-variant-key="{esc(look.get("variant_key", "skin_variant"))}" data-gallery-variant="{esc(look.get("gallery_variant", "light"))}" data-content-mode="{esc(mode)}" data-motion-pref="{esc(motion)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)} — Local Booru</title>
+{motion_script.tag()}
 <link rel="stylesheet" href="/static/booru.css">{manga_css}
 <link rel="stylesheet" href="/static/tools.css">
 <link rel="stylesheet" href="/static/skins/{esc(skin)}.css" id="skin-css">
@@ -202,10 +245,10 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
 </head>
 <body class="page-{esc(kind or active)}"{data_attrs}>
 <header class="top">
-  <a class="brand" href="/posts"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name"><span class="bn-1">Local</span> <span class="bn-2">Booru</span></span></a>
+  <a class="brand" href="{content_mode.home(mode)}"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name"><span class="bn-1">Local</span> <span class="bn-2">Booru</span></span></a>
   <nav class="main-nav" aria-label="Основное меню">{"".join(nav)}</nav>
   {top_search}
-  <div class="top-tools">{drawer_button}{_settings_link(active)}{_skin_menu(look, active)}<span class="tray-clock" aria-hidden="true"></span></div>
+  <div class="top-tools">{drawer_button}{content_mode.switch(mode)}{_settings_link(active)}{_skin_menu(look, active, motion)}<span class="tray-clock" aria-hidden="true"></span></div>
 </header>
 {sections}
 <div class="{layout_cls}">

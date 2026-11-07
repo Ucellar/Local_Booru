@@ -661,3 +661,54 @@ table.info .path { font-size: 11px; }
 :root[data-skin="win98"] .flight-pic, :root[data-skin="win98"] .recent-item button { border-radius: 0; }
 :root[data-skin="win98"] .parser-viewer { border: 0; border-radius: 0; box-shadow: var(--raised); }
 :root[data-skin="win98"] .settings-tabs [role="tab"] { border-radius: 0; }
+
+/* (v5.44.71) «Настройки → Телефон»: through the owner's server (webui/pages/phone_relay.py, static/phone-relay.js) and
+   through Tailscale (its part folds) */
+.phone-way { margin: 14px 0 0; padding: 12px 0 0; border-top: 1px solid var(--border); }
+.phone-way > h3, .phone-way > summary { margin: 0 0 8px; font: bold 13px/1.3 var(--font-head); }
+.phone-way > summary { cursor: pointer; }
+.phone-way > summary + * { margin-top: 8px; }
+.phone-relay-status p { margin: 4px 0; }
+.phone-relay-status .relay-up, .relay-result.relay-up { color: var(--accent-text, var(--accent)); }
+.phone-relay-form { margin: 8px 0 0; }
+.phone-relay-form .field-row > label:first-child { min-width: 120px; }
+.phone-relay-run .job-log { max-height: 260px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; }
+.relay-result { margin: 8px 0 0; }
+.phone-pair { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px 18px; margin: 10px 0 4px; }
+.phone-pair .phone-qr { flex: none; width: 198px; height: 198px; background: #ffffff; border-radius: var(--radius);
+  image-rendering: pixelated; }
+.phone-pair-text { flex: 1 1 260px; min-width: 0; }
+.phone-pair-text p { margin: 0 0 6px; }
+.phone-pair-code { font-size: 1.35em; letter-spacing: 0.08em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.phone-devices-title { margin: 14px 0 6px; font: bold 12.5px/1.3 var(--font-head); }
+.phone-devices { margin: 0 0 10px; padding: 0; list-style: none; }
+.phone-devices li { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0;
+  border-bottom: 1px solid var(--border); }
+.phone-device-text { display: flex; flex-direction: column; min-width: 0; }
+.phone-device-text .hint { margin: 0; font-size: 12px; }
+
+/* (v5.44.78) «Настройки → Сайты манги» (webui/pages/manga_sites.py): the addresses of the sites, the sign-in on them */
+.manga-sites h3 { margin: 18px 0 6px; font-size: 15px; }
+.manga-sites .ms-api > label:first-child { padding-left: 1em; color: var(--muted); }
+.manga-sites input[aria-invalid="true"] { border-color: var(--danger); }
+.manga-sites .ms-wrong { flex-basis: 100%; color: var(--danger); }
+.ms-sites { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.ms-site { padding: 10px 12px; border: 1px solid var(--border); border-radius: calc(var(--radius) + 2px);
+  background: var(--panel-2); }
+.ms-site-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
+.ms-state { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.ms-state.on { color: var(--text); }
+.ms-file { position: relative; display: inline-flex; }
+.ms-file input[type="file"] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.ms-file:focus-within .ms-file-button { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+.ms-token { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; }
+.ms-token label { color: var(--muted); }
+.ms-token input { flex: 1 1 220px; min-width: 0; max-width: 420px; }
+.manga-sites .field-row input[type="text"] { flex: 1 1 240px; }      /* narrow: the note goes under the field */
+.ms-site .tool-actions { margin: 0; }
+.ms-how { margin-top: 12px; }
+.ms-companion { max-width: 74ch; margin: 0 0 8px; color: var(--muted); }           /* (v5.44.100) the extension */
+.ms-companion.on { color: var(--text); }
+.ms-missing { margin: 6px 0 0; color: var(--danger); font-size: 13px; }
+.ms-how p { max-width: 74ch; }
+:root[data-skin="win98"] .ms-site { border-radius: 0; }

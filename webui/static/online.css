@@ -1,0 +1,120 @@
+/* (v5.44.82) A chapter read from a site without downloading it (webui/pages/manga_online.py, static/online.js): the
+   switch of the way it is read, and the pages one at a time — the page fills the window under the bar, the slider of
+   pages under it; on the phone the page fills the screen and the bars lie over it. */
+
+/* the switch «Авто / Лента / Справа налево / Слева направо», the link «Скачать» */
+.ol-modes { display: flex; flex-wrap: wrap; gap: 2px; }
+.ol-modes button {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.ol-modes button:hover { color: var(--text); background: var(--panel); }
+.ol-modes button[aria-pressed="true"] { color: var(--text); background: var(--panel); font-weight: bold; }
+.ol-modes button:focus-visible, .mh-online-get:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mh-bar-tools { flex-wrap: wrap; align-items: center; gap: 2px 8px; }
+.mh-widths { display: flex; gap: 2px; }
+.mh-online-get {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: bold;
+}
+.mh-online-get:hover { border-color: var(--accent); text-decoration: none; }
+.mh-online-problem { max-width: 640px; margin: 48px auto; padding: 0 16px; }
+
+/* ── the pages one at a time (the computer) ── */
+/* --ol-top — where the page starts (the program's header and the reader's bar above it; online.js measures it) */
+.ol-reader { --ol-top: 140px; --ol-bottom: 48px; position: relative; background: #111; color: #eee; }
+.ol-reader .mh-bar { position: sticky; top: 0; }
+.ol-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: calc(100vh - var(--ol-top) - var(--ol-bottom));
+  height: calc(100dvh - var(--ol-top) - var(--ol-bottom));
+  min-height: 240px;
+  overflow: hidden;
+  outline: none;
+  touch-action: pan-y;
+  user-select: none;
+  cursor: pointer;
+}
+.ol-stage[hidden] { display: none; }
+.ol-stage.zoomed { cursor: grab; touch-action: none; }
+.ol-page {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  transform-origin: center;
+  transition: opacity 0.12s;
+  pointer-events: none;
+}
+.ol-page.loading { opacity: 0.35; }
+.ol-stage:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.ol-end {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: calc(100vh - var(--ol-top) - var(--ol-bottom));
+  height: calc(100dvh - var(--ol-top) - var(--ol-bottom));
+  min-height: 240px;
+  padding: 24px;
+  text-align: center;
+}
+.ol-end[hidden] { display: none; }
+.ol-end-head { margin: 0; font-size: 20px; font-weight: bold; }
+.ol-end .mh-btn { display: inline-block; }
+.ol-bottom {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: var(--ol-bottom);
+  padding: 0 16px;
+  font-variant-numeric: tabular-nums;
+}
+.ol-slider { flex: 1; min-width: 0; accent-color: var(--accent); }
+.ol-at, .ol-total { min-width: 3ch; text-align: center; font-size: 13px; }
+.ol-problem { position: absolute; left: 50%; bottom: calc(var(--ol-bottom) + 12px); transform: translateX(-50%);
+  max-width: calc(100% - 32px); margin: 0; padding: 8px 14px; border-radius: 8px; background: #3a1d1d; color: #fff;
+  font-size: 13px; }
+.ol-bars-off .mh-bar, .ol-bars-off .ol-bottom { visibility: hidden; }
+
+/* ── the phone: the page fills the screen, the bars over it ── */
+.ol-phone { --ol-top: 0px; --ol-bottom: 0px; min-height: 100dvh; background: #000; }
+.ol-phone .ol-stage { height: 100dvh; padding: calc(var(--top, 56px) + 50px) 0 calc(150px + env(safe-area-inset-bottom, 0px)); }
+.ol-phone .ol-end { height: 100dvh; }
+.ol-phone .ol-bottom {
+  position: fixed;
+  left: 14px;
+  right: 14px;
+  bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  z-index: 30;
+  height: 44px;
+  padding: 0 12px;
+  border-radius: var(--radius, 8px);
+  background: rgba(30, 30, 30, 0.92);
+}
+.ol-phone .m-mh-top .ol-modes { padding: 4px 8px 6px; }
+.ol-phone .m-mh-top .ol-modes button { min-height: 36px; color: #ccc; }
+.ol-phone.ol-bars-off .m-mh-top, .ol-phone.ol-bars-off .m-mh-bottom, .ol-phone.ol-bars-off .ol-bottom { visibility: hidden; }
+.m-mh-reader .ol-modes { padding: 4px 8px 6px; }
+/* the phone's strip: its first page under both rows of the bar (the chapter, the way it is read) */
+.m-mh-reader.mh-online, .m-mh-reader.mh-modes { padding-top: calc(var(--top, 56px) + 50px); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ol-page { transition: none; }
+}

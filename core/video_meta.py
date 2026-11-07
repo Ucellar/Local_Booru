@@ -152,6 +152,8 @@ class _Meta:
                 value = _split(value)
             elif key == "notes":
                 value = [value]
+            elif key == "year":                         # «2026г.», «2026 г.» (hfshare) — the year
+                value = re.sub(r"^((?:19|20)\d{2})\s*г?\.?$", r"\1", value)
         self.data[key] = value
 
     def labeled(self, label: str, value_text: str, items: list[str]) -> None:
@@ -771,12 +773,20 @@ def _split_title(meta: _Meta) -> None:
         meta.data["alt_titles"] = list(dict.fromkeys(alt + parts[1:]))
 
 
+def _prose(text: str) -> int:
+    """Characters of a block's lines that are sentences (≥ 60 characters), not facts («Год выпуска:» / «2026»)."""
+    return sum(len(line) for line in text.split("\n") if len(line.strip()) >= 60)
+
+
 def _description(soup) -> str:
-    best = ""
-    for el in soup.select("[itemprop=description], .full-text, .fdesc, .description, .story, .film-desc"):
+    """The title's description: the block with the most sentences (hfshare: «.full-text» is its facts, the story is
+    «.full-story-content»), of those the longest."""
+    best, key = "", (-1, -1)
+    for el in soup.select("[itemprop=description], .full-text, .fdesc, .description, .story, .film-desc, "
+                          ".full-story-content"):
         text = block_text(el)
-        if len(text) > len(best):
-            best = text
+        if (_prose(text), len(text)) > key:
+            best, key = text, (_prose(text), len(text))
     return best if len(best) >= 40 else ""
 
 
@@ -800,17 +810,26 @@ def _player_files(html: str) -> list[dict]:
     return out
 
 
+_FILES_SPAN = r"(?:с\s*)?\d+(?:\s*(?:[-–—]|по|до)\s*\d+)?"      # «3», «1-6», «с 7 по 12»
+_FILES_WHICH = re.compile(rf"\s*[Фф]айл[ыа]?\s*№?\s*({_FILES_SPAN}(?:\s*(?:,|и|&)\s*{_FILES_SPAN})*)\s*[-–—:]\s*(.+)$")
+
+
 def _file_notes(files: list[dict], notes: list[str]) -> None:
-    """«Файл 1 - озвучка от AniStar, файлы 2,3 - озвучка от FumoDub, файл 4,5 - субтитры…»: each file's part."""
+    """«Файл 1 - озвучка от AniStar, файлы 2,3 - озвучка от FumoDub, файл 4,5 - субтитры…», «Файлы 1-6 - озвучка
+    Anistar, файлы 7-12 - субтитры от …» (hentasis, 04.11.2026: «1-6» was the file 1 of «6 - озвучка Anistar»): each
+    file's part."""
     numbered = {}
     for note in notes:
         for part in re.split(r"[,;]\s*(?=[Фф]айл)", note):
-            match = re.match(r"\s*[Фф]айл[ыа]?\s*№?\s*([\d\s,и&]+?)\s*[-–—:]\s*(.+)$", part)
+            match = _FILES_WHICH.match(part)
             if not match:
                 continue
             text = match.group(2).strip(" .!")
-            for number in re.findall(r"\d+", match.group(1)):
-                numbered.setdefault(int(number), text)
+            for first, last in re.findall(r"(\d+)(?:\s*(?:[-–—]|по|до)\s*(\d+))?", match.group(1)):
+                first = int(first)
+                last = int(last) if last and first <= int(last) <= first + 500 else first
+                for number in range(first, last + 1):
+                    numbered.setdefault(number, text)
     for item in files:
         number = re.search(r"(\d+)\s*$", item.get("title") or "")
         if number and int(number.group(1)) in numbered:

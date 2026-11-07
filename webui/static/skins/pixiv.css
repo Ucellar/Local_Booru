@@ -200,7 +200,7 @@ body { font: 400 var(--font-size)/22px var(--font); }
 .main-nav a[href="/posts"] { --i: var(--px-i-home); }
 .main-nav a[href="/manga"] { --i: var(--px-i-book); }
 .main-nav a[href="/videos"] { --i: var(--px-i-videos); }
-.main-nav a[href="/grab"] { --i: var(--px-i-grab); margin-top: 24px; }
+.main-nav a[href="/get"] { --i: var(--px-i-grab); margin-top: 24px; }
 .main-nav a[href="/parser"] { --i: var(--px-i-search); }
 .main-nav a[href="/subs"] { --i: var(--px-i-subs); }
 .main-nav a[href="/sites"] { --i: var(--px-i-globe); margin-top: 24px; }

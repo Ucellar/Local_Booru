@@ -23,6 +23,7 @@ const DEFAULT_OPTIONS = {
   blocklistSyncedAt: 0,
   mangaMode: 'blur',                 // (0.9.0) nhentai: the galleries the manga folder has — 'blur', 'hide', 'mark', 'off'
   mangaVersions: true,               // … and the other versions of their works (another language, another upload)
+  mangaSignin: true,                 // (0.10.0) the sign-in on the program's sites of manga goes to the program
 };
 const WATCHDOG_ALARM = 'lb-companion-event-watchdog';
 let eventLoopRunning = false;
@@ -66,7 +67,7 @@ async function clearFailure() {
   try { await browser.action.setBadgeText({ text: '' }); } catch (_) {}
 }
 
-async function apiFetch(path, payload, { allowUnpaired = false } = {}) {
+async function apiFetch(path, payload, { allowUnpaired = false, quiet = false } = {}) {
   const options = await getOptions();
   const base = String(options.apiBase || API_BASE_DEFAULT).replace(/\/$/, '');
   const headers = { 'Content-Type': 'application/json', 'X-Local-Booru-Companion': '1' };
@@ -77,7 +78,7 @@ async function apiFetch(path, payload, { allowUnpaired = false } = {}) {
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { ok: false, error: 'bad_json', raw: text.slice(0, 200) }; }
   if (!res.ok || data.ok === false) {
     const err = new Error(data.error || ('HTTP ' + res.status)); err.payload = data;
-    await setFailure(err.message);
+    if (!quiet) await setFailure(err.message);   // (0.10.0) quiet: a call in the background a program before 5.44.100 lacks
     throw err;
   }
   await clearFailure();
@@ -1197,6 +1198,7 @@ async function pumpBridgeTasks() {
     pollExternalBrowserBridgeOnce(null),
     pollPixivBridgeOnce(null),
     pollE621BridgeOnce(null),
+    pollMangaAsks(),                 // (0.10.0) «Сайты манги»: «Открыть сайт», «Обновить вход» (not a managed tab)
   ]);
 }
 
@@ -1216,6 +1218,7 @@ async function startEventLoop() {
         const rev = String(event.status && event.status.blocklist_rev || '');
         const { blocklistRev } = await STORAGE.get({ blocklistRev: '' });
         syncBlocklist({ force: !!rev && rev !== blocklistRev }).catch(() => {});
+        mangaSitesFollow(String(event.status && event.status.manga_signin || '')).catch(() => {});
         await pumpBridgeTasks();
       } catch (err) {
         await new Promise(resolve => setTimeout(resolve, 5000));
@@ -1225,6 +1228,217 @@ async function startEventLoop() {
   } finally {
     eventLoopRunning = false;
   }
+}
+
+// ── (0.10.0) the sign-in on the program's sites of manga ──────────────────────────────────────────────────────────
+// The owner (6.11.2026): «авто сбор куки с сайтов которые нужны программе через расширение … открыл сайт куки
+// собрались и с возможностью обновить их через расширение».  The program names its sites (/extension/manga/sites:
+// their domains, the address to open, the localStorage key of a Lib site's token); a page of one of them loaded, its
+// cookies changed, or «Обновить вход» of «Настройки → Сайты манги» — what this browser has of the site (its cookies,
+// the token) goes to the program (/extension/manga/signin).  Only those sites, only with the permission for them
+// (the manifest's; a new address — «Разрешить сайты манги» in the popup); nothing unchanged is sent twice.
+const MANGA_SITES_EVERY_MS = 30 * 60 * 1000;
+const MANGA_COOKIES_QUIET_MS = 8000;           // cookies of a site changed: sent when they are still this long
+const mangaCookieTimers = {};
+const mangaQuietTabs = new Set();               // the tabs «Обновить вход» opened for a moment: it sends for them
+
+async function mangaSites({ force = false } = {}) {
+  const kept = await STORAGE.get({ mangaSites: [], mangaSitesAt: 0 });
+  if (!force && kept.mangaSites.length && Date.now() - kept.mangaSitesAt < MANGA_SITES_EVERY_MS) return kept.mangaSites;
+  try {
+    const r = await apiFetch('/extension/manga/sites', { version: browser.runtime.getManifest().version }, { quiet: true });
+    const sites = Array.isArray(r.sites) ? r.sites.filter(x => x && x.site && Array.isArray(x.domains)) : [];
+    const { mangaSigninSent } = await STORAGE.get({ mangaSigninSent: {} });
+    sites.filter(x => !x.kept).forEach(x => { delete mangaSigninSent[x.site]; });   // the program has none: again
+    await STORAGE.set({ mangaSites: sites, mangaSitesAt: Date.now(), mangaSitesRev: String(r.rev || ''), mangaSigninSent });
+    return sites;
+  } catch (_) {
+    return kept.mangaSites;                     // the program is closed: the list it gave last
+  }
+}
+
+async function mangaSitesFollow(rev) {          // the long poll: a site's address changed in the program
+  const sites = String(rev || '').split(':')[1] || '';
+  const { mangaSitesRev } = await STORAGE.get({ mangaSitesRev: '' });
+  if (sites && sites !== (String(mangaSitesRev).split(':')[1] || '')) await mangaSites({ force: true });
+}
+
+function mangaHostOf(url) {
+  try {
+    const u = new URL(String(url || ''));
+    return /^https?:$/.test(u.protocol) ? u.hostname.toLowerCase() : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function mangaSiteOf(sites, host) {
+  host = String(host || '').toLowerCase().replace(/^\./, '');
+  if (!host) return null;
+  return sites.find(s => (s.domains || []).some(d => host === d || host.endsWith('.' + d))) || null;
+}
+
+function mangaRoots(site) {                     // its domains without the ones under another of them
+  const all = (site.domains || []).map(d => String(d).toLowerCase());
+  return all.filter(d => !all.some(o => o !== d && d.endsWith('.' + o)));
+}
+
+async function mangaTokenOf(tabId, key) {       // a Lib site's token: its own localStorage, read in its page
+  if (!tabId || !key) return '';
+  try {
+    const [res] = await browser.scripting.executeScript({
+      target: { tabId }, args: [key],
+      func: (name) => { try { return window.localStorage.getItem(name) || ''; } catch (_) { return ''; } },
+    });
+    return String(res && res.result || '').slice(0, 100000);
+  } catch (_) {
+    return '';
+  }
+}
+
+async function mangaCollect(site, tabId = 0) {
+  const seen = new Set(); const cookies = []; const missing = [];
+  for (const domain of mangaRoots(site)) {
+    let allowed = false;
+    try { allowed = await browser.permissions.contains({ origins: [`*://*.${domain}/*`] }); } catch (_) {}
+    if (!allowed) { missing.push(domain); continue; }
+    let list = [];
+    try { list = await browser.cookies.getAll({ domain }); } catch (_) {}
+    for (const c of list) {
+      const key = [c.domain, c.path, c.name].join('\t');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      cookies.push({ domain: c.domain, name: c.name, value: c.value, path: c.path,
+        expirationDate: c.session ? 0 : Number(c.expirationDate || 0), session: !!c.session });
+    }
+  }
+  return { cookies, token: site.token ? await mangaTokenOf(tabId, site.token) : '', missing };
+}
+
+async function mangaDigest(got) {
+  const text = JSON.stringify([got.cookies.map(c => [c.domain, c.path, c.name, c.value]).sort(), got.token || '']);
+  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(bytes)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function mangaSend(site, got, asked = 0) {
+  if (!asked && !got.cookies.length && !got.token) return { ok: true, empty: true };
+  const digest = await mangaDigest(got);
+  const { mangaSigninSent } = await STORAGE.get({ mangaSigninSent: {} });
+  if (!asked && mangaSigninSent[site.site] === digest) return { ok: true, same: true };
+  const r = await apiFetch('/extension/manga/signin', { site: site.site, cookies: got.cookies, token: got.token,
+    missing: got.missing, asked, version: browser.runtime.getManifest().version });
+  mangaSigninSent[site.site] = digest;
+  await STORAGE.set({ mangaSigninSent });
+  return r;
+}
+
+async function mangaReady() {
+  const options = await getOptions();
+  return !!(options.enabled && options.pairingToken && options.mangaSignin !== false);
+}
+
+async function mangaTabLoaded(tabId, url) {
+  if (mangaQuietTabs.has(tabId) || !(await mangaReady())) return;
+  const site = mangaSiteOf(await mangaSites(), mangaHostOf(url));
+  if (site) await mangaSend(site, await mangaCollect(site, tabId));
+}
+
+async function mangaOpenTabOf(site) {
+  try {
+    const tabs = await browser.tabs.query({});
+    const tab = tabs.find(t => mangaSiteOf([site], mangaHostOf(t.url)) && t.status === 'complete');
+    return tab ? tab.id : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+async function mangaCookiesChanged(domain) {
+  const site = mangaSiteOf(await mangaSites(), domain);
+  if (!site || !(await mangaReady())) return;
+  clearTimeout(mangaCookieTimers[site.site]);
+  mangaCookieTimers[site.site] = setTimeout(async () => {
+    delete mangaCookieTimers[site.site];
+    try {
+      if (await mangaReady()) await mangaSend(site, await mangaCollect(site, await mangaOpenTabOf(site)));
+    } catch (_) {}
+  }, MANGA_COOKIES_QUIET_MS);
+}
+
+async function mangaRefresh(site, asked) {      // «Обновить вход»: now; a Lib site's token — from its page
+  let tabId = site.token ? await mangaOpenTabOf(site) : 0;
+  let opened = 0;
+  if (site.token && !tabId && site.open) {      // no page of it open: one in the background, for a moment
+    try {
+      const tab = await browser.tabs.create({ url: site.open, active: false });
+      opened = tab.id;
+      mangaQuietTabs.add(opened);
+      await waitForTabComplete(tab.id, 20000);
+      tabId = tab.id;
+    } catch (_) {}
+  }
+  try {
+    return await mangaSend(site, await mangaCollect(site, tabId), asked);
+  } finally {
+    if (opened) {
+      browser.tabs.remove(opened).catch(() => {});
+      setTimeout(() => mangaQuietTabs.delete(opened), 2000);
+    }
+  }
+}
+
+async function mangaOpen(site) {                // «Открыть сайт»: a tab of it in this browser, in front
+  if (!site.open) return;
+  const tab = await browser.tabs.create({ url: site.open, active: true });
+  try { if (tab && tab.windowId) await browser.windows.update(tab.windowId, { focused: true }); } catch (_) {}
+}
+
+let mangaAsksBusy = false;
+let mangaAsksAgain = false;                     // asked while busy: one more round when this one ends
+async function pollMangaAsks() {
+  if (mangaAsksBusy) { mangaAsksAgain = true; return; }
+  const options = await getOptions();
+  if (!options.pairingToken) return;
+  mangaAsksBusy = true;
+  try {
+    do {
+      mangaAsksAgain = false;
+      const r = await apiFetch('/extension/manga/next', { version: browser.runtime.getManifest().version }, { quiet: true });
+      const asks = Array.isArray(r.asks) ? r.asks : [];
+      if (!asks.length) continue;
+      const sites = await mangaSites({ force: true });
+      for (const ask of asks) {
+        const site = sites.find(s => s.site === ask.site);
+        if (!site) continue;
+        try {
+          if (ask.action === 'open') await mangaOpen(site);
+          else if (ask.action === 'refresh') await mangaRefresh(site, Number(ask.id || 0) || 1);
+        } catch (err) {
+          await setFailure('manga_' + String(ask.action) + ':' + String(err && err.message || err));
+        }
+      }
+    } while (mangaAsksAgain);
+  } catch (_) {
+    // the program is closed or older: nothing asked
+  } finally {
+    mangaAsksBusy = false;
+  }
+}
+
+browser.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info && info.status === 'complete' && tab && tab.url) mangaTabLoaded(tabId, tab.url).catch(() => {});
+});
+if (browser.cookies && browser.cookies.onChanged) {
+  browser.cookies.onChanged.addListener((change) => {
+    const domain = change && change.cookie && change.cookie.domain;
+    if (domain) mangaCookiesChanged(domain).catch(() => {});
+  });
+}
+
+async function mangaPermissionOrigins() {       // the popup asks the browser for these (its button)
+  const sites = await mangaSites({ force: true });
+  return [...new Set(sites.flatMap(s => mangaRoots(s).map(d => `*://*.${d}/*`)))];
 }
 
 async function transferCurrentDomain(tab) {
@@ -1354,6 +1568,15 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'LB_REFRESH_PROFILES') return { ok: true, profiles: await refreshProfiles() };
     if (message.type === 'LB_REQUEST_PERMISSIONS') return await requestProfilePermissions(message.tab && message.tab.url || '');
     if (message.type === 'LB_TRANSFER_COOKIES') return await transferCurrentDomain(sender && sender.tab ? sender.tab : message.tab);
+    if (message.type === 'LB_MANGA_ORIGINS') return { ok: true, origins: await mangaPermissionOrigins() };
+    if (message.type === 'LB_MANGA_SEND_ALL') {   // (0.10.0) after «Разрешить сайты манги»: what the browser has now
+      const sites = await mangaSites({ force: true });
+      let sent = 0;
+      for (const site of sites) {
+        try { const r = await mangaSend(site, await mangaCollect(site, await mangaOpenTabOf(site))); if (r && r.changed) sent += 1; } catch (_) {}
+      }
+      return { ok: true, sites: sites.length, sent };
+    }
     if (message.type === 'LB_PIXIV_IMPORT_WORK') return await pixivImportWork(message.illustId);
     if (message.type === 'LB_E621_POLL_ONCE') {
       return await pollE621BridgeOnce(sender && sender.tab ? sender.tab : null);

@@ -440,6 +440,8 @@ class WebGalleryPage(QWidget):
             image_id = payload.get("id")
             if payload.get("episode"):             # an episode of the tab «Видео»: its series page is still shown
                 gone = not self.current_path().startswith("/videos/s/")
+            elif payload.get("stream"):            # (v5.44.106) an episode of «Смотреть»: its page is still shown
+                gone = not self.current_path().startswith("/videos/watch")
             else:
                 gone = image_id is not None and self.current_path() != f"/post/{int(image_id)}"
             if self._view is None or gone:

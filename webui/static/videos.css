@@ -259,30 +259,42 @@
 
 /* the address */
 .vget-ask { padding: 26px 28px 20px; }
-.vget-ask h1 { margin: 0; font: bold 26px/1.2 var(--font-head); color: var(--text); }
+.vget-ask h1 { margin: 0; font: bold 28px/1.15 var(--font-head); letter-spacing: -0.01em; color: var(--text); }
 .vget-lead { margin: 6px 0 18px; max-width: 68ch; color: var(--muted); font-size: 14px; line-height: 1.5; }
 .vget-form { margin: 0; }
-.vget-row { display: flex; min-width: 0; }
+/* the field and «Найти серии» are one control: its ring shows the focus and glows in the look's colour */
+.vget-row {
+  display: flex;
+  min-width: 0;
+  border-radius: calc(var(--vr) + 2px);
+  background: var(--field-bg, var(--bg));
+  box-shadow: 0 0 0 1px var(--border);
+  transition: box-shadow 0.18s;
+}
+.vget-row:focus-within {
+  box-shadow: 0 0 0 2px var(--accent), 0 12px 32px -14px color-mix(in srgb, var(--accent) 60%, transparent);
+}
 .vget-row input {
   flex: 1 1 auto;
   min-width: 0;
-  height: 48px;
-  padding: 0 16px;
-  border: 1px solid var(--border);
-  border-right: 0;
-  border-radius: var(--vr) 0 0 var(--vr);
-  background: var(--field-bg, var(--bg));
+  height: 56px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: calc(var(--vr) + 2px) 0 0 calc(var(--vr) + 2px);
+  background: transparent;
   color: var(--text);
-  font: 15px var(--font);
+  font: 16px var(--font);
 }
 .vget-row input::placeholder { color: var(--muted); }
-.vget-row input:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.vget-row .vbutton { flex: none; height: 48px; padding: 0 24px; border-radius: 0 var(--vr) var(--vr) 0; font-size: 15px; }
+.vget-row input:focus-visible { outline: none; }
+.vget-row .vbutton { flex: none; height: 56px; padding: 0 28px; border-radius: 0 calc(var(--vr) + 2px) calc(var(--vr) + 2px) 0;
+  font-size: 15px; }
 .vget-form .action-status:not(:empty) { display: block; margin-top: 8px; }
-.vget-where { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 14px; font-size: 12px;
+.vget-where { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 10px; margin-top: 14px; font-size: 12px;
   color: var(--muted); }
-.vget-sites { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
-.vget-sites li { padding: 3px 10px; border-radius: 999px; background: var(--panel-2); color: var(--text); }
+.vget-sites { display: flex; flex: 1 1 0; flex-wrap: wrap; min-width: 0; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.vget-sites li { padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); }
+.vget-sites li.vget-any { border-color: transparent; color: var(--muted); padding-left: 2px; }
 .vget-more { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px;
   margin-top: 14px; font-size: 13px; color: var(--muted); }
 .vget-saved { order: 2; margin: 0; }
@@ -308,6 +320,10 @@
 .vget-status .vlog[open] { grid-column: 1 / -1; grid-row: 3; margin-top: 8px; }
 .vget-status .job-title { font-size: 13px; }
 .vget-status .job-status { margin: 0; font-size: 13px; }
+/* the download going with no list on the page (begun again after a restart): its bar on its own */
+.vget-going { padding: 14px 20px 16px; }
+.vget-going-note { margin: 0; color: var(--muted); font-size: 13px; }
+.vget-going-note + .vbar-run:not([hidden]) { margin-top: 10px; }
 .vspin {
   display: none;
   flex: none;
@@ -337,11 +353,32 @@
 /* the title's card — under .vget: the list of series on «Видео» has cards of the same name (.vcard: poster, title,
    genres), which this grid squeezed into a column of a few pixels beside the poster (owner, 02.11.2026: genres in
    place of the title) */
-.vget .vfound { padding: 24px 26px 0; }
+.vget .vfound { position: relative; padding: 28px 28px 0; isolation: isolate; }
+/* the title's own colours: its poster, blurred, under the card's head — every title gives the page its own light;
+   it comes in once the poster has come (videos.js: --vposter, .has-poster) */
+.vget .vfound::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 0 0 auto;
+  height: 100%;
+  max-height: 560px;
+  background: var(--vposter, none) center 35% / cover no-repeat;
+  filter: blur(64px) saturate(1.6);
+  clip-path: inset(0 round var(--vr) var(--vr) 0 0);          /* the blur stays in the card (its menus are not cut) */
+  opacity: 0;
+  pointer-events: none;
+  -webkit-mask-image: linear-gradient(#000 30%, transparent 92%);
+  mask-image: linear-gradient(#000 30%, transparent 92%);
+  transition: opacity 0.7s ease-out;
+}
+.vget .vfound.has-poster::before { opacity: 0.42; }
+:root[data-variant="light"] .vget .vfound.has-poster::before { opacity: 0.3; }
+@media (prefers-reduced-motion: reduce) { .vget .vfound::before { transition: none; } }
 .vget .vcard {
   display: grid;
-  grid-template: "poster head" auto "poster more" 1fr / 160px minmax(0, 1fr);
-  column-gap: 24px;
+  grid-template: "poster head" auto "poster more" 1fr / 176px minmax(0, 1fr);
+  column-gap: 28px;
   align-items: start;
 }
 .vcard-poster { grid-area: poster; }
@@ -351,8 +388,9 @@
   position: relative;
   aspect-ratio: 2 / 3;
   overflow: hidden;
-  border-radius: calc(var(--radius) + 2px);
+  border-radius: calc(var(--radius) + 4px);
   background: var(--panel-2);
+  box-shadow: 0 22px 44px -22px rgba(0, 0, 0, 0.75), 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent);
 }
 .vcard-poster img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .vcard-initial {
@@ -364,11 +402,26 @@
   color: var(--muted);
 }
 .vcard-poster img:not([hidden]) + .vcard-initial { display: none; }
-.vfound-head { margin: 0 0 6px; color: var(--accent-text, var(--accent)); font-size: 13px; font-weight: bold; }
-.vget h2.vfound-title { margin: 0; font: bold 26px/1.2 var(--font-head); overflow-wrap: anywhere; }
+.vfound-head { margin: 0 0 6px; color: var(--muted); font-size: 13px; }
+.vget h2.vfound-title { margin: 0; font: bold 30px/1.15 var(--font-head); letter-spacing: -0.01em; overflow-wrap: anywhere;
+  text-wrap: balance; }
 .vfound-alt { margin: 6px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .vfound-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
-.vfound-facts li { padding: 3px 10px; border-radius: 999px; background: var(--panel-2); font-size: 12px; }
+.vfound-facts li { padding: 3px 10px; border-radius: 999px; background: color-mix(in srgb, var(--panel-2) 82%, transparent);
+  font-size: 12px; }
+.vfound-about {
+  display: -webkit-box;
+  max-width: 68ch;
+  margin: 14px 0 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--text) 82%, transparent);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  cursor: pointer;
+}
+.vfound-about.open { display: block; }
 .vfound-facts li.genre { padding: 2px 9px; border: 1px solid var(--border); background: none; color: var(--muted); }
 .vfound-sources { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; }
 .vfound-source {
@@ -524,6 +577,16 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vtile[data-blocked] .vtile-mark, .vtile[data-have="other"] .vtile-mark { color: var(--danger); }
 /* the download, file by file */
 .vtile-bar { position: absolute; right: 0; bottom: 0; left: 0; display: none; height: 4px; background: var(--panel); }
+.vget label.vtile[data-dl="active"]::before, .vget label.vtile[data-dl="paused"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--p, 0%);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  pointer-events: none;
+  transition: width 0.4s;
+}
+.vget label.vtile[data-dl="paused"]::before { background: color-mix(in srgb, var(--muted) 18%, transparent); }
 .vtile-bar i { display: block; width: var(--p, 0%); height: 100%; background: var(--accent); transition: width 0.4s; }
 .vtiles .vtile[data-dl] { background: var(--panel-2); }
 .vtiles .vtile[data-dl="active"] { border-color: var(--accent); }
@@ -549,11 +612,13 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
   position: sticky;
   bottom: 0;
   z-index: 3;
-  margin: 22px -26px 0;
-  padding: 14px 26px 16px;
+  margin: 22px -28px 0;
+  padding: 14px 28px 16px;
   border-top: 1px solid var(--border);
   border-radius: 0 0 var(--vr) var(--vr);
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 86%, transparent);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
   box-shadow: 0 -14px 24px -22px rgba(0, 0, 0, 0.7);
 }
 .vget .vbar-go { gap: 8px 16px; margin: 0; }
@@ -573,9 +638,24 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vget .vbar-run .job-head { gap: 6px 10px; margin: 0; }
 .vbar-run .job-title { font-size: 14px; }
 .vbar-run .job-status { margin: 0; }
-.vbar-run .job-head .vbutton { margin-left: auto; }
+.vbar-buttons { display: flex; gap: 8px; margin-left: auto; }
 .vget .vmeter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin: 10px 0 0; }
-.vget .vmeter progress { flex: 1 1 320px; height: 10px; accent-color: var(--accent); }
+.vget .vmeter progress {
+  flex: 1 1 320px;
+  height: 8px;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--panel-2);
+  accent-color: var(--accent);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.vget .vmeter progress::-webkit-progress-bar { border-radius: 999px; background: var(--panel-2); }
+.vget .vmeter progress::-webkit-progress-value { border-radius: 999px; background: var(--accent); transition: width 0.4s; }
+.vget .vmeter progress::-moz-progress-bar { border-radius: 999px; background: var(--accent); }
+.vmeter-pct { min-width: 3.2em; font: bold 20px/1 var(--font-head); font-variant-numeric: tabular-nums; text-align: right; }
+.vmeter-pct:empty { display: none; }
 .vmeter-text { font-size: 13px; font-variant-numeric: tabular-nums; }
 .vbar-end { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
 .vbar-end:has(> :not([hidden])) { margin-top: 10px; }

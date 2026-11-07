@@ -419,6 +419,13 @@ DEFAULT_SETTINGS = {
     "media_muted": True,
     "media_volume": 50,
     "manga_root": "",
+    "manhwa_root": "",                     # (v5.44.59) the manhwa folder; "" — «manhwa» in the archive
+    "manga_site_addresses": {},            # (v5.44.78) the owner's addresses of the sites of manga that moved
+    "manga_language": "ru",                # (v5.44.79) MangaDex's chapters: "ru", "en", "original" (the card picks others)
+    "manga_archive_auto": True,            # (v5.44.81) «Из архива»: the titles of the folders known by themselves, in the background
+    "parser_skip_manga": True,             # (v5.44.84) the parser leaves the manga of its folder to «Из архива»
+    "manga_archive_pictures": True,        # (v5.44.81) …and by their pictures (SauceNAO, the parser's key) when nothing else tells
+    "manga_archive_pictures_per_day": 40,  # (v5.44.81) SauceNAO's searches a day for the archive at most
     "video_root": "",                   # the folder of series for the tab «Видео» ("" — «video» in the archive)
     "video_tab_seconds": 60,            # a video card longer than this is on the tab «Видео», not in the gallery
     "video_av1_own": "",                # (v5.44) the program's own player shows AV1 here: "yes", "no" (learnt), "" — not known
@@ -430,6 +437,7 @@ DEFAULT_SETTINGS = {
     "post_sets_enabled": True,          # the сборка over a card's picture (webui/pages/post_sets.py)
     "card_sets_tiles": True,            # a сборка is one tile of the gallery (core/card_sets.py)
     "card_sets_auto": True,             # the program puts сборки together by itself
+    "comic_manga_auto": True,           # (v5.44.111) comics of the gallery and manga of the parser's folder → manga folder
     "card_sets_ask_sites": True,        # the sites asked once about the posts of the cards from before (core/site_posts.py)
     "card_sets_remote": True,           # (v5.30) a parent post's сборка shows its parts the library has not («api»)
     "show_reaction_counter": False,
@@ -517,6 +525,16 @@ DEFAULT_SETTINGS = {
     "webview_gpu": "auto",
     # New web gallery (webui): 0 = any free port on 127.0.0.1; pictures per page.
     "webui_port": 0,
+    "phone_access": False,             # (v5.44.64) the owner's phone let in through Tailscale (core/phone_access)
+    "phone_name": "",                  # the computer's name in the tailnet then
+    "phone_login": "",                 # the Tailscale account of the computer then
+    # (v5.44.71) or through the owner's own server (core/phone_relay): on, the server for SSH, the phone's https address,
+    # the server's own key at the setup (another one — refused); the password of the setup is never kept
+    "phone_relay": False,
+    "phone_relay_host": "",
+    "phone_relay_ssh_port": 22,
+    "phone_relay_address": "",
+    "phone_relay_host_key": "",
     "webui_posts_per_page": 0,          # 0: as many as fit the window (counted by the page)
     "interface_module_order": [],
     "interface_extra_collapsed": True,

@@ -30,6 +30,11 @@
         list.style.left = "0";
         list.style.right = "auto";
       }
+      // (v5.44.59) as tall as the window has room for below it: a header that wrapped in a narrow window (one more
+      // item in the menu — «Манхва») puts the list lower than the 72 px of the stylesheet allow for
+      list.style.maxHeight = "";
+      const room = window.innerHeight - list.getBoundingClientRect().top - 8;
+      if (room < list.getBoundingClientRect().height) list.style.maxHeight = Math.max(160, room) + "px";
       const current = list.querySelector(".skin-item.active") || list.querySelector(".skin-item");
       if (current) current.focus();
     }
@@ -226,6 +231,13 @@
     return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
   }
 
+  // The same page once more, as it is now: (v5.44.55) by a «replace» it gives way softly (a reload just jumps); an
+  // address with #… would only scroll — that one is reloaded.
+  function showAgain() {
+    if (location.hash) location.reload();
+    else location.replace(location.href);
+  }
+
   // ── buttons ──────────────────────────────────────────────────────────────
   const actions = {
     "skin-menu": () => openSkinMenu(skinMenu().querySelector(".skin-list").hidden),
@@ -250,6 +262,17 @@
       skinForAll();
       const button = skinMenu().querySelector(".skin-button");
       if (button) button.focus();
+    },
+
+    // (v5.44.55) «Плавные переходы» — on every page (static/motion.js reads it on the next page; this one at once)
+    motion(el) {
+      const on = el.getAttribute("aria-checked") !== "true";
+      el.setAttribute("aria-checked", on ? "true" : "false");
+      const said = el.querySelector("small");
+      if (said) said.textContent = on ? "включены — страницы и картинки появляются мягко" : "выключены — всё сменяется сразу";
+      root.dataset.motionPref = on ? "on" : "off";
+      root.dataset.motion = on && !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "on" : "off";
+      remember("motion", on ? "on" : "off");
     },
 
     drawer: () => setDrawer(!root.classList.contains("drawer-open")),
@@ -488,6 +511,40 @@
       } catch (err) {
         say(el, err.message, true);
       } finally {
+        el.disabled = false;
+      }
+    },
+
+    // (v5.44.53) «SFW / Всё / NSFW» in the header (webui/content_mode.py): the page is shown again in the new mode,
+    // or — when it is hidden there — the list it belongs to (the program's first page)
+    async "content-mode"(el) {
+      const mode = el.dataset.mode;
+      if (!mode || root.dataset.contentMode === mode) return;
+      document.querySelectorAll(".mode-switch [data-mode]").forEach((b) => {
+        const on = b.dataset.mode === mode;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-pressed", on ? "true" : "false");
+      });
+      root.dataset.contentMode = mode;
+      try {
+        const answer = await postJson("/api/content-mode", { mode, path: location.pathname + location.search });
+        if (answer.go) location.assign(answer.go);
+        else showAgain();
+      } catch (err) {
+        toast("Режим не переключился: " + err.message, true);
+      }
+    },
+
+    // «Это хентай» / «Это не хентай» on a title's page
+    async "content-mark"(el) {
+      el.disabled = true;
+      try {
+        const answer = await postJson("/api/content-mark", {
+          kind: el.dataset.kind, id: el.dataset.id, hentai: el.dataset.value === "hentai" });
+        if (answer.go) location.assign(answer.go);
+        else showAgain();
+      } catch (err) {
+        say(el, err.message, true);
         el.disabled = false;
       }
     },
@@ -1214,8 +1271,9 @@
     }
   })();
   const nativeVideo = (() => {
-    // a card's video (data-id) or an episode of the tab «Видео» (data-episode: where to start, played once)
-    const box = document.querySelector(".native-video[data-id], .native-video[data-episode]");
+    // a card's video (data-id) or an episode of the tab «Видео» (data-episode: where to start, played once);
+    // (v5.44.106) an episode of «Смотреть» (data-stream: the token of its stream on the program — watch.js sets it)
+    const box = document.querySelector(".native-video[data-id], .native-video[data-episode], .native-video[data-stream]");
     if (!box) return null;
     const frame = box.querySelector(".nv-frame");
     const play = box.querySelector(".nv-play");
@@ -1299,10 +1357,13 @@
       box.classList.remove("failed");
       starting = (async () => {
         try {
+          if (box.dataset.stream === "") throw new Error("выберите серию");
           const what = box.dataset.episode
             ? { cmd: "start", episode: box.dataset.episode, from: Number(box.dataset.from) || 0,
                 loop: box.dataset.loop !== "0" }
-            : { cmd: "start", id: Number(box.dataset.id) };
+            : box.dataset.stream !== undefined
+              ? { cmd: "start", stream: box.dataset.stream, from: Number(box.dataset.from) || 0, loop: false }
+              : { cmd: "start", id: Number(box.dataset.id) };
           const reply = await appRequest("video", Object.assign(what, place()));
           token = reply.token || "";
           if (!token) throw new Error("видео не запустилось");
@@ -1574,6 +1635,7 @@
     // the window's own player (mpv where it is installed) — when this one cannot play the file; it goes on from
     // this moment (and gives the moment back: ``resume``)
     async function full() {
+      if (box.dataset.stream !== undefined) return setFull(true);   // (v5.44.106) a stream: this player, whole screen
       if (fullOn) setFull(false);              // the window's player shows in the window as it was
       await fresh();
       const what = moment();

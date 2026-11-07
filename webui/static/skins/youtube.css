@@ -276,14 +276,14 @@ body { font: 400 var(--font-size)/1.43 var(--font); }
 .main-nav a[href="/posts"] { --i: var(--yt-i-home); }
 .main-nav a[href="/manga"] { --i: var(--yt-i-book); }
 .main-nav a[href="/videos"] { --i: var(--yt-i-videos); }
-.main-nav a[href="/grab"] { --i: var(--yt-i-grab); }
+.main-nav a[href="/get"] { --i: var(--yt-i-grab); }
 .main-nav a[href="/parser"] { --i: var(--yt-i-search); }
 .main-nav a[href="/subs"] { --i: var(--yt-i-subs); }
 .main-nav a[href="/sites"] { --i: var(--yt-i-globe); }
 .main-nav a[href="/dupes"] { --i: var(--yt-i-copy); }
 .main-nav a[href="/diag"] { --i: var(--yt-i-pulse); }
-.main-nav a[href="/grab"], .main-nav a[href="/diag"] { margin-top: 12px; position: relative; }
-.main-nav a[href="/grab"]::after, .main-nav a[href="/diag"]::after {   /* YouTube's lines between the groups */
+.main-nav a[href="/get"], .main-nav a[href="/diag"] { margin-top: 12px; position: relative; }
+.main-nav a[href="/get"]::after, .main-nav a[href="/diag"]::after {   /* YouTube's lines between the groups */
   content: "";
   position: absolute;
   top: -7px;
@@ -614,8 +614,8 @@ table.info th { color: var(--muted); font-weight: 400; }
     white-space: nowrap;
   }
   .main-nav a.active { font-weight: 500; }
-  .main-nav a[href="/grab"], .main-nav a[href="/diag"] { margin-top: 0; }
-  .main-nav a[href="/grab"]::after, .main-nav a[href="/diag"]::after { content: none; }
+  .main-nav a[href="/get"], .main-nav a[href="/diag"] { margin-top: 0; }
+  .main-nav a[href="/get"]::after, .main-nav a[href="/diag"]::after { content: none; }
 }
 @media (max-width: 1100px) {
   .page-post .layout.with-sidebar { grid-template-columns: minmax(0, 1fr); }

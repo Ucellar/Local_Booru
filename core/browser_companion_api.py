@@ -1191,6 +1191,8 @@ class _Handler(BaseHTTPRequestHandler):
             "browser_import": (_IMPORT_MANAGER.status() if _IMPORT_MANAGER is not None else {"queued": 0, "active": 0, "recent": []}),
             # (0.8.0) the program's blocklist changed → the long poll wakes, the extension takes the new one
             "blocklist_rev": __import__("core.companion_page", fromlist=["blocklist_rev"]).blocklist_rev(),
+            # (v5.44.100, 0.10.0) «Сайты манги» asked the extension (or a site's address changed) → it wakes too
+            "manga_signin": __import__("core.manhwa_access", fromlist=["browser_rev"]).browser_rev(),
         }
 
     def do_OPTIONS(self) -> None:
@@ -1242,8 +1244,38 @@ class _Handler(BaseHTTPRequestHandler):
         if client is None:
             self._send_json(401 if self._protocol_marker_ok() else 403, {"ok": False, "error": "pairing_required" if self._protocol_marker_ok() else "forbidden"}, cors=self._protocol_marker_ok())
             return
+        try:                                  # (v5.44.100) «Сайты манги» shows whether the extension is there
+            from core import manhwa_access
+            manhwa_access.browser_seen(str(data.get("version") or ""), manga=path.startswith("/extension/manga/"))
+        except Exception:                     # noqa: BLE001 — a note for a page, never the extension's answer
+            pass
         if path in {"/extension/status", "/extension/health"}:
             self._send_json(200, self._status_payload())
+            return
+        if path == "/extension/manga/sites":
+            # (v5.44.100, extension 0.10.0) the sites of manga: their domains (whose cookies are theirs), the address
+            # «Открыть сайт» opens, the localStorage key of a Lib site's token
+            from core import manhwa_access
+            self._send_json(200, {"ok": True, "sites": manhwa_access.browser_sites(), "rev": manhwa_access.browser_rev()})
+            return
+        if path == "/extension/manga/signin":
+            # …what the owner's browser has of one of them (its page loaded, its cookies changed, the program asked)
+            from core import manhwa_access
+            asked = str(data.get("asked") or "0")
+            try:
+                got = manhwa_access.take_from_browser(
+                    str(data.get("site") or "")[:40], data.get("cookies") if isinstance(data.get("cookies"), list) else [],
+                    str(data.get("token") or ""), asked=int(asked) if asked.isdigit() else 0,
+                    missing=data.get("missing") if isinstance(data.get("missing"), list) else [])
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": "unknown_site", "message": str(exc)[:200]})
+                return
+            self._send_json(200, {"ok": True, **got})
+            return
+        if path == "/extension/manga/next":
+            # …the asks of «Сайты манги»: «Открыть сайт», «Обновить вход»
+            from core import manhwa_access
+            self._send_json(200, {"ok": True, "asks": manhwa_access.browser_asks(), "rev": manhwa_access.browser_rev()})
             return
         if path == "/extension/open":
             self._send_json(200, open_card(self.settings, data.get("image_id")))
@@ -1342,7 +1374,7 @@ class _Handler(BaseHTTPRequestHandler):
             deadline = time.monotonic() + max(1.0, min(25.0, float(self.settings.get("browser_companion_event_wait_seconds", 20) or 20)))
             payload = self._status_payload()
             def signature(p):
-                compact = {k: p.get(k) for k in ("e621_bridge","pixiv_bridge","external_browser","browser_import","download_policy","blocklist_rev")}
+                compact = {k: p.get(k) for k in ("e621_bridge","pixiv_bridge","external_browser","browser_import","download_policy","blocklist_rev","manga_signin")}
                 return hashlib.sha256(_json_bytes(compact)).hexdigest()
             current = signature(payload)
             while before and current == before and time.monotonic() < deadline:

@@ -26,11 +26,17 @@ VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v"}
 
 
 def register(router) -> None:
-    router.add("GET", r"/", lambda req: Response.redirect("/posts"))
+    router.add("GET", r"/", _home)
     router.add("GET", r"/posts", posts)
     router.add("GET", r"/post/(?P<id>\d+)", post)
     router.add("GET", r"/tags", tags)
     router.add("GET", r"/random", random_post)
+
+
+def _home(req: Request) -> Response:
+    """«/»: the gallery — (v5.44.53) in «SFW» the manga (``webui/content_mode.py``)."""
+    from webui import content_mode
+    return Response.redirect(content_mode.home())
 
 
 # ── shared bits ──────────────────────────────────────────────────────────────
@@ -633,25 +639,42 @@ def _set_members(req: Request, ctx: dict, image_id: int) -> list:
     return found["members"] if found and found["index"] >= 0 else []
 
 
+def tile_card(req: Request, ctx: dict, at: int, last: bool) -> dict | None:
+    """The card of the search's tile at place ``at``: a сборка's last card (``last``) or first one, else the tile's."""
+    item = data.item_at(req.settings, ctx["tags"], section=ctx["section"], source=ctx["source"], order=ctx["order"],
+                        index=at)
+    if item is None:
+        return None
+    cards = _set_members(req, ctx, int(item["id"]))
+    return (cards[-1] if last else cards[0]) if cards else item
+
+
+def neighbours(req: Request, ctx: dict, index: int, image_id: int = 0) -> dict:
+    """The cards before and after this one in its search: {"prev", "prev_at", "next", "next_at" — a card (None at
+    the ends) and its tile's place; "members", "place" — the card's сборка and its place in it}.  The cards of a
+    сборка (one tile of the gallery) come one after another — after its last card the next tile (its first card),
+    before its first one the previous tile (its last card).  {} — not opened from a search.  (v5.44.65: the post
+    page and the phone's viewer.)"""
+    if index < 0:
+        return {}
+    members = _set_members(req, ctx, image_id) if image_id else []
+    place = next((n for n, m in enumerate(members) if int(m["id"]) == int(image_id)), -1)
+    prev_item, prev_at = ((members[place - 1], index) if place > 0
+                          else (tile_card(req, ctx, index - 1, True), index - 1))
+    next_item, next_at = ((members[place + 1], index) if 0 <= place < len(members) - 1
+                          else (tile_card(req, ctx, index + 1, False), index + 1))
+    return {"prev": prev_item, "prev_at": prev_at, "next": next_item, "next_at": next_at, "members": members,
+            "place": place}
+
+
 def _post_nav(req: Request, ctx: dict, index: int, per_page: int, image_id: int = 0) -> str:
-    """«Предыдущая / Следующая» of a search; the cards of a сборка (one tile of the gallery) one after another — after
-    its last card the next tile (its first card), before its first one the previous tile (its last card)."""
+    """«Предыдущая / Следующая» of a search (:func:`neighbours`)."""
     if index < 0:
         return ""
     parts = []
-    members = _set_members(req, ctx, image_id) if image_id else []
-    place = next((n for n, m in enumerate(members) if int(m["id"]) == int(image_id)), -1)
-
-    def tile(at: int, last: bool):
-        item = data.item_at(req.settings, ctx["tags"], section=ctx["section"], source=ctx["source"],
-                            order=ctx["order"], index=at)
-        if item is None:
-            return None
-        cards = _set_members(req, ctx, int(item["id"]))
-        return (cards[-1] if last else cards[0]) if cards else item
-
-    prev_item, prev_at = (members[place - 1], index) if place > 0 else (tile(index - 1, True), index - 1)
-    next_item, next_at = (members[place + 1], index) if 0 <= place < len(members) - 1 else (tile(index + 1, False), index + 1)
+    near = neighbours(req, ctx, index, image_id)
+    members = near["members"]
+    prev_item, prev_at, next_item, next_at = near["prev"], near["prev_at"], near["next"], near["next_at"]
     if prev_item:
         href = url(f"/post/{prev_item['id']}", i=prev_at, **ctx)
         parts.append(f'<a class="nav-prev" rel="prev" data-key="ArrowLeft" href="{esc(href)}">'
@@ -667,7 +690,7 @@ def _post_nav(req: Request, ctx: dict, index: int, per_page: int, image_id: int 
             # the same address as the next page's picture (with its version), or the browser fetches it twice
             prefetch = f'<link rel="prefetch" href="{esc(data.media_url("media", next_item))}">'
         if next_at == index and members:            # inside a сборка: past its other cards at once
-            after = tile(index + 1, False)
+            after = tile_card(req, ctx, index + 1, False)
             if after:
                 href = url(f"/post/{after['id']}", i=index + 1, **ctx)
                 parts.append(f'<a class="nav-skip" href="{esc(href)}" title="Следующая карточка после этой сборки">'

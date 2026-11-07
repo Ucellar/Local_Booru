@@ -3,7 +3,8 @@ shows a parent and its children (the green box «У этой карточки 3 
 marked — with «изменить» (move, take out, name, take apart, add cards); and the actions of the gallery's choice
 («Собрать в одну сборку», «Разобрать сборки»).
 
-``/api/post/<id>/sets`` — the card's сборка as data; ``/api/sets/{remove,dissolve,move,rename,gather}`` — the edits.
+``/api/post/<id>/sets`` — the card's сборка as data; ``/api/sets/{remove,dissolve,move,rename,gather}`` — the edits;
+(v5.44.111) ``/api/sets/manga`` — «В мангу» (``core/comic_manga.py``).
 
 (v5.44.1) A card of no сборка whose post has a family on a site the grabber searches — a child (its parent known), or
 any other (its children asked) — gets the same box, hidden until the site shows parts the library has not
@@ -39,6 +40,7 @@ def register(router) -> None:
     router.add("POST", r"/api/sets/move", move)
     router.add("POST", r"/api/sets/rename", rename)
     router.add("POST", r"/api/sets/gather", gather)
+    router.add("POST", r"/api/sets/manga", to_manga)
 
 
 def enabled(settings: dict) -> bool:
@@ -192,6 +194,8 @@ def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_curre
         f'placeholder="без названия"></label> <button type="button" data-set-act="rename">Сохранить</button> '
         f'<a class="post-set-add" href="{esc(add)}">+ добавить карточки</a> '
         f'<button type="button" class="danger" data-set-act="dissolve">Разобрать сборку</button> '
+        f'<button type="button" data-set-act="manga" title="Картинки сборки — мангой в папку манги, карточки — в '
+        f'корзину (оттуда их можно вернуть)">В мангу</button> '
         f'<span class="action-status" role="status"></span>'
         f'<p class="hint">‹ › — переставить, × — убрать карточку из сборки (сама программа её больше в сборки не '
         f'положит). Сборку, которую вы изменили, программа не пересобирает — только добавляет в конец новые части.</p>'
@@ -280,6 +284,21 @@ def dissolve(req: Request) -> Response:
         if not wanted:
             raise card_sets.SetError("Среди выбранных нет сборок")
         return card_sets.dissolve(req.settings, wanted)
+    return _edit(req, run)
+
+
+def to_manga(req: Request) -> Response:
+    """(v5.44.111) «В мангу»: the сборка's pictures copied into the manga folder as one manga, its cards to the trash
+    (``core/comic_manga.py``) — {"name", "pages", "trashed", "page"}: the page of the manga in «Манга»."""
+    from core import comic_manga
+    from core.card_sets import SetError
+
+    def run(body: dict) -> dict:
+        try:
+            comic = comic_manga.of_set(req.settings, int(body.get("set") or 0))
+            return comic_manga.move(req.settings, comic)
+        except (comic_manga.ComicError, OSError) as exc:
+            raise SetError(str(exc)) from exc
     return _edit(req, run)
 
 

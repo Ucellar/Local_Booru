@@ -936,7 +936,22 @@ class Merger:
         key = dub_key(self.title(remote))
         return any(dub_key(name) == key for name in self.tracks(self.folder / f"{self.stem(remote)}.mkv"))
 
-    def __call__(self, *, say, stop) -> dict:
+    def waiting(self) -> set:
+        """The episodes whose voice-overs lie in their sub-folders, not in the episode's file: left by a download that
+        did not end (the program closed, «Остановить», an error) — put together before the next one begins."""
+        out = set()
+        for remote in self.files:
+            if self.takes(remote) and remote.group:
+                place = self.folder / remote.group
+                stem = self.stem(remote)
+                if any((place / f"{stem}{ext}").is_file() for ext in (".mp4", ".ts", ".aac")):
+                    out.add(stem)
+        return out
+
+    def __call__(self, *, say, stop, stems=None) -> dict:
+        """The voice-overs' files of the episodes into their «Серия NN.mkv» — every episode of the folder, or those of
+        ``stems`` (one whose files have all come: put together at once, not at the end of the whole download — owner,
+        05.11.2026: a season stopped half-way stayed half in «Озвучка JAM»)."""
         from core import video_library
         if not available():
             say("Собрать озвучки в один файл нельзя: в программе нет библиотеки PyAV — серии остались отдельными файлами")
@@ -946,6 +961,8 @@ class Merger:
             if not self.takes(remote):
                 continue
             stem = self.stem(remote)
+            if stems is not None and stem not in stems:
+                continue
             place = self.folder / remote.group if remote.group else self.folder
             path = next((place / f"{stem}{ext}" for ext in (".mp4", ".ts", ".aac") if (place / f"{stem}{ext}").is_file()),
                         None)                    # «.aac»: a voice-over's sound alone (``core/cvh_sound``)
@@ -957,7 +974,7 @@ class Merger:
                 say("Сборка остановлена — остальные серии соберутся со следующего «Скачать»")
                 break
             names = ", ".join(name for name, _path in files)
-            say(f"Сборка {n}/{len(episodes)}: {stem} — {names}")
+            say(f"Сборка {n}/{len(episodes)}: {stem} — {names}" if len(episodes) > 1 else f"Сборка: {stem} — {names}")
             from core.video_download import _set_meter
             _set_meter(merging=True, index=n, count=len(episodes), name=stem, file=-1, done=0, total=0, speed=0)
             prefer = None                        # the voice-over chosen for the episode's picture (its file)

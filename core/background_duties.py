@@ -40,6 +40,20 @@
   every tag (the library had kept the first category anyone gave a tag — «female» a character on every card), then the
   tags whose sites' answers may have changed it (8 seconds at most a round); not while «Обслуживание» has the library,
   nor while the base is read-only.
+- every 10 minutes: the new chapters of the titles «Скачать манхву» downloaded (``manhwa_download.watch_round``,
+  v5.44.60): when it is due — at night once a day, any time when the last round is a day old (the computer was off at
+  night) — a page task of its own (``manhwa_download.TASK``: the page «Скачать манхву» shows it, «Остановить» stops it) asks
+  the sites and downloads the free chapters the folders have not, the paid ones that became free too; a download the
+  person started goes first (the round waits for its end; (v5.44.74) and for the queue of them — ``manhwa_queue``,
+  which goes on after the round).
+- (v5.44.81) every 10 minutes: «Скачать → Из архива» knows a few titles of the manga and manhwa folders by itself
+  (``manga_archive.background_round``: the new ones, the ones SauceNAO put off, «не нашлось» again after a week — a
+  page task of its own, «Узнаю тайтлы в фоне»; the folders are looked at in a thread of its own, so this one never
+  waits for them); not when «Узнавать само» is off, while the page's own work or a download of manga goes.
+- (v5.44.111) every 5 minutes: the comics of the gallery (a pool of e621, a сборка of a comic of 15 pages and more)
+  and the manga of the parser's folder — to the manga folder (``comic_manga.background_round``: copied and checked,
+  the cards to the trash «перенесено в мангу»; 45 seconds a round, again in 20 when more waits); not while
+  «Обслуживание» has the library, nor while the base is read-only.
 
 One daemon thread, so none of this waits in the window's thread (the old window's timers wrote to the base from
 it, and a VACUUM of «Обслуживание» froze the window for the base's busy time).  It ends with the program: the exit
@@ -69,10 +83,15 @@ INTERVALS = {                        # seconds between the runs of each duty
     "skips": 3 * 60,
     "e621_export": 10 * 60,
     "tag_categories": 60,
+    "manhwa": 10 * 60,
+    "phone": 10 * 60,
+    "manga_archive": 10 * 60,
+    "comic_manga": 5 * 60,
 }
 FIRST_RUN = {"lifecycle": 1.5, "subscriptions": 60, "checkpoint": 30, "stalls": 60, "visual": 45,
              "durations": 20, "site_posts": 75, "card_sets": 25, "originals": 150,
-             "skips": 90, "e621_export": 60, "tag_categories": 15}                  # seconds after the start
+             "skips": 90, "e621_export": 60, "tag_categories": 15, "manhwa": 120,
+             "phone": 8, "manga_archive": 240, "comic_manga": 200}              # seconds after the start
 VISUAL_AGAIN = 30                    # seconds to the next round of «фото или рисунок» when the last one was cut short
 DURATIONS_AGAIN = 5                  # seconds to the next round of video lengths when cards are still waiting
 SITE_POSTS_AGAIN = 15                # seconds to the next round of questions to the sites when posts are still waiting
@@ -80,6 +99,7 @@ SITE_POSTS_SHARED_AGAIN = 45         # …while the parser or the subscriptions 
 SKIPS_AGAIN = 10                     # seconds to the next round of openings and endings when episodes still wait
 ORIGINALS_AGAIN = 20                 # seconds to the next round of originals when reduced copies still wait
 ORIGINALS_SHARED_AGAIN = 60          # …while the parser or the subscriptions use the sites
+COMIC_MANGA_AGAIN = 20               # seconds to the next round of comics to the manga folder when more wait
 TICK = 1.0
 
 _LOCK = threading.Lock()
@@ -312,6 +332,76 @@ class BackgroundDuties:
         result = tag_consensus.review(settings, budget=8.0, log=_LOG.info)
         if (changed or result.get("changed")) and self._changed is not None:
             self._changed()
+
+    def _manhwa(self, settings: dict) -> None:
+        """(v5.44.60) The new chapters of the downloaded manhwa, once a day: a page task of its own, so this thread
+        never waits for the sites."""
+        if self._stopping():
+            return
+        from core import manhwa_download, manhwa_queue, page_jobs
+        if not manhwa_download.due():
+            return
+        current = page_jobs.current(manhwa_download.TASK)
+        if current is not None and current.running or manhwa_queue.waiting():
+            return                                         # a download of the person's: the round waits for it
+        live = self._settings
+
+        def run(say, stop_check):
+            try:
+                return manhwa_download.watch_round(dict(live() or {}), say=say,
+                                                   stop_check=lambda: stop_check() or self._stopping())
+            finally:
+                if not stop_check():                       # (v5.44.74) a download asked meanwhile — now
+                    manhwa_queue.next_soon()
+        try:
+            page_jobs.start(manhwa_download.TASK, "Новые главы манхвы", run)
+        except page_jobs.TaskBusy:
+            return
+        _LOG.info("manhwa: the round of new chapters started")
+
+    def _manga_archive(self, settings: dict) -> None:
+        """(v5.44.81) «Из архива» by itself: a round of a few titles, as a page task of its own."""
+        if self._stopping():
+            return
+        from core import manga_archive
+        manga_archive.background_round(settings, live=self._settings)   # it says in the log when a round begins
+
+    def _phone(self, settings: dict) -> None:
+        """(v5.44.64) The owner's phone let in (``core/phone_access``): Tailscale still takes its address to this run's
+        port — another one after a busy port, the computer renamed in the tailnet; (v5.44.71) through the owner's
+        server — the connection to it is there (``core/phone_relay``: it makes itself again when lost; this only
+        starts it after the start of the program and stops it when switched off)."""
+        if self._stopping():
+            return
+        from webui import service
+        server = service.running()
+        if server is None:
+            return
+        from core import phone_relay
+        phone_relay.keep(settings, server.port)
+        if not settings.get("phone_access"):
+            return
+        from core import phone_access
+        changes = phone_access.keep(settings, server.port)
+        if changes:
+            from webui import settings_store
+            settings_store.save(changes)
+            _LOG.info("phone: the computer's name or account in Tailscale changed: %s", sorted(changes))
+
+    def _comic_manga(self, settings: dict) -> None:
+        """(v5.44.111) The comics of the gallery and the manga of the parser's folder to the manga folder
+        (``core/comic_manga``); not while «Обслуживание» has the library, stopped at the exit."""
+        from core.database.connection import writes_blocked
+        if self._stopping() or writes_blocked() or _library_taken():
+            return
+        from core import comic_manga
+        result = comic_manga.background_round(settings, stop_check=lambda: self._stopping() or _library_taken())
+        if result.get("moved") or result.get("copied"):
+            _LOG.info("comics and manga to the manga folder: %s", ", ".join(result["moved"] + result["copied"]))
+            if self._changed is not None:
+                self._changed()
+        if result.get("more"):
+            self._next_in["comic_manga"] = COMIC_MANGA_AGAIN
 
     def _card_sets(self, settings: dict) -> None:
         """The сборки put together again when the library changed since the last time."""

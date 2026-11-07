@@ -99,11 +99,13 @@ def _preview_html(what: str, value: str, scope: str, rows: list, token: str) -> 
         return f'<p class="reset-none">Ничего не найдено: {esc(label)}.</p>'
     count = len(rows)
     size = sum(int(r.get("size_bytes") or 0) for r in rows)
+    from webui import content_mode
+    sfw = content_mode.mode() == "sfw"           # (v5.44.53) «SFW»: the gallery's pictures are not shown
     pictures = "".join(
         f'<li><a href="/post/{int(r["id"])}" title="{esc(r.get("file_name") or "")}">'
         f'<img src="/thumb/{int(r["id"])}" alt="{esc(r.get("file_name") or "")}" loading="lazy" decoding="async"></a></li>'
-        for r in rows[:SAMPLE])
-    more = f'<p class="hint">…и ещё {diag._n(count - SAMPLE)}.</p>' if count > SAMPLE else ""
+        for r in rows[:SAMPLE]) if not sfw else ""
+    more = f'<p class="hint">…и ещё {diag._n(count - SAMPLE)}.</p>' if count > SAMPLE and not sfw else ""
     gallery = ""
     if what == "tag":
         gallery = (f'<a href="{esc(url("/posts", tags=cleanup.normalized("tag", value)))}">'

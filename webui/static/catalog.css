@@ -1,0 +1,156 @@
+/* Local Booru «Лента» of «Манга», «Манхва», «Видео» (v5.44.90, webui/pages/catalog.py, catalog.js): the titles of the
+   sites with filters on the right — the owner's approved mockups «Манга → Онлайн» and «Видео → Онлайн».  Every look
+   gets its colours from its own tokens (--panel, --accent…).  Every rule starts with .cat: the looks style button,
+   input and a:hover by their tags, a class alone would lose to «button:hover». */
+.cat {
+  --cat-r: 12px;
+  --cat-line: color-mix(in srgb, var(--text) 24%, transparent);
+  max-width: 1360px; margin: 0 auto; padding: 28px 24px 48px; box-sizing: border-box;
+  display: flex; flex-wrap: wrap; gap: 28px; align-items: flex-start; color: var(--text);
+}
+.cat .cat-main { flex: 999 1 640px; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.cat .cat-vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.cat [hidden] { display: none !important; }
+.cat :is(button, a, input, select):focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+
+/* ── the head ── */
+.cat .cat-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+.cat .cat-head h1 { margin: 0; font: 800 28px/1.2 var(--font-head, inherit); letter-spacing: -0.01em; color: var(--text); }
+.cat .cat-where { color: var(--muted); }
+.cat .cat-sites { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat .cat-sites a { padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; color: var(--text);
+  font-size: 13px; line-height: 1.3; text-decoration: none; }
+.cat .cat-sites a:hover { border-color: var(--accent); color: var(--text); text-decoration: none; }
+.cat .cat-sites a.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent);
+  font-weight: 600; }
+
+/* ── the name and the order ── */
+.cat .cat-bar { display: flex; flex-wrap: wrap; gap: 10px; }
+.cat .cat-search { flex: 1 1 320px; display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 0 14px;
+  box-sizing: border-box; background: var(--field-bg, var(--panel)); border: 1px solid var(--border); border-radius: 10px;
+  cursor: text; }
+.cat .cat-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.cat .cat-search input { flex: 1 1 auto; min-width: 0; height: 44px; margin: 0; padding: 0; border: 0; outline: none;
+  background: transparent; box-shadow: none; color: var(--text); font: inherit; }
+.cat .cat-search input::placeholder { color: var(--muted); opacity: 1; }
+.cat .cat-icon { flex: 0 0 18px; width: 18px; height: 18px; fill: none; stroke: var(--muted); stroke-width: 2;
+  stroke-linecap: round; }
+.cat .cat-order select { min-height: 46px; padding: 0 14px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--field-bg, var(--panel)); color: var(--text); font: inherit; cursor: pointer; }
+
+/* ── the filters chosen ── */
+.cat .cat-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cat .cat-picked { display: inline-flex; align-items: center; gap: 8px; padding: 4px 10px 4px 12px; border-radius: 999px;
+  border: 1px solid var(--cat-line); background: var(--panel-2, var(--panel)); color: var(--text); font-size: 13px;
+  line-height: 1.3; text-decoration: none; }
+.cat .cat-picked:hover { color: var(--text); text-decoration: none; border-color: var(--text); }
+.cat .cat-picked.yes { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.cat .cat-picked.no { border-color: var(--danger, #b8615c); background: color-mix(in srgb, var(--danger, #b8615c) 14%, transparent); }
+.cat .cat-picked span { font-size: 15px; line-height: 1; opacity: 0.7; }
+.cat .cat-picked:hover span { opacity: 1; }
+.cat .cat-reset { color: var(--muted); font-size: 13px; text-decoration: underline; }
+.cat .cat-reset:hover { color: var(--text); }
+
+/* ── words about the sites ── */
+.cat .cat-notes { display: flex; flex-direction: column; gap: 6px; }
+.cat .cat-notes:empty { display: none; }
+.cat .cat-note { margin: 0; max-width: 80ch; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.cat .cat-note.bad { padding-left: 10px; border-left: 3px solid var(--danger, #b8615c); color: var(--text); }
+.cat .cat-note a { color: var(--accent-text, var(--accent)); }
+/* (v5.44.98) a site that is late: its tiles come after the others' */
+.cat .cat-note.cat-late { display: flex; align-items: center; gap: 8px; }
+.cat .cat-empty, .cat .cat-end { margin: 8px 0; color: var(--muted); }
+.cat .cat-empty a { color: var(--accent-text, var(--accent)); }
+.cat .cat-end { text-align: center; font-size: 13px; }
+
+/* ── the tiles ── */
+.cat .cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); gap: 22px 16px; }
+.cat .cat-tile { display: flex; flex-direction: column; gap: 8px; min-width: 0; color: var(--text); text-decoration: none; }
+.cat .cat-tile:hover { color: var(--text); text-decoration: none; }
+.cat .cat-cover { position: relative; display: block; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 10px;
+  background: var(--panel-2, var(--panel)); box-shadow: inset 0 0 0 1px var(--border); }
+.cat .cat-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.cat .cat-cover img.gone { visibility: hidden; }          /* a cover the site did not give: the panel's colour */
+.cat .cat-nocover { position: absolute; inset: 0; background: linear-gradient(160deg, var(--panel-2, var(--panel)),
+  color-mix(in srgb, var(--accent) 18%, var(--panel))); }
+.cat .cat-tile:hover .cat-cover { box-shadow: inset 0 0 0 2px var(--accent); }
+.cat .cat-tile:hover .cat-cover img { opacity: 0.92; }
+.cat .cat-rate { position: absolute; top: 8px; left: 8px; padding: 2px 7px; border-radius: 6px;
+  background: rgba(8, 17, 31, 0.86); color: #fff; font-size: 12px; font-weight: 700; line-height: 1.4; }
+.cat .cat-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.cat .cat-tile:hover .cat-name { color: var(--accent-text, var(--accent)); }
+.cat .cat-meta { color: var(--muted); font-size: 12px; line-height: 1.35; }
+
+/* ── «отвечает», «Показать ещё» ── */
+.cat .cat-wait { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border: 1px dashed var(--cat-line);
+  border-radius: var(--cat-r); color: var(--muted); }
+.cat .cat-wait.bad { border-color: var(--danger, #b8615c); color: var(--text); }
+.cat .cat-spin { flex: 0 0 auto; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--cat-line);
+  border-top-color: var(--accent); animation: cat-spin 0.8s linear infinite; }
+@keyframes cat-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .cat .cat-spin { animation: none; } }
+.cat .cat-more { display: flex; justify-content: center; margin: 8px 0 0; }
+.cat .cat-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 28px;
+  border: 1px solid var(--cat-line); border-radius: 10px; background: var(--panel-2, var(--panel)); color: var(--text);
+  font: inherit; font-weight: 600; line-height: 1.2; text-decoration: none; cursor: pointer; }
+.cat .cat-btn:hover { border-color: var(--accent); background: var(--panel-2, var(--panel)); color: var(--text);
+  text-decoration: none; }
+.cat .cat-btn[aria-busy="true"] { cursor: progress; opacity: 0.8; }
+.cat .cat-btn.primary, .cat .cat-btn.primary:hover { border-color: transparent; background: var(--accent);
+  color: var(--accent-ink, #1b1305); font-weight: 700; }
+.cat .cat-btn.primary:hover { filter: brightness(1.08); }
+.cat .cat-btn.quiet { background: transparent; }
+
+/* ── «Фильтры» ── */
+.cat .cat-side { flex: 1 1 280px; max-width: 320px; box-sizing: border-box; display: flex; flex-direction: column;
+  gap: 16px; padding: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+  position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
+.cat .cat-side h2 { margin: 0; color: var(--text); font-size: 17px; line-height: 1.3; }
+.cat .cat-side .cat-hint { margin: 0; }
+.cat .cat-group { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; }
+.cat .cat-group legend { float: left; width: 100%; margin: 0 0 8px; padding: 0; color: var(--text); font-weight: 600; }
+.cat .cat-group legend + * { clear: both; }
+.cat .cat-group-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.cat .cat-label { color: var(--text); font-weight: 600; }
+.cat .cat-hint { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.cat .cat-hint a { color: var(--accent-text, var(--accent)); }
+.cat .cat-tri { display: flex; flex-wrap: wrap; gap: 6px; }
+.cat .cat-tri-chip { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: transparent; box-shadow: none; color: var(--text); font: inherit;
+  font-size: 13px; line-height: 1.3; cursor: pointer; }
+.cat .cat-tri-chip:hover { border-color: var(--accent); background: transparent; color: var(--text); }
+.cat .cat-tri-chip[data-state="yes"], .cat .cat-tri-chip[data-state="yes"]:hover { border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.cat .cat-tri-chip[data-state="no"], .cat .cat-tri-chip[data-state="no"]:hover { border-color: var(--danger, #b8615c);
+  background: color-mix(in srgb, var(--danger, #b8615c) 14%, transparent); text-decoration: line-through;
+  text-decoration-thickness: 1px; }          /* «нет» — struck out: where the accent is red too (nhentai) */
+.cat .cat-mark { font-weight: 700; }
+.cat .cat-mark:empty { display: none; }
+.cat .cat-tri-chip[data-rest][data-state=""]:not(.found) { display: none; }
+.cat .cat-tri.open .cat-tri-chip[data-rest] { display: inline-flex; }
+.cat .cat-link { align-self: flex-start; margin: 0; padding: 2px 0; border: 0; background: none; box-shadow: none;
+  color: var(--accent-text, var(--accent)); font: inherit; font-size: 13px; cursor: pointer; }
+.cat .cat-link:hover { background: none; color: var(--accent-text, var(--accent)); text-decoration: underline; }
+.cat .cat-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.cat .cat-check { display: inline-flex; align-items: center; gap: 6px; color: var(--text); cursor: pointer; }
+.cat .cat-check input { margin: 0; accent-color: var(--accent); }
+.cat .cat-range { display: flex; gap: 8px; }
+.cat .cat-field { flex: 1 1 0; min-width: 0; box-sizing: border-box; margin: 0; padding: 9px 12px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--field-bg, var(--bg)); box-shadow: none; color: var(--text); font: inherit; }
+.cat .cat-field::placeholder { color: var(--muted); opacity: 1; }
+.cat .cat-field:focus { border-color: var(--accent); outline: none; }
+.cat .cat-actions { display: flex; gap: 8px; margin-top: 2px; padding-top: 14px; border-top: 1px solid var(--border); }
+.cat .cat-actions .cat-btn { flex: 1 1 0; padding: 11px; }
+.cat.changed .cat-actions .cat-btn.primary { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent); }
+
+@media (max-width: 860px) {
+  .cat { padding: 18px 16px 40px; gap: 18px; }
+  .cat .cat-side { order: -1; flex-basis: 100%; max-width: none; position: static; max-height: none; }
+  .cat .cat-side h2 { cursor: pointer; }
+  .cat .cat-side h2::after { content: " ▾"; color: var(--muted); }
+  .cat .cat-side.closed h2::after { content: " ▸"; }
+  .cat .cat-side.closed > :not(h2) { display: none; }
+  .cat .cat-grid { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 18px 12px; }
+}

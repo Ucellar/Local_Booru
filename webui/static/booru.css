@@ -132,7 +132,8 @@ input[type="search"], select {
 .main-nav a:hover { text-decoration: none; background: color-mix(in srgb, var(--bar-active-bg) 45%, transparent); }
 .main-nav a.active:hover { background: var(--bar-active-bg); }
 .top-search { display: none; min-width: 200px; }   /* looks that show it: the header wraps only when 200 px do not fit */
-.top-search .search-row input { min-width: 0; }
+.top-search .search-row, .top-search .search-row input { min-width: 0; }   /* (v5.44.59) the row too: else the field
+   stood out of a narrowed search over the next item — «Win98» at 1280 px covered «SFW» of the taskbar */
 .top-tools { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .drawer-toggle, .tray-clock { display: none; }
 
@@ -156,6 +157,85 @@ a.settings-link, a.settings-link:hover { text-decoration: none; }
   .settings-link .skin-label { display: none; }
   .settings-link { padding-left: 7px; padding-right: 7px; }
 }
+/* (v5.44.53) «SFW / Всё / NSFW» — what the pages show (webui/content_mode.py): three buttons in one frame, the mode
+   now drawn as the chosen item of the menu */
+.mode-switch {
+  display: inline-flex;
+  flex: none;
+  align-self: center;
+  border: 1px solid color-mix(in srgb, var(--bar-ink) 35%, transparent);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.mode-switch .mode-opt {
+  margin: 0;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--bar-ink);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+.mode-switch .mode-opt + .mode-opt { border-left: 1px solid color-mix(in srgb, var(--bar-ink) 22%, transparent); }
+.mode-switch .mode-opt:hover { background: color-mix(in srgb, var(--bar-active-bg) 40%, transparent); }
+.mode-switch .mode-opt.active { background: var(--bar-active-bg); color: var(--bar-active-ink); font-weight: bold; cursor: default; }
+.mode-switch .mode-opt:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* as tall as the buttons beside it, and of their shape, in each look */
+:root:is([data-skin="cinema"], [data-skin="danbooru"], [data-skin="deep"], [data-skin="flow"], [data-skin="hub"],
+  [data-skin="pixiv"], [data-skin="sepia"], [data-skin="youtube"], [data-skin="nhentai"]) .mode-switch { align-self: stretch; }
+:root:is([data-skin="cinema"], [data-skin="danbooru"], [data-skin="deep"], [data-skin="flow"], [data-skin="hub"],
+  [data-skin="pixiv"], [data-skin="sepia"], [data-skin="youtube"], [data-skin="nhentai"]) .mode-opt {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+:root[data-skin="cinema"] .mode-switch { border-color: var(--border); }
+:root[data-skin="danbooru"] .mode-switch { border-color: var(--db-button-line); border-radius: 4px; }
+:root[data-skin="deep"] .mode-switch { border-color: var(--dp-head-line); border-radius: 16px; }
+:root[data-skin="flow"] .mode-switch { border-color: var(--border); border-radius: 999px; background: var(--panel); }
+:root[data-skin="flow"] .mode-opt { padding: 0 12px; }
+:root[data-skin="hub"] .mode-switch { border-color: var(--hub-line); border-radius: 4px; background: var(--hub-field); }
+:root[data-skin="pixiv"] .mode-switch { border: 0; border-radius: 999px; background: var(--panel); }
+:root[data-skin="pixiv"] .mode-opt + .mode-opt, :root[data-skin="youtube"] .mode-opt + .mode-opt { border-left: 0; }
+:root[data-skin="pixiv"] .mode-opt { padding: 0 12px; border-radius: 999px; }
+:root[data-skin="sepia"] .mode-switch { border-color: var(--border); border-radius: 4px; background: var(--bg); }
+:root[data-skin="youtube"] .mode-switch { border: 0; border-radius: 18px; background: var(--panel); }
+:root[data-skin="youtube"] .mode-opt { padding: 0 13px; border-radius: 18px; }
+:root[data-skin="nhentai"] .mode-switch { border-color: #3d3d3d; }
+/* «Legacy»: the tools are the rows at the foot of its side menu — the switch takes the row's width */
+:root[data-skin="legacy"] .mode-switch { align-self: stretch; margin: 0 6px 6px; border-radius: 9px; }
+:root[data-skin="legacy"] .mode-opt { flex: 1; padding: 6px 4px; text-align: center; }
+/* a page or a title the mode hides */
+.mode-hidden {
+  max-width: 560px;
+  margin: 48px auto;
+  padding: 22px 26px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) * 2);
+}
+.mode-hidden h1 { margin: 0 0 10px; font: bold 19px/1.3 var(--font-head); color: var(--text); }
+.mode-hidden p { margin: 0 0 10px; }
+.mode-hidden .muted { color: var(--muted); }
+.mode-hidden-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 16px !important; }
+.mode-hidden-actions .mode-show {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  font-weight: bold;
+  cursor: pointer;
+}
+.mode-hidden-actions .mode-show:hover { filter: brightness(1.08); }
 .skin-icon {
   width: 14px;
   height: 14px;
@@ -823,6 +903,53 @@ html[data-skin="nhentai"] .taglist-r34 { display: none; }
   .main-nav a { padding: 6px 9px 7px; }
   .brand { font-size: 16px; padding-right: 4px; }
   .skin-label { display: none; }
+}
+
+/* ── (v5.44.55) Плавность (static/motion.js): страницы сменяются не «бац»; страница вперёд (следующая страница манги,
+   соседняя карточка, страница списка, серия) приходит справа, назад — слева; картинки проявляются, когда загрузились;
+   меню и подсказки раскрываются. Всё — при :root[data-motion="on"] (его ставит motion.js): «Оформление» → «Плавные
+   переходы», «меньше движения» системы.
+   (v5.44.56) Без смены страниц «наплывом» (view transitions между документами): между страницами разного оформления
+   одна тема растворялась в другой, сама смена была слишком заметной (владелец, 4.11.2026: «анимации багуются из за
+   разности самих тем и такой переход как будто слишком большой»), а снимки страниц нагружали видеокарту окна. Теперь
+   шапка остаётся как есть, а содержимое под ней проявляется за 0,14 с; вперёд/назад — со сдвигом на 10 точек. */
+:where(:root[data-motion="on"]) main.content { animation: lb-come 0.14s ease-out; }
+:where(:root[data-motion="on"][data-turned="next"]) main.content { animation: lb-come-right 0.16s ease-out; }
+:where(:root[data-motion="on"][data-turned="prev"]) main.content { animation: lb-come-left 0.16s ease-out; }
+@keyframes lb-come { from { opacity: 0.4; } }
+@keyframes lb-come-right { from { opacity: 0.4; transform: translateX(10px); } }
+@keyframes lb-come-left { from { opacity: 0.4; transform: translateX(-10px); } }
+/* pictures: hidden until they have come (motion.js marks them .lb-in), then shown softly; the picture of a card and
+   a page of the reader — when it is decoded (booru.js takes «loading» off); (v5.44.59) the strips of «Манхва» —
+   never hidden: a strip shows as it comes, on its place kept by its size */
+:where(:root[data-motion="on"]) main img:not(.post-media, .reader-image, .vslide, .mh-page, .lb-in) { opacity: 0; }
+:where(:root[data-motion="on"]) main img.lb-in:not(.lb-now, .post-media, .reader-image, .vslide, .mh-page) { animation: lb-arrive 0.28s ease-out; }
+:where(:root[data-motion="on"]) .reader-stage:not(.loading) img.reader-image,
+:where(:root[data-motion="on"]) .media-wrap:not(.loading) img.post-media { animation: lb-arrive 0.16s ease-out; }
+@keyframes lb-arrive { from { opacity: 0; } }
+/* menus, hints of tags, notes and the tabs of «Настройки» open, colours change — not jump */
+:where(:root[data-motion="on"]) :is(.skin-list, .ac-list):not([hidden]) {
+  animation: lb-drop 0.15s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+:where(:root[data-motion="on"]) .settings-pane:not([hidden]) { animation: lb-arrive 0.18s ease-out; }
+:where(:root[data-motion="on"]) .toast:not([hidden]) { animation: lb-rise 0.2s ease-out; }
+@keyframes lb-drop { from { opacity: 0; transform: translateY(-4px); } }
+@keyframes lb-rise { from { opacity: 0; transform: translateY(8px); } }
+:where(:root[data-motion="on"]) :where(a, button, input, select, textarea, .chip, .mtag, .vchip) {
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+/* «Плавные переходы» in the menu «Оформление»: a switch, on every page at once */
+.skin-motion { margin-top: 6px; border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; }
+.skin-motion::before {
+  content: "";
+  flex: none;
+  width: 30px;
+  height: 16px;
+  border-radius: 8px;
+  background: radial-gradient(circle at 8px 50%, var(--bg) 5px, transparent 5.5px), var(--border);
+}
+.skin-motion[aria-checked="true"]::before {
+  background: radial-gradient(circle at 22px 50%, var(--accent-ink) 5px, transparent 5.5px), var(--accent);
 }
 
 @media (prefers-reduced-motion: reduce) {

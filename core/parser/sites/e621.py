@@ -112,6 +112,16 @@ class E621Site(Site):
                              headers=self._headers(), auth=self._auth(), soft=len(ids) > 1)
         return post_dicts(data, keys=("posts",))
 
+    def pools_by_ids(self, ids: list) -> list:
+        """(v5.44.111) e621's pools by their numbers — [{id, name, category, post_ids, …}]: a comic is a pool of the
+        category «series», its pages ``post_ids`` in their order (``core/site_posts.py`` keeps them for сборки)."""
+        wanted = [str(int(i)) for i in ids or [] if str(i).isdigit()]
+        if not wanted:
+            return []
+        data = self.get_json(f"{self.root}/pools.json", params={"search[id]": ",".join(wanted), "limit": len(wanted)},
+                             headers=self._headers(), auth=self._auth(), soft=True)
+        return [p for p in (data if isinstance(data, list) else []) if isinstance(p, dict) and p.get("id")]
+
     def search_query(self, query: str, limit: int = 3) -> list:
         # soft: a relay query the site rejects (wildcards) must not switch the whole site off
         data = self.get_json(f"{self.root}/posts.json", params={"tags": query, "limit": max(1, min(20, limit))},

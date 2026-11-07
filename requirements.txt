@@ -18,3 +18,6 @@ av
 
 # Брак, «фото или рисунок» (core/visual_models.py): small models on the processor
 onnxruntime
+
+# «Телефон» through the owner's own server (core/phone_relay.py): SSH
+paramiko

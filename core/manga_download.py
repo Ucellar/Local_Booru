@@ -4,14 +4,18 @@
   numbers (``691957``, ``#691957``), several at once;
 * :func:`description` — the gallery's description from the site's API (its pages and their kinds, titles, tags);
   a check for robots (Cloudflare) → the program window's browser opens the API address, then the gallery's page
-  (its ``window._gallery`` carries the same description; failing that its page thumbnails and tags are read);
+  (its ``window._gallery`` carries the same description — (v5.44.97) the page of 2026 has it among the answers its
+  scripts were given, ``<script data-sveltekit-fetched>``; failing that its page thumbnails and tags are read);
+  (v5.44.97) the API of 2026 (``core/nhentai.py``): ``/api/v2/galleries/<n>`` — the old ``/api/gallery/<n>`` answers
+  403 «Use new API»; the pages by their paths on the servers ``/api/v2/cdn`` names; the program's rule about minors —
+  such a gallery is neither described nor downloaded (:class:`Forbidden`);
 * :func:`download` — the galleries one after another into the manga folder, each as ``nhentai-<number> - <title>``
   with pages ``001.jpg`` … and the description as ``meta.json`` (``core/manga_library.py`` reads it: the titles, the
   tags by kind, the link back).  A page already there (a download stopped or broken off) is not asked again; a
   folder of the same gallery named otherwise is the one used.
 
-The site moves pictures between its servers (``i``, ``i1`` … ``i7``) and kinds: a page is asked of the server that gave
-the last one, then of the others, then in the other kinds.  The journal never carries a cookie or a key: what a
+The site moves pictures between its servers (``i``, ``i1`` … ``i7``; (v5.44.97) ``i1`` … ``i4`` by ``/api/v2/cdn``) and
+kinds: a page is asked of the server that gave the last one, then of the others, then in the other kinds.  The journal never carries a cookie or a key: what a
 server says is cut and cleaned (``sanitize_text``).
 """
 from __future__ import annotations
@@ -27,10 +31,16 @@ from pathlib import Path
 _LOG = logging.getLogger("local_booru.manga")
 
 SITE = "https://nhentai.net"
-API = SITE + "/api/gallery/{id}"
+# (v5.44.97) the API of 2026 — the old «/api/gallery/{id}» answers 403 «Use new API https://nhentai.net/api/v2/docs»
+API = SITE + "/api/v2/galleries/{id}"
+CDN = SITE + "/api/v2/cdn"              # its picture servers: {"image_servers": [...], "thumb_servers": [...]}
+IMAGE_SERVERS = ("https://i1.nhentai.net", "https://i2.nhentai.net", "https://i3.nhentai.net",
+                 "https://i4.nhentai.net")     # when the API does not name them
 PAGE = SITE + "/g/{id}/"
-PICTURE = "https://{server}.nhentai.net/galleries/{media}/{n}{ext}"
+PICTURE = "https://{server}.nhentai.net/galleries/{media}/{n}{ext}"      # the pages of the old description
 SERVERS = ("i", "i1", "i2", "i3", "i4", "i5", "i7")
+RATE_WAIT = 60.0                 # (v5.44.97) «слишком часто» (429) of its API: waited this long (it says a minute)
+RATE_TRIES = 2
 RETRY_WAIT = 1.5                 # seconds before a busy server is asked again (more each time)
 KINDS = {"j": ".jpg", "p": ".png", "g": ".gif", "w": ".webp"}
 MAX_AT_ONCE = 50                 # galleries in one go
@@ -44,6 +54,8 @@ NAME_MAX = 110                   # characters of the folder's name
 _LINK = re.compile(r"^(?:https?://)?(?:www\.)?nhentai\.net/g/(\d{1,7})(?:/.*)?$", re.I)
 _NUMBER = re.compile(r"^#?(\d{1,7})$")
 _GALLERY_SCRIPT = re.compile(r"window\._gallery\s*=\s*JSON\.parse\(\s*(\"(?:[^\"\\]|\\.)*\")\s*\)", re.S)
+# (v5.44.97) the page of 2026 (SvelteKit): the answers its scripts got, each a JSON of {status, headers, body}
+_FETCHED = re.compile(r"<script\b[^>]*\bdata-sveltekit-fetched\b[^>]*>(.*?)</script>", re.S | re.I)
 _THUMB = re.compile(r"//(t\d*)\.nhentai\.net/galleries/(\d+)/(\d+)t\.(\w+)", re.I)
 # a link to a tag of the site: its kind is in its address (the same in every look of the site since its start)
 _TAG_LINK = re.compile(r"^(?:https?://(?:www\.)?nhentai\.net)?/(tag|parody|character|artist|group|language|category)/"
@@ -53,6 +65,10 @@ _COUNT = re.compile(r"\s*\d+(?:[.,]\d+)?\s*[kKmM]?\s*$")
 
 class MangaError(Exception):
     """Said to the person as it is."""
+
+
+class Forbidden(MangaError):
+    """(v5.44.97) A gallery the program's rule leaves out: it depicts minors (``core/nhentai.py``)."""
 
 
 # ── what was pasted ─────────────────────────────────────────────────────────────────
@@ -84,6 +100,8 @@ class Gallery:
     pretty: str = ""
     data: dict = field(default_factory=dict)       # the description as the site gives it — meta.json
     server: str = "i"                    # the picture server that gave the last page
+    paths: list = field(default_factory=list)      # (v5.44.97) the pages' paths of the API v2 («galleries/<media>/1.webp»)
+    servers: list = field(default_factory=list)    # …and its picture servers (``/api/v2/cdn``)
 
     @property
     def title(self) -> str:
@@ -94,8 +112,11 @@ class Gallery:
         return len(self.kinds)
 
 
-def gallery_of(data, number: int) -> Gallery:
-    """The gallery a description (the API's JSON) tells of — checked: its number, its pictures' number, its pages."""
+def gallery_of(data, number: int, servers=None) -> Gallery:
+    """The gallery a description (the API's JSON) tells of — checked: its number, its pictures' number, its pages.
+    (v5.44.97) The API v2's description too (``pages`` — their paths; ``servers`` — the picture servers the API names);
+    a gallery the program's rule leaves out — :class:`Forbidden`."""
+    from core import nhentai as N
     if not isinstance(data, dict):
         raise MangaError("Описание галереи непонятное")
     try:
@@ -107,18 +128,45 @@ def gallery_of(data, number: int) -> Gallery:
     media = str(data.get("media_id") or "").strip()
     if not re.fullmatch(r"[0-9]{1,12}", media):           # it goes into the pictures' addresses
         raise MangaError("В описании галереи нет номера её картинок")
-    images = data.get("images") if isinstance(data.get("images"), dict) else {}
-    pages = images.get("pages") if isinstance(images.get("pages"), list) else []
-    kinds = [KINDS.get(str(p.get("t") or "j"), ".jpg") if isinstance(p, dict) else ".jpg" for p in pages[:MAX_PAGES]]
+    if N.forbidden_gallery(data):
+        raise Forbidden(N.EXCLUDED)
+    paths: list = []
+    if isinstance(data.get("pages"), list):               # (v5.44.97) the API v2: each page's path
+        for page in data["pages"][:MAX_PAGES]:
+            path = str(page.get("path") or "").lstrip("/") if isinstance(page, dict) else ""
+            if not N.path_ok(path, media):
+                raise MangaError("В описании галереи непонятный адрес страницы")
+            paths.append(path)
+        kinds = [_ext_of(path) for path in paths]
+    else:
+        images = data.get("images") if isinstance(data.get("images"), dict) else {}
+        pages = images.get("pages") if isinstance(images.get("pages"), list) else []
+        kinds = [KINDS.get(str(p.get("t") or "j"), ".jpg") if isinstance(p, dict) else ".jpg"
+                 for p in pages[:MAX_PAGES]]
     if not kinds:
         raise MangaError("В галерее нет страниц")
     title = data.get("title") if isinstance(data.get("title"), dict) else {}
 
     def text(key: str) -> str:
         return re.sub(r"\s+", " ", str(title.get(key) or "")).strip()
+    if paths:
+        bases = N.servers_ok(list(servers or ()), IMAGE_SERVERS, also=(_host(API), _host(CDN)))
+        return Gallery(id=gid, media_id=media, kinds=kinds, english=text("english"), japanese=text("japanese"),
+                       pretty=text("pretty"), data=data, server=bases[0], paths=paths, servers=bases)
     server = str(data.get("_server") or "")              # named by the page's thumbnails (``_from_thumbnails``)
     return Gallery(id=gid, media_id=media, kinds=kinds, english=text("english"), japanese=text("japanese"),
                    pretty=text("pretty"), data=data, server=server if re.fullmatch(r"i[0-9]{0,2}", server) else "i")
+
+
+def _host(address: str) -> str:
+    from urllib.parse import urlparse
+    return (urlparse(str(address or "")).hostname or "").lower()
+
+
+def _ext_of(path: str) -> str:
+    """A page's kind by its path («…/1.webp» → «.webp»; «…/2.webp.webp» — the same; one not known — «.jpg»)."""
+    ext = "." + str(path).rsplit(".", 1)[-1].lower() if "." in str(path).rsplit("/", 1)[-1] else ""
+    return ext if ext in set(KINDS.values()) | {".jpeg", ".avif"} else ".jpg"
 
 
 def _json_of(text: str):
@@ -140,9 +188,10 @@ def _json_of(text: str):
     return None
 
 
-def gallery_from_text(text: str, number: int) -> Gallery | None:
-    """The gallery in what a browser got: the API's JSON, the gallery page's ``window._gallery = JSON.parse("…")``, or
-    the page's thumbnails and tags (None — none of them)."""
+def gallery_from_text(text: str, number: int, servers=None) -> Gallery | None:
+    """The gallery in what a browser got: the API's JSON, the gallery page's ``window._gallery = JSON.parse("…")``,
+    (v5.44.97) the description among the answers the page's scripts got (``data-sveltekit-fetched``), or the page's
+    thumbnails and tags (None — none of them)."""
     data = _json_of(text)
     if data is None:
         found = _GALLERY_SCRIPT.search(str(text or ""))
@@ -151,10 +200,27 @@ def gallery_from_text(text: str, number: int) -> Gallery | None:
                 data = json.loads(json.loads(found.group(1)))
             except ValueError:
                 data = None
+    if data is None:
+        data = _fetched_gallery(str(text or ""), number)
     if isinstance(data, dict) and data.get("media_id"):
-        return gallery_of(data, number)
+        return gallery_of(data, number, servers)
     data = _from_thumbnails(str(text or ""), number)
-    return gallery_of(data, number) if data else None
+    return gallery_of(data, number, servers) if data else None
+
+
+def _fetched_gallery(text: str, number: int) -> dict | None:
+    """(v5.44.97) The gallery's description among the answers the page's scripts were given (SvelteKit puts each in a
+    ``<script type="application/json" data-sveltekit-fetched>`` as {status, headers, body — the answer's text})."""
+    for block in _FETCHED.findall(text):
+        try:
+            answer = json.loads(block)
+            body = json.loads(answer.get("body")) if isinstance(answer, dict) and isinstance(answer.get("body"), str) \
+                else None
+        except ValueError:
+            continue
+        if isinstance(body, dict) and body.get("media_id") and str(body.get("id")) == str(number):
+            return body
+    return None
 
 
 def _from_thumbnails(text: str, number: int) -> dict | None:
@@ -217,24 +283,48 @@ def _session():
     return I._session(SITE)          # the site's cookies (taken from a browser) and a browser's name
 
 
-def description(number: int, *, say, window_fetch=None, session=None, memory: dict | None = None) -> Gallery:
+def servers_of(session=None) -> list:
+    """(v5.44.97) The picture servers the API names (``/api/v2/cdn``), else :data:`IMAGE_SERVERS`."""
+    from core import nhentai as N
+    from core import video_meta_import as I
+    try:
+        status, body, _final, _ctype = I._get(session or _session(), CDN, 64 * 1024, referer=SITE + "/")
+        data = json.loads(I.decode_html(body, "utf-8")) if status == 200 else {}
+    except (I.MetaImportError, ValueError):
+        data = {}
+    return N.servers_ok((data if isinstance(data, dict) else {}).get("image_servers"), IMAGE_SERVERS,
+                        also=(_host(CDN),))
+
+
+def description(number: int, *, say, window_fetch=None, session=None, memory: dict | None = None,
+                servers=None, stop_check=None) -> Gallery:
     """The gallery's description from the site (``window_fetch(address)`` → (html, address): the program window's
     browser, for the site's check for robots).  ``memory`` — kept for the galleries of one download: an API the
-    window's browser did not get is not asked of it again (the gallery's page is)."""
+    window's browser did not get is not asked of it again (the gallery's page is).  (v5.44.97) ``servers`` — the
+    picture servers of the API v2 (:func:`servers_of`); «слишком часто» (429) — waited :data:`RATE_WAIT` and asked
+    again (:data:`RATE_TRIES` times)."""
     from core import video_meta_import as I
     from core.redaction import sanitize_text
     address = API.format(id=number)
     session = session or _session()
-    try:
-        status, body, _final, _ctype = I._get(session, address, MAX_JSON, referer=SITE + "/")
-    except I.MetaImportError as exc:                # «Сайт не ответил: …», cleaned
-        raise MangaError(sanitize_text(str(exc))[:240]) from exc
+    for attempt in range(RATE_TRIES + 1):
+        try:
+            status, body, _final, _ctype = I._get(session, address, MAX_JSON, referer=SITE + "/")
+        except I.MetaImportError as exc:                # «Сайт не ответил: …», cleaned
+            raise MangaError(sanitize_text(str(exc))[:240]) from exc
+        if status != 429 or attempt == RATE_TRIES:
+            break
+        say(f"nhentai просит спрашивать реже — жду {int(RATE_WAIT)} с")
+        if _rest(RATE_WAIT, stop_check):
+            raise MangaError("остановлено")
     text = I.decode_html(body, "utf-8")
     if status == 404:
         raise MangaError(f"Галереи {number} на nhentai нет")
+    if status == 429:
+        raise MangaError("nhentai просит спрашивать реже — попробуйте через минуту")
     data = _json_of(text) if status == 200 else None
     if data is not None:
-        return gallery_of(data, number)
+        return gallery_of(data, number, servers)
     guard = I.guard_of(status, text)
     say(f"Сайт проверяет, что заходит не робот ({guard})" if guard else
         f"Вместо описания nhentai ответил {f'кодом {status}' if status != 200 else 'страницей'}")
@@ -252,15 +342,55 @@ def description(number: int, *, say, window_fetch=None, session=None, memory: di
         except I.MetaImportError as exc:
             why = sanitize_text(str(exc))[:200]
             continue
-        if '"error"' in html and "does not exist" in html:
+        if '"error"' in html and ("does not exist" in html or "not found" in html.lower()):
             raise MangaError(f"Галереи {number} на nhentai нет")
-        found = gallery_from_text(html, number)
+        found = gallery_from_text(html, number, servers)
         if found is not None:
             return found
         if where == address and memory is not None:
             memory["api_in_window"] = False
         why = f"проверка на роботов ({I.guard_of(200, html)})" if I.guard_of(200, html) else "описания в ней нет"
     raise MangaError(f"Описание галереи не получено и браузером окна программы: {why}. Попробуйте позже")
+
+
+def _rest(seconds: float, stop_check=None) -> bool:
+    """Waits; True — stopped meanwhile."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if stop_check is not None and stop_check():
+            return True
+        time.sleep(min(0.5, max(0.0, end - time.monotonic())))
+    return False
+
+
+# (v5.44.97) the card of «Скачать → По ссылке»: a gallery's description kept a while (the card is opened again and
+# again from «Лента»)
+_DESCRIBED: dict = {}
+_DESCRIBED_LOCK = threading.Lock()
+DESCRIBED_TTL = 20 * 60
+DESCRIBED_KEPT = 64
+
+
+def describe(number: int) -> Gallery:
+    """(v5.44.97) A gallery's description for its card — the API (no window's browser: the card does not wait for
+    one; its thumbnails are on ``nhentai.THUMB_SERVERS``, its servers of pages are not asked), kept
+    :data:`DESCRIBED_TTL`; :class:`MangaError` with words (:class:`Forbidden` — the program's rule)."""
+    number = int(number)
+    with _DESCRIBED_LOCK:
+        kept = _DESCRIBED.get(number)
+        if kept is not None and time.monotonic() - kept[0] < DESCRIBED_TTL:
+            return kept[1]
+    gallery = description(number, say=lambda _text: None, session=_session())
+    with _DESCRIBED_LOCK:
+        _DESCRIBED[number] = (time.monotonic(), gallery)
+        while len(_DESCRIBED) > DESCRIBED_KEPT:
+            _DESCRIBED.pop(min(_DESCRIBED, key=lambda k: _DESCRIBED[k][0]))
+    return gallery
+
+
+def forget_described() -> None:
+    with _DESCRIBED_LOCK:
+        _DESCRIBED.clear()
 
 
 # ── the pages ─────────────────────────────────────────────────────────────────────────
@@ -308,18 +438,32 @@ def _ask(session, address: str, referer: str) -> tuple[int, bytes, str]:
         return 0, b"", ""
 
 
+def _tries_of(gallery: Gallery, n: int) -> list:
+    """(server, address) to ask for page ``n``: its own kind on every server (the one that gave the last page first),
+    then the other kinds on the first two.  (v5.44.97) The API v2's pages — their paths on its servers."""
+    first = gallery.server
+    own = gallery.kinds[n - 1]
+    others = [ext for ext in dict.fromkeys(KINDS.values()) if ext != own]
+    if gallery.paths:
+        path = gallery.paths[n - 1]
+        stem = path[:-len(path.rsplit("/", 1)[-1])] + path.rsplit("/", 1)[-1].split(".", 1)[0]
+        servers = [first] + [s for s in gallery.servers if s != first] if first in gallery.servers else \
+            list(gallery.servers)
+        tries = [(server, f"{server}/{path}") for server in servers]
+        return tries + [(server, f"{server}/{stem}{ext}") for ext in others for server in servers[:2]]
+    servers = [first] + [s for s in SERVERS if s != first]
+    tries = [(server, PICTURE.format(server=server, media=gallery.media_id, n=n, ext=own)) for server in servers]
+    return tries + [(server, PICTURE.format(server=server, media=gallery.media_id, n=n, ext=ext))
+                    for ext in others for server in servers[:2]]
+
+
 def _page(session, gallery: Gallery, n: int, stop_check) -> tuple[bytes, str]:
     """Page ``n`` (from 1): its bytes and their kind — of the server that gave the last page, then of the others, then
     in the other kinds (MangaError with the last server's answer — none gave it; _Refused — a check for robots)."""
     referer = PAGE.format(id=gallery.id)
     first = gallery.server
-    servers = [first] + [s for s in SERVERS if s != first]
-    own = gallery.kinds[n - 1]
-    tries = [(server, own) for server in servers]
-    tries += [(server, ext) for ext in dict.fromkeys(KINDS.values()) if ext != own for server in servers[:2]]
     last = ""
-    for server, ext in tries:
-        address = PICTURE.format(server=server, media=gallery.media_id, n=n, ext=ext)
+    for server, address in _tries_of(gallery, n):
         for attempt in range(PAGE_TRIES):
             if stop_check():
                 raise MangaError("остановлено")
@@ -396,6 +540,136 @@ def _set_meter(clear: bool = False, **values) -> None:
         _METER.update(values)
 
 
+# ── (v5.44.107) the queue ────────────────────────────────────────────────────────────────────
+# The owner (7.11.2026): «почему нет очереди на скачивании манги» — «Скачать» while a download went was refused.  Now
+# the galleries asked meanwhile join the download going, after the ones there (:func:`add`): they wait in it («в
+# очереди») and come one after another; «убрать» takes one out before it begins (:func:`drop`).  What is left of the
+# download when the program closes — its galleries not finished — is kept in ``manga_queue.json`` (the settings
+# folder) and goes on at the next start (``webui/pages/manga_get.py``: :func:`kept_galleries`, :func:`await_restore`);
+# «Остановить» (``USER_STOP``) keeps nothing.
+KEEP_NAME = "manga_queue.json"
+MAX_IN_RUN = 300                 # galleries in one download with its queue
+RESTORE_AFTER = 30.0             # seconds after the start: the program's own start goes first
+UNFINISHED = ("wait", "reading", "pages", "stopped")
+USER_STOP = threading.Event()    # «Остановить»: what it stopped is not kept for the next run
+_RUN_LOCK = threading.Lock()
+_KEEP_LOCK = threading.Lock()    # one writer of manga_queue.json at a time (the download and a page's «Скачать»)
+_RUN: dict = {"items": None, "open": False, "root": ""}
+_RESTORED = threading.Event()
+_PENDING: dict = {"numbers": [], "at": 0.0}
+
+
+def _item(number: int) -> dict:
+    return {"number": number, "title": "", "pages": 0, "page": 0, "got": 0, "had": 0, "bytes": 0, "state": "wait",
+            "why": "", "folder": ""}
+
+
+def add(numbers: list) -> "list | None":
+    """Galleries put into the download going, after the ones there — for each its place among the galleries waiting
+    (0 — it is in the download already, begun or done).  None — no download takes more (none goes, or it is ending):
+    the caller begins one of its own."""
+    with _RUN_LOCK:
+        if not _RUN["open"]:
+            return None
+        items = _RUN["items"]
+        there = {x["number"] for x in items}
+        for number in numbers:
+            if number not in there and len(items) < MAX_IN_RUN:
+                items.append(_item(number))
+                there.add(number)
+        waiting = [x["number"] for x in items if x["state"] == "wait"]
+        places = [waiting.index(n) + 1 if n in waiting else 0 for n in numbers]
+        snapshot = [dict(x) for x in items]
+    _set_meter(galleries=len(snapshot), items=snapshot)
+    _persist()
+    return places
+
+
+def drop(number: int) -> bool:
+    """«Убрать»: a gallery waiting in the download going taken out of it (one begun stays)."""
+    with _RUN_LOCK:
+        items = _RUN["items"] if _RUN["open"] else None
+        k = next((k for k, x in enumerate(items or []) if x["number"] == number and x["state"] == "wait"), -1)
+        if k < 0:
+            return False
+        del items[k]
+        snapshot = [dict(x) for x in items]
+    _set_meter(galleries=len(snapshot), items=snapshot)
+    _persist()
+    return True
+
+
+def waiting() -> list:
+    """The galleries waiting in the download going: [{"number", "title"}]."""
+    with _RUN_LOCK:
+        return [{"number": x["number"], "title": x["title"]} for x in (_RUN["items"] or []) if x["state"] == "wait"]
+
+
+def _keep_file() -> Path:
+    from core.paths import SETTINGS_DIR
+    return Path(SETTINGS_DIR) / KEEP_NAME
+
+
+def _persist(final: bool = False) -> None:
+    """``manga_queue.json``: the galleries of the download not finished and its folder (nothing after «Остановить»,
+    nothing once it has ended)."""
+    from core.file_safety import write_json_kept
+    with _RUN_LOCK:
+        items = list(_RUN["items"] or [])
+        root = _RUN["root"]
+    left = [] if (final and USER_STOP.is_set()) else [x["number"] for x in items if x["state"] in UNFINISHED]
+    try:
+        with _KEEP_LOCK:
+            write_json_kept(_keep_file(), json.dumps({"root": root if left else "", "galleries": left}), dict)
+    except OSError as exc:
+        _LOG.warning("the queue of manga downloads not kept: %s", exc)
+
+
+def kept_galleries() -> tuple[list, str]:
+    """(the galleries the last run left unfinished, their folder) — ([], "") when none or it cannot be read."""
+    from core.file_safety import read_json_kept
+    try:
+        data = read_json_kept(_keep_file(), dict, what="manga queue") or {}
+    except OSError as exc:
+        _LOG.warning("the queue of manga downloads cannot be read now: %s", exc)
+        return [], ""
+    numbers = [n for n in data.get("galleries") or [] if isinstance(n, int) and 0 < n < 10_000_000]
+    return numbers[:MAX_IN_RUN], str(data.get("root") or "")
+
+
+def await_restore() -> bool:
+    """The galleries of the last run, before they are begun again (``RESTORE_AFTER`` from now) — kept for the page.
+    False — none."""
+    if _RESTORED.is_set():
+        return False
+    numbers, _root = kept_galleries()
+    if not numbers:
+        return False
+    with _RUN_LOCK:
+        _PENDING.update(numbers=numbers, at=time.monotonic() + RESTORE_AFTER)
+    return True
+
+
+def restoring_public() -> dict | None:
+    """{"titles", "in": seconds} of the galleries to be begun again soon; None when none waits."""
+    with _RUN_LOCK:
+        if _RESTORED.is_set() or not _PENDING["numbers"]:
+            return None
+        numbers = _PENDING["numbers"]
+        titles = [f"nhentai {n}" for n in numbers[:6]] + ([f"ещё {len(numbers) - 6}"] if len(numbers) > 6 else [])
+        return {"titles": titles, "in": max(0, int(round(_PENDING["at"] - time.monotonic())))}
+
+
+def restored() -> list:
+    """The galleries kept by the last run — once a run of the program (the next calls: [])."""
+    if _RESTORED.is_set():
+        return []
+    _RESTORED.set()
+    with _RUN_LOCK:
+        _PENDING["numbers"] = []
+    return kept_galleries()[0]
+
+
 def _size(size: float) -> str:
     size = float(size or 0)
     if size >= 1024 ** 2:
@@ -412,29 +686,50 @@ def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -
     root.mkdir(parents=True, exist_ok=True)
     session = _session()
     memory: dict = {}
+    servers: list = []                    # (v5.44.97) the API's picture servers — asked once, with the first gallery
     done: list[int] = []
     failed: list[int] = []
     folders: list[str] = []
     stopped = False
-    items = [{"number": number, "title": "", "pages": 0, "page": 0, "got": 0, "had": 0, "bytes": 0, "state": "wait",
-              "why": "", "folder": ""} for number in numbers]
+    items = [_item(number) for number in dict.fromkeys(numbers)]
+    if items:                      # (v5.44.107) the first one is under way already: not «в очереди» for add()
+        items[0]["state"] = "reading"
+    USER_STOP.clear()
+    with _RUN_LOCK:                                   # (v5.44.107) the galleries asked meanwhile join it: add()
+        _RUN.update(items=items, open=True, root=str(root))
 
     def mark(item: dict, **values) -> None:
         """A gallery's line of the page's list, then the list to the progress bar."""
-        item.update(values)
-        _set_meter(items=[dict(x) for x in items])
-    _set_meter(clear=True, galleries=len(numbers), items=[dict(x) for x in items])
+        with _RUN_LOCK:
+            item.update(values)
+            snapshot = [dict(x) for x in items]
+        _set_meter(items=snapshot, galleries=len(snapshot))
+    _set_meter(clear=True, galleries=len(items), items=[dict(x) for x in items])
+    _persist()
+    k = 0
     try:
-        for k, number in enumerate(numbers, 1):
-            item = items[k - 1]
+        while True:
             if stop_check():
                 stopped = True
                 break
+            with _RUN_LOCK:                           # the next one waiting — taken at once («убрать» leaves it be)
+                if k >= len(items):
+                    _RUN["open"] = False
+                    break
+                item = items[k]
+                item["state"] = "reading"
+                number, total = item["number"], len(items)
+            k += 1
             _set_meter(gallery=k, number=number, title="", page=0, pages=0, bytes=0)
             mark(item, state="reading")
-            say(f"— Галерея {number} ({k} из {len(numbers)})")
+            say(f"— Галерея {number} ({k} из {total})")
             try:
-                gallery = description(number, say=say, window_fetch=window_fetch, session=session, memory=memory)
+                gallery = description(number, say=say, window_fetch=window_fetch, session=session, memory=memory,
+                                      servers=servers or None, stop_check=stop_check)
+                if gallery.paths and not servers:     # (v5.44.97) the API v2's pages: its servers, asked once
+                    servers = servers_of(session)
+                    gallery.servers = list(servers)
+                    gallery.server = servers[0]
             except MangaError as exc:
                 say(f"Не скачана: {exc}")
                 failed.append(number)
@@ -447,7 +742,8 @@ def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -
             mark(item, title=gallery.title, pages=gallery.pages, state="pages")
             try:
                 folder.mkdir(parents=True, exist_ok=True)
-                described = {key: value for key, value in gallery.data.items() if not str(key).startswith("_")}
+                described = {key: value for key, value in gallery.data.items()
+                             if not str(key).startswith("_") and value is not None}
                 _write(folder / "meta.json", json.dumps(described, ensure_ascii=False, indent=1).encode("utf-8"))
             except OSError as exc:
                 say(f"Не скачана: папка не записывается ({sanitize_text(str(exc))[:200]})")
@@ -506,7 +802,11 @@ def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -
             else:
                 done.append(number)
                 mark(item, state="had" if had == gallery.pages else "done")
+            _persist()
     finally:
+        with _RUN_LOCK:
+            _RUN["open"] = False
+        _persist(final=True)
         _set_meter(clear=True)
     from core import manga_library
     manga_library.LIBRARY.invalidate()

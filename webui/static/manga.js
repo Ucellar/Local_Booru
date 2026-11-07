@@ -94,8 +94,10 @@
     countButton();
   }
   function countButton() {
-    go.disabled = busy || unclear > 0;
-    go.textContent = named.length ? "Скачать " + plural(named.length, ["галерею", "галереи", "галерей"]) : "Скачать";
+    // (v5.44.107) while a download goes — into its queue
+    go.disabled = unclear > 0;
+    const what = named.length ? plural(named.length, ["галерею", "галереи", "галерей"]) : "";
+    go.textContent = busy ? (what ? "В очередь: " + what : "В очередь") : what ? "Скачать " + what : "Скачать";
     go.title = unclear ? "Уберите из поля то, что программа не поняла" : "";
   }
   field.addEventListener("input", () => {
@@ -147,6 +149,13 @@
       const link = element("a", "mbutton", "Открыть");
       link.href = item.open;
       status.append(link);
+    }
+    if (state === "wait" && running) {             // (v5.44.107) the queue: taken out before it begins
+      const drop = element("button", "mbutton", "убрать");
+      drop.type = "button";
+      drop.dataset.action = "manga-get-unqueue";
+      drop.dataset.number = String(item.number);
+      status.append(drop);
     }
     row.append(cover, text, status);
     return row;
@@ -210,6 +219,13 @@
     if (!text) { say(go, "Вставьте ссылку на галерею или её номер", true); field.focus(); return; }
     try {
       const reply = await postJson("/api/manga/download", { text });
+      if (reply.queued || reply.already) {        // (v5.44.107) they join the download going: its lines below
+        say(go, reply.already ? "Они уже в этом скачивании" : "Добавлено в очередь — ниже, в списке");
+        field.value = "";
+        readField();
+        watcher.poll();
+        return;
+      }
       say(go, "");
       busy = true;
       countButton();
@@ -224,6 +240,8 @@
     }
   });
 
+  actions["manga-get-unqueue"] = (el) => postJson("/api/manga/download/unqueue", { id: Number(el.dataset.number) })
+    .then(() => watcher.poll()).catch((err) => say(el, err.message, true));
   actions["manga-get-stop"] = (el) => postJson("/api/manga/download/stop", {})
     .then(() => say(el, "Останавливаю…")).catch((err) => say(el, err.message, true));
 

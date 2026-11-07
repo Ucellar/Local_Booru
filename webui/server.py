@@ -9,7 +9,13 @@ Safety:
   every run and handed to the program window / browser by the program itself;
 * the ``Host`` header must name this server (a web page cannot reach it through a DNS trick);
 * actions that change the library are POST requests whose ``Origin`` must be this server, and the
-  cookie is ``SameSite=Strict``, so another site open in the same browser cannot press them.
+  cookie is ``SameSite=Strict``, so another site open in the same browser cannot press them;
+* (v5.44.64) the owner's phone comes through Tailscale (``core/phone_access``): ``tailscale serve`` takes the
+  computer's name in his tailnet to this server and says who asks (``Tailscale-User-Login``) — the owner's own
+  account is let in without the cookie (``phone_access.admit``), its POST must come from that name;
+* (v5.44.71) or through the owner's own server (``core/phone_relay``): its https address as the Host, the connection
+  the program's own (the server's way ends here on 127.0.0.1) and a paired phone's cookie (``core/phone_devices``);
+  a phone not paired yet gets only the pairing page and the app's files (``phone_access.open_to_pair``).
 """
 from __future__ import annotations
 
@@ -18,14 +24,15 @@ import json
 import logging
 import mimetypes
 import os
-import queue
 import re
 import secrets
+import select
 import selectors
 import socket
 import threading
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -37,7 +44,22 @@ _LOG = logging.getLogger("local_booru.webui")
 STATIC_DIR = Path(__file__).with_name("static")
 COOKIE = "lb_session"
 WORKERS = 16              # requests served at once
+PAGE_WORKERS = 4          # (v5.44.58) of them, the ones that serve only pages (pictures and files never keep them)
+# (v5.44.58) Requests for pictures and files: thumbnails made on the spot, covers, pages of manga, frames and files of
+# video, the grabber's and the parser's previews (fetched from sites).  A page waits behind none of them (``_Jobs``).
+MEDIA_PATHS = ("/thumb/", "/media/", "/poster/", "/manga/cover/", "/manga/thumb/", "/manga/page/", "/manhwa/cover/",
+               "/manhwa/page/", "/videos/cover/", "/videos/frame/", "/videos/file/", "/videos/subs/", "/grab/media",
+               "/sets/media", "/api/parser/thumb/", "/api/parser/file/", "/video/live/", "/api/manga/download-cover",
+               "/api/manhwa/hit-cover", "/api/manhwa/find-cover", "/api/archive/cover",
+               "/api/online/pic",                        # (v5.44.82) a page of a chapter read without downloading
+               "/api/online/thumb",                      # (v5.44.110) …small, in the strip of the chapter's pages
+               "/api/manhwa/feed-cover",                 # (v5.44.83) a cover of «Лента»
+               "/api/archive/folder-cover",              # (v5.44.84) a title of the parser's folder
+               "/api/manhwa/download-cover",             # (v5.44.87) «Загрузки» of «Скачать → По ссылке»
+               "/api/catalog/cover",                     # (v5.44.90) a tile of «Лента» of the tabs
+               "/watch/s/")                              # (v5.44.106) an episode of «Смотреть»: its picture and sound
 REQUEST_TIMEOUT = 10      # seconds a request may wait for a stalled browser (reading it or sending the answer)
+WATCH_TIMEOUT = 30 * 60   # (v5.44.106) …a player of «Смотреть» on a pause: it reads its stream on when it plays on
 KEEPALIVE_IDLE = 60       # seconds an idle browser connection stays open; it holds no worker meanwhile
 MAX_IDLE_CONNECTIONS = 256
 MAX_BODY = 10 * 1024 * 1024
@@ -45,9 +67,13 @@ MAX_UPLOAD = 200 * 1024 * 1024        # a saved page sent to «Описание 
 UPLOAD_PATHS = ("/meta-file", "/find-file")    # the ends of the addresses that take such a file as the body
 INT_LIMIT = 10 ** 9       # numbers in addresses (page, position) are clamped to this
 # Pages load scripts, styles and pictures only from this server; text from the library (tag names,
-# file names) is escaped anyway, this is the second lock on the door.
+# file names) is escaped anyway, this is the second lock on the door.  (v5.44.55) One script is written into the pages
+# themselves — static/motion.js, by its hash (webui/motion_script.py): nothing else inline runs.
+from webui import motion_script as _motion  # noqa: E402
+
 CSP = ("default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; "
-       "script-src 'self'; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'")
+       f"script-src 'self'{_motion.csp_source()}; connect-src 'self'; frame-ancestors 'self'; base-uri 'none'; "
+       "form-action 'self'")
 
 
 class _Conn:
@@ -57,6 +83,60 @@ class _Conn:
 
     def __init__(self, sock, address):
         self.sock, self.address, self.handler, self.since = sock, address, None, time.monotonic()
+
+
+def request_kind(head: bytes) -> str:
+    """"media" — a request for a picture or a file (``MEDIA_PATHS``), else "page" (a page, the API, a script, a style),
+    from the first bytes the browser sent; what cannot be read is a page."""
+    line = head.split(b"\r\n", 1)[0].split(b" ")
+    if len(line) >= 2 and line[1].decode("latin-1", "replace").startswith(MEDIA_PATHS):
+        return "media"
+    return "page"
+
+
+class _Jobs:
+    """(v5.44.58) The requests that have come, waiting for a worker: pages first.
+
+    The owner (4.11.2026): «некоторые страницы открываются ебать как долго как будто прога зависает» — the gallery and
+    the grabber, at times the parser and the manga.  All requests stood in one line: a page asked for after a gallery of
+    thumbnails still being made (``media._MAKING`` lets a few be made at once, the others wait — in workers), or after
+    the grabber's previews still coming from the sites, waited for all of them.  Now a page goes before every picture,
+    and ``PAGE_WORKERS`` of the workers take pages only: a page is answered even while every other worker is busy
+    with a picture.  Pictures keep their order among themselves.  (One browser has six connections at most: what keeps
+    its next page waiting is in the browser — ``static/motion.js`` lets the pictures go when the reader leaves; this
+    line is for more of them — the window and a browser, the pictures of pages already left.)"""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._pages: deque = deque()
+        self._media: deque = deque()
+        self._stopping = False
+
+    def put(self, conn, kind: str = "page") -> None:
+        with self._cv:
+            (self._media if kind == "media" else self._pages).append(conn)
+            self._cv.notify_all()
+
+    def get(self, pages_only: bool = False):
+        """The next request for this worker (None — the server stops)."""
+        with self._cv:
+            while True:
+                if self._stopping:
+                    return None
+                if self._pages:
+                    return self._pages.popleft()
+                if self._media and not pages_only:
+                    return self._media.popleft()
+                self._cv.wait()
+
+    def stop(self) -> None:
+        with self._cv:
+            self._stopping = True
+            self._cv.notify_all()
+
+    def waiting(self) -> tuple[int, int]:
+        with self._cv:
+            return len(self._pages), len(self._media)
 
 
 class _PooledHTTPServer(HTTPServer):
@@ -74,7 +154,7 @@ class _PooledHTTPServer(HTTPServer):
 
     def __init__(self, address, handler, workers: int = WORKERS):
         super().__init__(address, handler)
-        self._jobs: queue.Queue = queue.Queue()
+        self._jobs = _Jobs()
         self._lock = threading.Lock()
         self._open: set = set()                 # every connection socket, served or waiting
         self._incoming: list = []               # connections handed to the selector thread
@@ -82,8 +162,10 @@ class _PooledHTTPServer(HTTPServer):
         self._wake_r, self._wake_w = socket.socketpair()
         self._wake_r.setblocking(False)
         self._wake_w.setblocking(False)
-        self._workers = [threading.Thread(target=self._work, name=f"webui-worker-{n}", daemon=True)
-                         for n in range(max(1, int(workers)))]
+        count = max(2, int(workers))
+        pages_only = min(PAGE_WORKERS, count - 1)            # at least one worker serves pictures too
+        self._workers = [threading.Thread(target=self._work, args=(n < pages_only,), name=f"webui-worker-{n}",
+                                          daemon=True) for n in range(count)]
         for worker in self._workers:
             worker.start()
         self._watcher = threading.Thread(target=self._watch_idle, name="webui-idle", daemon=True)
@@ -132,7 +214,7 @@ class _PooledHTTPServer(HTTPServer):
                     conn = key.data
                     selector.unregister(conn.sock)
                     idle.pop(conn.sock, None)
-                    self._jobs.put(conn)            # a request has arrived: a worker serves it
+                    self._jobs.put(conn, self._kind(conn.sock))     # a request has arrived: a worker serves it
                 with self._lock:
                     fresh, self._incoming = self._incoming, []
                 for conn in fresh:
@@ -156,9 +238,28 @@ class _PooledHTTPServer(HTTPServer):
                 self._close(conn)
             selector.close()
 
-    def _work(self) -> None:
+    @staticmethod
+    def _kind(sock) -> str:
+        """A page or a picture: the request's first line, looked at without taking it from the socket (and without
+        waiting: nothing to read yet must not stop the selector)."""
+        try:
+            timeout = sock.gettimeout()
+            sock.settimeout(0)
+        except OSError:
+            return "page"
+        try:
+            return request_kind(sock.recv(512, socket.MSG_PEEK))
+        except (OSError, ValueError):            # closed, or nothing to read yet: the worker finds out
+            return "page"
+        finally:
+            try:
+                sock.settimeout(timeout)
+            except OSError:
+                pass                             # closed meanwhile: the worker finds out
+
+    def _work(self, pages_only: bool = False) -> None:
         while True:
-            conn = self._jobs.get()
+            conn = self._jobs.get(pages_only)
             if conn is None:
                 return
             keep = False
@@ -187,8 +288,7 @@ class _PooledHTTPServer(HTTPServer):
 
     def close_all(self) -> None:
         self._stopping = True
-        for _ in self._workers:
-            self._jobs.put(None)
+        self._jobs.stop()
         self._wake()
         with self._lock:
             sockets = list(self._open)
@@ -291,6 +391,7 @@ class Request:
     body: bytes = b""
     settings: dict = field(default_factory=dict)
     server: "WebUI | None" = None
+    peer: str = ""                     # (v5.44.64) the address the connection came from (Tailscale serve: 127.0.0.1)
 
     def arg(self, name: str, default: str = "") -> str:
         values = self.query.get(name)
@@ -494,6 +595,16 @@ class _RequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._dispatch("POST")
 
+    def _browser_gone(self) -> bool:
+        """(v5.44.58) The browser has given this request up — it left the page that wanted the picture and closed the
+        connection: the picture (a thumbnail to make, a preview to fetch from a site) is not made for nobody, and the
+        pictures of the page opened now do not wait for it."""
+        try:
+            ready, _w, _x = select.select([self.connection], [], [], 0)
+            return bool(ready) and self.connection.recv(1, socket.MSG_PEEK) == b""
+        except (OSError, ValueError):
+            return True
+
     def _refuse(self, response: Response, method: str) -> None:
         """Answer without reading the request body: the connection is closed after it, so an
         unread body is never taken for the next request."""
@@ -504,16 +615,33 @@ class _RequestHandler(BaseHTTPRequestHandler):
         ui = self.webui
         started = time.time()
         try:
-            if not ui.host_ok(self.headers.get("Host", "")):
-                return self._refuse(Response(421, b"Wrong host", "text/plain"), method)
+            from core import phone_access
+            settings = ui.settings()
+            peer = str(self.client_address[0]) if self.client_address else ""
+            phone = phone_access.admit(settings, self.headers, peer)      # (v5.44.64) the owner's phone, Tailscale
             url = urlparse(self.path)
             path = url.path or "/"
+            if path == "/m/alive" and method != "POST" and peer in ("127.0.0.1", "::1"):
+                # (v5.44.71) the owner's server checks its way here — before the settings name it too (the setup's own
+                # check through it comes first); it says nothing but «ok»
+                from webui.pages import phone_relay
+                return self._send(phone_relay.alive(url.query), method)
+            if not ui.host_ok(self.headers.get("Host", "")) and phone is None:
+                return self._refuse(Response(421, b"Wrong host", "text/plain"), method)
+            if phone == "pair" and not phone_access.open_to_pair(path):
+                from webui.pages import phone_relay            # (v5.44.71) a phone not paired yet: the pairing only
+                return self._refuse(phone_relay.pair_needed(path, method, self.headers), method)
+            if method != "POST" and path.startswith(MEDIA_PATHS) and self._browser_gone():
+                self.close_connection = True        # (v5.44.58) the page that asked for it is gone: nothing to make
+                return
             query = parse_qs(url.query, keep_blank_values=True)
             body = b""
             if method == "POST":
-                if not ui.cookie_ok(self.headers.get("Cookie", "")):
-                    return self._refuse(_login_required(), method)
-                if not ui.origin_ok(self.headers.get("Origin", "")):
+                if not ui.cookie_ok(self.headers.get("Cookie", "")) and phone not in ("ok", "pair"):
+                    return self._refuse(_login_required(phone), method)
+                origin = self.headers.get("Origin", "")
+                if not ui.origin_ok(origin) and not (phone in ("ok", "pair")
+                                                     and phone_access.origin_ok(origin, settings, ui.port)):
                     return self._refuse(Response(403, b"Cross-site request refused", "text/plain"), method)
                 if self.headers.get("Transfer-Encoding"):
                     return self._refuse(Response(411, b"Content-Length required", "text/plain"), method)
@@ -529,8 +657,19 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._auth(query, method)
             if path.startswith("/static/"):
                 return self._send(_static(path[len("/static/"):]), method)
-            if not ui.cookie_ok(self.headers.get("Cookie", "")):
-                return self._send(_login_required(), method)
+            given = False
+            if path.startswith("/watch/s/") and method in ("GET", "HEAD") and peer in ("127.0.0.1", "::1"):
+                # (v5.44.106) the window's own player (Qt Multimedia) asks the stream of an episode of «Смотреть»
+                # without the page's cookie: an address with a token the program gave (core/video_watch) — that alone
+                from core import video_watch
+                given = video_watch.known(path.split("/")[3] if path.count("/") >= 4 else "")
+            if not given and not ui.cookie_ok(self.headers.get("Cookie", "")) and phone not in ("ok", "pair"):
+                return self._send(_login_required(phone), method)
+            if phone == "ok" and method in ("GET", "HEAD"):
+                from webui.pages import phone as phone_pages
+                twin = phone_pages.twin(path, url.query)             # the phone's own pages: «/», the gallery
+                if twin:
+                    return self._send(Response.redirect(twin), method)
             from core.database.connection import pages_wait
             wait = pages_wait()
             if wait:                                # (v5.44.5) the base is being checked and updated: no page yet
@@ -540,8 +679,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 if params == "method":
                     return self._send(Response(405, b"Method not allowed", "text/plain"), method)
                 return self._send(Response.not_found(), method)
-            request = Request(method, path, params or {}, query, dict(self.headers.items()), body, ui.settings(), ui)
-            response = handler(request)
+            request = Request(method, path, params or {}, query, dict(self.headers.items()), body, settings, ui, peer)
+            from webui import content_mode
+            response = content_mode.guard(request) or handler(request)     # (v5.44.53) «SFW»: the gallery's pages
             if response.stream is not None:
                 started = None                      # an endless answer: not a slow page
         except (ConnectionError, TimeoutError):    # the browser went away or stopped reading
@@ -596,6 +736,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         the connection ends with it.  The browser going away ends it too."""
         self.close_connection = True
         stream = response.stream
+        if urlparse(self.path).path.startswith("/watch/s/"):
+            with contextlib.suppress(OSError):          # (v5.44.106) a player on a pause stops reading for a while
+                self.connection.settimeout(WATCH_TIMEOUT)
         try:
             self.send_response(response.status)
             self.send_header("Content-Type", response.content_type)
@@ -720,7 +863,15 @@ def _static(name: str) -> Response:
     return Response(200, target.read_bytes(), ctype, {"Cache-Control": "no-cache"})
 
 
-def _login_required() -> Response:
+def _login_required(phone: "str | None" = None) -> Response:
+    if phone == "other":                       # (v5.44.64) the computer's name in Tailscale, not the owner's account
+        text = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<title>Local Booru</title>"
+                "<body style='font:16px sans-serif;padding:32px 20px;background:#1f1f1f;color:#d9d9d9'>"
+                "<h2 style='color:#fff'>Библиотека открывается только с ваших устройств</h2>"
+                "<p>Откройте этот адрес на телефоне, где Tailscale включён и вошёл в тот же аккаунт, что и на "
+                "компьютере.</p></body>")
+        return Response(403, text.encode("utf-8"))
     text = ("<!doctype html><meta charset=utf-8><title>Local Booru</title>"
             "<body style='font:15px sans-serif;padding:40px;background:#1c1e25;color:#d9dbe4'>"
             "<h2>Откройте галерею из программы Local Booru</h2>"

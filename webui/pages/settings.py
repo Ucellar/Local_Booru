@@ -31,6 +31,7 @@ def register(router) -> None:
     router.add("GET", r"/api/settings/diagnostics\.zip", diagnostics_export)
     router.add("POST", r"/api/settings/profile", profile_import)
     router.add("GET", r"/api/settings/move/state", move_state)
+    router.add("GET", r"/api/settings/comic/state", comic_state)          # (v5.44.113) «Проверить сейчас»
 
 
 def _prefs() -> dict:
@@ -102,6 +103,10 @@ GALLERY = Section("gallery", "Галерея", fields=(
           "из скачанного: родитель и дочерние посты, страницы одной работы (pixiv, твит, Patreon…), серии одного "
           "загрузившего и комиксы; сборки, которые вы меняли или собрали сами, она не трогает",
           default=True),
+    Field("comic_manga_auto", "bool", "Комиксы и манга — в папку манги",
+          "комикс галереи от 15 страниц (пул e621 или сборка комикса) и манга из папки парсера копируются в папку "
+          "манги, карточки — в корзину («перенесено в мангу», оттуда их можно вернуть); файлы папки парсера остаются "
+          "на месте", default=True),
     Field("card_sets_ask_sites", "bool", "Узнать у сайтов про уже скачанное",
           "один раз, в фоне, пачками: кто залил пост и его родитель — для карточек, скачанных до версии 5.21; "
           "ответ запоминается навсегда", default=True),
@@ -340,7 +345,42 @@ def _gallery_extra(settings: dict) -> str:
     return (f'<p class="hint">Сборок: {sets}' + (f", из них ваших (собраны или изменены вами): {mine}" if mine else "")
             + f'. Про скачанное {esc(asked)}.</p>{notes}'
             '<div class="tool-actions"><button type="button" data-action="settings-act" data-act="card_sets_rebuild">'
-            'Собрать сборки заново</button><span class="action-status" role="status"></span></div>')
+            'Собрать сборки заново</button><span class="action-status" role="status"></span></div>'
+            + _comic_extra(settings))
+
+
+def _comic_extra(settings: dict) -> str:
+    """(v5.44.113) «Комиксы и манга — в папку манги»: what was moved, what waits, «Проверить сейчас» and its journal —
+    the owner: «и как мне перепроверить архив?»."""
+    from core import comic_manga
+    try:
+        st = comic_manga.status(settings)
+    except Exception as exc:  # noqa: BLE001 - a broken file of the settings folder: the button still works
+        _LOG.debug("settings page: comics not counted: %s", exc)
+        st = {"comics": 0, "copies": 0, "waiting": 0, "looked_at": 0, "due": False, "no_room": ""}
+    parts = [f"в папке манги комиксов из галереи — {st['comics']}, манги из папки парсера — {st['copies']}"]
+    if st["waiting"]:
+        parts.append(f"ждут копирования: {st['waiting']}")
+    if st["due"]:
+        parts.append("папку парсера программа пересмотрит в ближайшие минуты")
+    elif st["looked_at"]:
+        parts.append(f"папка парсера просмотрена {_day(st['looked_at'])}")
+    room = f'<p class="hint warn">{esc(st["no_room"])}</p>' if st["no_room"] else ""
+    return (f'<p class="hint">Комиксы и манга: {esc("; ".join(parts))}. Программа проверяет сама, раз в несколько '
+            f'минут; «Проверить сейчас» — сразу: заново смотрит папку парсера и переносит всё, что нашла.</p>{room}'
+            '<div class="tool-actions"><button type="button" data-action="settings-act" data-act="comic_manga_check">'
+            'Проверить сейчас</button><span class="action-status" role="status"></span></div>'
+            '<div class="job" data-job data-comic-job hidden><div class="job-head"><b class="job-title"></b> '
+            '<span class="job-status"></span></div><pre class="job-log" tabindex="0" aria-label="Журнал"></pre></div>')
+
+
+def comic_state(req: Request) -> Response:
+    """(v5.44.113) The task «Проверить сейчас» for the page (its journal)."""
+    from core import comic_manga, page_jobs
+    task = page_jobs.current(comic_manga.TASK)
+    if task is None:
+        return Response.json({"ok": True, "status": "idle"})
+    return Response.json({"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0))})
 
 
 def _download_extra(settings: dict) -> str:
@@ -478,8 +518,11 @@ def _folders_html(settings: dict) -> str:
     from core.storage_roots import configured_output_root       # shows the folder, does not create it
     root = str(settings.get("root") or "")
     manga = str(settings.get("manga_root") or "")
+    from core.manhwa_library import manhwa_root
     from core.video_library import video_root
     video = video_root(settings)
+    manhwa = manhwa_root(settings)
+    manhwa_note = "" if str(settings.get("manhwa_root") or "").strip() else ' <small class="muted">по умолчанию — в архиве</small>'
     video_note = "" if str(settings.get("video_root") or "").strip() else ' <small class="muted">по умолчанию — в архиве</small>'
     archive, how = _archive_html(settings)
     return f"""<section class="settings-block" id="set-folders"><h2>Папки</h2>
@@ -490,6 +533,9 @@ def _folders_html(settings: dict) -> str:
       <a href="/parser">изменить на странице «Парсер»</a></span>
     <span class="tool-label">Папка манги</span><span class="tool-value"><span class="tool-path">{esc(manga or "не выбрана")}</span>
       <span class="tool-actions"><button type="button" data-action="settings-choose" data-key="manga_root">Выбрать…</button>
+      <span class="action-status" role="status"></span></span></span>
+    <span class="tool-label">Папка манхвы</span><span class="tool-value"><span class="tool-path">{esc(manhwa)}</span>{manhwa_note}
+      <span class="tool-actions"><button type="button" data-action="settings-choose" data-key="manhwa_root">Выбрать…</button>
       <span class="action-status" role="status"></span></span></span>
     <span class="tool-label">Папка видео</span><span class="tool-value"><span class="tool-path">{esc(video)}</span>{video_note}
       <span class="tool-actions"><button type="button" data-action="settings-choose" data-key="video_root">Выбрать…</button>
@@ -540,6 +586,10 @@ TABS = (
     ("library", "Библиотека", "Где лежат данные, что делается с новыми и удалёнными файлами, резервные копии.",
      ("folders", "library", "backup")),
     ("download", "Скачивание и браузер", "Граббер, подписки и расширение браузера.", ("download", "companion")),
+    ("manga", "Сайты манги", "Сайты манги и манхвы: новые адреса, когда сайт переехал, и вход на них (v5.44.78).",
+     ("manga_sites",)),
+    ("phone", "Телефон", "Библиотека на телефоне вне дома — через ваш сервер (v5.44.71) или через Tailscale "
+                         "(v5.44.64).", ("phone",)),
     ("visual", "Брак: фото или рисунок", "Модель, которая отличает фото от рисунка в Браке.", ("visual",)),
     ("db", "База и журналы", "Как программа обращается со своей базой, журналы и отчёт об ошибке.",
      ("db", "logs", "dev")),
@@ -572,8 +622,10 @@ def settings_page(req: Request) -> Response:
                               section.note, section.danger)
         blocks[section.id] = render(section, s)
     from webui import prefs
+    from webui.pages import manga_sites, phone
     blocks.update({"folders": _folders_html(s), "logs": _logs_html(), "profile": _profile_html(),
-                   "looks": render(LOOKS, prefs.choices())})
+                   "looks": render(LOOKS, prefs.choices()), "phone": phone.settings_block(s),
+                   "manga_sites": manga_sites.settings_block(s)})
     tabs, panes = [], []
     for tab_id, label, lead, parts in TABS:
         tabs.append(f'<button type="button" role="tab" id="tab-{tab_id}" aria-controls="pane-{tab_id}" '
@@ -682,6 +734,15 @@ def settings_act(req: Request) -> Response:
         return Response.json({"ok": True, "reload": True,
                               "message": f"Готово: сборок {result['sets']}, новых {result['created']}, "
                                          f"ушло {result['removed']}"})
+    if act == "comic_manga_check":                 # (v5.44.113) comics and manga to the manga folder — now
+        from core import comic_manga, page_jobs
+        try:
+            started = comic_manga.check_now(s)
+        except comic_manga.ComicError as exc:
+            return Response.json({"ok": False, "error": str(exc)}, 409)
+        except page_jobs.TaskBusy:
+            return Response.json({"ok": False, "error": "Проверка уже идёт — её журнал ниже"}, 409)
+        return Response.json({"ok": True, "id": started.id, "message": "Проверка идёт — журнал ниже"})
     if act in ("move_continue", "move_stop", "move_cancel", "move_delete_old"):
         return _move_act(act, s)
     if act == "archive_stay":

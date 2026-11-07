@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 
@@ -338,6 +339,12 @@ class _FrameMaker:
         return bytes(buffer.data()), dims
 
 
+def is_own_stream(path: str) -> bool:
+    """(v5.44.106) ``path`` is the program's own address of a stream of «Смотреть» (``core/video_watch``:
+    ``http://127.0.0.1:<port>/watch/s/<token>/…``), not a file."""
+    return bool(re.match(r"http://(?:127\.0\.0\.1|localhost):\d{1,5}/watch/s/[A-Za-z0-9_-]{8,64}/", str(path or "")))
+
+
 class InlineVideo(QObject):
     """One video at a time; ``handle`` takes the page's requests (start and the buttons)."""
 
@@ -458,16 +465,19 @@ class InlineVideo(QObject):
         self._audio_choice = None
         self._sub_choice = None
         self.maker.set_cues(None)
+        # (v5.44.106) an episode of «Смотреть»: the program's own address of its stream (core/video_watch) — no file,
+        # no subtitle files beside it, nothing to read of it here
+        remote = is_own_stream(path)
         try:
-            self._subfiles = video_tracks.subtitle_files(path, top=top)
+            self._subfiles = [] if remote else video_tracks.subtitle_files(path, top=top)
         except OSError as exc:
             _LOG.info("subtitle files of %s not looked at: %s", path, exc)
             self._subfiles = []
-        self.path_key = os.path.normcase(os.path.abspath(path))
+        self.path_key = path if remote else os.path.normcase(os.path.abspath(path))
         self._dark_since, self._dark_said = 0.0, False
         try:                                     # an AV1 file: what it shows tells whether this computer can
             from core import video_probe
-            info = video_probe.probe(path)
+            info = None if remote else video_probe.probe(path)
             self._av1 = info is not None and info.video == "av1"
         except Exception as exc:  # the play goes on; nothing is learnt
             _LOG.debug("inline video: codec of %s not read: %s", path, exc)
@@ -479,7 +489,7 @@ class InlineVideo(QObject):
         self.player.setLoops(QMediaPlayer.Loops.Infinite if loop else QMediaPlayer.Loops.Once)
         self.maker.target(token, width, height)
         self._apply_volume()
-        later(self.player, "setSource", Q_ARG(QUrl, QUrl.fromLocalFile(path)))
+        later(self.player, "setSource", Q_ARG(QUrl, QUrl(path) if remote else QUrl.fromLocalFile(path)))
         later(self.player, "play")
         self._timer.start()
         self._publish()
@@ -601,8 +611,14 @@ class InlineVideo(QObject):
 
     def _loaded(self) -> bool:
         """The file of this play is open: the player's tracks are its own (not those of the file played before)."""
-        source = self.player.source().toLocalFile() if self.path_key else ""
-        return bool(source) and os.path.normcase(os.path.abspath(source)) == self.path_key and \
+        if not self.path_key:
+            return False
+        if is_own_stream(self.path_key):                 # (v5.44.106) a stream of «Смотреть»: its address
+            same = self.player.source().toString() == self.path_key
+        else:
+            source = self.player.source().toLocalFile()
+            same = bool(source) and os.path.normcase(os.path.abspath(source)) == self.path_key
+        return same and \
             self.player.mediaStatus() in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferingMedia,
                                           QMediaPlayer.MediaStatus.BufferedMedia, QMediaPlayer.MediaStatus.EndOfMedia)
 

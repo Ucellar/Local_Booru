@@ -36,6 +36,8 @@
   // job: the .job box (title, status, journal); url: the task's state address.
   // onState(state, busy) — every answer (to enable buttons); onEnd(state) — a task seen going has ended.
   // Returns {poll, started}: started() after the page has started a task, so its end is seen.
+  // ``url`` — the state's address, or (v5.44.74) a function giving it anew for every question (a page that asks only
+  // for what changed since its last answer)
   LB.watchTask = (job, url, { onState, onEnd } = {}) => {
     const pre = job.querySelector(".job-log");
     let after = 0;
@@ -71,7 +73,8 @@
       const mine = generation;
       let delay = 3000;
       try {
-        const r = await fetch(url + (url.includes("?") ? "&" : "?") + "after=" + asked, { credentials: "same-origin" });
+        const address = typeof url === "function" ? url() : url;
+        const r = await fetch(address + (address.includes("?") ? "&" : "?") + "after=" + asked, { credentials: "same-origin" });
         const st = await r.json();
         // an answer from before started() describes the old state: it would hide the new task's end
         if (mine !== generation) return;

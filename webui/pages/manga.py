@@ -34,6 +34,7 @@ def register(router) -> None:
     router.add("GET", r"/manga/s/(?P<id>[0-9a-f]{12})", set_page)
     router.add("POST", r"/api/manga/(?P<id>[0-9a-f]{12})/set", set_change)
     router.add("GET", r"/manga/(?P<kind>tags|artists|characters|parodies)", tag_index)
+    router.add("POST", r"/api/manga/progress", progress)
 
 
 def _prefs(req: Request) -> dict:
@@ -41,9 +42,12 @@ def _prefs(req: Request) -> dict:
     return {"thumbs": "m"}
 
 
-TABS = (("all", "Вся манга", "/manga"), ("tags", "Теги", "/manga/tags"), ("artists", "Артисты", "/manga/artists"),
-        ("characters", "Персонажи", "/manga/characters"), ("parodies", "Пародии", "/manga/parodies"),
-        ("random", "Случайная", "/manga/random"), ("get", "Скачать с nhentai", "/manga/get"))
+TABS = (("all", "Вся манга", "/manga"), ("feed", "Лента", "/manga/feed"), ("tags", "Теги", "/manga/tags"),
+        ("artists", "Артисты", "/manga/artists"), ("characters", "Персонажи", "/manga/characters"),
+        ("parodies", "Пародии", "/manga/parodies"), ("random", "Случайная", "/manga/random"))
+# (v5.44.90) «Лента» — the titles of the sites, with filters (webui/pages/catalog.py)
+# (v5.44.89) no «Скачать» here: the owner — «убрать кнопку скачать которая в них находится оставив только вкладку
+# "скачать"»; downloading is the menu's «Скачать» alone
 # The lists of the manga folder's tags (``tag_index``): (title, groups of core.manga_library, «нет …»)
 INDEX_TITLES = {"tags": ("Теги", ("general",), "тегов"), "artists": ("Артисты", ("artist",), "артистов"),
                 "characters": ("Персонажи", ("character",), "персонажей"),
@@ -51,7 +55,8 @@ INDEX_TITLES = {"tags": ("Теги", ("general",), "тегов"), "artists": ("�
 
 
 def _frame(req: Request, title: str, body: str, *, kind: str = "manga", show: str = "") -> Response:
-    """A page of the tab; ``show`` — which of its pages the section bar marks ("" — no bar: a title, the reader)."""
+    """A page of the tab; ``show`` — which of its pages the section bar marks ("" — no bar: a title, the reader).
+    (v5.44.75) «Скачать» leads to «Скачать → Манга» (``get_hub.py``) — in «SFW» too (its nhentai is not there then)."""
     search = _search_form(req.arg("q"), req.arg("sort", "newest"))
     tabs = tuple((label, href, key == show) for key, label, href in TABS) if show else ()
     return Response.html(page_frame(title, body, active="manga", subnav=False, kind=kind, top_search=search, tabs=tabs,
@@ -74,6 +79,91 @@ def _library(req: Request, *, refresh: bool = False) -> tuple[str, list]:
 def _get(req: Request) -> M.Manga | None:
     root = M.manga_root(req.settings)
     return M.LIBRARY.get(root, req.params["id"]) if root else None
+
+
+# ── (v5.44.53) «SFW / Всё / NSFW»: which titles the mode shows (webui/content_mode.py, core/content_marks.py) ──
+def _top(root: str, manga: M.Manga) -> M.Manga:
+    """A chapter is judged as its series."""
+    return (M.LIBRARY.get(root, manga.parent_id) or manga) if manga.parent_id else manga
+
+
+def _verdict(manga: M.Manga, hand: dict | None = None):
+    from core import content_marks as CM
+    return CM.manga_verdict(manga, hand)
+
+
+def _visible(items: list, now: str | None = None) -> list:
+    """The titles of the list the mode shows («Всё» — the list itself)."""
+    from core import content_marks as CM
+    from webui import content_mode
+    now = now or content_mode.mode()
+    if now == "all":
+        return items
+    hand = CM.marks()["manga"]
+    return [m for m in items if content_mode.shows(_verdict(m, hand).hentai, now)]
+
+
+def _shown_sets(items: list, visible: list) -> list:
+    """The сборки of the shown titles: one with hidden parts keeps the shown ones (one left — a title on its own)."""
+    from core import manga_works as W
+    sets = _sets(items)
+    if visible is items:
+        return sets
+    ids = {m.id for m in visible}
+    out = []
+    for found in sets:
+        parts = [p for p in found.parts if p.id in ids]
+        if len(parts) == len(found.parts):
+            out.append(found)
+        elif len(parts) >= 2:
+            out.append(W.MangaSet(id=found.id, title=found.title, parts=parts))
+    return out
+
+
+def _hidden(req: Request, manga: M.Manga) -> Response | None:
+    """The page of a title (its reader) the mode hides: what it is instead; None — show it."""
+    from webui import content_mode
+    top = _top(M.manga_root(req.settings), manga)
+    found = _verdict(top)
+    if content_mode.shows(found.hentai):
+        return None
+    body = content_mode.hidden_item(active="manga", what="эта манга", reason=found.reason, hentai=found.hentai,
+                                    back="/manga", back_label="Вся манга")
+    return _frame(req, "Скрыто", body, kind="mode-hidden")
+
+
+def item_shown(settings: dict, item_id: str, now: str) -> bool | None:
+    """Is a title (a chapter, a сборка) shown in the mode ``now``; None — no such thing."""
+    from webui import content_mode
+    root = M.manga_root(settings)
+    if not root:
+        return None
+    manga = M.LIBRARY.get(root, item_id)
+    if manga is not None:
+        return content_mode.shows(_verdict(_top(root, manga)).hentai, now)
+    found = next((s for s in _sets(M.LIBRARY.items(root)) if s.id == item_id), None)
+    if found is None:
+        return None
+    return any(content_mode.shows(_verdict(p).hentai, now) for p in found.parts)
+
+
+def top_item(settings: dict, item_id: str) -> M.Manga | None:
+    """The title a mark by hand is for: the title itself, or the series of a chapter."""
+    root = M.manga_root(settings)
+    manga = M.LIBRARY.get(root, item_id) if root else None
+    return _top(root, manga) if manga is not None else None
+
+
+def _mode_empty(items: list) -> str:
+    """The list is empty because of the mode, not because the folder is."""
+    from webui import content_mode
+    now = content_mode.mode()
+    if not items or now == "all":
+        return ""
+    why = ("в папке только хентай" if now == "sfw" else "хентая в папке нет")
+    return (f'<div class="empty mode-empty"><p>В режиме «{content_mode.LABELS[now]}» здесь пусто: {why}.</p>'
+            '<p><button type="button" class="mbutton primary" data-action="content-mode" data-mode="all">'
+            'Показать всё</button></p></div>')
 
 
 # ── search ──────────────────────────────────────────────────────────────────
@@ -130,8 +220,9 @@ def _sets_on() -> bool:
     return str(prefs.load().get("manga_sets") or "on") != "off"
 
 
-def _set_of(items: list, manga_id: str):
-    return next((s for s in _sets(items) if any(p.id == manga_id for p in s.parts)), None)
+def _set_of(items: list, manga_id: str, visible: list | None = None):
+    sets = _sets(items) if visible is None else _shown_sets(items, visible)
+    return next((s for s in sets if any(p.id == manga_id for p in s.parts)), None)
 
 
 class _Tile:
@@ -198,10 +289,11 @@ def index(req: Request) -> Response:
         return missing
     query = req.arg("q").strip()
     sort = req.arg("sort", "newest")
-    found = [m for m in items if _matches(m, query)] if query else list(items)
+    visible = _visible(items)           # (v5.44.53) what the mode «SFW / Всё / NSFW» shows
+    found = [m for m in visible if _matches(m, query)] if query else list(visible)
     grouped = not query and _sets_on()
     if grouped:                         # the parts of one work: one tile (a search shows each title it found)
-        sets = _sets(items)
+        sets = _shown_sets(items, visible)
         inside = {p.id for s in sets for p in s.parts}
         found = [m for m in found if m.id not in inside] + [_Tile(s) for s in sets]
     found = _sorted(found, sort if sort in SORTS else "newest")
@@ -225,9 +317,11 @@ def index(req: Request) -> Response:
                                                        for m in shown) + "</div>"
     elif query:
         grid = f'<div class="empty"><p>По запросу «{esc(query)}» манги нет.</p></div>'
+    elif _mode_empty(items):
+        grid = _mode_empty(items)
     else:
         grid = ('<div class="empty"><p>В папке манги пока ничего нет.</p><p><a class="mbutton primary" '
-                'href="/manga/get">Скачать с nhentai</a></p></div>')
+                'href="/get">Скачать мангу</a></p></div>')
     body = (f'<div class="manga-index">{head}{grid}'
             + paginator(page, pages, lambda n: url("/manga", q=query, sort=sort, page=n)) + "</div>")
     return _frame(req, "Манга" if not query else query, body, show="all")
@@ -236,6 +330,7 @@ def index(req: Request) -> Response:
 def random_title(req: Request) -> Response:
     import random
     _root, items = _library(req)
+    items = _visible(items)
     return Response.redirect(f"/manga/g/{random.choice(items).id}" if items else "/manga")
 
 
@@ -257,7 +352,7 @@ def tag_index(req: Request) -> Response:
     missing = _no_folder(req, root, kind)
     if missing is not None:
         return missing
-    entries = [(group, tag, n) for (group, tag), n in _counts(items).items() if group in groups and tag]
+    entries = [(group, tag, n) for (group, tag), n in _counts(_visible(items)).items() if group in groups and tag]
     if not entries:
         body = (f'<div class="manga-head"><h1>{esc(title)} <span class="muted">0</span></h1></div>'
                 f'<div class="empty"><p>У манги в папке пока нет {none}.</p><p>Они берутся из описания манги '
@@ -325,23 +420,29 @@ def title_page(req: Request) -> Response:
     if manga is None:
         return _frame(req, "Нет такой манги", '<div class="empty"><p>Такой манги нет — возможно, её переименовали '
                       'или убрали из папки.</p><p><a href="/manga?refresh=1">Перечитать папку манги</a></p></div>')
+    hidden = _hidden(req, manga)                 # (v5.44.53) the mode «SFW / Всё / NSFW» hides it
+    if hidden is not None:
+        return hidden
     _root, items = _library(req)
+    visible = _visible(items)
     read_target = manga.chapters[0] if manga.is_series else manga
     series = M.LIBRARY.get(M.manga_root(req.settings), manga.parent_id) if manga.parent_id else None
+    found = _verdict(series or manga)
     buttons = [f'<a class="mbutton primary" href="/manga/r/{read_target.id}/1">Читать</a>']
     if manga.source_url:
         buttons.append(f'<a class="mbutton" href="{esc(manga.source_url)}" target="_blank" rel="noopener noreferrer">На сайте</a>')
     buttons.append(f'<button type="button" class="mbutton" data-action="reveal-manga" data-id="{manga.id}">Показать в папке</button>')
+    buttons.append(_mark_button(series or manga, found))
     back = (f'<p class="manga-back"><a href="/manga/g/{series.id}">← {esc(series.title)}</a></p>' if series else "")
     info = (f'<div class="manga-info"><a class="manga-cover" href="/manga/r/{read_target.id}/1">'
             f'<img src="/manga/cover/{manga.id}" alt=""></a><div class="manga-meta">{back}'
             f'<h1>{esc(manga.title)}</h1>'
             + (f'<h2>{esc(manga.title_japanese)}</h2>' if manga.title_japanese else "")
-            + f'<div class="tag-rows">{_tag_rows(manga, _counts(items))}</div>'
+            + f'<div class="tag-rows">{_tag_rows(manga, _counts(visible))}{_mark_row(found)}</div>'
             f'<div class="manga-buttons">{"".join(buttons)}<p class="action-status" role="status"></p></div></div></div>')
-    related_html = _set_box(items, manga) if not manga.parent_id else ""
-    if not manga.parent_id and _set_of(items, manga.id) is None:
-        parts = M.related(items, manga)          # (not a сборка: loose chapters by their files' names)
+    related_html = _set_box(items, manga, visible) if not manga.parent_id else ""
+    if not manga.parent_id and _set_of(items, manga.id, visible) is None:
+        parts = M.related(visible, manga)        # (not a сборка: loose chapters by their files' names)
         if parts:
             cards = "".join(_cover_card(m) for m in parts)
             related_html = (f'<h3 class="manga-sub">Другие главы этого тайтла <span class="muted">{len(parts)}</span></h3>'
@@ -361,10 +462,31 @@ def title_page(req: Request) -> Response:
     return _frame(req, manga.title, f'<div class="manga-gallery">{info}{extra}{related_html}</div>', kind="manga-title")
 
 
-def _set_box(items: list, manga: M.Manga) -> str:
-    """The title's сборка (its other parts, «Убрать из сборки») — or «В сборку с…» (titles by the same people)."""
+def _mark_row(found) -> str:
+    """(v5.44.53) «Хентай: да — с nhentai.net» among the tag rows: a title the program (or a mark by hand) takes for
+    hentai, or one marked «не хентай» by hand."""
+    if not found.hentai and not found.by_hand:
+        return ""
+    said = ("да" if found.hentai else "нет") + (f" — {found.reason}" if found.reason else "")
+    return (f'<div class="tag-row content-row"><span class="tr-name">Хентай:</span><span class="tr-tags">'
+            f'<span class="mtag plain">{esc(said)}</span></span></div>')
+
+
+def _mark_button(manga: M.Manga, found) -> str:
+    """«Это хентай» / «Это не хентай»: the mark by hand for the switch «SFW / Всё / NSFW» (a chapter — its series)."""
+    value = "safe" if found.hentai else "hentai"
+    label = "Это не хентай" if found.hentai else "Это хентай"
+    tip = ("Не прятать в режиме «SFW»" if found.hentai else "Прятать в режиме «SFW», показывать в «NSFW»")
+    return (f'<button type="button" class="mbutton" data-action="content-mark" data-kind="manga" data-id="{manga.id}" '
+            f'data-value="{value}" title="{esc(tip)}">{label}</button>')
+
+
+def _set_box(items: list, manga: M.Manga, visible: list | None = None) -> str:
+    """The title's сборка (its other parts, «Убрать из сборки») — or «В сборку с…» (titles by the same people);
+    (v5.44.53) only the titles the mode shows (``visible``)."""
     from core import manga_works as W
-    found = _set_of(items, manga.id)
+    visible = items if visible is None else visible
+    found = _set_of(items, manga.id, visible)
     done = manga.id in W.manual()["apart"] or manga.id in W.manual()["joined"]
     back = (f'<button type="button" class="link" data-action="manga-set" data-id="{manga.id}" data-do="program">'
             f'Пусть решает программа</button>') if done else ""
@@ -378,7 +500,7 @@ def _set_box(items: list, manga: M.Manga) -> str:
                 f'data-id="{manga.id}" data-do="apart">Убрать из сборки</button> {back}'
                 f'<span class="action-status" role="status"></span></p><div class="covers">{cards}</div>')
     mine = W.people_of(manga)
-    near = [m for m in items if m.id != manga.id and mine and W.people_of(m) & mine][:60]
+    near = [m for m in visible if m.id != manga.id and mine and W.people_of(m) & mine][:60]
     if not near:
         return (f'<p class="manga-set-tools">{back}<span class="action-status" role="status"></span></p>' if back else "")
     options = "".join(f'<option value="{m.id}">{esc(m.title[:120])}</option>'
@@ -398,6 +520,13 @@ def set_page(req: Request) -> Response:
     if found is None:
         return _frame(req, "Нет такой сборки", '<div class="empty"><p>Такой сборки нет — её части переименовали, '
                       'убрали из папки или из сборки.</p><p><a href="/manga">Вся манга</a></p></div>')
+    ids = {p.id for p in _visible(found.parts)}                          # (v5.44.53) the mode hides some parts
+    shown = [p for p in found.parts if p.id in ids]
+    if not shown:
+        return _hidden(req, found.parts[0])
+    if len(shown) < len(found.parts):
+        from core import manga_works as W
+        found = W.MangaSet(id=found.id, title=found.title, parts=shown)
     cards = "".join(_cover_card(m) for m in found.parts)
     pages = sum(p.page_count for p in found.parts)
     head = (f'<div class="manga-head"><h1>{esc(found.title)} <span class="muted">{len(found.parts)} '
@@ -441,11 +570,16 @@ def reader(req: Request) -> Response:
     manga = _get(req)
     if manga is None or manga.is_series:
         return Response.redirect(f"/manga/g/{req.params['id']}" if manga else "/manga")
+    hidden = _hidden(req, manga)                 # (v5.44.53) the mode «SFW / Всё / NSFW» hides it
+    if hidden is not None:
+        return hidden
     total = len(manga.pages)
     n = int(req.params["n"])
     if n < 1 or n > total:
         return Response.redirect(f"/manga/r/{manga.id}/{max(1, min(n, total))}")
     series = M.LIBRARY.get(M.manga_root(req.settings), manga.parent_id) if manga.parent_id else None
+    # (v5.44.67) the page open is what was read: the phone's «Продолжить чтение» knows it
+    M.PROGRESS.record((series or manga).id, manga.id, n - 1, 0.0, done=n == total)
     home = f"/manga/g/{series.id if series else manga.id}"
     after = home
     if series:
@@ -557,6 +691,24 @@ def page_image(req: Request) -> Response:
         return _placeholder("PDF: нужен PyMuPDF")
     data, ctype = rendered
     return Response(200, data, ctype, {"Cache-Control": "private, max-age=3600"})
+
+
+def progress(req: Request) -> Response:
+    """(v5.44.67) {id, page from 1}: the page open in the phone's reader (``webui/pages/phone_manga.py``); the last one —
+    the manga (the chapter) is read."""
+    body = req.json()
+    root = M.manga_root(req.settings)
+    manga = M.LIBRARY.get(root, str(body.get("id") or "")) if root else None
+    if manga is None or manga.is_series:
+        return Response.json({"ok": False, "error": "Такой манги нет"}, 404)
+    try:
+        page = int(body.get("page") or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if not 1 <= page <= len(manga.pages):
+        return Response.json({"ok": False, "error": "Такой страницы нет"}, 400)
+    M.PROGRESS.record(_top(root, manga).id, manga.id, page - 1, 0.0, done=page == len(manga.pages))
+    return Response.json({"ok": True})
 
 
 def reveal(req: Request) -> Response:

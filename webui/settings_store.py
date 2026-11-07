@@ -31,11 +31,14 @@ PAGE_KEYS = frozenset({
     "external_browser_mode", "external_browser_executable",
     "performance_slow_ms", "sqlite_cache_mb", "sqlite_checkpoint_on_exit", "sqlite_idle_checkpoint_enabled",
     "sqlite_idle_checkpoint_threshold_mb", "sqlite_idle_checkpoint_interval_seconds", "derived_cache_external_enabled", "manga_root",
+    "manhwa_root", "manga_site_addresses", "manga_language", "manga_archive_auto", "manga_archive_pictures",
     "visual_nomatch_classify_enabled", "visual_nomatch_auto_download_model", "visual_nomatch_model",
     "visual_nomatch_min_confidence", "video_root", "video_tab_seconds", "video_source_aniliberty", "aniliberty_url",
     "video_source_dubs", "yummy_api_url", "video_dub_merge",
     "post_sets_enabled",
-    "card_sets_tiles", "card_sets_auto", "card_sets_ask_sites", "card_sets_remote",
+    "card_sets_tiles", "card_sets_auto", "comic_manga_auto", "card_sets_ask_sites", "card_sets_remote",
+    "phone_access", "phone_name", "phone_login", "webui_port",
+    "phone_relay", "phone_relay_host", "phone_relay_ssh_port", "phone_relay_address", "phone_relay_host_key",
 })
 # Settings whose value a page may set by asking the window for a folder or a file (``choose_path``):
 # key -> (folder or file, the dialog's title, the file filter).
@@ -43,6 +46,7 @@ PATH_KEYS = {
     "light_backup_dir": ("folder", "Папка для резервных копий", ""),
     "external_browser_executable": ("file", "Браузер", "Программы (*.exe);;Все файлы (*)"),
     "manga_root": ("folder", "Папка с мангой", ""),
+    "manhwa_root": ("folder", "Папка манхвы: одна папка — один тайтл", ""),
     "video_root": ("folder", "Папка видео: одна папка — один сериал", ""),
 }
 _FILE_LOCK = threading.Lock()

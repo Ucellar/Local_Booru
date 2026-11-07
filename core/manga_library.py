@@ -29,6 +29,8 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.manhwa_library import Progress
+
 _LOG = logging.getLogger("local_booru.manga")
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp"}
@@ -43,6 +45,7 @@ GROUP_TITLES = {
     "artist": "Артисты", "group": "Группы", "language": "Языки", "category": "Категории",
 }
 _GROUP_ALIASES = {"tag": "general", "tags": "general", "meta": "category", "metadata": "category", "circle": "group",
+                  "genres": "general", "genre": "general",       # (v5.44.76) the description a site gives (info.json)
                   "artists": "artist", "characters": "character", "parodies": "parody", "groups": "group",
                   "languages": "language", "categories": "category"}
 _RU_GROUP_KEYS = {"Авторы": "artist", "Персонажи": "character", "Произведения": "parody", "Копирайт": "copyright",
@@ -121,6 +124,9 @@ class Manga:
     parent_id: str = ""
     number: int = 0                                    # chapter number in its series
     key: str = ""                                      # same for loose chapters of one title ("Name ch1", "Name ch2")
+    adult: str = ""                                    # (v5.44.53) its site marks it as hentai: why (core/content_marks)
+    cover_page: "PageRef | None" = None                # (v5.44.76) «cover.*» of a title the program looks after
+    linked: bool = False                               # (v5.44.76) the folder names its site (``.lb/source.json``)
 
     @property
     def is_series(self) -> bool:
@@ -136,6 +142,8 @@ class Manga:
 
     @property
     def cover(self) -> PageRef | None:
+        if self.cover_page is not None:
+            return self.cover_page
         if self.pages:
             return self.pages[0]
         for chapter in self.chapters:
@@ -283,6 +291,9 @@ def _apply_meta(manga: Manga, data) -> None:
         manga.source_url = f"https://nhentai.net/g/{int(data['id'])}/"
     if isinstance(data.get("url"), str) and data["url"].startswith("http"):
         manga.source_url = data["url"]
+    adult = _adult_flag(data)
+    if adult:
+        manga.adult = adult
     tags = data.get("tags")
     if isinstance(tags, list):
         for item in tags:
@@ -298,8 +309,11 @@ def _apply_meta(manga: Manga, data) -> None:
         elif isinstance(value, list) and key != "tags":
             for part in value:
                 _add(manga.groups, "general", part)
+    if isinstance(data.get("source_url"), str) and data["source_url"].startswith("http") and not manga.source_url:
+        manga.source_url = data["source_url"]               # (v5.44.76) the description of a site's title
     for key, value in data.items():
-        group = _RU_GROUP_KEYS.get(str(key)) or (_group(key) if _group(key) != "general" or key == "general" else "")
+        group = _RU_GROUP_KEYS.get(str(key)) or (_group(key) if _group(key) != "general" or key in (
+            "general", "genres", "genre") else "")
         if not group or key in {"tags", "tag", "general"}:
             continue
         if isinstance(value, str):
@@ -309,6 +323,19 @@ def _apply_meta(manga: Manga, data) -> None:
             for part in value:
                 if not isinstance(part, dict):
                     _add(manga.groups, group, part)
+
+
+def _adult_flag(data: dict) -> str:
+    """(v5.44.53) The site's own word that a title is hentai, kept in its description: Remanga's ``is_erotic``,
+    MangaDex's ``content_rating`` «pornographic», ``hentai: true`` (written by hand or by a downloader) — why, or ""."""
+    if data.get("hentai") is True:
+        return "помечена как хентай в описании"
+    if data.get("is_erotic") is True:
+        return "сайт пометил как эротику"
+    rating = str(data.get("content_rating") or data.get("contentRating") or "").strip().lower()
+    if rating == "pornographic":
+        return "сайт пометил как порнографию"
+    return ""
 
 
 def _title_from_name(name: str) -> tuple[str, str]:
@@ -327,6 +354,16 @@ def _bracket_tags(manga: Manga) -> None:
             _add(manga.groups, "general", token)
 
 
+LB_DIR = ".lb"                 # (v5.44.76) what the program keeps in a title's folder (core/manhwa_download.py)
+COVER_STEM = "cover"
+
+
+def _linked(folder: Path) -> bool:
+    """(v5.44.76) The folder names its site (``.lb/source.json``): the program looks after it — its «cover.*» is the
+    cover, not a page."""
+    return (folder / LB_DIR / "source.json").is_file()
+
+
 def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
     title, source = _title_from_name(folder.name)
     manga = Manga(id=_id_for(root, folder), title=title, path=str(folder), source_url=source)
@@ -334,13 +371,19 @@ def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
         manga.mtime = folder.stat().st_mtime
     except OSError:
         pass
+    manga.linked = _linked(folder)
     files = folder.rglob("*") if recursive else folder.iterdir()
     pages = []
     for p in files:
         try:
+            if LB_DIR in p.relative_to(folder).parts[:-1] or p.name == LB_DIR:
+                continue                                  # (v5.44.76) the program's own: a chapter half-downloaded
             if p.suffix.lower() in PAGE_EXTS and p.is_file():
+                if manga.linked and p.parent == folder and p.stem.lower() == COVER_STEM:
+                    manga.cover_page = PageRef(str(p))
+                    continue
                 pages.append(p)
-        except OSError:
+        except (OSError, ValueError):
             continue
     pages.sort(key=lambda p: natural_key(p.relative_to(folder).as_posix()))
     manga.pages = _expand_pdfs([PageRef(str(p)) for p in pages])
@@ -406,6 +449,10 @@ def _looks_like_chapter(name: str) -> bool:
 
 def _series(root: Path, folder: Path, chapters: list[Manga]) -> Manga:
     series = _read_folder(root, folder, recursive=False)
+    if series.cover_page is None:                      # (v5.44.76) «cover.*» of a series is its cover, not a page
+        cover = next((p for p in series.pages if Path(p.path).parent == folder and
+                      Path(p.path).stem.lower() == COVER_STEM), None)
+        series.cover_page = cover
     series.pages = []
     series.chapters = chapters
     for n, chapter in enumerate(chapters, 1):
@@ -425,6 +472,33 @@ def _chapter_title(series_name: str, entry: Path, number: int, title: str) -> st
     if _looks_like_chapter(stem):
         return f"{series_name} — {number}"
     return title
+
+
+def _mixed_series(root: Path, folder: Path, archives: list, subdirs: list) -> Manga:
+    """(v5.44.76) A series of archives, folders of pages and (as one chapter, first) the pictures right in its folder."""
+    from core.manhwa_library import parse_name
+
+    def order(entry: Path) -> tuple:
+        tome, number, _own = parse_name(entry.name)
+        try:
+            value = float(number) if number else float("inf")
+        except ValueError:
+            value = float("inf")
+        return (tome or 0, value, natural_key(entry.name))
+    chapters = []
+    entries = sorted([*archives, *subdirs], key=order)
+    if _has_direct_pages(folder):
+        loose = _read_folder(root, folder, recursive=False)
+        loose.id = _id_for(root, folder / "__pages__")
+        if loose.pages:
+            loose.title = f"{_title_from_name(folder.name)[0]} — 1"
+            chapters.append(loose)
+    for n, entry in enumerate(entries, len(chapters) + 1):
+        chapter = _read_archive(root, entry) if entry.is_file() else _read_folder(root, entry)
+        if chapter.pages:
+            chapter.title = _chapter_title(folder.name, entry, n, chapter.title)
+            chapters.append(chapter)
+    return _series(root, folder, chapters)
 
 
 def scan(root) -> list[Manga]:
@@ -455,6 +529,13 @@ def scan(root) -> list[Manga]:
                 continue
             archives = sorted((p for p in entry.iterdir() if p.is_file() and p.suffix.lower() in ARCHIVE_EXTS),
                               key=lambda p: natural_key(p.name))
+            subdirs = sorted((p for p in entry.iterdir() if p.is_dir() and p.name != LB_DIR and _has_direct_pages(p)),
+                             key=lambda p: natural_key(p.name))
+            if archives and subdirs or (archives or subdirs) and _has_direct_pages(entry) and _linked(entry):
+                # (v5.44.76) a title of the archive the program added chapters to: its archives, folders of pages and
+                # pictures right in it — all its chapters, in the order of their tomes and numbers
+                out.append(_mixed_series(root, entry, archives, subdirs))
+                continue
             if archives:
                 chapters = []
                 for n, arc in enumerate(archives, 1):
@@ -465,8 +546,6 @@ def scan(root) -> list[Manga]:
                 if chapters:
                     out.append(_series(root, entry, chapters))
                 continue
-            subdirs = sorted((p for p in entry.iterdir() if p.is_dir() and _has_direct_pages(p)),
-                             key=lambda p: natural_key(p.name))
             if subdirs:
                 chapters = []
                 for n, sub in enumerate(subdirs, 1):
@@ -569,3 +648,8 @@ LIBRARY = Library()
 def manga_root(settings: dict) -> str:
     """The manga folder from the settings (the old page fell back to the parser's picture folder)."""
     return str((settings or {}).get("manga_root") or "").strip()
+
+
+# (v5.44.67) what was read: {the title (a manga, a series): its last manga or chapter, the page open in each, the ones
+# read to their last page} — the phone's «Продолжить чтение» and the readers of both (webui/pages/manga.py, phone_manga.py)
+PROGRESS = Progress(name="manga_progress.json")

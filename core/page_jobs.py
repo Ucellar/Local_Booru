@@ -147,14 +147,19 @@ class _ExitJoin:
         return self._task.wait(None if msecs is None else max(0.0, msecs / 1000.0))
 
 
-def start(kind: str, label: str, fn: Callable, *, stoppable: bool = True, about=None) -> PageTask:
-    """Start a task of ``kind`` (raises :class:`TaskBusy` while one of that kind is going)."""
+def start(kind: str, label: str, fn: Callable, *, stoppable: bool = True, about=None,
+          replace: bool = False) -> PageTask:
+    """Start a task of ``kind`` (raises :class:`TaskBusy` while one of that kind is going); (v5.44.93) ``replace`` —
+    the one going is asked to stop and this one starts at once (a search: the last one asked is the one wanted; the
+    old one ends on its own, its result is nobody's)."""
     global _EXIT_HOOKED
     task = PageTask(kind, label, fn, stoppable=stoppable, about=about)
     with _LOCK:
         old = _TASKS.get(kind)
         if old is not None and old.running:
-            raise TaskBusy(old.label)
+            if not (replace and old.stoppable):
+                raise TaskBusy(old.label)
+            old.stop()
         _TASKS[kind] = task
         hook = not _EXIT_HOOKED
         _EXIT_HOOKED = True

@@ -142,6 +142,14 @@
       await LB.postJson("/api/sets/dissolve", { sets: [setId] });
       try { sessionStorage.removeItem(EDITING); } catch (_) { /* nothing kept */ }
       location.reload();
+    } else if (what === "manga") {
+      // (v5.44.111) the сборка's pictures → one manga in the manga folder, its cards → the trash (they come back from it)
+      if (!LB.confirmed || !LB.confirmed(button, "Перенести в мангу? Карточки уйдут в корзину. Нажмите ещё раз")) return;
+      status("Копирую страницы в папку манги…");
+      const done = await LB.postJson("/api/sets/manga", { set: setId });
+      try { sessionStorage.removeItem(EDITING); } catch (_) { /* nothing kept */ }
+      status(`В манге: «${done.name}», страниц — ${done.pages}`);
+      location.href = done.page || "/manga";
     }
   }
 

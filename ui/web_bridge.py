@@ -80,7 +80,8 @@ class AppBridge(QObject):
 
     def _do_fetch_page(self, payload) -> None:
         """«Описание с сайта» of a site that checks for robots: the window's browser opens the page out of sight
-        (``ui/page_fetch.py``) and gives its HTML to the waiting task (``payload["box"]``)."""
+        (``ui/page_fetch.py``) and gives its HTML to the waiting task (``payload["box"]``); (v5.44.73) «Скачать манхву»
+        (``core/site_browser.py``) — with its own test of a check (``guard``) and the site's cookies (``cookies``)."""
         if not begin_call(payload):               # the task stopped waiting
             return
         from ui.page_fetch import PageFetch
@@ -89,7 +90,10 @@ class AppBridge(QObject):
             payload["box"]["error"] = "Окно программы без встроенного браузера"
             payload["done"].set()
             return
-        fetch = PageFetch(profile, str(payload.get("url") or ""), payload["box"], payload["done"], parent=self)
+        guard = payload.get("guard")
+        fetch = PageFetch(profile, str(payload.get("url") or ""), payload["box"], payload["done"], parent=self,
+                          guard=guard if callable(guard) else None, cookies=bool(payload.get("cookies")),
+                          visible=bool(payload.get("visible")))
         fetch.start()
 
     def _do_choose_parser_folder(self, _payload) -> None:

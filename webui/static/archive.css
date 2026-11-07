@@ -1,0 +1,150 @@
+/* «Скачать → Из архива» (v5.44.76, webui/pages/manga_archive.py): the titles of the manga and manhwa folders — one
+   row each: its cover, its name and folder, what was found for it (the site's title and the chapters, the covers to
+   choose from, «не нашлось»), what can be done. */
+.ar { max-width: 1040px; margin: 0 auto; padding: 22px 22px 48px; --ar-r: calc(var(--radius) + 4px);
+  --ok: var(--tag-character, #3f9d4a); }
+.ar-head { margin: 0 0 14px; padding: 24px 28px 20px; border-radius: var(--ar-r); background: var(--panel);
+  color: var(--text); }
+.ar-head h1 { margin: 0; font: bold 26px/1.2 var(--font-head); color: var(--text); }
+.ar-lead { max-width: 74ch; margin: 6px 0 16px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.ar-note { max-width: 74ch; margin: -6px 0 16px; padding: 8px 12px; border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0; background: color-mix(in srgb, var(--panel-2) 88%, transparent); font-size: 13px; }
+.ar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+/* (v5.44.81) «Узнавать само, в фоне», «…и по картинкам»: two switches and what SauceNAO costs */
+.ar-auto { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; margin: 0 0 14px; font-size: 13px; }
+.ar-auto label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.ar-auto input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.ar-auto .action-status { color: var(--muted); }
+.ar-auto-note { flex: 1 0 100%; max-width: 74ch; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.ar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: bold;
+  text-decoration: none;
+  cursor: pointer;
+}
+.ar-btn:hover { border-color: var(--accent); text-decoration: none; }
+.ar-btn.primary { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.ar-btn.primary:hover { filter: brightness(1.08); }
+.ar-btn:disabled { opacity: 0.55; cursor: default; filter: none; }
+.ar-btn:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+
+/* the work going: one line of what it does, its journal under «Подробности» */
+.ar-run { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ar-run .job-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; }
+.ar-run .job-title { font-size: 13px; }
+.ar-run .job-status { margin: 0; color: var(--muted); font-size: 13px; }
+.ar-run [data-action="ar-stop"] { margin-left: auto; min-height: 28px; padding: 3px 12px; }
+.ar-spin { display: none; width: 14px; height: 14px; border: 2px solid var(--panel-2); border-top-color: var(--accent);
+  border-radius: 50%; animation: ar-spin 0.8s linear infinite; }
+.job:is([data-status="starting"], [data-status="running"], [data-status="stopping"]) .ar-spin { display: inline-block; }
+@keyframes ar-spin { to { transform: rotate(360deg); } }
+.ar-step { margin: 8px 0 0; overflow-wrap: anywhere; font-size: 13px; line-height: 1.45; }
+.ar-step:empty { display: none; }
+.ar-step.error { padding: 8px 12px; border-left: 3px solid var(--danger, #c0392b); background: var(--panel-2); }
+.ar-log { margin-top: 6px; color: var(--muted); font-size: 12px; }
+.ar-log summary { width: fit-content; cursor: pointer; }
+.ar-log .job-log { height: auto; max-height: 40vh; margin-top: 6px; font-size: 12px; }
+
+/* the filters */
+.ar-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.ar-filters:empty { display: none; }
+.ar-filter { padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel);
+  color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.ar-filter .ar-n { color: var(--muted); font-variant-numeric: tabular-nums; }
+.ar-filter.on { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.ar-filter.on .ar-n { color: inherit; }
+.ar-filter:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+.ar-empty, .ar-files { margin: 12px 0; color: var(--muted); font-size: 13px; }
+
+/* a title */
+.ar-list { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ar-row { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 4px 16px; padding: 14px 16px;
+  border-left: 3px solid transparent; border-radius: var(--ar-r); background: var(--panel); color: var(--text); }
+.ar-row[data-state="choose"] { border-left-color: var(--accent); }
+.ar-row[data-state="none"] { border-left-color: var(--border); }
+.ar-row[data-state="linked"], .ar-row[data-state="own"] { border-left-color: var(--ok); }
+.ar-row.busy { opacity: 0.75; }
+.ar-cover { position: relative; display: block; width: 72px; aspect-ratio: 2 / 3; overflow: hidden;
+  border-radius: var(--radius); background: var(--panel-2); }
+.ar-cover img, .ar-cand-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.ar-initial { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted);
+  font: bold 26px/1 var(--font-head); }
+.ar-main { min-width: 0; }
+.ar-head-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.ar-title { color: var(--text); font-size: 15px; font-weight: bold; overflow-wrap: anywhere; }
+.ar-title:hover { color: var(--accent-text, var(--accent)); }
+.ar-kind { color: var(--muted); font-size: 12px; }
+.ar-facts { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+.ar-state { margin: 8px 0 0; font-size: 13px; font-weight: bold; }
+.ar-state.ok { color: var(--ok); }
+.ar-state.warn { color: var(--accent-text, var(--accent)); }
+.ar-state.bad { color: var(--muted); }
+.ar-count { margin: 2px 0 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+/* (v5.44.81) how a title was known; what was tried for one not found */
+.ar-how { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.ar-tried { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.ar-tried li { overflow-wrap: anywhere; }
+.ar-count.missing { color: var(--text); }
+.ar-tools { display: flex; flex-wrap: wrap; gap: 6px 8px; margin-top: 10px; }
+.ar-tools .ar-btn { min-height: 30px; padding: 4px 14px; }
+
+/* the covers to choose from */
+.ar-cands { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 12px 10px; margin-top: 10px; }
+.ar button.ar-cand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ar-cand-cover { position: relative; display: block; aspect-ratio: 2 / 3; margin-bottom: 4px; overflow: hidden;
+  border-radius: var(--radius); background: var(--panel-2); }
+.ar-cand-name { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: bold; line-height: 1.25;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+.ar-cand-facts, .ar-cand-sites { color: var(--muted); font-size: 11px; line-height: 1.3; }
+.ar button.ar-cand:hover .ar-cand-name { color: var(--accent-text, var(--accent)); }
+.ar button.ar-cand:focus-visible { outline: none; }
+.ar button.ar-cand:focus-visible .ar-cand-cover { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+.ar-again { display: flex; gap: 6px; max-width: 520px; margin-top: 10px; }
+.ar-again input { flex: 1 1 auto; min-width: 0; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px); background: var(--field-bg, var(--bg)); color: var(--text); font: inherit;
+  font-size: 13px; }
+.ar-again input::placeholder { color: var(--muted); }
+.ar-again input:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 1px; }
+
+:root[data-skin="win98"] :is(.ar-head, .ar-row, .ar-cover, .ar-cand-cover, .ar-filter) { border-radius: 0; }
+:root[data-skin="win98"] .ar-cover, :root[data-skin="win98"] .ar-cand-cover { box-shadow: var(--sunken); }
+
+@media (max-width: 760px) {
+  .ar { padding: 14px 12px 40px; }
+  .ar-head { padding: 18px 16px 16px; }
+  .ar-head h1 { font-size: 22px; }
+  .ar-row { grid-template-columns: 56px minmax(0, 1fr); padding: 12px; gap: 4px 12px; }
+  .ar-cover { width: 56px; }
+  .ar-cands { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ar-spin { animation: none; }
+}
+
+/* (v5.44.84) the parser's folder and where a title is in it */
+.ar-folder { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 8px 0; font-size: 13px; }
+.ar-folder b { word-break: break-all; }
+.ar-where { margin: 2px 0 0; color: var(--muted); font-size: 12px; word-break: break-all; }

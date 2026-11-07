@@ -188,6 +188,14 @@ def search_page(settings: dict, query: str, *, section: str = "all", source: str
     return items, total, files_total
 
 
+def count_tiles(settings: dict, query: str, *, section: str = "all", source: str = "all") -> int:
+    """How many tiles a search has (a сборка — one tile where the section shows it so): the phone's «12 из 1 240»."""
+    from core.database.repository import count_search_items
+    tags, bucket, extra, params = _filters(settings, query, section)
+    return count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params,
+                              collapse_sets=collapses(settings, section))
+
+
 def item_at(settings: dict, query: str, *, section: str, source: str, order: str, index: int) -> dict | None:
     """The card at position ``index`` (0-based) of a search — for «previous / next» on the post page (a сборка is one
     place: its card the gallery shows)."""
@@ -201,25 +209,28 @@ def item_at(settings: dict, query: str, *, section: str, source: str, order: str
     return rows[0] if rows else None
 
 
-class TagCounts:
-    """How many live cards carry each tag.
+class Kept:
+    """A count over the whole library for the pages, counted once and then kept.
 
-    Counted once (about 0.25 s for 100 thousand pictures with 2.4 million tag links) and then kept;
-    when the copy is older than ``ttl`` the pages get the old numbers at once while a background
-    thread counts again, so no page waits for the count after the first one.
+    When the copy is older than ``ttl`` the pages get the old numbers at once while a background thread counts again,
+    so no page waits for the count after the first one.  ``invalidate`` (the library changed) makes the next page
+    start a recount; a kept count may have ``followers`` that are made stale with it.
     """
 
-    def __init__(self, ttl: float = 60.0):
+    THREAD = "webui-kept"
+
+    def __init__(self, ttl: float = 60.0, followers: tuple = ()):
         self.ttl = ttl
+        self.followers = tuple(followers)
         self._lock = threading.Lock()
         self._load_lock = threading.Lock()
         self._loaded_at = 0.0
         self._db = ""
         self._refreshing = False
         self._generation = 0                  # +1 on every change of the library (invalidate)
-        self._by_name: dict[str, tuple[str, str, int]] = {}   # norm -> (display name, category, count)
+        self._by_name = None                  # what _load gave
 
-    def get(self, settings: dict) -> dict:
+    def get(self, settings: dict):
         from core.database.connection import db_path
         key = str(db_path(settings))
         with self._lock:
@@ -227,7 +238,7 @@ class TagCounts:
                 if time.time() - self._loaded_at >= self.ttl and not self._refreshing:
                     self._refreshing = True
                     threading.Thread(target=self._refresh, args=(dict(settings), key, self._generation),
-                                     name="webui-tag-counts", daemon=True).start()
+                                     name=self.THREAD, daemon=True).start()
                 return self._by_name
         with self._load_lock:                     # the first count: one thread counts, the others wait
             with self._lock:
@@ -259,6 +270,39 @@ class TagCounts:
             self._generation += 1
             if self._loaded_at:
                 self._loaded_at = 1.0          # stale: the next page starts a recount
+        for follower in self.followers:
+            follower.invalidate()
+
+    @staticmethod
+    def _load(settings: dict):
+        raise NotImplementedError
+
+
+class SourceHosts(Kept):
+    """The sites of the gallery's «Источники» box with how many live cards each has (the 30 biggest).  (v5.44.58)
+    Counted on every page of the gallery before: on 100 thousand cards with 200 thousand source links 0.2–0.3 s of
+    the 0.4 s of a page — now once a minute, and after a change of the library (it follows the tag counts)."""
+
+    THREAD = "webui-source-hosts"
+
+    @staticmethod
+    def _load(settings: dict) -> list:
+        with db(settings, readonly=True) as con:
+            rows = con.execute("""
+                SELECT s.host AS host, COUNT(DISTINCT x.image_id) AS c FROM image_sources x
+                JOIN sources s ON s.id=x.source_id JOIN images i ON i.id=x.image_id AND i.deleted=0
+                GROUP BY s.host ORDER BY c DESC LIMIT 30
+            """).fetchall()
+        return [(str(r["host"]), int(r["c"])) for r in rows]
+
+
+class TagCounts(Kept):
+    """How many live cards carry each tag.
+
+    Counted once (about 0.25 s for 100 thousand pictures with 2.4 million tag links) and then kept (:class:`Kept`).
+    """
+
+    THREAD = "webui-tag-counts"
 
     @staticmethod
     def _load(settings: dict) -> dict:
@@ -279,7 +323,8 @@ class TagCounts:
         return out
 
 
-TAG_COUNTS = TagCounts()
+SOURCE_HOSTS = SourceHosts()
+TAG_COUNTS = TagCounts(followers=(SOURCE_HOSTS,))      # a change of the library makes both stale
 
 
 def sidebar_tags(settings: dict, items: list, limit: int = 60) -> dict[str, list[tuple[str, int]]]:
@@ -461,13 +506,8 @@ def media_file_of(settings: dict, image_id: int, *, video: bool = False) -> tupl
 
 
 def source_hosts(settings: dict) -> list[tuple[str, int]]:
-    with db(settings, readonly=True) as con:
-        rows = con.execute("""
-            SELECT s.host AS host, COUNT(DISTINCT x.image_id) AS c FROM image_sources x
-            JOIN sources s ON s.id=x.source_id JOIN images i ON i.id=x.image_id AND i.deleted=0
-            GROUP BY s.host ORDER BY c DESC LIMIT 30
-        """).fetchall()
-    return [(str(r["host"]), int(r["c"])) for r in rows]
+    """The sites of the library with their live cards, the biggest 30 (kept: :data:`SOURCE_HOSTS`)."""
+    return list(SOURCE_HOSTS.get(settings))
 
 
 def random_in_search(settings: dict, query: str = "", *, section: str = "all", source: str = "all",

@@ -808,7 +808,10 @@ def _purge_trash(settings: dict, image_ids, *, make_backup: bool, reuse_backup: 
     removed = errors = protected_source_skipped = revived = kept_files = 0
     hard_ids = []
     from core.deleted_registry import mark_deleted
-    reimport_blocking_reasons = {"delete", "gallery_context_delete", "post_context_delete", "delete_by_tag", "delete_by_source"}
+    # (v5.44.111) «moved_to_manga» — the comic's pages live in the manga folder now: the parser does not bring them
+    # back into the gallery after the trash is emptied
+    reimport_blocking_reasons = {"delete", "gallery_context_delete", "post_context_delete", "delete_by_tag", "delete_by_source",
+                                 "moved_to_manga"}
     trash_dir = _trash_media_dir(settings)
     thumbs_of = []
     stopped = False

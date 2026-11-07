@@ -185,9 +185,12 @@ def facts_of(meta: dict) -> dict:
     def text(key: str) -> str:
         value = meta.get(key)
         return str(value[0] if isinstance(value, list) and value else value or "").strip()[:80]
+    about = str(meta.get("description") or "").strip()
+    about = re.split(r"\n\s*\n", about, 1)[0].strip()             # its first paragraph, for a few lines on the card
     return {"year": text("year"), "type": text("type"), "episodes": text("episodes"),
             "alt": [str(t)[:120] for t in (meta.get("alt_titles") or [])[:2]],
-            "genres": [str(g)[:40] for g in (meta.get("genres") or [])[:6]]}
+            "genres": [str(g)[:40] for g in (meta.get("genres") or [])[:6]],
+            "about": about[:600] + ("…" if len(about) > 600 else "")}
 
 
 # ── names ─────────────────────────────────────────────────────────────────────────
@@ -788,6 +791,7 @@ def download_file(session, remote: Remote, folder: Path, referer: str, *, say, s
     target = target_of(folder, remote)
     part = target.with_name(target.name + ".part")
     label = f"{number}{remote.name}"
+    referer = remote.page or referer       # the page it was found on (an episode's, another site's player's)
     if plan is not None and callable(getattr(plan, "fetch", None)) and not target.is_file():
         return plan.fetch(session, remote, target, say=say, stop=stop, label=label, referer=remote.page or referer)
     if remote.stream == "hls" and not target.is_file():
@@ -1057,6 +1061,23 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
         if roles:   # the pictures first: one that does not come is given by another voice-over, not yet downloaded
             pairs = sorted(zip(places, files), key=lambda pair: roles.get(id(pair[1])) == "sound")
             places, files = [p for p, _f in pairs], [f for _p, f in pairs]
+    # into one file: each episode as soon as its files have all come (not only at the end — owner, 05.11.2026: a season
+    # stopped half-way stayed half in «Озвучка JAM»), and first what an earlier download left in the sub-folders
+    merger = found.after if merge and found.after is not None and callable(getattr(found.after, "waiting", None)) else None
+    if merger is not None:
+        from core import video_merge
+        if not video_merge.available():
+            merger = None
+    pending: dict = {}                             # an episode -> its files of this download not ended yet
+    if merger is not None:
+        for remote in files:
+            if merger.takes(remote):
+                pending[merger.stem(remote)] = pending.get(merger.stem(remote), 0) + 1
+        left = sorted(merger.waiting() - set(pending), key=video_library.natural_key)
+        if left and not stop_check():
+            say(f"Сначала собираю серии, оставшиеся несобранными с прошлого раза: {len(left)}")
+            counts["merged"] += int((merger(say=say, stop=stop_check, stems=set(left)) or {}).get("episodes") or 0)
+            _set_meter(clear=True)
     _BUSY.append(1)
     if start_paused:                               # paused when the program closed: paused again
         _PAUSE.set()
@@ -1130,10 +1151,18 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
                 video_library.LIBRARY.invalidate()
             if state == "stopped":
                 break
+            stem = merger.stem(remote) if merger is not None and merger.takes(remote) else None
+            if stem in pending:                    # the episode's last file: its voice-overs into one file now
+                pending[stem] -= 1
+                if pending[stem] <= 0:
+                    del pending[stem]
+                    if not stop_check():
+                        counts["merged"] += int((merger(say=say, stop=stop_check, stems={stem}) or {}).get("episodes") or 0)
+                        _set_meter(merging=False)
         if merge and found.after is not None and not counts["stopped"] and not stop_check():
-            _set_meter(clear=True)
+            _set_meter(clear=True)                 # what is left (an episode not put together above)
             merged = found.after(say=say, stop=stop_check) or {}
-            counts["merged"] = int(merged.get("episodes") or 0)
+            counts["merged"] += int(merged.get("episodes") or 0)
     finally:
         _BUSY.pop()
         _PAUSE.clear()

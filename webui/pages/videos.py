@@ -83,13 +83,27 @@ def _search_form(tags: str, show: str) -> str:
             f'<button type="submit" class="search-go">Найти</button></div>{hidden}</form>')
 
 
-def _frame(req: Request, title: str, body: str, *, kind: str = "videos", show: str = "", body_data=None) -> Response:
-    """A page of the tab; ``show`` — which of its pages is shown in the section bar ("get" — «Скачать с сайта»)."""
+def tabs_of(req: Request, show: str) -> tuple:
+    """The section bar of the tab: «Всё», «Сериалы», (v5.44.90) «Лента» — the sites' titles (``catalog.py``),
+    «Длинные видео»."""
+    from webui import content_mode
     tags = req.arg("tags").strip()
-    tabs = ()
-    if show:
-        tabs = tuple((label, url("/videos", tags=tags, show=key), key == show) for key, label in SHOWS)
-        tabs += (("Скачать с сайта", "/videos/get", show == "get"),)
+    long_ok = content_mode.long_videos_shown()          # (v5.44.53) the gallery's long videos: not in «SFW»
+    tabs = []
+    for key, label in SHOWS:
+        if long_ok or key != "long":
+            tabs.append((label, url("/videos", tags=tags, show=key), key == show))
+        if key == "series":
+            tabs.append(("Лента", "/videos/feed", show == "feed"))
+    # (v5.44.89) no «Скачать с сайта» here: the owner — «убрать кнопку скачать … оставив только вкладку
+    # "скачать" потому что переход с видео скачивание переносит на старое окно»; the menu's «Скачать» alone
+    return tuple(tabs)
+
+
+def _frame(req: Request, title: str, body: str, *, kind: str = "videos", show: str = "", body_data=None) -> Response:
+    """A page of the tab; ``show`` — which of its pages is shown in the section bar."""
+    tags = req.arg("tags").strip()
+    tabs = tabs_of(req, show) if show else ()
     search_show = show if show in dict(SHOWS) else "all"
     return Response.html(page_frame(title, body, active="videos", subnav=False, kind=kind, tabs=tabs,
                                     top_search=_search_form(tags, search_show), body_data=body_data, **_look()))
@@ -107,6 +121,39 @@ def _library(req: Request, *, refresh: bool = False) -> list:
 def _series(req: Request) -> V.Series | None:
     root = _root(req)
     return V.LIBRARY.get(root, req.params["id"]) if Path(root).is_dir() else None
+
+
+# ── (v5.44.53) «SFW / Всё / NSFW»: which series the mode shows (webui/content_mode.py, core/content_marks.py) ──
+def _visible(items: list, now: str | None = None) -> list:
+    from core import content_marks as CM
+    from webui import content_mode
+    now = now or content_mode.mode()
+    if now == "all":
+        return items
+    hand = CM.marks()["series"]
+    return [s for s in items if content_mode.shows(CM.series_verdict(s, hand).hentai, now)]
+
+
+def find_series(settings: dict, series_id: str) -> V.Series | None:
+    root = V.video_root(settings)
+    return V.LIBRARY.get(root, series_id) if Path(root).is_dir() else None
+
+
+def item_shown(settings: dict, series_id: str, now: str) -> bool | None:
+    """Is a series shown in the mode ``now``; None — no such series."""
+    from core import content_marks as CM
+    from webui import content_mode
+    series = find_series(settings, series_id)
+    return None if series is None else content_mode.shows(CM.series_verdict(series).hentai, now)
+
+
+def _mark_button(series: V.Series, found) -> str:
+    """«Это хентай» / «Это не хентай»: the mark by hand for the switch «SFW / Всё / NSFW»."""
+    value = "safe" if found.hentai else "hentai"
+    label = "Это не хентай" if found.hentai else "Это хентай"
+    tip = ("Не прятать в режиме «SFW»" if found.hentai else "Прятать в режиме «SFW», показывать в «NSFW»")
+    return (f'<button type="button" class="vbutton" data-action="content-mark" data-kind="series" '
+            f'data-id="{series.id}" data-value="{value}" title="{esc(tip)}">{label}</button>')
 
 
 def _episode(req: Request) -> tuple[V.Series | None, V.Episode | None]:
@@ -197,9 +244,13 @@ def _plural(n: int) -> str:
 
 # ── /videos ──────────────────────────────────────────────────────────────────
 def index(req: Request) -> Response:
+    from webui import content_mode
     tags = req.arg("tags").strip()
     show = req.arg("show", "all")
     show = show if show in dict(SHOWS) else "all"
+    long_ok = content_mode.long_videos_shown()          # (v5.44.53) the gallery's long videos: not in «SFW»
+    if show == "long" and not long_ok:
+        show = "series"
     sort = req.arg("sort", "newest")
     sort = sort if sort in SORTS else "newest"
     order = req.arg("order", "newest") or "newest"
@@ -207,7 +258,8 @@ def index(req: Request) -> Response:
     page = req.int_arg("page", 1, lo=1)
     root = _root(req)
     folder_ok = Path(root).is_dir()
-    items = _library(req, refresh=bool(req.arg("refresh"))) if folder_ok else []
+    every = _library(req, refresh=bool(req.arg("refresh"))) if folder_ok else []
+    items = _visible(every)                             # (v5.44.53) what the mode «SFW / Всё / NSFW» shows
     found = [s for s in items if _matches(s, tags)] if tags else list(items)
     found = _sorted(found, sort)
     parts = []
@@ -238,15 +290,21 @@ def index(req: Request) -> Response:
             body = f'<div class="vcards"{rows}>' + "".join(_series_card(s) for s in shown) + "</div>"
             if show == "series":
                 body += paginator(min(page, pages), pages, lambda n: url("/videos", tags=tags, show=show, sort=sort, page=n))
+        elif every and not items:                         # (v5.44.53) empty because of the mode
+            now = content_mode.mode()
+            why = "в папке только хентай" if now == "sfw" else "хентая в папке нет"
+            body = (f'<div class="vempty mode-empty"><p>В режиме «{content_mode.LABELS[now]}» здесь пусто: {why}.</p>'
+                    '<p class="vactions"><button type="button" class="vbutton primary" data-action="content-mode" '
+                    'data-mode="all">Показать всё</button><span class="action-status" role="status"></span></p></div>')
         else:
             body = _no_series(req, root, folder_ok, tags)
         parts.append(f'<section class="vshelf"><div class="vhead"><h2>{esc(title)} <span class="muted">{len(found)}</span>'
                      f'</h2><nav class="vsorts">{sorts}<a href="{esc(url("/videos", tags=tags, show=show, sort=sort, refresh=1))}" '
                      f'title="Перечитать папку видео">Обновить</a></nav>{more}</div>{body}</section>')
 
-    if show in ("all", "long"):
+    if show in ("all", "long") and long_ok:
         parts.append(_long_section(req, tags, order, source, page))
-    waiting = _waiting(req)
+    waiting = _waiting(req) if long_ok else 0
     note = (f'<p class="vnote">Программа ещё узнаёт длину видео из библиотеки: осталось {waiting}. Длинные появятся '
             f'здесь сами.</p>' if waiting else "")
     body = f'<div class="vindex">{note}{"".join(parts)}</div>'
@@ -315,7 +373,7 @@ def _no_series(req: Request, root: str, folder_ok: bool, tags: str) -> str:
     rules = ('<p class="hint">Одна папка — один сериал, видеофайлы в ней — серии (номера берутся из имён файлов). '
              'Подпапки сериала — озвучки или сезоны: они будут вкладками над сериями. Видеофайл прямо в папке видео — '
              'отдельный фильм. Описание и обложку можно взять с сайта на странице сериала, а серии — '
-             '<a href="/videos/get">скачать с сайта</a>.</p>')
+             '<a href="/get">скачать по ссылке</a>.</p>')
     if tags:
         return f'<p class="hint">По запросу «{esc(tags)}» сериалов нет.</p>'
     if not folder_ok:
@@ -338,6 +396,13 @@ def series_page(req: Request) -> Response:
     if series is None:
         return _frame(req, "Нет такого видео", '<div class="vempty"><p>Такого сериала нет — возможно, папку '
                       'переименовали или убрали.</p><p><a href="/videos?refresh=1">Перечитать папку видео</a></p></div>')
+    from core import content_marks as CM
+    from webui import content_mode
+    found = CM.series_verdict(series)              # (v5.44.53) the mode «SFW / Всё / NSFW» hides it
+    if not content_mode.shows(found.hentai):
+        body = content_mode.hidden_item(active="videos", what="этот сериал", reason=found.reason, hentai=found.hentai,
+                                        back="/videos", back_label="Все видео")
+        return _frame(req, "Скрыто", body, kind="mode-hidden")
     episode = series.episode(req.arg("ep")) or series.episode(V.PROGRESS.last(series.id)) or series.episodes[0]
     play = req.arg("play") == "1"
     full = play and req.arg("full") == "1"         # the next episode after one played full size: full size again
@@ -377,6 +442,11 @@ def _hero(req: Request, series: V.Series, episode: V.Episode, resume: float) -> 
         facts.append(f'<dt>Оценки</dt><dd>{" · ".join(ratings)}</dd>')
     if not series.single:
         facts.append(f'<dt>Файлов</dt><dd>{len(series.episodes)}</dd>')
+    from core import content_marks as CM
+    found = CM.series_verdict(series)              # (v5.44.53) for the switch «SFW / Всё / NSFW»
+    if found.hentai or found.by_hand:
+        said = ("да" if found.hentai else "нет") + (f" — {found.reason}" if found.reason else "")
+        facts.append(f'<dt>Хентай</dt><dd class="content-row">{esc(said)}</dd>')
     tags = info.get("tags") or []
     tag_html = ""
     if isinstance(tags, list) and tags:
@@ -402,8 +472,10 @@ def _hero(req: Request, series: V.Series, episode: V.Episode, resume: float) -> 
                        f'{esc(info.get("site") or "На сайте")}</a>')
         from core.video_download import is_frame_site
         if not series.single and (not is_frame_site(source) or _yummy(req, source)):
-            buttons.append(f'<a class="vbutton" href="{esc(url("/videos/get", url=source))}" '
+            from webui.pages.get_link import link_of       # (v5.44.89) the card of «Скачать», not the page of before
+            buttons.append(f'<a class="vbutton" href="{esc(link_of(source))}" '
                            f'title="Скачать серии с этой страницы сайта (те, которых ещё нет)">Скачать с сайта</a>')
+    buttons.append(_mark_button(series, found))
     where = ""
     try:
         imported = int(info.get("imported_at") or 0)        # info.json may have been edited by hand
