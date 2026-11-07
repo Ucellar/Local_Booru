@@ -76,6 +76,8 @@
 .gl .gl-note { margin: 0; max-width: 80ch; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .gl .gl-note b { color: var(--text); }
 .gl .gl-note.warn { padding: 6px 0 6px 12px; border-left: 3px solid var(--accent); color: var(--text); }
+/* (v5.44.117) the other sites still asked: the card shows what came so far */
+.gl .gl-note.gl-asking { display: flex; align-items: center; gap: 8px; }
 .gl .gl-check { display: inline-flex; align-items: flex-start; gap: 8px; cursor: pointer; line-height: 1.4; }
 .gl .gl-check input { margin: 2px 0 0; accent-color: var(--accent); }
 .gl .gl-seg { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 3px; background: var(--field-bg, var(--bg));
@@ -249,39 +251,9 @@
   border-radius: 16px; }
 .gl .gl-side-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .gl .gl-side-head h2 { margin: 0; color: var(--text); font-size: 18px; }
-.gl .gl-side-count { color: var(--muted); font-size: 13px; }
-.gl .gl-jobs { display: flex; flex-direction: column; gap: 16px; margin: 0; padding: 0; list-style: none; }
-.gl .gl-jobs:not(:has(> li:not([hidden]))) { display: none; }
-.gl .gl-job { display: flex; gap: 12px; }
-.gl .gl-job-pic { position: relative; flex: 0 0 44px; height: 62px; overflow: hidden; border-radius: 6px;
-  background: color-mix(in srgb, var(--text) 10%, var(--panel)); }
-.gl .gl-job-pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.gl .gl-job-pic .gl-initial { font-size: 20px; }
-.gl .gl-job-body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.gl .gl-job-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.gl .gl-job-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.gl .gl-job-kind { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
-.gl .gl-job-text { margin: 0; color: var(--text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; opacity: 0.9; }
-.gl .gl-job-sub { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.gl .gl-job-bar { display: block; height: 5px; overflow: hidden; border-radius: 3px;
-  background: color-mix(in srgb, var(--text) 13%, transparent); }
-.gl .gl-job-bar i { display: block; height: 100%; width: 2%; background: var(--accent); transition: width 0.4s; }
-.gl .gl-job[data-state="paused"] .gl-job-bar i { background: var(--muted); }
-.gl .gl-job-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
-.gl .gl-job-tools .gl-link { font-size: 13px; }
-.gl .gl-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
-  min-height: 0; padding: 0; border: 1px solid var(--border); border-radius: 7px; background: transparent; box-shadow: none;
-  color: var(--text); cursor: pointer; }
-.gl .gl-icon-btn:hover { border-color: var(--accent); background: transparent; color: var(--text); }
-.gl .gl-icon-btn:disabled { opacity: 0.5; cursor: default; }
-.gl .gl-job-queue { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
-.gl .gl-job-queue li { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--muted); }
-.gl .gl-job-queue li.warn { color: var(--danger); }
-.gl .gl-job-q { min-width: 0; overflow-wrap: anywhere; }
-.gl .gl-side-buttons { display: flex; gap: 8px; padding-top: 14px; border-top: 1px solid var(--border); }
-.gl .gl-side-buttons .gl-btn { flex: 1 1 0; padding: 10px; }
-.gl :is(.gl-side-empty, .gl-side-note) { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.gl .gl-side-empty { font-size: 13px; }
+/* (v5.44.120) the downloads themselves — «Скачать → Загрузки» (downloads.css); here — only the way there */
+.gl .gl-side-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.gl .gl-side-link .gl-btn { align-self: flex-start; text-decoration: none; }
 
 /* ── (v5.44.97) a gallery of nhentai: its tags by kind, its pages as thumbnails ── */
 .gl .gl-nh-full { font-size: 13px; }

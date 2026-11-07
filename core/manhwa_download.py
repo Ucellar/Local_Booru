@@ -18,7 +18,10 @@ The folder of a title:
 
 What was checked last — ``manhwa_watch.json`` in the settings folder (``checked_at``): the nightly round
 (``background_duties._manhwa`` → :func:`due`) runs between 3 and 8 at night once a day, and at any hour when the
-last one is more than a day old (the computer was off at night).
+last one is more than a day old (the computer was off at night).  (v5.44.116) «Остановить» of the round means «until
+the next night»: a round the person stopped is kept as checked too (only one the program's closing cut short is not —
+the next start goes on with it); «Настройки → Сайты манги → Новые главы — скачивать самой» (``manhwa_watch_auto``)
+off — no round at all.
 
 (v5.44.62) Chapters from other sites — the owner (4.11.2026), of the chapters Remanga sells and MangaBuff has free:
 «стоило бы брать от туда если не доступно с реманги».  When the title's own site (the «home» one, of the link) lacks
@@ -51,6 +54,13 @@ failed asked again, the meter of the page); the page picks the chapters (``downl
 left unticked are kept in ``source.json`` (``skipped``) — the nightly round does not take them (it takes the chapters
 that come out later, and the paid ones that become free); the downloads one at a time with a queue, kept between runs
 of the program — ``core/manhwa_queue.py``.
+
+(v5.44.117) The owner: «открыл тайтл и все разом начали грузить и не приходилось одному сайту ждать другой».  The other
+sites — the ones the chapters are looked for on (:func:`helpers_for`) and the ones the description is (:func:`about_of`;
+a site asked for its chapters is not asked again: one answer serves both) — and the cover are asked at once, each in a
+thread of its own (:func:`_ask_all`, :class:`_Others`), :data:`ASK_DEADLINE` seconds at most all together; what they
+give is decided in the owner's order (``SOURCES``), so it does not depend on who answered first.  The page is shown the
+link's site's chapters at once and the rest as it comes (``look(shown=)``: ``Found.asking`` — the sites still asked).
 """
 from __future__ import annotations
 
@@ -87,6 +97,9 @@ TYPES = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/
 RESEARCH_AFTER = 7 * 24 * 3600       # (v5.44.62) a site where the title was not found is searched again a week later
 COVER_TIMEOUT = (6, 12)              # (v5.44.93) a title's cover in «Найти»: (connect, read) seconds, asked once
 MEET = 0.8                           # (v5.44.62) the share of the chapters two sites must agree on
+ASK_DEADLINE = 45.0                  # (v5.44.117) seconds the other sites of a title, asked at once, are waited for
+QUIET_DEADLINE = 600.0               # (v5.44.117) the same when no page waits for the answer (the night round, the
+                                     # queue, «Из архива»): as before — a slow site (com-x through its check) is not skipped
 
 
 class DownloadError(RuntimeError):
@@ -141,6 +154,13 @@ def write_source(folder: Path, data: dict) -> None:
     write_json_kept(Path(folder) / LB_DIR / SOURCE_FILE, json.dumps(data, ensure_ascii=False, indent=1), dict)
 
 
+def follow_choice(stored: dict) -> bool:
+    """(v5.44.116) «Новые главы — скачивать самой» of a title as its card and its page tick it: the owner's choice
+    (``follow`` of source.json) once the program has downloaded it (``added_at``), else on — a title never downloaded,
+    a folder of the archive only linked (its «follow» is off until its first download)."""
+    return bool(stored.get("follow", True)) if stored.get("added_at") else True
+
+
 def followed(settings: dict) -> list:
     """[(the title's folder, its source.json)] of both folders: what the nightly round looks at."""
     out = []
@@ -158,15 +178,10 @@ def followed(settings: dict) -> list:
 
 def linked_folder(settings: dict, site: str, key: str) -> "tuple[str, Path] | None":
     """(v5.44.76) (the kind, the folder) of either library whose ``source.json`` names this title — a title of the
-    archive linked to a site («Из архива», ``core/manga_archive.py``) stays where it is, whatever the site calls it;
-    (v5.44.84) a title of the booru parser's folder too (``core/manga_detect``: its manga found there)."""
-    from core import manga_detect
-    for found in manga_detect.STORE.titles(str(settings.get("root") or "")):
-        folder = Path(found.path)
-        if (folder / LB_DIR / SOURCE_FILE).is_file():
-            data = read_source(folder)
-            if data.get("site") == site and data.get("key") == key:
-                return (data.get("kind") if data.get("kind") in ("manga", "manhwa") else "manga"), folder
+    archive linked to a site («Из архива», ``core/manga_archive.py``) stays where it is, whatever the site calls it.
+    (v5.44.84–5.44.124 a title of the booru parser's folder too, linked where it lay; v5.44.125 — never: the program
+    writes nothing into the parser's folder, such a title is downloaded into as its copy in «Манга» —
+    ``core/parser_manga``.)"""
     for kind, root in roots(settings).items():
         if not root:
             continue
@@ -404,24 +419,34 @@ def helper_branch(source: S.Source, other: S.TitleRef, team: str = "", language:
     return other.best_branch()
 
 
-def helpers_for(net: S.Net, home: S.Source, title: S.TitleRef, chapters: list, stored: dict, *, say=None,
-                team: str = "") -> tuple:
-    """([:class:`Helper`], what ``source.json`` keeps of them): the other sites in the owner's order — the ones
-    ``source.json`` names asked straight, the rest searched (``find_same``) a week after the last search at most;
-    (v5.44.73) a site not searched yet (``helpers_sites`` — com-x.life, added to a title searched before) — at once;
-    (v5.44.79) their chapters of the home site's translators (``team``) when they have them, in the title's language
-    (a title of MangaDex in English or in its original language takes nothing from the Russian sites)."""
-    say = say or (lambda _text: None)
+def _kept_record(stored: dict) -> dict:
+    """What ``source.json`` keeps of the other sites, as it was (none asked: a title not in Russian)."""
+    return {"helpers": list(stored.get("helpers") or []), "helpers_at": int(float(stored.get("helpers_at") or 0)),
+            "helpers_sites": sorted(stored.get("helpers_sites") or [])}
+
+
+@dataclass
+class _Plan:
+    """(v5.44.117) Which other sites :func:`helpers_for` asks of a title: [(site, its entry in ``source.json`` — asked by
+    its key — or None: searched)] in the owner's order; whether a search is due (a week after the last); the sites
+    searched before and when."""
+    sites: list
+    search: bool
+    searched: set
+    searched_at: float
+
+
+def _helper_plan(home: S.Source, title: S.TitleRef, stored: dict) -> "_Plan | None":
+    """The other sites in the owner's order — the ones ``source.json`` names asked straight, the rest searched
+    (``find_same``) a week after the last search at most; (v5.44.73) a site not searched yet (``helpers_sites`` —
+    com-x.life, added to a title searched before) — at once.  None — a title not in Russian: nothing asked."""
     known = {str(h.get("site")): h for h in stored.get("helpers") or [] if isinstance(h, dict) and h.get("key")}
     searched_at = float(stored.get("helpers_at") or 0)
     search = _now() - searched_at >= RESEARCH_AFTER
     searched = set(stored.get("helpers_sites") or (LEGACY_SEARCHED if searched_at else ()))
-    asked: set = set()
-    out, keep = [], []
-    language = title.language or "ru"
-    if language != "ru":                               # (v5.44.79) the other sites are Russian: nothing asked, and
-        return [], {"helpers": list(stored.get("helpers") or []), "helpers_at": int(searched_at),   # what was kept
-                    "helpers_sites": sorted(stored.get("helpers_sites") or [])}                      # stays as it was
+    if (title.language or "ru") != "ru":               # (v5.44.79) the other sites are Russian: nothing asked, and
+        return None                                    # what was kept stays as it was
+    sites = []
     for other_site in S.readable():
         if other_site.name == home.name or other_site.adult_only and not title.is_erotic:
             continue                                   # (v5.44.85) a site of hentai — only for an erotic title
@@ -435,40 +460,154 @@ def helpers_for(net: S.Net, home: S.Source, title: S.TitleRef, chapters: list, s
         entry = known.get(other_site.name)
         if entry is None and not search and other_site.name in searched:
             continue
-        try:
-            if entry is not None:
-                other = other_site.title(net, str(entry["key"]))
+        sites.append((other_site, entry))
+    return _Plan(sites, search, searched, searched_at)
+
+
+@dataclass
+class _Asked:
+    """(v5.44.117) What one other site answered of a title — the same answer for its chapters (:func:`helpers_for`) and
+    for its description (:func:`about_of`): the site is asked once."""
+    site: S.Source
+    entry: "dict | None" = None          # ``source.json`` names its title there: asked by its key, not searched
+    chapters: bool = True                # its chapters too (a helper's), not only its title (the description's)
+    done: bool = False                   # it has answered (or has failed)
+    other: "S.TitleRef | None" = None    # its title (None — not there, or no answer)
+    helper: "Helper | None" = None       # its chapters met the home site's
+    searched: bool = False               # its search answered this time (the title found there or not)
+    failed: bool = False                 # it did not answer
+    late: bool = False                   # …not within the time of all of them (``_ask_all``)
+
+
+def _ask(net: S.Net, asked: _Asked, title: S.TitleRef, chapters: list, *, team: str, say, lock) -> None:
+    """One other site asked of ``title`` (in a thread of its own: :func:`_ask_all`): its title — by the key
+    ``source.json`` keeps, else by its search (``find_same``) — and (a helper) its chapters of the right translators or
+    language, met with the home site's (:func:`meet`).  What it said goes into ``asked`` under ``lock`` at once."""
+    site = asked.site
+    other = helper = None
+    searched = failed = False
+    language = title.language or "ru"
+    try:
+        if asked.entry is not None:
+            other = site.title(net, str(asked.entry["key"]))
+        else:
+            say(f"Ищу этот тайтл на {site.label}")
+            other = S.find_same(net, site, title)
+            searched = True
+            if other is None:
+                say(f"{site.label}: этого тайтла там нет")
+        if other is not None and asked.chapters:
+            best = helper_branch(site, other, team, language)
+            if best is None and getattr(site, "languages", False):
+                say(f"{site.label}: «{other.title}» там есть, но не на нужном языке")
             else:
-                say(f"Ищу этот тайтл на {other_site.label}")
-                other = S.find_same(net, other_site, title)
-                asked.add(other_site.name)
-                if other is None:
-                    say(f"{other_site.label}: этого тайтла там нет")
-                    continue
-            best = helper_branch(other_site, other, team, language)
-            if best is None and getattr(other_site, "languages", False):
-                say(f"{other_site.label}: «{other.title}» там есть, но не на нужном языке")
-                continue
-            theirs = other_site.chapters(net, other, best.id if best else "")
-        except S.Missing as exc:
-            say(f"{other_site.label}: тайтла там больше нет ({exc})")
+                theirs = site.chapters(net, other, best.id if best else "")
+                mode = meet(chapters, theirs)
+                if not mode:
+                    say(f"{site.label}: «{other.title}» — главы там считаются иначе, оттуда не беру")
+                else:
+                    helper = Helper(site, other, theirs, mode)
+                    if asked.entry is None:
+                        say(f"{site.label}: нашёлся «{other.title}» — глав {len(theirs)}")
+    except S.Missing as exc:                           # (its title, when it came, still tells its description)
+        say(f"{site.label}: тайтла там больше нет ({exc})")
+        helper = None
+    except S.SourceError as exc:
+        say(f"{site.label}: не ответил — {exc}")
+        helper, failed = None, True
+    except Exception as exc:  # noqa: BLE001 - one site's surprise: the others are taken all the same
+        _LOG.warning("%s: asked of %s: %s: %s", site.label, title.url, type(exc).__name__, exc)
+        say(f"{site.label}: ответил непонятно")
+        helper, failed = None, True
+    with lock:
+        if asked.done:                                 # too late: its time was over, it counts as not answered
+            return
+        asked.other, asked.helper, asked.searched, asked.failed = other, helper, searched, failed
+        asked.done = True
+
+
+def _ask_all(net: S.Net, asking: list, title: S.TitleRef, chapters: list, *, team: str, say, deadline: float,
+             answered=None) -> bool:
+    """(v5.44.117) The other sites of ``asking`` (:class:`_Asked`) asked at once, each in a thread of its own (the owner:
+    «все разом начали грузить и не приходилось одному сайту ждать другой»), all of them waited for ``deadline`` seconds
+    together; ``answered()`` — each time one has answered (under no lock: it reads ``asking`` itself).  The ones still
+    asking then stop (their net's stop: ``Net.asked_until``) and count as not answered.  -> all of them answered."""
+    lock = threading.Lock()
+    came = threading.Event()
+    over = threading.Event()             # their time is over: a site still asked says nothing more (its words would
+    started = time.monotonic()           # come in the middle of what follows — the next title of the night's round)
+    late = lambda: net.stop_check() or time.monotonic() - started > deadline     # noqa: E731
+    shared = net.asked_until(late)
+
+    def words(text: str) -> None:
+        if not over.is_set():
+            say(text)
+
+    def one(asked: _Asked) -> None:
+        try:
+            _ask(shared, asked, title, chapters, team=team, say=words, lock=lock)
+        finally:
+            with lock:
+                if not asked.done:                     # (it did not get as far as saying anything)
+                    asked.failed, asked.done = True, True
+            came.set()
+    for asked in asking:          # threads of their own (daemons): one that hangs on a site holds nobody at the exit
+        threading.Thread(target=one, args=(asked,), name=f"manhwa-ask-{asked.site.name}", daemon=True).start()
+    while True:
+        with lock:
+            left = [a for a in asking if not a.done]
+        if not left or late():
+            break
+        came.wait(min(0.5, max(0.05, deadline - (time.monotonic() - started))))
+        if came.is_set():
+            came.clear()
+            if answered is not None:
+                answered()
+    with lock:
+        over.set()
+        late_ones = [a for a in asking if not a.done]
+        for asked in late_ones:                         # too late: as a site that did not answer this time
+            asked.failed, asked.late, asked.helper = True, True, None
+            asked.done = True
+    if late_ones and not net.stop_check():
+        say("Не ответили вовремя — без них: " + ", ".join(a.site.label for a in late_ones))
+    return not late_ones
+
+
+def _helpers_of(wanted: _Plan, asking: list) -> tuple:
+    """([:class:`Helper`] in the owner's order, what ``source.json`` keeps of them) by the sites' answers — the same
+    whoever answered first: a helper — a site whose chapters met; a site of ``source.json`` that did not answer — kept
+    as it was; the sites searched now — not searched again for a week."""
+    out, keep, searched_now = [], [], set()
+    for asked in asking:
+        if not asked.chapters:
             continue
-        except S.SourceError as exc:
-            say(f"{other_site.label}: не ответил — {exc}")
-            if entry is not None:
-                keep.append(entry)                     # kept: the site did not answer this time
-            continue
-        mode = meet(chapters, theirs)
-        if not mode:
-            say(f"{other_site.label}: «{other.title}» — главы там считаются иначе, оттуда не беру")
-            continue
-        out.append(Helper(other_site, other, theirs, mode))
-        keep.append({"site": other_site.name, "key": other.key, "url": other.url, "title": other.title})
-        if entry is None:
-            say(f"{other_site.label}: нашёлся «{other.title}» — глав {len(theirs)}")
-    sites = (set() if search else searched) | asked | {str(h["site"]) for h in keep}
-    return out, {"helpers": keep, "helpers_at": int(_now()) if search else int(searched_at),
+        if asked.searched:
+            searched_now.add(asked.site.name)
+        if asked.done and asked.helper is not None:
+            other = asked.helper.title
+            out.append(asked.helper)
+            keep.append({"site": asked.site.name, "key": other.key, "url": other.url, "title": other.title})
+        elif asked.entry is not None and (asked.failed or not asked.done):
+            keep.append(asked.entry)                   # kept: the site did not answer this time
+    sites = (set() if wanted.search else wanted.searched) | searched_now | {str(h["site"]) for h in keep}
+    return out, {"helpers": keep, "helpers_at": int(_now()) if wanted.search else int(wanted.searched_at),
                  "helpers_sites": sorted(sites)}
+
+
+def helpers_for(net: S.Net, home: S.Source, title: S.TitleRef, chapters: list, stored: dict, *, say=None,
+                team: str = "", deadline: "float | None" = None) -> tuple:
+    """([:class:`Helper`], what ``source.json`` keeps of them): the other sites in the owner's order (:func:`_helper_plan`)
+    — (v5.44.117) asked at once (:func:`_ask_all`), taken in that order whoever answered first;
+    (v5.44.79) their chapters of the home site's translators (``team``) when they have them, in the title's language
+    (a title of MangaDex in English or in its original language takes nothing from the Russian sites)."""
+    say = say or (lambda _text: None)
+    wanted = _helper_plan(home, title, stored)
+    if wanted is None:
+        return [], _kept_record(stored)
+    asking = [_Asked(site, entry) for site, entry in wanted.sites]
+    _ask_all(net, asking, title, chapters, team=team, say=say, deadline=ASK_DEADLINE if deadline is None else deadline)
+    return _helpers_of(wanted, asking)
 
 
 # ── what the page shows before downloading ────────────────────────────────────────────────────────────────────────
@@ -484,12 +623,24 @@ class Found:
     cover_type: str = ""
     helpers: list = field(default_factory=list)          # (v5.44.62) Helper: the other sites with this title
     helpers_on: bool = True                              # the owner's choice for this title (source.json)
+    # (v5.44.116; the review: «Новые главы — скачивать самой» was ticked on every card — a download switched it back on)
+    # the owner's choice for this title (:func:`follow_choice`)
+    follow_on: bool = True
     helper_record: dict = field(default_factory=dict)    # what source.json keeps of them
     asked_helpers: bool = False                          # the other sites were asked
     notes: list = field(default_factory=list)            # (v5.44.72) what the card says first (the link's site…)
     asked: str = ""                                      # (v5.44.72) the link's site, when the title is another's
     about: "S.TitleRef | None" = None                    # (v5.44.112) the title on the site its description is from
     about_site: str = ""                                 # …that site's name (``about_of``; "" — the home site's own)
+    # (v5.44.117) the other sites still asked (their names — the page says «ищу на …» and shows what came so far) and
+    # the ones that did not answer in time (a title found so is not kept for «уже открывали»: ``manhwa_get``)
+    asking: list = field(default_factory=list)
+    late: list = field(default_factory=list)
+    # (v5.44.123) the covers of the sites the title was found on — its own site's and the other sites' (the menu of
+    # covers: ``webui/pages/covers.py``): [{"site", "label", "key", "url", "page"}] in the owner's order; and where
+    # ``cover`` came from: {"how": "folder"} — the folder's own, {"how": "site", "site", "url"}, {"how": "own", "file"}
+    covers: list = field(default_factory=list)
+    cover_from: dict = field(default_factory=dict)
 
     def by_number(self) -> bool:
         numbers = [c.number for c in self.chapters if c.number]
@@ -560,6 +711,8 @@ class Found:
             "waiting": [{"label": c.label, "free_at": _date(c.free_at)} for c in left[:5]],
             "helped": len(helped), "helped_paid": len([t for t in helped if t.ch.id in {c.id for c in paid}]),
             "helpers": helpers, "helpers_on": self.helpers_on, "helpers_asked": self.asked_helpers,
+            "asking": list(self.asking), "late": list(self.late),     # (v5.44.117) the other sites, asked at once
+            "follow": self.follow_on,                                  # (v5.44.116) the box «Новые главы» ticked by it
             "licensed": self.title.licensed, "notes": list(self.notes), "asked": self.asked,
             "kind": self.kind, "folder": self.folder, "cover": bool(self.cover),
             "first": self.chapters[0].label if self.chapters else "", "last": self.chapters[-1].label if self.chapters else "",
@@ -576,7 +729,7 @@ def _date(text: str) -> str:
 
 def look(url: str, settings: dict, *, branch: str = "", net: "S.Net | None" = None, where: str = "",
          cover: bool = True, helpers: bool = True, stored: "dict | None" = None, say=None, about: bool = True,
-         name: str = "") -> Found:
+         name: str = "", elsewhere: bool = True, shown=None, deadline: "float | None" = None) -> Found:
     """The title of a link, the chapters of its branch (the most voted, unless ``branch``) and what is already there;
     its cover too (``cover``), unless the folder has one already; (v5.44.62) the other sites with this title
     (``helpers``, when worth asking — :func:`worth_asking`; ``stored`` — the title's ``source.json``, else read from
@@ -584,7 +737,15 @@ def look(url: str, settings: dict, *, branch: str = "", net: "S.Net | None" = No
     (``about`` — :func:`about_of`).  A link whose site says it has no such title (404 — «Атака Титанов» of MangaLib, the
     owner: «MangaLib ответил 404»), lets no program in, or would not give it — the title by the name in the link on the
     other sites (:func:`_by_link_name`; ``name`` — the title's name as the page that gave the link said it, a tile
-    of «Лента»: asked first): the chapters from the site that has it."""
+    of «Лента»: asked first): the chapters from the site that has it; (v5.44.115) not when ``elsewhere`` is off — the
+    night's round and the queue: a site's 404 there is said, not a title found by words taken without a person.
+
+    (v5.44.117; the owner: «открыл тайтл и все разом начали грузить и не приходилось одному сайту ждать другой») the
+    other sites — for the chapters and for the description — and the cover are asked at once (:class:`_Others`; one
+    question to a site serves both), ``deadline`` seconds at most all together (:data:`ASK_DEADLINE`); what they give is
+    decided in the owner's order, so it is the same whoever answered first.  ``shown(found)`` — the title as it is so
+    far (a copy): first with the link's site's chapters and ``asking`` (the sites asked), then each time something
+    came (a site's chapters; the description once every site before its site in the order has answered; the cover)."""
     source, key = S.source_for(url)
     if source is None:
         raise DownloadError(UNKNOWN_LINK)
@@ -594,7 +755,9 @@ def look(url: str, settings: dict, *, branch: str = "", net: "S.Net | None" = No
     try:
         title = source.title(net, key)
     except (S.Closed, S.Refused, S.Missing) as exc:   # (v5.44.72) the link's site lets no program in, or not to this
-        asked = source.label                            # title; (v5.44.112) or has it no more (404)
+        if isinstance(exc, S.Missing) and not elsewhere:     # title; (v5.44.112) or has it no more (404) — (v5.44.115)
+            raise DownloadError(str(exc)) from exc           # not at night nor in the queue: no person to say «тот ли»
+        asked = source.label
         source, title, note = _by_link_name(net, source, key, exc, say, name=name)
         notes.append(note)
     except S.SourceError as exc:
@@ -623,48 +786,172 @@ def look(url: str, settings: dict, *, branch: str = "", net: "S.Net | None" = No
         kind, folder = linked
     else:
         folder = folder_for(Path(root), title) if root else Path(safe_name(title.title))
-    picture, picture_type = b"", ""
-    if title.cover_url and cover and not any((folder / f"cover{ext}").is_file() for ext in set(TYPES.values())):
+    picture, picture_type, came = b"", "", {}
+    from core import title_covers as TC
+    folder_cover = TC.current(folder) if cover else None
+    # (v5.44.123) the owner's choice (the menu of covers) of a title whose folder is not one of the program's yet —
+    # or is the booru parser's (never written into): its picture is the cover; a folder of the program's — its own
+    choice = None
+    if cover and not (folder_cover is not None and TC.in_library(folder, settings)):
+        choice = TC.chosen([f"{title.site}:{title.key}"])
+    fetch_cover = bool(cover) and choice is not None or bool(title.cover_url and cover) and folder_cover is None
+    if cover and folder_cover is not None and choice is None:   # the folder's own cover: the page shows it
         try:
-            # (v5.44.94–95) short, once, on each of its hosts (Хентай-тян's mirrors: ``S.picture_links``): its picture
-            # host hung 40 s three times — the card waited minutes for a cover (the owner: «даже не попытался
-            # загрузится»); no cover — the card has its letter
-            picture, picture_type = _cover_of(net, source, title)
-            if not _picture_type(picture, picture_type):
-                picture, picture_type = b"", ""
-        except S.SourceError as exc:
-            _LOG.info("cover of %s not taken: %s", title.url, exc)
-    elif cover:                                       # the folder's own cover: the page shows it
-        for ext in set(TYPES.values()):
-            if (folder / f"cover{ext}").is_file():
-                try:
-                    picture, picture_type = (folder / f"cover{ext}").read_bytes(), ""
-                except OSError:
-                    pass
-                break
+            picture, picture_type, came = folder_cover.read_bytes(), "", {"how": "folder"}
+        except OSError:
+            pass
     if stored is None:
         stored = read_source(folder) if (folder / LB_DIR / SOURCE_FILE).is_file() else {}
     found = Found(title=title, branch=chosen, chapters=chapters, kind=kind, folder=str(folder),
                   have=had(folder, title.site), cover=picture, cover_type=picture_type,
                   helpers_on=bool(stored.get("helpers_on", True)),
+                  follow_on=follow_choice(stored),                     # (v5.44.116)
                   helper_record={k: stored[k] for k in ("helpers", "helpers_at", "helpers_sites") if k in stored},
-                  notes=notes, asked=asked)
-    if helpers and worth_asking(title, chapters):
-        paid = [c for c in chapters if not c.free]
-        if paid:
-            say(f"Платных на {source.label}: {len(paid)} — ищу их на других сайтах")
-        team = chosen.name if chosen and not getattr(source, "languages", False) else ""
-        found.helpers, found.helper_record = helpers_for(net, source, title, chapters, stored, say=say, team=team)
-        found.asked_helpers = True
-    if about:
-        try:
-            got = about_of(net, source, title, found.helpers, say=say)
-        except Exception as exc:  # noqa: BLE001 - the description of another site is a nicety: the home's stays
-            _LOG.info("the description of %s from another site: %s", title.url, exc)
-            got = None
-        if got is not None:
-            found.about, found.about_site = got[1], got[0].name
+                  notes=notes, asked=asked, cover_from=came, covers=_covers_of([(source, title)]))
+    others = _Others(net, source, title, chapters, stored, found, say=say, shown=shown,
+                     deadline=ASK_DEADLINE if deadline is None else deadline)
+    others.run(helpers=helpers and worth_asking(title, chapters), about=about, fetch_cover=fetch_cover,
+               team=chosen.name if chosen and not getattr(source, "languages", False) else "", choice=choice)
     return found
+
+
+def _covers_of(pairs: list) -> list:
+    """(v5.44.123) The covers of a title on the sites ([(site, its title there)]) for the menu of covers: one a site,
+    in the owner's order, none without an address."""
+    order = {s.name: n for n, s in enumerate(S.readable())}
+    out, seen = [], set()
+    for site, other in sorted(pairs, key=lambda p: order.get(p[0].name, len(order))):
+        if other is None or not other.cover_url or site.name in seen:
+            continue
+        seen.add(site.name)
+        out.append({"site": site.name, "label": site.label, "key": other.key, "url": other.cover_url,
+                    "page": other.url})
+    return out
+
+
+class _Others:
+    """(v5.44.117) The other sites of a title and its cover, asked at once for :func:`look`: their chapters
+    (:func:`helpers_for`'s sites), the description (:func:`about_of`'s — a site asked for the chapters is not asked
+    again: one answer serves both), the cover; each new thing shown to the page as it comes (``shown``)."""
+
+    def __init__(self, net: S.Net, source: S.Source, title: S.TitleRef, chapters: list, stored: dict, found: Found, *,
+                 say, shown, deadline: float):
+        self.net, self.source, self.title, self.chapters = net, source, title, chapters
+        self.stored, self.found, self.say, self.shown, self.deadline = stored, found, say, shown, deadline
+        self.lock = threading.Lock()                  # the found as the threads change it
+        self.showing = threading.Lock()               # its copies go to the page one at a time, in order
+        self.ended = False                            # the look has its answer: a cover later than that is dropped
+        self.wanted: "_Plan | None" = None
+        self.asking: list = []
+        self.choice: "dict | None" = None
+
+    def run(self, *, helpers: bool, about: bool, fetch_cover: bool, team: str, choice: "dict | None" = None) -> None:
+        found, title, say = self.found, self.title, self.say
+        self.choice = choice                          # (v5.44.123) the owner's cover of a title without a folder
+        if helpers:
+            self.wanted = _helper_plan(self.source, title, self.stored)
+            if self.wanted is None:                   # a title not in Russian: the Russian sites are not asked
+                found.helper_record = _kept_record(self.stored)
+            else:
+                self.asking = [_Asked(site, entry) for site, entry in self.wanted.sites]
+            found.asked_helpers = True
+            paid = [c for c in self.chapters if not c.free]
+            if paid:
+                say(f"Платных на {self.source.label}: {len(paid)} — ищу их на других сайтах")
+        if about:
+            mine = {a.site.name for a in self.asking}
+            self.asking += [_Asked(site, chapters=False) for site in _about_sites(self.source, title, mine)]
+        order = {s.name: n for n, s in enumerate(S.readable())}
+        self.asking.sort(key=lambda a: order.get(a.site.name, len(order)))
+        found.asking = [a.site.label for a in self.asking]
+        if found.asking:
+            say("Спрашиваю разом: " + ", ".join(found.asking))
+        cover_thread = None
+        if fetch_cover:
+            cover_thread = threading.Thread(target=self._cover, name="manhwa-ask-cover", daemon=True)
+            cover_thread.start()
+        started = time.monotonic()
+        self._show()                                  # the link's site's chapters at once
+        if self.asking:
+            _ask_all(self.net, self.asking, title, self.chapters, team=team, say=say, deadline=self.deadline,
+                     answered=self._gather)
+        if cover_thread is not None:                  # (the cover asks short and once: ``COVER_TIMEOUT``)
+            cover_thread.join(max(0.0, self.deadline - (time.monotonic() - started)))
+        self._gather(final=True)
+
+    def _cover(self) -> None:
+        """(v5.44.94–95) short, once, on each of its hosts (Хентай-тян's mirrors: ``S.picture_links``): its picture host
+        hung 40 s three times — the card waited minutes for a cover (the owner: «даже не попытался загрузится»); no
+        cover — the card has its letter; (v5.44.117) asked beside the other sites, the page shows it when it comes.
+        (v5.44.123) The owner chose another one for a title without a folder (the menu of covers): that one; it does
+        not come — the site's."""
+        came = {"how": "site", "site": self.title.site, "url": self.title.cover_url}
+        got = None
+        if self.choice is not None:
+            from core import title_covers as TC
+            got = TC.picture_of(self.choice)
+            if got is not None:
+                came = {k: self.choice.get(k) for k in ("how", "site", "url", "file") if self.choice.get(k)}
+        if got is None and self.title.cover_url:
+            try:
+                got = _cover_of(self.net, self.source, self.title)
+            except S.SourceError as exc:
+                _LOG.info("cover of %s not taken: %s", self.title.url, exc)
+                return
+        if got is None:
+            return
+        picture, picture_type = got
+        if not _picture_type(picture, picture_type):
+            return
+        with self.lock:
+            if self.ended:                            # too late: the title has been given as it was
+                return
+            self.found.cover, self.found.cover_type, self.found.cover_from = picture, picture_type, came
+        self._show()
+
+    def _gather(self, final: bool = False) -> None:
+        """What the sites have said so far, decided in the owner's order (so whoever answered first, the same): the
+        helpers that answered (at the end — all of them, with what ``source.json`` keeps); the description once every
+        site before its site has answered."""
+        answers = {a.site.name: a for a in self.asking}
+        with self.lock:
+            found = self.found
+            if self.wanted is not None:
+                if final:
+                    found.helpers, found.helper_record = _helpers_of(self.wanted, self.asking)
+                else:
+                    found.helpers = [a.helper for a in self.asking if a.chapters and a.done and a.helper is not None]
+            decided, got = _about_decision(self.source, self.title, answers)
+            if decided and got is not None:
+                found.about, found.about_site = got[1], got[0].name
+            # (v5.44.123) the covers of every site that has the title (the menu of covers): what has come so far
+            found.covers = _covers_of([(self.source, self.title)] + [(a.site, a.other) for a in self.asking
+                                                                     if a.done and a.other is not None])
+            found.asking = [] if final else [a.site.label for a in self.asking if not a.done]
+            if final:
+                found.late = [a.site.label for a in self.asking if a.late]
+                self.ended = True
+            about = found.about_site
+        if final and about:
+            self.say(f"Описание — с {getattr(S.by_name(about), 'label', about)}")
+        if not final:
+            self._show()
+
+    def _show(self) -> None:
+        """The title as it is now — a copy — to the page (``shown``)."""
+        if self.shown is None:
+            return
+        with self.showing:
+            with self.lock:
+                if self.ended:
+                    return
+                now = replace(self.found, helpers=list(self.found.helpers), notes=list(self.found.notes),
+                              asking=list(self.found.asking), late=list(self.found.late),
+                              covers=list(self.found.covers), cover_from=dict(self.found.cover_from))
+            try:
+                self.shown(now)
+            except Exception as exc:  # noqa: BLE001 - the page's view of it: the look goes on all the same
+                _LOG.warning("the title found so far not shown: %s", exc)
 
 
 ABOUT_SEARCHES = 3              # (v5.44.112) sites searched at most for a title's description
@@ -678,41 +965,78 @@ def _searchable() -> tuple:
     return ASKED
 
 
+def _about_sites(source: S.Source, title: S.TitleRef, asked: set) -> list:
+    """(v5.44.117) The sites asked of a title for its description alone, besides the ones asked for its chapters
+    (``asked`` — their answers serve the description too: a site is asked once): the sites a search by name asks
+    (:func:`_searchable`), :data:`ABOUT_SEARCHES` at most, in the owner's order — the ones after the home site only
+    when it has no description of its own; a site of hentai only for an erotic title, a title of a site of hentai only
+    on those; a title not in Russian — none."""
+    if (title.language or "ru") != "ru":             # (v5.44.79) a title of MangaDex in English or in its original
+        return []                                    # language: the Russian sites are not asked — its own description
+    out = []
+    for site in S.readable():
+        if site.name == source.name:
+            if str(title.description or "").strip():
+                break
+            continue
+        if site.adult_only and not title.is_erotic or getattr(source, "adult_only", False) and not site.adult_only:
+            continue
+        if site.name in asked or site.name not in _searchable():
+            continue
+        if len(out) >= ABOUT_SEARCHES:
+            break
+        out.append(site)
+    return out
+
+
+def _about_decision(source: S.Source, title: S.TitleRef, answers: dict) -> tuple:
+    """(v5.44.117) (decided, (site, its title) or None) — the description and the facts the card shows, of the sites'
+    answers so far (``answers``: the site's name → :class:`_Asked`): the first site in the owner's order with this title
+    and a description, the home site's own when it comes first (None); decided only once every site before that one
+    has answered — they are asked at once, and the one chosen is the same whoever answered first.  A site the search by
+    name does not ask (com-x.life, MangaDex) — only when its chapters are taken (a helper), as before."""
+    if (title.language or "ru") != "ru":
+        return True, None
+    for site in S.readable():
+        if site.name == source.name:
+            if str(title.description or "").strip():
+                return True, None
+            continue
+        asked = answers.get(site.name)
+        if asked is None:
+            continue
+        if not asked.done:
+            return False, None                       # it may yet have it: the ones after it wait
+        if asked.helper is not None:
+            other = asked.helper.title
+        elif site.name not in _searchable():
+            continue
+        else:
+            other = asked.other
+        if other is not None and str(other.description or "").strip():
+            return True, (site, other)
+    return True, None
+
+
 def about_of(net: S.Net, source: S.Source, title: S.TitleRef, helpers: list, *, say=None) -> "tuple | None":
     """(v5.44.112) (site, its title) whose description and facts the card and the title's page show — the owner: «само
     описание и все все все про тайтл с ре манги или если там нет то по очереди пока не будет»: the first site in his
     order (``S.readable``: Remanga first) that has this title with a description; the home site's own when it comes
     first (None); a site found among the helpers is not searched again; the sites a search by name does not ask
-    (com-x.life, MangaDex — :func:`_searchable`) — only as helpers; :data:`ABOUT_SEARCHES` searches at most; a site of hentai only for an erotic title, and a title of
-    a site of hentai only on those."""
+    (com-x.life, MangaDex — :func:`_searchable`) — only as helpers; :data:`ABOUT_SEARCHES` searches at most; a site of
+    hentai only for an erotic title, and a title of a site of hentai only on those.  (v5.44.117) The sites searched at
+    once (:func:`_ask_all`), the one taken by the order (:func:`_about_decision`); :func:`look` asks them together with
+    the sites of the chapters (:class:`_Others`)."""
     say = say or (lambda _text: None)
-    if (title.language or "ru") != "ru":             # (v5.44.79) a title of MangaDex in English or in its original
-        return None                                  # language: the Russian sites are not asked — its own description
-    searched = 0
-    for site in S.readable():
-        if site.name == source.name:
-            if str(title.description or "").strip():
-                return None
-            continue
-        if site.adult_only and not title.is_erotic or getattr(source, "adult_only", False) and not site.adult_only:
-            continue
-        helper = next((h for h in helpers if h.source.name == site.name), None)
-        if helper is not None:
-            other = helper.title
-        elif site.name not in _searchable() or searched >= ABOUT_SEARCHES:
-            continue
-        else:
-            searched += 1
-            say(f"Ищу описание на {site.label}")
-            try:
-                other = S.find_same(net, site, title)
-            except S.SourceError as exc:
-                say(f"{site.label}: не ответил — {exc}")
-                continue
-        if other is not None and str(other.description or "").strip():
-            say(f"Описание — с {site.label}")
-            return site, other
-    return None
+    answers = {h.source.name: _Asked(h.source, done=True, other=h.title, helper=h) for h in helpers}
+    asking = [_Asked(site, chapters=False) for site in _about_sites(source, title, set(answers))]
+    if asking:
+        _ask_all(net, asking, title, [], team="", say=say, deadline=ASK_DEADLINE)
+    answers.update({a.site.name: a for a in asking})
+    got = _about_decision(source, title, answers)[1]
+    if got is not None:
+        say(f"Описание — с {got[0].label}")
+    return got
 
 
 def _cover_of(net: S.Net, source: S.Source, title: S.TitleRef) -> tuple:
@@ -752,20 +1076,22 @@ def _by_link_name(net: S.Net, source: S.Source, key: str, why: S.SourceError, sa
         raise DownloadError(f"{reason}. В ссылке нет названия тайтла — вставьте ссылку на этот тайтл с {names}")
     said = " ".join(words)
     from core.manhwa_link_names import find_by_words
-    found = None
+    found, how = None, "по названию из ссылки"
     if named and named != words:                      # (v5.44.112) the name the tile said — the sites know it best
         say(f"{reason}. Ищу этот тайтл по названию «{name}» на {names}")
         found = find_by_words(net, named, sites, say=say)
+        how = f"по названию «{name}»"
     if found is None and words:
         say(f"{reason}. Ищу этот тайтл по названию из ссылки («{said}») на {names}")
         found = find_by_words(net, words, sites, say=say)
+        how = "по названию из ссылки"
     if found is None:
         asked = " и ".join(f"«{x}»" for x in dict.fromkeys(x for x in (str(name or "").strip(), said) if x))
         raise DownloadError(f"{reason}. По названию ({asked}) тайтл не нашёлся ни на одном из сайтов, "
                             f"которые программа читает ({names}). Если он там есть — вставьте ссылку оттуда.")
     other, title, _share = found
     say(f"{other.label}: нашёлся «{title.title}» — описание и главы оттуда и с других сайтов")
-    return other, title, (f"{reason}. Поэтому тайтл найден на {other.label} по названию — описание оттуда, "
+    return other, title, (f"{reason}. Поэтому тайтл найден на {other.label} {how} — описание оттуда, "
                           f"главы — оттуда и с других сайтов. Проверьте, тот ли это тайтл.")
 
 
@@ -815,10 +1141,12 @@ def _iso_ready(free_at: str) -> bool:
     return when.timestamp() <= _now()
 
 
-def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt) -> str:
+def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt, night: bool = False) -> str:
     """One chapter into ``folder``: its pictures into ``.lb/partial/<name>`` (another site's — ``<name> (<site>)``: two
     sites' pictures never mix), then the whole folder moved in.  The chapter's folder (its name in the title's
-    folder), or "" when ``halt()`` stopped it half-way («Остановить», (v5.44.74) «Пауза» — its pictures there stay)."""
+    folder), or "" when ``halt()`` stopped it half-way («Остановить», (v5.44.74) «Пауза» — its pictures there stay).
+    (v5.44.119) ``night`` — the nightly round brought it: its ``chapter.json`` says so (the title's page: «новая — пришла
+    ночной проверкой»)."""
     source, title, ch, ref = take.source, take.title, take.ch, take.ref
     name = chapter_name(ch)
     base = folder / LB_DIR / PARTIAL
@@ -867,7 +1195,8 @@ def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt) -> str:
         w, h = (pic.width, pic.height) if pic.width > 0 and pic.height > 0 else _size_of(path)
         pages.append({"file": path.name, "w": int(w), "h": int(h)})
     info = {"tome": ch.tome or None, "chapter": ch.number, "name": ch.name, "pages": pages,
-            "source": {"site": title.site, "id": ref.id, "url": ref.url}, "downloaded_at": int(_now())}
+            "source": {"site": title.site, "id": ref.id, "url": ref.url}, "downloaded_at": int(_now()),
+            **({"night": True} if night else {})}
     (partial / "chapter.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     target, n = folder / name, 2
     while target.exists():
@@ -916,19 +1245,55 @@ def _write_title(net: S.Net, source: S.Source, found: Found, folder: Path) -> No
     tmp.write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, info_path)
     has_cover = any((folder / f"cover{ext}").is_file() for ext in set(TYPES.values()))
-    if found.cover and not has_cover:
-        ext = _picture_type(found.cover, found.cover_type) or ".jpg"
-        (folder / f"cover{ext}").write_bytes(found.cover)
+    if not has_cover:
+        _first_cover(found, folder)
+
+
+def cover_ids(found: Found) -> list:
+    """(v5.44.123) The names a title is known by on the sites it was found on («remanga:<dir>», «mangalib:<slug>»…):
+    the owner's choice of its cover is kept under them (``core/title_covers``)."""
+    return list(dict.fromkeys([f"{found.title.site}:{found.title.key}"]
+                              + [f"{c['site']}:{c['key']}" for c in found.covers if c.get("key")]))
+
+
+def _first_cover(found: Found, folder: Path) -> None:
+    """The cover of a folder that has none: (v5.44.123) the one the owner chose while the title had no folder (the menu
+    of covers), else the one the title was found with; what it is — noted (the menu knows the folder's is that site's)."""
+    from core import title_covers as TC
+    picture, came = found.cover, dict(found.cover_from)
+    choice = TC.chosen(cover_ids(found))
+    if choice is not None and choice.get("how") in ("site", "own") and choice.get("md5") != TC.md5_of(picture or b""):
+        got = TC.picture_of(choice)
+        if got is not None and _picture_type(got[0], got[1]):
+            picture = got[0]
+            came = {k: choice.get(k) for k in ("how", "site", "url", "file") if choice.get(k)}
+    if not picture:
+        return
+    ext = _picture_type(picture, found.cover_type) or ".jpg"
+    (folder / f"cover{ext}").write_bytes(picture)
+    if came.get("how") in ("site", "own"):
+        label = getattr(S.by_name(str(came.get("site") or "")), "label", "")
+        TC.remember(cover_ids(found), **came, label=label, md5=TC.md5_of(picture), folder=str(folder),
+                    name=found.title.title)
+
+
+ENDED: list = []      # (v5.44.120) fn(found, result) at the end of every download (``core/download_history``: «Готово»)
 
 
 def download(found: Found, *, chapters: list | None = None, follow: bool = True, helpers: "bool | None" = None,
-             net: "S.Net | None" = None, say=None, stop_check=None, start_paused: bool = False) -> dict:
+             net: "S.Net | None" = None, say=None, stop_check=None, start_paused: bool = False,
+             night: bool = False, retry: bool = False) -> dict:
     """The chapters of ``found`` that the folder has not and some site has free (or ``chapters`` — their ids: the ones
     the page ticked) into the title's folder — (v5.44.62) from the other sites too (``helpers``; the title's own choice
     unless said); the paid ones nobody has free are kept in ``.lb/source.json`` with their dates; (v5.44.74) the new
-    ones left out of ``chapters`` — as ``skipped`` (the nightly round leaves them).  «Пауза», the chapters asked
+    ones left out of ``chapters`` — as ``skipped`` (the nightly round leaves them); (v5.44.120) ``retry`` — «Повторить
+    не скачавшееся» of «Загрузки → Готово»: ``chapters`` are the ones that did not come, the others are not made
+    ``skipped`` by it (a chapter that came out since would never be taken at night).  «Пауза», the chapters asked
     again, the meter — ``core/manhwa_run.py``; ``start_paused`` — begun on «Пауза» (one the program closed on).
-    A result for the page: the chapters that did not come — ``failed_chapters`` [{label, why}] (not «failed»: a
+    (v5.44.119) ``night`` — the nightly round's download: its chapters say so (``chapter.json`` «night») and
+    ``source.json`` keeps when the round looked and what it brought (``night_at``, ``night_got`` — the title's page:
+    «Последняя проверка — сегодня в 03:12: пришли главы 40 и 41»).
+    A result for the page: the chapters that did not come — ``failed_chapters`` [{label, why, id}] (not «failed»: a
     page task takes a result's «failed» for a refusal of the whole task — until 5.44.74 a download with one chapter
     that did not come ended «прервано ошибкой» with that list as its words)."""
     say = say or (lambda _text: None)
@@ -957,6 +1322,8 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
               "waiting": [{"id": c.id, "label": c.label, "free_at": c.free_at} for c in paid],
               **found.helper_record, "helpers_on": use, "licensed": found.title.licensed,
               "skipped": sorted(t.id for t in new if chosen is not None and t.id not in chosen)}
+    if retry:                                      # (v5.44.120) the skipped ones as they were, less the ones retried
+        record["skipped"] = sorted(str(x) for x in stored.get("skipped") or [] if str(x) not in (chosen or set()))
     if not record["skipped"]:
         record.pop("skipped")
     write_source(folder, record)
@@ -980,12 +1347,16 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
         R.pause()
         say("ПАУЗА с прошлого запуска — «Продолжить», чтобы качать дальше")
     try:                                           # «Пауза»: the strips on their way come, the next ones wait
-        run = R.go(wanted, lambda take, k, halt: _chapter(net, take, folder, k, halt), say=say, stop_check=stop_check)
+        run = R.go(wanted, lambda take, k, halt: _chapter(net, take, folder, k, halt, night=night), say=say,
+                   stop_check=stop_check)
     finally:
         R.resume()
     got = [name for _k, name, _take in run["got"]]
     others = sum(1 for _k, _name, take in run["got"] if take.helped)
     record["checked_at"] = int(_now())
+    if night:                                      # (v5.44.119) the round's look at this title and what it brought
+        record["night_at"] = record["checked_at"]
+        record["night_got"] = [take.label for _k, _name, take in run["got"]]
     write_source(folder, record)
     _clean_partial(folder)
     if record.get("archive"):                      # (v5.44.76) a title of the archive: «Из архива» shows it as it is now
@@ -994,13 +1365,18 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
             manga_archive.note_download(folder, found)
         except (OSError, ValueError) as exc:
             _LOG.warning("the archive's counts of %s not noted: %s", folder, exc)
-    failed = run["failed"] + [{"label": take.label, "why": take.source.sign_in_words()}
+    failed = run["failed"] + [{"label": take.label, "why": take.source.sign_in_words(), "id": take.id}
                               for take in locked]
     result = {"title": found.title.title, "folder": str(folder), "kind": found.kind, "got": len(got),
               "chapters": got, "failed_chapters": failed, "paid": len(paid), "stopped": run["stopped"],
               "helped": others,
               "gave_up": run["gave_up"], "skipped": len(record.get("skipped") or [])}
     R.values(finished=True, gave_up=run["gave_up"])
+    for hook in list(ENDED):                       # (v5.44.120) «Загрузки → Готово»: never in the way of the download
+        try:
+            hook(found, result)
+        except Exception as exc:  # noqa: BLE001 - a record of the history not made: the download is done all the same
+            _LOG.warning("the end of the download of %s not noted: %s: %s", found.title.title, type(exc).__name__, exc)
     return result
 
 
@@ -1047,11 +1423,18 @@ def due(now: float | None = None, last: float | None = None) -> bool:
     return NIGHT[0] <= hour < NIGHT[1] and now - last >= AGAIN_AT_NIGHT
 
 
-def watch_round(settings: dict, *, say=None, stop_check=None, net: "S.Net | None" = None) -> dict:
+def _closing() -> bool:
+    from core.shutdown import is_shutting_down
+    return is_shutting_down()
+
+
+def watch_round(settings: dict, *, say=None, stop_check=None, net: "S.Net | None" = None, closing=None) -> dict:
     """Every followed title: its site asked for chapters, the new free ones (and the paid ones that became free)
-    downloaded.  Kept as done in ``manhwa_watch.json`` unless stopped."""
+    downloaded.  Kept as done in ``manhwa_watch.json`` — (v5.44.116) a stopped one too, unless ``closing()`` says the
+    stop is the program's closing (then the next start goes on with it)."""
     say = say or (lambda _text: None)
     stop_check = stop_check or (lambda: False)
+    closing = closing or _closing
     net = net or S.Net(stop_check)
     titles = [(f, d) for f, d in followed(settings) if d.get("follow", True)]
     if not titles:
@@ -1065,7 +1448,8 @@ def watch_round(settings: dict, *, say=None, stop_check=None, net: "S.Net | None
         try:
             found = look(data.get("url") or "", settings, branch=str(data.get("branch") or ""), net=net,
                          where=str(data.get("kind") or ""), cover=False, stored=data, say=say,
-                         helpers=bool(data.get("helpers_on", True)), about=False)
+                         helpers=bool(data.get("helpers_on", True)), about=False, elsewhere=False,
+                         deadline=QUIET_DEADLINE)
         except DownloadError as exc:
             problems.append(f"{name}: {exc}")
             say(f"{name}: сайт не ответил — {exc}")
@@ -1077,6 +1461,7 @@ def watch_round(settings: dict, *, say=None, stop_check=None, net: "S.Net | None
         new = [t for t in found.new() if t.id not in skipped]
         if not new:
             data["checked_at"] = int(_now())
+            data["night_at"], data["night_got"] = data["checked_at"], []     # (v5.44.119) looked at: nothing new
             data["waiting"] = [{"id": c.id, "label": c.label, "free_at": c.free_at} for c in found.waiting()]
             data["licensed"] = found.title.licensed
             data.update(found.helper_record)
@@ -1084,15 +1469,17 @@ def watch_round(settings: dict, *, say=None, stop_check=None, net: "S.Net | None
             continue
         say(f"{name}: новых глав — {len(new)}")
         result = download(found, chapters=[t.id for t in new] if skipped else None, follow=bool(data.get("follow", True)),
-                          net=net, say=say, stop_check=stop_check)
+                          net=net, say=say, stop_check=stop_check, night=True)
         total += result["got"]
         if result.get("stopped"):
             stopped = True
             break
-    if not stopped:
+    # (v5.44.116) «Остановить» means «until the next night» (the owner's review): a round the person stopped is kept as
+    # checked — else the duty began it again ten minutes later; one the program's closing cut short is not
+    if not stopped or not closing():
         from core.file_safety import write_json_kept
-        write_json_kept(_watch_file(), json.dumps({"checked_at": int(_now()), "got": total, "titles": len(titles)}),
-                        dict)
+        write_json_kept(_watch_file(), json.dumps({"checked_at": int(_now()), "got": total, "titles": len(titles),
+                                                   **({"stopped": True} if stopped else {})}), dict)
     if total:
         say(f"Новых глав скачано: {total}")
     return {"titles": len(titles), "got": total, "problems": problems, "stopped": stopped}

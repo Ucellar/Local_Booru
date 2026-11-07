@@ -133,7 +133,8 @@ def _card_json(card: dict, search=None) -> dict:
     first = card["entries"][0]
     sized = next((e for e in card["entries"] if e.get("width") and e.get("height")), first)
     tags = [[name, category] for category, names in _merged_groups(card) for name in names]
-    return {"key": card["key"], "url": first.get("url") or "", "sites": [e.get("label") or e["site"] for e in card["entries"]],
+    return {"key": card["key"], "url": first.get("url") or "", "post": str(first.get("post_id") or ""),  # (v5.44.122)
+            "sites": [e.get("label") or e["site"] for e in card["entries"]],
             "owned": card.get("owned") or "", "image_id": int(card.get("image_id") or 0),
             "w": int(sized.get("width") or 0), "h": int(sized.get("height") or 0), "ext": first.get("ext") or "",
             "video": bool(first.get("video")), "rating": first.get("rating") or "",
@@ -246,13 +247,14 @@ def grab_download(req: Request) -> Response:
         return Response.json({"ok": False, "error": "Не выбрано ни одной карточки"}, 400)
     blocked = sorted({t for c in cards for t in search.blocked_tags(c)})
     if blocked:            # only a link shows such a card; the download would skip it without a word
-        return Response.json({"ok": False, "error": "У поста теги из блоклиста граббера и подписок: "
+        return Response.json({"ok": False, "error": "У поста теги из блоклиста подписок и «Галереи (booru)»: "
                               + ", ".join(blocked[:8]) + " — такой пост не скачивается. Блоклист — на странице «Подписки»."},
                              409)
     if not any(e.get("original") for c in cards for e in c["entries"]):
         return Response.json({"ok": False, "error": "У выбранных постов сайты не дают оригинал — скачивать нечего"}, 400)
     sub = make_sub(search.query, cards, [s.host for s in search.sites])
-    label = f"Граббер: {len(cards)} файл(ов) — {search.query}"
+    from webui.pages.post_sets import FILES, plural          # (v5.44.116) the section's name, not «Граббер: … файл(ов)»
+    label = f"Галерея (booru): {plural(len(cards), FILES)} — {search.query}"
     try:
         job = subscription_jobs.start(dict(req.settings), [sub], label=label, kind="grab", forget_seeds=True)
     except subscription_jobs.SubscriptionsBusy as exc:

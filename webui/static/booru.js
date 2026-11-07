@@ -238,8 +238,45 @@
     else location.replace(location.href);
   }
 
+  // (v5.44.116) the page before this one is the program's own: the history's entries before this one (the Navigation
+  // API lists only the program's), without it — the page that opened this one (document.referrer: the program tells
+  // its addresses only to itself — «Referrer-Policy: same-origin»)
+  function programBefore() {
+    if (history.length < 2) return false;
+    const nav = window.navigation;
+    if (nav && nav.currentEntry && typeof nav.entries === "function") {
+      // (v5.44.117) the entry just before this one, and the program's: a new tab's first entry (about:blank) is not
+      // a page to go back to (canGoBack said «yes» there — the button showed, the header grew after the page was laid
+      // out, and the card's picture jumped when it came: webui_viewer V2)
+      const index = nav.currentEntry.index;
+      const before = index > 0 ? nav.entries()[index - 1] : null;
+      try {
+        return !!before && !!before.url && new URL(before.url).origin === location.origin;
+      } catch (_) {
+        return false;
+      }
+    }
+    try {
+      return new URL(document.referrer).origin === location.origin;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // (v5.44.116) «←» of the header — shown only when there is the program's page to go back to; (v5.44.117) decided
+  // here, before anything measures the page: the button can make the header a row taller, and the card's picture is
+  // fitted to the room under it (fitPicture)
+  const topBack = document.querySelector(".top .top-back");
+  if (topBack) {
+    topBack.hidden = !programBefore();
+    window.addEventListener("pageshow", (event) => { if (event.persisted) topBack.hidden = !programBefore(); });
+  }
+
   // ── buttons ──────────────────────────────────────────────────────────────
   const actions = {
+    // (v5.44.116) «←» of the header: back to the program's page before (html._back_button; hidden — there is none)
+    "history-back": () => history.back(),
+
     "skin-menu": () => openSkinMenu(skinMenu().querySelector(".skin-list").hidden),
 
     skin(el) {
@@ -439,15 +476,6 @@
           tags: el.dataset.tags || "", section: el.dataset.section || "all", source: el.dataset.source || "all",
         });
         say(el, "Выберите, куда сохранить файл");
-      } catch (err) {
-        say(el, err.message, true);
-      }
-    },
-
-    async "manga-strip"(el) {
-      try {
-        await postJson("/api/prefs", { manga_strip: el.dataset.place });
-        location.reload();
       } catch (err) {
         say(el, err.message, true);
       }
@@ -852,7 +880,7 @@
     });
   }
 
-  // ── the picture of the post page (and of the manga reader): shown when it is all there ──
+  // ── the picture of the post page: shown when it is all there (the reader's pages — reader.js, the same way) ──
   // A big picture drawn while it still arrives goes in stripes (a progressive JPEG comes as blocks first), and on
   // some graphics drivers such a half-drawn frame — even with a strip of the previous page in it — stayed on the
   // screen.  So the picture stays hidden (its thumbnail stands in) until it has come whole and is decoded; then it
@@ -1075,8 +1103,8 @@
     wait();
   }
 
-  document.querySelectorAll(".media-wrap.loading img.post-media, .reader-stage.loading img.reader-image").forEach((img) => {
-    const holder = img.closest(".media-wrap, .reader-stage");
+  document.querySelectorAll(".media-wrap.loading img.post-media").forEach((img) => {
+    const holder = img.closest(".media-wrap");
     const problem = holder.nextElementSibling && holder.nextElementSibling.matches(".picture-problem")
       ? holder.nextElementSibling : null;
     setupPicture(img, holder, problem, holder.dataset.id || "");
@@ -1223,27 +1251,7 @@
 
   document.querySelectorAll("input[data-autocomplete]").forEach(setupAutocomplete);
 
-  // ── manga reader: a click on the left third goes back, elsewhere forward; the page list jumps ──
-  document.querySelectorAll(".reader-stage").forEach((stage) => {
-    stage.addEventListener("click", (event) => {
-      const box = stage.getBoundingClientRect();
-      const back = event.clientX - box.left < box.width / 3;
-      const target = back ? stage.dataset.prev : stage.dataset.next;
-      if (target) window.location.href = target;
-    });
-  });
-  // The strip of manga pages scrolls itself to the current page; the window stays where it is.
-  const pageStrip = document.querySelector(".page-strip");
-  const currentStripPage = pageStrip && pageStrip.querySelector(".current");
-  if (currentStripPage) {
-    pageStrip.scrollLeft = currentStripPage.offsetLeft - (pageStrip.clientWidth - currentStripPage.offsetWidth) / 2;
-    pageStrip.scrollTop = currentStripPage.offsetTop - (pageStrip.clientHeight - currentStripPage.offsetHeight) / 2;
-  }
-  document.querySelectorAll('select[data-action="goto-page"]').forEach((select) => {
-    select.addEventListener("change", () => {
-      window.location.href = select.dataset.base + select.value;
-    });
-  });
+  // (v5.44.117) the manga reader's clicks, its strip of pages and its list of pages — static/reader.js (one reader)
 
   // ── a video played by the program inside the page ──
   // The window's browser cannot decode H.264: the program plays the video and its frames come as pictures in the
@@ -1270,6 +1278,13 @@
       return false;
     }
   })();
+  // (v5.44.116) F puts the player on the whole screen only where F is no key of the page: the card page keeps it for
+  // «В избранное» (its keys — data-hotkeys, «Горячие клавиши»); the hint of ⛶ names F only then
+  function fullByF() {
+    let keys = {};
+    try { keys = JSON.parse(document.body.dataset.hotkeys || "{}"); } catch (_) { /* no keys of its own */ }
+    return !Object.values(keys).some((k) => String(k).toUpperCase() === "F");
+  }
   const nativeVideo = (() => {
     // a card's video (data-id) or an episode of the tab «Видео» (data-episode: where to start, played once);
     // (v5.44.106) an episode of «Смотреть» (data-stream: the token of its stream on the program — watch.js sets it)
@@ -1363,7 +1378,9 @@
                 loop: box.dataset.loop !== "0" }
             : box.dataset.stream !== undefined
               ? { cmd: "start", stream: box.dataset.stream, from: Number(box.dataset.from) || 0, loop: false }
-              : { cmd: "start", id: Number(box.dataset.id) };
+              // (v5.44.121) a long video of the library: once, from its place (data-loop="0", data-from)
+              : { cmd: "start", id: Number(box.dataset.id), from: Number(box.dataset.from) || 0,
+                  loop: box.dataset.loop !== "0" };
           const reply = await appRequest("video", Object.assign(what, place()));
           token = reply.token || "";
           if (!token) throw new Error("видео не запустилось");
@@ -1508,8 +1525,8 @@
         if (document.activeElement !== audioMenu && state.audio !== undefined) audioMenu.value = String(state.audio);
         if (document.activeElement !== subsMenu && state.subtitle !== undefined) subsMenu.value = String(state.subtitle);
       }
-      // the voice-overs are chosen under the episodes (videos.js, «.vdubs») — here only at full screen
-      const outside = !box.classList.contains("nv-fullscreen") && !!document.querySelector(".vdubs");
+      // the voice-overs are chosen on the page of the series (series.js «Озвучка») — here only at full screen
+      const outside = !box.classList.contains("nv-fullscreen") && !!document.querySelector(".vdubs, [data-sv-voice]");
       audioMenu.closest(".nv-track").hidden = audio.length < 2 || outside;
       subsMenu.closest(".nv-track").hidden = !subs.length;
       tracksRow.querySelector(".nv-track-note").textContent = state.subtitle_error || "";
@@ -1600,7 +1617,10 @@
         /* this page only */
       }
       if (fullButton) {
-        fullButton.title = on ? "Выйти из полноэкранного режима (Esc, F)" : "Во весь экран (F, двойной щелчок; Esc — выйти)";
+        // (v5.44.116) F only where it is no key of the page (the card page keeps it for «В избранное»)
+        const f = fullByF();
+        fullButton.title = on ? (f ? "Выйти из полноэкранного режима (Esc, F)" : "Выйти из полноэкранного режима (Esc)")
+          : (f ? "Во весь экран (F, двойной щелчок; Esc — выйти)" : "Во весь экран (двойной щелчок; Esc — выйти)");
         fullButton.setAttribute("aria-label", on ? "Выйти из полноэкранного режима" : "Во весь экран");
         fullButton.setAttribute("aria-pressed", on ? "true" : "false");
       }
@@ -1655,7 +1675,8 @@
         history.replaceState(history.state, "", u.pathname + u.search + u.hash);
       } catch (_) { /* the address stays as it is */ }
       full().catch((err) => showProblem(err.message));
-    } else if (inApp && box.dataset.autoplay !== "0") start();
+    } else if (inApp && box.dataset.autoplay !== "0" && box.dataset.stream !== "") start();
+    // (v5.44.121) an episode of a site asked to play: its stream is opened by the page (series.js), then start()
     else if (!inApp) showProblem("Это видео браузер показать не может.");
     return {
       toggle: () => command("toggle"),
@@ -1700,7 +1721,7 @@
     } else if (event.code === "KeyJ" || event.code === "KeyL") {
       event.preventDefault();
       nativeVideo.seekBy(event.code === "KeyJ" ? -5 : 5);
-    } else if (event.code === "KeyF" && !Object.values(hotkeys).some((k) => String(k).toUpperCase() === "F")) {
+    } else if (event.code === "KeyF" && fullByF()) {
       event.preventDefault();                   // (a post page keeps F for «Избранное» — its ⛶ and a double click)
       nativeVideo.fullscreen();
     } else if (event.code === "Escape" && nativeVideo.isFull()) {
@@ -1891,6 +1912,116 @@
     }
   });
 
+  // (v5.44.120) «Загрузки» of the header: its number (going and waiting) asked every few seconds while the page is seen
+  // (the page «Загрузки» itself sets it from its own state)
+  const downloadsBadge = document.querySelector(".top [data-dl-badge]");
+  if (downloadsBadge && !document.getElementById("downloads")) {
+    let badgeTimer = 0;
+    let badgeAsking = false;             // one question at a time: the page shown again while one is on its way
+    const badgeTick = () => {
+      clearTimeout(badgeTimer);
+      if (document.hidden || badgeAsking) return;
+      badgeAsking = true;
+      fetch("/api/downloads/count", { credentials: "same-origin", cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data) return;
+          const n = Number(data.count) || 0;
+          const pill = downloadsBadge.querySelector("[data-dl-n]");
+          pill.textContent = n ? String(n) : "";
+          pill.hidden = !n;
+          downloadsBadge.classList.toggle("on", n > 0);
+        })
+        .catch(() => {})
+        .finally(() => {
+          badgeAsking = false;
+          if (!document.hidden) badgeTimer = setTimeout(badgeTick, 5000);
+        });
+    };
+    badgeTimer = setTimeout(badgeTick, 5000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) badgeTick(); });
+  }
+
+  // (v5.44.121) a long video of the library (longer than «Видео длиннее», data-memory): played once — at its end
+  // «Видео закончилось» over it, not round and round —, its place kept for «Продолжить с 12:34» and the bar on its
+  // tile (/api/videos/card-progress; the window's full-size player keeps it itself)
+  (() => {
+    const held = document.querySelector("video.post-media[data-memory], .native-video[data-id][data-memory]");
+    if (!held) return;
+    const own = held.classList.contains("native-video");
+    let last = { position: 0, duration: 0 };
+    let sentAt = 0, sentPosition = -1, over = false;
+    const send = (ended, leaving) => {
+      if (!last.duration && !ended) return;
+      if (!ended && Math.abs(last.position - sentPosition) < 1) return;
+      sentPosition = last.position;
+      sentAt = Date.now();
+      fetch("/api/videos/card-progress", {
+        method: "POST", credentials: "same-origin", keepalive: !!leaving, headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: Number(held.dataset.id), position: last.position, duration: last.duration,
+                               ended: !!ended }),
+      }).catch(() => { /* the next moment says it */ });
+    };
+    let card = null;
+    const endCard = (on) => {
+      if (card) { card.remove(); card = null; }
+      if (!on) return;
+      card = document.createElement("div");
+      card.className = "lv-end";
+      card.setAttribute("role", "status");
+      const words = document.createElement("p");
+      words.textContent = "Видео закончилось";
+      const again = document.createElement("button");
+      again.type = "button";
+      again.textContent = "Смотреть снова";
+      again.addEventListener("click", () => {
+        endCard(false);
+        if (own && nativeVideo) nativeVideo.restart();
+        else { held.currentTime = 0; held.play().catch(() => {}); }
+      });
+      card.append(words, again);
+      if (own) held.querySelector(".nv-screen").append(card);
+      else held.insertAdjacentElement("afterend", card);
+    };
+    const seen = (position, duration, playing, ended) => {
+      last = { position: Number(position) || 0, duration: Number(duration) || last.duration };
+      if (playing) {
+        over = false;
+        endCard(false);
+        if (Date.now() - sentAt > 10000) send(false);
+      } else if (!ended && last.position >= 1) send(false);  // paused (a place it did not reach just now): kept at once
+      if (ended && !over) {
+        over = true;
+        last.position = last.duration;
+        send(true);
+        endCard(true);
+      }
+    };
+    if (own) {
+      held.addEventListener("lb-video-state", (event) => {
+        const st = event.detail || {};
+        seen(st.position, st.duration, st.playing, st.ended);
+      });
+      held.addEventListener("lb-video-full-left", (event) => {   // the full-size player kept the place itself
+        const d = event.detail || {};
+        last = { position: Number(d.position) || 0, duration: Number(d.duration) || last.duration };
+        sentPosition = last.position;
+        if (d.ended) endCard(true);
+      });
+    } else {
+      held.loop = false;
+      const from = Number(held.dataset.from) || 0;
+      if (from > 1) {
+        const jump = () => { if (held.duration && from < held.duration - 1) held.currentTime = from; };
+        if (held.readyState >= 1) jump(); else held.addEventListener("loadedmetadata", jump, { once: true });
+      }
+      held.addEventListener("timeupdate", () => seen(held.currentTime, held.duration, !held.paused, false));
+      held.addEventListener("pause", () => { if (!held.ended) seen(held.currentTime, held.duration, false, false); });
+      held.addEventListener("ended", () => seen(held.duration, held.duration, false, true));
+    }
+    window.addEventListener("pagehide", () => { if (!over) send(false, true); });
+  })();
+
   // tools.js (the parser page, many cards at once) adds its buttons to the same dispatcher.
-  window.LocalBooru = { actions, postJson, say, appRequest, inApp, nativeVideo, copyText };
+  window.LocalBooru = { actions, postJson, say, appRequest, inApp, nativeVideo, copyText, programBefore };
 })();

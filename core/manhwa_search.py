@@ -361,10 +361,13 @@ def fetch_cover(address: str, page: str = "", *, net=None, shrink: int = 0) -> "
     from core import manhwa_download as D
     if not _cover_ok(address):
         return None
+    # (v5.44.123) a smaller one is kept apart: the menu of covers shows a cover whole (its size is the site's), «Лента»
+    # the same address smaller
+    key = f"{address}#{shrink}" if shrink else address
     with _LOCK:
-        if address in _COVERS:
-            _COVERS.move_to_end(address)
-            return _COVERS[address]
+        if key in _COVERS:
+            _COVERS.move_to_end(key)
+            return _COVERS[key]
         failed = _COVERS_FAILED.get(address)
         if failed is not None and time.monotonic() - failed < COVER_FAILED_FOR:
             return None
@@ -390,7 +393,7 @@ def fetch_cover(address: str, page: str = "", *, net=None, shrink: int = 0) -> "
     if shrink:
         got = _smaller(got, shrink)
     with _LOCK:
-        _COVERS[address] = got
+        _COVERS[key] = got
         while len(_COVERS) > COVERS_KEPT:
             _COVERS.popitem(last=False)
     return got

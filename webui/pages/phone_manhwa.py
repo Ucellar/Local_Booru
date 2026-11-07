@@ -3,28 +3,30 @@
 * ``/m/manhwa`` (:func:`index`) — the search, «Продолжить чтение» (the titles being read, the last first: their next
   chapter), all the titles in three columns with how much of each is read;
 * ``/m/manhwa/t/<id>`` (:func:`title_page`) — the cover, the names, the type, year and status, «Прочитано N из M»,
-  «Продолжить: Глава 57» and «С начала», the tabs «Главная» (the description, genres, tags, facts) and «Главы» (newest
-  first; a chapter of another site and when it came, «новая» for a few days, «Вы остановились здесь · стр. 12 из 40»,
-  a tick by hand);
-* ``/m/manhwa/r/<chapter id>`` (:func:`reader`) — the strip of the computer's reader (``static/manhwa.js``: the place
-  kept, the chapter read to its end ticked, the next chapter coming by itself below, the bar hiding while the strip is
-  read down) in the phone's bars: on top — back, «Том · Глава» opening the list of chapters, the line of how much of
-  the chapter is read; at the bottom — the chapters before and after.
+  «Продолжить: Глава 57» and «Читать с начала», the tabs «Главная» (the description, genres, tags, facts) and «Главы»
+  (newest first; a chapter of another site and when it came, «новая» for a few days, «Вы остановились здесь · стр. 12
+  из 40», a tick by hand);
+* ``/m/manhwa/r/<chapter id>`` (:func:`reader`) — (v5.44.117) the program's one reader (``webui/pages/reader.py``,
+  ``static/reader.js``; ``manhwa.show(phone=True)``): on top — «‹ К тайтлу», «‹ Глава ›» (the chapter's name opens the
+  list of chapters), where the pages are from; at the bottom — «Страница N из M» with its slider and «Как читать»
+  (left to right, right to left, «Прокруткой» — the strip of the computer: the place kept, the chapter read to its
+  end ticked, the next chapter coming by itself below, the panels hiding while it is read down); a tap in the middle —
+  the panels shown or hidden.
 
 The data is the computer's tab (``webui/pages/manhwa.py``: the folder, what was read, the mode «SFW / Всё / NSFW»); the
-downloading, its switches and the marks «Это хентай» stay on the computer.
+downloading and its switches stay on the computer; (v5.44.122) «Это хентай» / «Это не хентай» — here too
+(``phone.mark_box``: the computer's API).
 """
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 from core import manhwa_library as H
 from webui.html import esc, url
 from webui.pages import manhwa as MH, phone
 from webui.server import Request, Response
 
-NEW_FOR = 3 * 86400            # a chapter that came this many seconds ago and is not read: «новая»
+NEW_FOR = MH.NEW_FOR           # a chapter that came this many seconds ago and is not read: «новая» (manhwa.arrival)
 SHELF = 10
 
 
@@ -67,7 +69,7 @@ def _card(title: H.Title, *, shelf: bool = False) -> str:
     if shelf:
         target, _said = MH._continue(title, state)
         return (f'<a class="m-shelf-card" href="/m/manhwa/r/{target.id}">'
-                f'<span class="m-cover"><img src="/manhwa/cover/{title.id}" alt="" loading="lazy" decoding="async">'
+                f'<span class="m-cover"><img src="{esc(MH.cover_src(title))}" alt="" loading="lazy" decoding="async">'
                 f'</span>{_bar(done, total) or _bar(1, 10 ** 9)}<span class="m-card-title">{esc(title.title)}</span>'
                 f'<span class="m-card-sub">{esc(target.label)}</span></a>')
     kind = str(title.info.get("type") or "").strip()
@@ -75,7 +77,7 @@ def _card(title: H.Title, *, shelf: bool = False) -> str:
     sub = (f"{done} из {total} {MH._words(total, 'главы', 'глав', 'глав')}" if done
            else f"{total} {MH._words(total, 'глава', 'главы', 'глав')}")
     return (f'<a class="m-card" href="/m/manhwa/t/{title.id}">'
-            f'<span class="m-cover"><img src="/manhwa/cover/{title.id}" alt="" loading="lazy" decoding="async">{badge}'
+            f'<span class="m-cover"><img src="{esc(MH.cover_src(title))}" alt="" loading="lazy" decoding="async">{badge}'
             f'</span>{_bar(done, total)}<span class="m-card-title">{esc(title.title)}</span>'
             f'<span class="m-card-sub">{esc(sub)}</span></a>')
 
@@ -138,38 +140,43 @@ def index(req: Request) -> Response:
 
 
 # ── /m/manhwa/t/<id> ─────────────────────────────────────────────────────────────────────────────────────────────
-def _day(stamp: float) -> str:
-    if not stamp:
-        return ""
-    moment = time.localtime(stamp)
-    today = time.localtime()
-    days = (time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
-            - time.mktime((moment.tm_year, moment.tm_mon, moment.tm_mday, 0, 0, 0, 0, 0, -1))) / 86400
-    if -0.5 < days < 0.5:
-        return "сегодня"
-    if 0.5 <= days < 1.5:
-        return "вчера"
-    from webui.pages.phone_gallery import MONTHS
-    day = f"{moment.tm_mday} {MONTHS[moment.tm_mon - 1]}"
-    return day if moment.tm_year == today.tm_year else f"{day} {moment.tm_year}"
-
-
-def _came(chapter: H.Chapter) -> float:
-    try:
-        return float(chapter.info.get("downloaded_at") or 0) or float(chapter.mtime or 0)
-    except (TypeError, ValueError):
-        return float(chapter.mtime or 0)
+# (v5.44.126) when a chapter came, the site of a title, «новая» — one rule with the computer and the manga's pages
+# (manhwa.arrival, came_of, day_of, home_site, site_label)
+_came = MH._came                 # when a chapter came (the reader's «новая» too)
 
 
 def _home_site(title: H.Title) -> str:
-    from core import manhwa_download as D
-    return str(D.read_source(Path(title.path)).get("site") or "")
+    return MH.home_site(title.path)
 
 
-def _site_label(name: str) -> str:
-    from core import manhwa_sources as S
-    found = S.by_name(name)
-    return found.label if found else name
+def chapter_row(chapter_id: str, href: str, label: str, *, notes: list = (), read: bool = False, here: bool = False,
+                fresh: bool = False, kind: str = "") -> str:
+    """A chapter of a title's page of the phone: its label, ``notes`` under it («Возвращение · с MangaLib · сегодня»,
+    «Вы остановились здесь · стр. 2 из 3»), «новая», the tick «прочитана» by hand (``manhwa.js`` ``mh-read``).
+    (v5.44.126) The manga's series too (``phone_manga``: ``kind`` "manga" — its library's memory of reading)."""
+    cls = "mh-ch m-ch" + (" read" if read else "") + (" here" if here else "")
+    where = f' data-kind="{esc(kind)}"' if kind else ""
+    return (f'<li class="{cls}" data-chapter="{esc(chapter_id)}"><a href="{esc(href)}">'
+            f'<span class="m-ch-text"><span class="mh-ch-label">{esc(label)}</span>'
+            + (f'<span class="m-ch-note">{esc(" · ".join(notes))}</span>' if notes else "") + "</span>"
+            + ('<span class="m-new">новая</span>' if fresh else "") + "</a>"
+            f'<button type="button" class="mh-tick" data-action="mh-read" data-chapter="{esc(chapter_id)}"{where} '
+            f'aria-pressed="{"true" if read else "false"}" aria-label="Прочитана">'
+            f'{phone.svg(phone.TICK, size=20, width=2.2)}</button></li>')
+
+
+def from_site(folder) -> str:
+    """«Скачано с Remanga» among a title's facts (``<dt>``/``<dd>`` of its ``m-dl``): the site its folder was downloaded
+    from (``.lb/source.json``); "" — a title the program did not download.  (v5.44.126) The manga's too."""
+    home = MH.home_site(folder)
+    return f'<dt>Скачано с</dt><dd>{esc(MH.site_label(home))}</dd>' if home else ""
+
+
+def read_line(done: int, total: int) -> str:
+    """«Прочитано N из M глав» and its bar under a title's names — (v5.44.126) a series of «Манга» too."""
+    return (f'<p class="m-read-line">Прочитано {done} из {total} {MH._words(total, "главы", "глав", "глав")}</p>'
+            f'<span class="m-bar m-bar-always" aria-hidden="true"><span style="width:{_percent(done, total)}"></span>'
+            f'</span>')
 
 
 def _chapter_rows(title: H.Title, state: dict) -> str:
@@ -183,26 +190,14 @@ def _chapter_rows(title: H.Title, state: dict) -> str:
         notes = []
         if here:
             page, _part = H.PROGRESS.place(title.id, chapter.id)
-            notes.append(f"Вы остановились здесь · стр. {min(page + 1, max(1, len(chapter.pages)))} из "
-                         f"{len(chapter.pages)}")
-        source = chapter.info.get("source") if isinstance(chapter.info.get("source"), dict) else {}
-        site = str(source.get("site") or "")
-        came = _came(chapter)
-        if site and home and site != home:
-            notes.append(f"с {_site_label(site)}" + (f" · {_day(came)}" if came else ""))
-        elif not here and came and now - came < 30 * 86400:
-            notes.append(_day(came))
+            notes.append(MH.here_words(page + 1, len(chapter.pages)))
+        came, fresh = MH.arrival(chapter.info, _came(chapter), home, read=read, here=here, now=now)
+        if came:
+            notes.append(came)
         if chapter.number and chapter.name:
             notes.insert(0, chapter.name)
-        fresh = not read and came and now - came < NEW_FOR
-        cls = "mh-ch m-ch" + (" read" if read else "") + (" here" if here else "")
-        rows.append(f'<li class="{cls}" data-chapter="{chapter.id}"><a href="/m/manhwa/r/{chapter.id}">'
-                    f'<span class="m-ch-text"><span class="mh-ch-label">{esc(chapter.label)}</span>'
-                    + (f'<span class="m-ch-note">{esc(" · ".join(notes))}</span>' if notes else "") + "</span>"
-                    + ('<span class="m-new">новая</span>' if fresh else "") + "</a>"
-                    f'<button type="button" class="mh-tick" data-action="mh-read" data-chapter="{chapter.id}" '
-                    f'aria-pressed="{"true" if read else "false"}" aria-label="Прочитана">'
-                    f'{phone.svg(phone.TICK, size=20, width=2.2)}</button></li>')
+        rows.append(chapter_row(chapter.id, f"/m/manhwa/r/{chapter.id}", chapter.label, notes=notes, read=read,
+                                here=here, fresh=fresh))
     return "".join(rows)
 
 
@@ -225,26 +220,29 @@ def title_page(req: Request) -> Response:
     chips = "".join(f"<span>{esc(str(title.info.get(key)))}</span>" for key in ("type", "year", "status", "age")
                     if title.info.get(key))
     alt = " / ".join(esc(t) for t in title.alt_titles[:3])
-    hero = (f'<section class="m-hero"><span class="m-cover m-hero-cover"><img src="/manhwa/cover/{title.id}?size=l" '
+    hero = (f'<section class="m-hero"><span class="m-cover m-hero-cover"><img src="{esc(MH.cover_src(title, "l"))}" '
             f'alt=""></span><div class="m-hero-about"><h1>{esc(title.title)}</h1>'
             + (f'<p class="m-alt">{alt}</p>' if alt else "")
             + (f'<p class="m-facts">{chips}</p>' if chips else "")
-            + f'<p class="m-read-line">Прочитано {done} из {total} {MH._words(total, "главы", "глав", "глав")}</p>'
-            f'<span class="m-bar m-bar-always" aria-hidden="true"><span style="width:{_percent(done, total)}"></span>'
-            f'</span></div></section>')
+            + read_line(done, total) + '</div></section>')
+    # (v5.44.119) a title downloaded from a site: «Докачать» — its one page (as «Докачать сейчас» of the computer)
+    more = MH.home_of("manhwa", MH.site_of(title.path), title.title, phone=True)
     buttons = (f'<div class="m-go"><a class="m-button m-go-main" href="/m/manhwa/r/{target.id}">'
                f'{phone.svg(phone.PLAY, size=18, width=2)}{esc(said)}</a>'
-               + (f'<a class="m-button m-quiet" href="/m/manhwa/r/{title.chapters[0].id}?from=start">С начала</a>'
-                  if state["last"] is not None and target.id != title.chapters[0].id else "") + "</div>")
+               + (f'<a class="m-button m-quiet" href="/m/manhwa/r/{title.chapters[0].id}?from=start">'
+                  f'Читать с начала</a>'           # (v5.44.116) the computer's words (until then «С начала»)
+                  if state["last"] is not None and target.id != title.chapters[0].id else "")
+               + (f'<a class="m-button m-quiet" href="{esc(more)}" data-title-page>Докачать</a>' if more else "")
+               + "</div>")
+    from core import content_marks as CM               # (v5.44.122) «Это хентай» / «Это не хентай», as the computer's
+    buttons += phone.mark_box("manhwa", title.id, CM.manhwa_verdict(title))
     text = str(title.info.get("description") or "").strip()
     desc = "".join(f"<p>{esc(p)}</p>" for p in text.split("\n\n") if p.strip()) or '<p class="m-muted">Описания нет.</p>'
     chip_links = "".join(f'<a class="m-tag" href="{esc(url("/m/manhwa", q=v))}">{esc(v)}</a>'
                          for v in (title.list_of("genres") + title.list_of("tags"))[:40])
     facts = "".join(f'<dt>{esc(name)}</dt><dd>{esc(", ".join(title.list_of(key)) if isinstance(title.info.get(key), list) else title.info.get(key))}</dd>'
                     for key, name in MH.FACTS if title.info.get(key))
-    home = _home_site(title)
-    if home:
-        facts += f'<dt>Скачано с</dt><dd>{esc(_site_label(home))}</dd>'
+    facts += from_site(title.path)
     facts += f"<dt>Глав</dt><dd>{total}</dd>"
     tab = "main" if req.arg("tab") == "main" else "chapters"
     tabs = (f'<nav class="m-tabs-line" role="tablist" aria-label="Страница тайтла">'
@@ -265,16 +263,7 @@ def title_page(req: Request) -> Response:
                       top=phone.mode_switch(), scripts=("manhwa",))
 
 
-# ── /m/manhwa/r/<chapter id> ─────────────────────────────────────────────────────────────────────────────────────
-def _list(title: H.Title, current: H.Chapter, read: set) -> str:
-    items = []
-    for chapter in reversed(title.chapters):
-        cls = ("current " if chapter.id == current.id else "") + ("read" if chapter.id in read else "")
-        items.append(f'<li class="{cls.strip()}" data-chapter="{chapter.id}"><a href="/m/manhwa/r/{chapter.id}">'
-                     f'<span>{esc(chapter.label)}</span><i aria-hidden="true">✓</i></a></li>')
-    return "".join(items)
-
-
+# ── /m/manhwa/r/<chapter id> — (v5.44.117) the one reader of the program (webui/pages/reader.py) ──────────────────
 def reader(req: Request) -> Response:
     title, chapter = MH._chapter(req, req.params["id"])
     if title is None or chapter is None:
@@ -282,49 +271,6 @@ def reader(req: Request) -> Response:
     hidden = _hidden(req, title)
     if hidden is not None:
         return hidden
-    from webui.pages import manga_online as OP
-    page, part = (0, 0.0) if req.arg("from") == "start" else H.PROGRESS.place(title.id, chapter.id)
-    page = min(page, max(0, len(chapter.pages) - 1))
-    before, after = title.neighbours(chapter)
-    state = MH._read_state(title)
-    now, chosen = MH.reading_mode(title, chapter)          # (v5.44.83) «Лента», «Справа налево», «Слева направо»
-    modes = OP.modes_html(chosen, now)
-
-    def step(cls: str, target, rel: str, words: str, icon: str, first: bool) -> str:
-        inside = (f"{icon}<span>{words}</span>" if first else f"<span>{words}</span>{icon}")
-        if target is None:
-            return f'<a class="{cls}" aria-disabled="true">{inside}</a>'
-        return f'<a class="{cls}" href="/m/manhwa/r/{target.id}" rel="{rel}">{inside}</a>'
-    bar = (f'<div class="m-mh-bars" data-bar>'
-           f'<div class="m-mh-top"><div class="m-mh-row">'
-           f'<a class="m-icon" href="/m/manhwa/t/{title.id}" aria-label="К странице тайтла">'
-           f'{phone.svg(phone.BACK, width=2)}</a>'
-           f'<button type="button" class="mh-bar-where" data-action="{"mh-list" if now == "strip" else "ol-list"}" '
-           f'aria-expanded="false" aria-controls="mh-list">{esc(chapter.label)}</button>'
-           f'<span class="m-icon" aria-hidden="true"></span></div>'
-           f'<span class="m-bar m-bar-thin" aria-hidden="true"><span data-chapter-read></span></span>{modes}'
-           f'<div class="mh-list" id="mh-list" hidden><ol>{_list(title, chapter, state["read"])}</ol></div></div>'
-           f'<nav class="m-mh-bottom" aria-label="Главы">'
-           + step("mh-bar-prev", before, "prev", "Предыдущая", phone.svg(phone.BACK, size=18, width=2), True)
-           + step("mh-bar-next", after, "next", "Следующая", phone.svg(phone.FORTH, size=18, width=2), False)
-           + "</nav></div>")
-    online_css = '<link rel="stylesheet" href="/static/online.css">'
-    name = f"{chapter.label} — {title.title}"
-    if now != "strip":                                     # the pages one at a time (static/online.js)
-        body = OP.pager_html(
-            mode=now, chapter=chapter.id, page=page, pages=[{"src": f"/manhwa/page/{chapter.id}/{n}", "w": w, "h": h}
-                                                         for n, w, h in MH._pages(chapter)],
-            progress_api="/api/manhwa/progress", mode_api=f"/api/manhwa/mode?id={title.id}",
-            next_href=f"/m/manhwa/r/{after.id}" if after else "",
-            prev_href=f"/m/manhwa/r/{before.id}" if before else "", next_label=after.label if after else "",
-            label=chapter.label, bar=bar, back_href=f"/m/manhwa/t/{title.id}", back_words="К списку глав", phone=True)
-        return phone.page(name, body, tabs=False, bare=True, kind="m-reader", scripts=("manhwa", "online"),
-                          head=online_css)
-    tail = (f'<div class="mh-tail" data-tail hidden><p>Это последняя глава.</p><p><a class="m-button m-quiet" '
-            f'href="/m/manhwa/t/{title.id}">К списку глав</a></p></div>')
-    body = (f'<div class="mh-reader m-mh-reader mh-modes" data-title="{title.id}" data-start="{chapter.id}" '
-            f'data-page="{page}" data-part="{part}" data-base="/m/manhwa/r/" data-width="full" style="--mh-w:100%" '
-            f'data-mode-api="/api/manhwa/mode?id={title.id}">'
-            f'{bar}<div class="mh-strip">{MH._section(title, chapter, page)}</div>{tail}</div>')
-    return phone.page(name, body, tabs=False, bare=True, kind="m-reader", scripts=("manhwa", "online"),
-                      head=online_css)
+    if not chapter.pages:
+        return Response.redirect(f"/m/manhwa/t/{title.id}")
+    return MH.show(req, title, chapter, phone=True)

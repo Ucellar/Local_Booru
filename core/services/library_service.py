@@ -69,14 +69,14 @@ def delete_by_buckets(settings, buckets, delete_files=True):
         return result
 
 
-def check_integrity(settings, *, sample_limit=None):
+def check_integrity(settings, *, sample_limit=None, files=True):
     from core.database.invariants import check
-    return check(settings, sample_limit=sample_limit, persist=True)
+    return check(settings, sample_limit=sample_limit, persist=True, files=files)
 
 
-def repair_integrity(settings):
+def repair_integrity(settings, *, mark_missing_deleted=True):
     from core.database.invariants import repair
-    return repair(settings)
+    return repair(settings, mark_missing_deleted=mark_missing_deleted)
 
 
 def unfinished_operations(settings, limit=100):

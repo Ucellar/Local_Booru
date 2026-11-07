@@ -1,0 +1,103 @@
+/* Local Booru — (v5.44.123) the menu of covers (static/covers.js; the owner's approved mockup F): «Сменить обложку»
+   over the cover of a title's or a series' page; the menu beside it on the computer, from the bottom of the screen on
+   the phone and in a narrow window.  Every look gives its colours (--panel, --text, --accent…; the phone's --line,
+   --strong, --accent-button); the looks style button by its tag — every rule here is stronger than «button:hover». */
+
+/* ── the cover ── */
+.cv-on { position: relative; cursor: pointer; transition: box-shadow 0.15s; }
+.cv-on:hover, .cv-on:focus-within { box-shadow: 0 0 0 3px var(--accent); }
+.cv-on > button.cv-change, .cv-on > button.cv-change:hover {
+  position: absolute; z-index: 2; left: 10px; right: 10px; top: 10px; display: flex; align-items: center;
+  justify-content: center; gap: 7px; min-height: 0; margin: 0; padding: 8px 10px; box-sizing: border-box; border: 0;
+  border-radius: 8px; background: rgba(0, 0, 0, 0.78); color: #fff; font-family: inherit; font-size: 13px;
+  font-weight: 700; line-height: 1.2; text-shadow: none; box-shadow: none; opacity: 0; transition: opacity 0.15s;
+  cursor: pointer; }
+.cv-on:hover > button.cv-change, .cv-on > button.cv-change:focus-visible,
+.cv-on > button.cv-change[aria-expanded="true"] { opacity: 1; }
+.cv-on > button.cv-change:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cv-on.cv-phone > button.cv-change { left: 6px; right: 6px; top: 6px; padding: 4px; border-radius: 6px; font-size: 11px;
+  opacity: 1; }
+.cv-on.cv-phone > button.cv-change .cv-i { display: none; }
+.cv-i { flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ── the menu beside the cover ── */
+.cv-menu { position: absolute; z-index: 1000; box-sizing: border-box; max-width: calc(100vw - 16px); padding: 14px 16px;
+  border: 1px solid var(--border, var(--line, rgba(128, 128, 128, 0.4))); border-radius: 14px;
+  background: var(--panel, #262626); color: var(--text, #ddd); box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+  font-size: 14px; line-height: 1.35; text-align: left; }
+.cv-menu::before { content: ""; position: absolute; left: -8px; top: 34px; width: 14px; height: 14px;
+  background: var(--panel, #262626); border-left: 1px solid var(--border, var(--line, rgba(128, 128, 128, 0.4)));
+  border-bottom: 1px solid var(--border, var(--line, rgba(128, 128, 128, 0.4))); transform: rotate(45deg); }
+.cv-menu [hidden] { display: none !important; }
+.cv-menu .cv-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 12px;
+  padding-right: 28px; position: relative; }
+.cv-menu .cv-head h2 { margin: 0; color: var(--strong, var(--text, #fff)); font-size: 16px; font-weight: 700;
+  overflow-wrap: anywhere; }
+.cv-menu .cv-sub { color: var(--muted, #999); font-size: 12.5px; }
+.cv-menu button.cv-x, .cv-menu button.cv-x:hover { position: absolute; right: -4px; top: -6px; width: 32px; height: 32px;
+  min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 8px; background: transparent;
+  color: var(--muted, #999); font-size: 22px; line-height: 1; box-shadow: none; cursor: pointer; }
+.cv-menu button.cv-x:hover { color: var(--text, #fff); }
+.cv-menu .cv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 14px; }
+.cv-menu .cv-opt, .cv-menu button.cv-opt, .cv-menu button.cv-opt:hover {
+  position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 3px; min-width: 0;
+  min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; box-shadow: none; cursor: pointer; }
+.cv-menu .cv-pic { position: relative; display: block; aspect-ratio: 2 / 3; overflow: hidden; border-radius: 8px;
+  background: var(--panel-2, rgba(128, 128, 128, 0.18));
+  box-shadow: 0 0 0 1px var(--border, var(--line, rgba(128, 128, 128, 0.4))); }
+.cv-menu .cv-pic img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.cv-menu .cv-opt:hover .cv-pic, .cv-menu .cv-opt:focus-visible .cv-pic { box-shadow: 0 0 0 2px var(--accent); }
+.cv-menu .cv-opt:focus-visible { outline: none; }
+.cv-menu .cv-opt.on .cv-pic { box-shadow: 0 0 0 3px var(--accent); }
+.cv-menu .cv-opt.busy { opacity: 0.6; cursor: progress; }
+.cv-menu .cv-opt.bad, .cv-menu button.cv-opt:disabled { opacity: 0.5; cursor: default; }
+.cv-menu .cv-tick { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; display: grid;
+  place-items: center; border-radius: 50%; background: var(--accent-button, var(--accent)); color: #fff; }
+.cv-menu .cv-tick .cv-i { stroke-width: 3; }
+.cv-menu .cv-site { margin-top: 5px; color: var(--strong, var(--text, #fff)); font-size: 13.5px; font-weight: 700;
+  overflow-wrap: anywhere; }
+.cv-menu .cv-size { color: var(--muted, #999); font-size: 12px; }
+.cv-menu .cv-note { color: var(--muted, #999); font-size: 11.5px; line-height: 1.3; }
+.cv-menu .cv-note:empty { display: none; }
+.cv-menu .cv-opt.on .cv-note { color: var(--accent-text, var(--accent)); font-weight: 600; }
+.cv-menu .cv-own .cv-pic { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px; box-sizing: border-box; background: transparent; box-shadow: none;
+  border: 2px dashed var(--border, var(--line, rgba(128, 128, 128, 0.5))); color: var(--muted, #999);
+  font-size: 12.5px; text-align: center; }
+.cv-menu .cv-own .cv-pic .cv-i { color: var(--strong, var(--text, #fff)); }
+.cv-menu .cv-own:hover .cv-pic, .cv-menu .cv-own:focus-visible .cv-pic { border-color: var(--accent); box-shadow: none; }
+.cv-menu .cv-own:focus-visible { outline: none; }
+.cv-menu .cv-file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.cv-menu .cv-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; margin: 12px 0 0;
+  padding-top: 10px; border-top: 1px solid var(--border, var(--line, rgba(128, 128, 128, 0.3)));
+  color: var(--muted, #999); font-size: 12.5px; line-height: 1.45; }
+.cv-menu .cv-foot b { color: var(--text, #fff); font-weight: 600; }
+.cv-menu button.cv-back, .cv-menu button.cv-back:hover { min-height: 0; margin: 0; padding: 0; border: 0;
+  background: transparent; color: var(--accent-text, var(--accent)); font: inherit; text-decoration: underline;
+  box-shadow: none; cursor: pointer; }
+.cv-menu button.cv-back:hover { color: var(--text, #fff); }
+.cv-menu .cv-status { margin: 8px 0 0; color: var(--muted, #999); font-size: 12.5px; }
+.cv-menu .cv-status:empty { display: none; }
+.cv-menu .cv-status.bad { padding-left: 8px; border-left: 3px solid var(--danger, #c75b55); color: var(--text, #fff); }
+
+/* ── the phone and a narrow window: from the bottom of the screen, three in a row, not wider than the screen ── */
+.cv-dim { position: fixed; inset: 0; z-index: 999; background: rgba(0, 0, 0, 0.62); }
+.cv-menu.cv-sheet { position: fixed; left: 0; right: 0; top: auto; bottom: 0; width: auto; max-width: none;
+  max-height: 86vh; overflow-y: auto; overscroll-behavior: contain;
+  padding: 8px 14px calc(16px + env(safe-area-inset-bottom, 0px)); border-width: 1px 0 0;
+  border-radius: 16px 16px 0 0; box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5); }
+.cv-menu.cv-sheet::before { display: none; }
+.cv-menu .cv-handle { display: block; width: 40px; height: 4px; margin: 0 auto 8px; border-radius: 2px;
+  background: var(--muted, #777); opacity: 0.6; }
+.cv-menu.cv-sheet .cv-head { flex-direction: column; align-items: flex-start; gap: 2px; margin-bottom: 10px; }
+.cv-menu.cv-sheet .cv-head h2 { font-size: 17px; }
+.cv-menu.cv-sheet .cv-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 10px; }
+.cv-menu.cv-sheet .cv-site { margin-top: 3px; font-size: 13px; }
+.cv-menu.cv-sheet .cv-size { font-size: 11px; line-height: 1.3; }
+.cv-menu.cv-sheet .cv-foot { display: block; border-top: 0; padding-top: 0; font-size: 12px; line-height: 1.4; }
+.cv-menu.cv-sheet .cv-foot > span { display: block; margin-bottom: 4px; }
+.cv-menu.cv-sheet .cv-foot .cv-back { display: inline-block; margin-top: 6px; }
+@media (min-width: 700px) {
+  .cv-menu.cv-sheet .cv-grid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
+}

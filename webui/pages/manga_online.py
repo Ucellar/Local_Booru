@@ -1,26 +1,20 @@
 """(v5.44.82) «Читать» a title of the sites without downloading it (``core/manga_online.py``): the program's own reader
-— the strip of «Манхва» (``static/manhwa.js``: the next chapter coming by itself below, the place kept, the bar hiding
-while the strip is read) — with the site's pictures through the program; the site is not opened.
+with the site's pictures through the program; the site is not opened.
 
-* ``/online?url=<the title's link>&ch=<n>`` (:func:`reader`; ``&branch=`` — the card's translators) — on the computer,
-  the frame of «Манхва»; ``/m/online`` (:func:`phone_reader`) — the phone's bars (``/online`` on the phone goes there —
-  ``phone.TWINS``).  ``n`` — the chapter's tile on the card (from 1).
+* ``/online?url=<the title's link>&ch=<n>`` (:func:`reader`; ``&branch=`` — the card's translators; ``&p=`` — the page,
+  ``last`` — the chapter's last, ``end`` — its end screen) — on the computer, in the frame of the title's kind;
+  ``/m/online`` (:func:`phone_reader`) — on the phone (``/online`` on the phone goes there — ``phone.TWINS``).  ``n`` —
+  the chapter's tile on the card (from 1).
 * ``/api/online/chapter`` — the next chapter for the strip (as ``/api/manhwa/chapter/<id>`` answers); ``/api/online/pic``
-  — a page's picture (a media path: ``server.MEDIA_PATHS``); ``/api/online/progress`` — the place (the last chapter of
-  the title, its page); ``/api/online/last`` — it, for the card's «Продолжить».
-* «SFW»: a title the site marks as erotica is not shown.
-* (as the friend's reader Yomi: «лента (манхва), страницы справа налево / слева направо, автовыбор режима») the way a
-  chapter is read (``manga_online.MODES``): the strip, or the pages one at a time (``static/online.js``: the sides of
-  the page turn it — right to left for manga, a tap in the middle hides the bars, a double tap zooms, the slider
-  jumps, the next pages come ahead); «авто» — ``manga_online.auto_mode``; the owner's choice per title —
-  ``/api/online/mode`` (``PROGRESS.put_mode``).
-* (v5.44.110; the owner, 7.11.2026: «на компе просмотр манги с ленты пиздец какой не удобный я думал ты сделаешь такой
-  же как в проге») on the computer the pages one at a time are the reader of «Манга» for its downloaded manga
-  (``webui/pages/manga.reader``, :func:`_book_body`): a page per address (``&p=``; ``last`` — the chapter's last), the
-  bars of pages above and below it (« ‹ the page's number › », the chapter, «К тайтлу»), a click on its left third —
-  back, elsewhere — on, ← → (``booru.js``), the strip of the chapter's pages under it, beside it or none («Лента
-  страниц» — the folder's reader's choice), after the last page — the next chapter; a manga in the frame of «Манга».
-  The strip's pictures — ``/api/online/thumb`` (small copies of the pages the program has).  The phone keeps its own.
+  — a page's picture (a media path: ``server.MEDIA_PATHS``); ``/api/online/thumb`` — (v5.44.110) its small copy for
+  «Лента страниц»; ``/api/online/progress`` — the place (the last chapter of the title, its page); ``/api/online/last``
+  — it, for the card's «Продолжить»; ``/api/online/mode`` — the way the title is read.
+* «SFW»: a title the program takes for hentai is not shown.
+* (v5.44.117) the reader is the program's one reader (``webui/pages/reader.py``, ``static/reader.js``; the owner's
+  approved mockup B): «По страницам» (left to right, right to left) or «Прокруткой» (the strip of «Манхва»: the next
+  chapter comes by itself below), the way kept for the title (``PROGRESS.put_mode``), the first time — by its kind
+  (``manga_online.auto_mode``: manhwa — the strip, manga — the pages left to right).  Until then the computer and the
+  phone had three readers of their own here (the strip, the reader of «Манга», ``online.js``).
 """
 from __future__ import annotations
 
@@ -32,6 +26,10 @@ from webui.html import esc
 from webui.server import Request, Response
 
 MAX_URL = 2000
+THUMB_WIDTH = 168                 # px of a page in the strip of pages (it shows them 84 px wide)
+THUMBS_KEPT = 600                 # small copies kept in memory
+_THUMBS: "OrderedDict[tuple, bytes]" = OrderedDict()
+_THUMBS_LOCK = threading.Lock()
 
 
 def register(router) -> None:
@@ -43,9 +41,6 @@ def register(router) -> None:
     router.add("POST", r"/api/online/progress", progress)
     router.add("GET", r"/api/online/last", last)
     router.add("POST", r"/api/online/mode", mode)
-
-
-MODE_WORDS = (("", "Авто"), ("strip", "Лента"), ("rtl", "Справа налево"), ("ltr", "Слева направо"))
 
 
 def _args(req: Request) -> tuple:
@@ -77,8 +72,9 @@ def _hidden_words() -> str:
     return "Этот тайтл — хентай, а включён режим «SFW» — переключите на «Всё», чтобы читать"
 
 
-def _open(req: Request):
-    """(the reading, n, the error page's words) of the request."""
+def _open(req: Request, *, hidden_too: bool = False):
+    """(the reading, n, the error page's words) of the request; ``hidden_too`` — (v5.44.116) a title the mode hides
+    comes back too, with its words (its page: the frame of its kind, «К тайтлу»)."""
     from core import manga_online as O
     url, branch = _args(req)
     if not url:
@@ -92,64 +88,78 @@ def _open(req: Request):
     except O.OnlineError as exc:
         return None, n, str(exc)
     if _hidden(reading):
-        return None, n, _hidden_words()
+        return (reading if hidden_too else None), n, _hidden_words()
     if not reading.readable(n):                          # a paid chapter nobody has free: the next one that is
         n = reading.neighbour(n, 1) or reading.neighbour(n, -1) or n
     return reading, n, ""
 
 
-def _pages(reading, n: int, req: Request) -> list:
-    """[{src, w, h}] of chapter ``n``: the addresses of the program, never the site's."""
+def _pages(reading, n: int, req: Request) -> tuple:
+    """([{src, w, h, thumb}] of chapter ``n`` — the addresses of the program, never the site's; the site that gives
+    them)."""
     from core import manga_online as O
     _r, pages = O.ONLINE.chapter(reading.url, n, req.settings, reading.branch)
     q = _q(reading.url, reading.branch)
-    return [{"src": f"/api/online/pic?{q}&ch={n}&p={k}", "w": max(0, int(p.width or 0)), "h": max(0, int(p.height or 0))}
-            for k, p in enumerate(pages.pictures, 1)]
+    out = [{"src": f"/api/online/pic?{q}&ch={n}&p={k}", "w": max(0, int(p.width or 0)), "h": max(0, int(p.height or 0)),
+            "thumb": f"/api/online/thumb?{q}&ch={n}&p={k}"} for k, p in enumerate(pages.pictures, 1)]
+    return out, pages
 
 
-def _mode(req: Request, reading, n: int) -> tuple:
-    """(the way the chapter is read, the owner's own choice or "")."""
+def online_link(url: str, branch: str, phone: bool = False) -> str:
+    """The address of a chapter of a title read without downloading, but its number (``…&ch=``)."""
+    return f"{'/m' if phone else ''}/online?{_q(url, branch)}&ch="
+
+
+def _follows(req: Request, reading) -> bool:
+    """The title is downloaded and its new chapters come by themselves at night (its folder's ``source.json``)."""
+    from webui.pages import manhwa as MH
+    folder = str(getattr(reading.found, "folder", "") or "")
+    return MH.follows(req, MH.site_of(folder)) if folder else False
+
+
+def book(req: Request, reading, n: int, *, phone: bool = False, asked: "str | None" = None):
+    """(v5.44.117) Chapter ``n`` of a site's title for the one reader (``webui/pages/reader.py``): the card's chapters
+    (``Found.takes(True)`` — paid everywhere: no link; in the folder; another site's copy), the chapter's pages through
+    the program, where it was left (the title's last chapter), the way it is read."""
     from core import manga_online as O
-    chosen = str(O.PROGRESS.of(reading.url).get("mode") or "")
-    if chosen in O.MODES:
-        return chosen, chosen
-    _r, pages = O.ONLINE.chapter(reading.url, n, req.settings, reading.branch)
-    return O.auto_mode(reading, pages.pictures), ""
-
-
-def modes_html(chosen: str, now: str) -> str:
-    """The switch of the way it is read: «Авто» and the three ways (both readers: the sites' and the folder's)."""
-    out = []
-    for key, words in MODE_WORDS:
-        pressed = "true" if key == chosen else "false"
-        hint = f' title="Сейчас: {dict(MODE_WORDS).get(now, now)}"' if not key else ""
-        out.append(f'<button type="button" data-action="ol-mode" data-mode="{key}" aria-pressed="{pressed}"{hint}>'
-                   f'{esc(words)}</button>')
-    return f'<div class="ol-modes" role="group" aria-label="Как читать">{"".join(out)}</div>'
-
-
-def _section(reading, n: int, pages: list) -> str:
-    imgs = []
-    for k, p in enumerate(pages, 1):
-        size = f' width="{p["w"]}" height="{p["h"]}"' if p["w"] > 0 and p["h"] > 0 else ""
-        lazy = "" if k <= 3 else ' loading="lazy"'
-        imgs.append(f'<img class="mh-page" id="c{n}-p{k}" src="{esc(p["src"])}"{size} alt="" decoding="async"{lazy}>')
-    before, after = reading.neighbour(n, -1), reading.neighbour(n, 1)
-    return (f'<section class="mh-chapter" data-chapter="{n}" data-label="{esc(reading.label(n))}" '
-            f'data-prev="{before or ""}" data-next="{after or ""}">'
-            f'<h2 class="mh-chapter-head">{esc(reading.full(n))}</h2>{"".join(imgs)}</section>')
-
-
-def _list(reading, current: int, base: str) -> str:
-    items = []
-    for n in range(len(reading.takes), 0, -1):
-        cls = "current" if n == current else ""
-        if reading.readable(n):
-            items.append(f'<li class="{cls}" data-chapter="{n}"><a href="{esc(base)}{n}"><span>'
-                         f'{esc(reading.label(n))}</span><i aria-hidden="true">✓</i></a></li>')
-        else:
-            items.append(f'<li class="paid" data-chapter="{n}"><span>{esc(reading.label(n))} — платная</span></li>')
-    return "".join(items)
+    from webui.pages import reader as R
+    link = online_link(reading.url, reading.branch, phone)
+    place = O.PROGRESS.of(reading.url)
+    read_ids = {str(x) for x in place.get("read") or []}       # (v5.44.119) every chapter read to its end
+    found = reading.found
+    rows = []
+    for k, take in enumerate(reading.takes, 1):
+        readable = take.source is not None
+        href = f"{link}{k}" if readable else ""
+        try:
+            had = bool(found.is_had(take.ch))
+        except (AttributeError, TypeError):
+            had = False
+        rows.append(R.Row(key=str(k), label=take.label, name=take.name if take.ch.number else "", href=href,
+                          start=f"{href}&p=1" if href else "", last=f"{href}&p=last" if href else "",
+                          read=bool((place.get("ch") == k and place.get("done")) or str(take.id) in read_ids),
+                          where="site" if readable else "paid",
+                          site=take.source.label if readable and take.helped else "",
+                          free_at="" if readable else R.day_of(take.ch.free_at), in_folder=had,
+                          tome=int(take.ch.tome or 0), number=R.number_of(take.ch.number)))
+    pages, given = _pages(reading, n, req)
+    rows[n - 1].pages = len(pages)
+    chosen = str(place.get("mode") or "")
+    chosen = chosen if chosen in O.MODES else ""
+    way = chosen or O.auto_mode(reading, given.pictures)
+    mine = place.get("ch") == n
+    saved = (int(place.get("page") or 0), float(place.get("part") or 0)) if mine else (0, 0.0)
+    page, part = R.place_of(req, saved, len(pages), read=bool(mine and place.get("done")), asked=asked)
+    if way == "strip":
+        page = min(page, max(0, len(pages) - 1))
+    q = _q(reading.url, reading.branch)
+    return R.Book(src="site", kind="manga" if _is_manga(reading) else "manhwa", phone=phone, name=reading.title.title,
+                  home=_get_link(reading, phone), rows=rows, at=n - 1, pages=pages, href=f"{link}{n}",
+                  base=link + "{key}", progress=f"/api/online/progress?{q}", mode_api=f"/api/online/mode?{q}",
+                  chapter_api=f"/api/online/chapter?{q}&ch=" + "{key}" + ("&m=1" if phone else ""),
+                  mode=way, chosen=chosen, page=page, part=part, where="site",
+                  where_words=f"с {given.source.label}, без скачивания", follow=_follows(req, reading),
+                  dir_default=chosen if chosen in ("ltr", "rtl") else "ltr")
 
 
 def _get_link(reading, phone: bool = False) -> str:
@@ -164,9 +174,10 @@ def _get_link(reading, phone: bool = False) -> str:
 
 def _problem(req: Request, words: str, *, phone: bool, reading=None, n: int = 0, hidden: bool = False) -> Response:
     """A chapter (or a title) that did not open: why, and the ways on — (v5.44.103) a chapter of a title: the next one
-    that can be read and «К тайтлу» (its page — on the phone its card); a title the mode hides: «Показать всё»."""
+    that can be read and «К тайтлу» (its page — on the phone its card); a title the mode hides: «Показать всё» —
+    (v5.44.116) on the phone «К тайтлу» too; on the computer the frame of its kind and its feed (:func:`_frame`)."""
     links = []
-    if reading is not None:
+    if reading is not None and not hidden:
         after = reading.neighbour(n, 1) if n else 0
         if after:
             links.append((f"{'/m/online' if phone else '/online'}?{_q(reading.url, reading.branch)}&ch={after}",
@@ -174,256 +185,50 @@ def _problem(req: Request, words: str, *, phone: bool, reading=None, n: int = 0,
         links.append((_get_link(reading, phone), "К тайтлу", not after))
     if phone:
         from webui.pages import phone as P
-        links = links or [("/m/get", "Скачать по ссылке", False)]
-        body = (f'<div class="m-empty"><p>{esc(words)}</p><p>'
-                + "".join(f'<a class="m-button{"" if main else " m-quiet"}" href="{esc(href)}">{esc(label)}</a> '
-                          for href, label, main in links) + '</p></div>')
-        return P.page("Не открылось", body, status=404)
+        if hidden:      # (v5.44.116) the phone's «Показать всё» (its own mode, as its other pages) and its title's page
+            ways = ('<button type="button" class="m-button" data-mode-set="all">Показать всё</button> '
+                    + (f'<a class="m-button m-quiet" href="{esc(_get_link(reading, True))}">К тайтлу</a>'
+                       if reading is not None else ""))
+        else:
+            links = links or [("/m/get", "Скачать по ссылке", False)]
+            ways = "".join(f'<a class="m-button{"" if main else " m-quiet"}" href="{esc(href)}">{esc(label)}</a> '
+                           for href, label, main in links)
+        body = f'<div class="m-empty"><p>{esc(words)}</p><p>{ways}</p></div>'
+        return P.page("Не открылось", body, status=404, top=P.mode_switch() if hidden else "")
     from webui import content_mode
-    from webui.html import page_frame
     if hidden:
-        ways = content_mode._actions('<a class="mh-btn" href="/manhwa/feed">К ленте</a>')
+        feed = "/manga/feed" if reading is not None and _is_manga(reading) else "/manhwa/feed"
+        ways = content_mode._actions(f'<a class="mh-btn" href="{feed}">К ленте</a>')
     else:
         links = links or [("/get", "Скачать по ссылке", False)]
         ways = "<p>" + "".join(f'<a class="mh-btn{" primary" if main else ""}" href="{esc(href)}">{esc(label)}</a> '
                                for href, label, main in links) + "</p>"
     body = f'<div class="mh-online-problem"><h1>Не открылось</h1><p>{esc(words)}</p>{ways}</div>'
-    return Response.html(page_frame("Не открылось", body, active="manhwa", subnav=False, kind="manhwa"), status=404)
+    return _frame(req, reading, "Не открылось", body, kind="manhwa", assets=("manhwa", "reader"), search=False,
+                  status=404)
 
 
-def _place(req: Request, reading, n: int, pages: list) -> tuple:
-    """(page, part) where chapter ``n`` was left (``?from=start`` — its start)."""
-    from core import manga_online as O
-    place = O.PROGRESS.of(reading.url)
-    page = int(place.get("page") or 0) if place.get("ch") == n and not place.get("done") else 0
-    part = float(place.get("part") or 0) if page else 0.0
-    if req.arg("from") == "start":
-        page, part = 0, 0.0
-    return min(page, max(0, len(pages) - 1)), part
-
-
-def _bar(req: Request, reading, n: int, base: str, *, phone: bool, tools: str, list_action: str) -> str:
-    """The reader's bars: back to the title, the chapter (its list), the chapters before and after, ``tools``."""
-    before, after = reading.neighbour(n, -1), reading.neighbour(n, 1)
-    get_link = esc(_get_link(reading, phone))
-    chapters = f'<div class="mh-list" id="mh-list" hidden><ol>{_list(reading, n, base)}</ol></div>'
-    where = (f'<button type="button" class="mh-bar-where" data-action="{list_action}" aria-expanded="false" '
-             f'aria-controls="mh-list">{esc(reading.label(n))}</button>')
-    if phone:
-        from webui.pages import phone as P
-
-        def step(cls: str, target: int, rel: str, words: str, icon: str, first: bool) -> str:
-            inside = f"{icon}<span>{words}</span>" if first else f"<span>{words}</span>{icon}"
-            if not target:
-                return f'<a class="{cls}" aria-disabled="true">{inside}</a>'
-            return f'<a class="{cls}" href="{esc(base)}{target}" rel="{rel}">{inside}</a>'
-        card = get_link                                  # (v5.44.105) the phone's page of the title
-        return (f'<div class="m-mh-bars" data-bar><div class="m-mh-top"><div class="m-mh-row">'
-                f'<a class="m-icon" href="{card}" aria-label="К тайтлу">'
-                f'{P.svg(P.BACK, width=2)}</a>{where}<span class="m-icon" aria-hidden="true"></span></div>'
-                f'<span class="m-bar m-bar-thin" aria-hidden="true"><span data-chapter-read></span></span>'
-                f'{tools}{chapters}</div><nav class="m-mh-bottom" aria-label="Главы">'
-                + step("mh-bar-prev", before, "prev", "Предыдущая", P.svg(P.BACK, size=18, width=2), True)
-                + step("mh-bar-next", after, "next", "Следующая", P.svg(P.FORTH, size=18, width=2), False)
-                + "</nav></div>")
-    prev_link = (f'<a class="mh-bar-prev" rel="prev" href="{esc(base)}{before}" title="Предыдущая глава" '
-                 f'aria-label="Предыдущая глава">‹</a>' if before else
-                 '<a class="mh-bar-prev" aria-disabled="true" aria-label="Предыдущей главы нет">‹</a>')
-    next_link = (f'<a class="mh-bar-next" rel="next" href="{esc(base)}{after}" title="Следующая глава" '
-                 f'aria-label="Следующая глава">›</a>' if after else
-                 '<a class="mh-bar-next" aria-disabled="true" aria-label="Следующей главы нет">›</a>')
-    return (f'<div class="mh-bar" data-bar><a class="mh-bar-back" href="{get_link}" title="К тайтлу — его главы, '
-            f'скачать"><span aria-hidden="true">←</span> <span class="mh-bar-title">{esc(reading.title.title)}</span></a>'
-            f'<div class="mh-bar-mid">{prev_link}{where}{next_link}</div>'
-            f'<div class="mh-bar-tools">{tools}<a class="mh-online-get" href="{get_link}">Скачать</a></div>'
-            f'{chapters}</div>')
-
-
-def _strip_body(req: Request, reading, n: int, pages: list, modes: str, *, phone: bool) -> str:
-    """The strip (``static/manhwa.js`` — as the reader of «Манхва»: the next chapter comes by itself below)."""
-    q = _q(reading.url, reading.branch)
-    base = ("/m/online?" if phone else "/online?") + q + "&ch="
-    page, part = _place(req, reading, n, pages)
-    data = (f'data-title="online" data-start="{n}" data-page="{page}" data-part="{part}" '
-            f'data-base="{esc(base)}" data-chapter-api="{esc("/api/online/chapter?" + q + "&ch=")}" '
-            f'data-progress="{esc("/api/online/progress?" + q)}" data-mode-api="{esc("/api/online/mode?" + q)}"')
-    if phone:
-        bar = _bar(req, reading, n, base, phone=True, tools=modes, list_action="mh-list")
-        tail = (f'<div class="mh-tail" data-tail hidden><p>Это последняя глава на сайтах.</p><p><a class="m-button '
-                f'm-quiet" href="{esc(_get_link(reading, True))}">К тайтлу</a></p></div>')
-        return (f'<div class="mh-reader m-mh-reader mh-online" {data} data-width="full" style="--mh-w:100%">'
-                f'{bar}<div class="mh-strip">{_section(reading, n, pages)}</div>{tail}</div>')
-    from webui.pages import manhwa as MH
-    width = MH._width()
-    widths = "".join(f'<button type="button" data-action="mh-width" data-width="{key}" aria-pressed='
-                     f'"{"true" if key == width else "false"}">{esc(label)}</button>' for key, label in MH.WIDTHS.items())
-    tools = f'<div class="mh-widths" role="group" aria-label="Ширина ленты">{widths}</div>{modes}'
-    bar = _bar(req, reading, n, base, phone=False, tools=tools, list_action="mh-list")
-    tail = (f'<div class="mh-tail" data-tail hidden><p>Это последняя глава на сайтах.</p>'
-            f'<p><a class="mh-btn" href="{esc(_get_link(reading))}">К тайтлу — скачать главы</a></p></div>')
-    return (f'<div class="mh-reader mh-online" {data} style="--mh-w:{"100%" if width == "full" else width + "px"}" '
-            f'data-width="{width}">{bar}<div class="mh-strip">{_section(reading, n, pages)}</div>{tail}</div>')
-
-
-def pager_html(*, mode: str, chapter: str, page: int, pages: list, progress_api: str, mode_api: str,
-               next_href: str, prev_href: str, next_label: str, label: str, bar: str, back_href: str,
-               back_words: str, phone: bool) -> str:
-    """(v5.44.83) The pages one at a time (``static/online.js``) — right to left (``rtl``) or left to right (``ltr``):
-    the reader of a site's chapter and of a chapter in the folder of manhwa.  ``chapter`` — what the progress API is
-    told; ``pages`` — [{src, w, h}]; ``bar`` — the reader's bar (its chapter list opens with «ol-list»)."""
-    import json as _json
-    total = len(pages)
-    data = (f'data-mode="{mode}" data-chapter="{esc(str(chapter))}" data-page="{page}" data-total="{total}" '
-            f'data-pages="{esc(_json.dumps(pages))}" data-progress="{esc(progress_api)}" '
-            f'data-mode-api="{esc(mode_api)}" data-next="{esc(next_href)}" data-prev="{esc(prev_href)}" '
-            f'data-label="{esc(label)}"')
-    end = (f'<div class="ol-end" hidden><p class="ol-end-head">Глава закончилась</p>'
-           + (f'<p><a class="ol-next mh-btn" href="{esc(next_href)}">{esc("Следующая: " + next_label)}</a></p>'
-              if next_href else
-              f'<p>Это последняя глава.</p><p><a class="mh-btn" href="{esc(back_href)}">{esc(back_words)}</a></p>')
-           + '</div>')
-    # right to left: the slider too, and the page's number on its right (as the friend's reader Yomi has it)
-    slider = (f'<div class="ol-bottom"{" dir=rtl" if mode == "rtl" else ""}><span class="ol-at" aria-live="polite">'
-              f'{page + 1}</span><input class="ol-slider" type="range" min="1" max="{max(1, total)}" '
-              f'value="{page + 1}" aria-label="Страница"><span class="ol-total">{total}</span></div>')
-    stage = (f'<div class="ol-stage" tabindex="0" aria-label="Страница — стрелки и щелчок по краям листают">'
-             f'<img class="ol-page" alt="" decoding="async"></div>')
-    return (f'<div class="ol-reader{" ol-phone" if phone else ""}" {data}>{bar}{stage}{end}{slider}'
-            f'<p class="ol-problem" hidden role="alert"></p></div>')
-
-
-def _pager_body(req: Request, reading, n: int, pages: list, mode: str, modes: str, *, phone: bool) -> str:
-    """A site's chapter, the pages one at a time (:func:`pager_html`)."""
-    q = _q(reading.url, reading.branch)
-    base = ("/m/online?" if phone else "/online?") + q + "&ch="
-    page, _part = _place(req, reading, n, pages)
-    before, after = reading.neighbour(n, -1), reading.neighbour(n, 1)
-    return pager_html(mode=mode, chapter=str(n), page=page, pages=pages, progress_api="/api/online/progress?" + q,
-                      mode_api="/api/online/mode?" + q, next_href=base + str(after) if after else "",
-                      prev_href=base + str(before) if before else "",
-                      next_label=reading.label(after) if after else "", label=reading.label(n),
-                      bar=_bar(req, reading, n, base, phone=phone, tools=modes, list_action="ol-list"),
-                      back_href=_get_link(reading, phone), back_words="К тайтлу", phone=phone)
-
-
-def _body(req: Request, reading, n: int, pages: list, *, phone: bool) -> tuple:
-    """(the body, its way) of chapter ``n``; (v5.44.110) the pages one at a time on the computer — "book" (the reader of
-    «Манга»)."""
-    now, chosen = _mode(req, reading, n)
-    if now != "strip" and not phone:
-        return _book_body(req, reading, n, pages, chosen), "book"
-    modes = modes_html(chosen, now)
-    if now == "strip":
-        return _strip_body(req, reading, n, pages, modes, phone=phone), now
-    return _pager_body(req, reading, n, pages, now, modes, phone=phone), now
-
-
-# ── (v5.44.110) the pages one at a time on the computer: the reader of «Манга» ─────────────────────────────────────
-BOOK_MODES = (("", "Авто"), ("strip", "Лентой"), ("ltr", "По страницам"))
-THUMB_WIDTH = 168                 # px of a page in the strip of pages (it shows them 84 px wide)
-THUMBS_KEPT = 600                 # small copies kept in memory
-_THUMBS: "OrderedDict[tuple, bytes]" = OrderedDict()
-_THUMBS_LOCK = threading.Lock()
-
-
-def book_modes_html(chosen: str) -> str:
-    """«Как читать: Авто · Лентой · По страницам» under the reader of «Манга» («справа налево» of before — pages)."""
-    pressed = "ltr" if chosen == "rtl" else chosen
-    buttons = "".join(f'<button type="button" class="link{" active" if key == pressed else ""}" data-action="ol-mode" '
-                      f'data-mode="{key}" aria-pressed="{"true" if key == pressed else "false"}">{esc(words)}</button>'
-                      for key, words in BOOK_MODES)
-    return f'<div class="strip-places reader-modes" role="group" aria-label="Как читать">Как читать: {buttons}</div>'
-
-
-def _book_page(req: Request, reading, n: int, pages: list) -> int:
-    """The page (from 1) of chapter ``n`` to show: ``&p=`` (``last`` — its last), else where it was left."""
-    total = len(pages)
-    asked = str(req.arg("p") or "").strip().lower()
-    if asked == "last":
-        return total
-    if asked.isdigit():
-        return max(1, min(int(asked), total))
-    page, _part = _place(req, reading, n, pages)
-    return max(1, min(page + 1, total))
-
-
-def _book_body(req: Request, reading, n: int, pages: list, chosen: str) -> str:
-    """(v5.44.110) A site's chapter, the pages one at a time, as the reader of «Манга» shows a manga of its folder
-    (``webui/pages/manga.reader`` — the same markup, ``manga.css``, ``booru.js``): the page asked by its address."""
-    from core import manga_online as O
-    from webui import prefs
-    from webui.pages import manga as MG
-    total = len(pages)
-    if not total:
-        raise O.OnlineError("У главы нет страниц")
-    p = _book_page(req, reading, n, pages)
-    O.PROGRESS.put(reading.url, reading, n, p - 1, 0.0, p == total)      # the page open is what was read
-    q = _q(reading.url, reading.branch)
-    home = _get_link(reading)
-    before, after = reading.neighbour(n, -1), reading.neighbour(n, 1)
-    here = f"/online?{q}&ch={n}&p="
-    prev_href = f"{here}{p - 1}" if p > 1 else (f"/online?{q}&ch={before}&p=last" if before else home)
-    next_href = f"{here}{p + 1}" if p < total else (f"/online?{q}&ch={after}&p=1" if after else home)
-    readable = [k for k in range(1, len(reading.takes) + 1) if reading.readable(k)]
-
-    def nav(cls: str, chapters: bool) -> str:
-        options = "".join(f'<option value="{k}"{" selected" if k == p else ""}>{k}</option>' for k in range(1, total + 1))
-        choose = ""
-        if chapters and len(readable) > 1:
-            names = "".join(f'<option value="{k}"{" selected" if k == n else ""}>{esc(reading.label(k))}</option>'
-                            for k in readable)
-            choose = (f'<label class="reader-count reader-chapter">Глава <select data-action="goto-page" '
-                      f'data-base="{esc(f"/online?{q}&p=1&ch=")}" aria-label="Глава">{names}</select></label>')
-        return (f'<nav class="reader-nav {cls}" aria-label="Страницы">'
-                f'<a href="{esc(here)}1" title="Первая страница" aria-label="Первая страница">«</a>'
-                f'<a href="{esc(prev_href)}" rel="prev" title="Предыдущая (←)" aria-label="Предыдущая страница">‹</a>'
-                f'<label class="reader-count"><select data-action="goto-page" data-base="{esc(here)}" '
-                f'aria-label="Страница">{options}</select> / {total}</label>'
-                f'<a href="{esc(next_href)}" rel="next" title="Следующая (→)" aria-label="Следующая страница">›</a>'
-                f'<a href="{esc(here)}{total}" title="Последняя страница" aria-label="Последняя страница">»</a>'
-                f'{choose}<a class="reader-home" href="{esc(home)}">К тайтлу</a></nav>')
-
-    title = f"{reading.title.title} — {reading.label(n)}"
-    image = (f'<div class="reader-stage loading" data-prev="{esc(prev_href)}" data-next="{esc(next_href)}">'
-             f'<img class="reader-image" src="{esc(pages[p - 1]["src"])}" alt="Страница {p}"></div>'
-             f'<div class="picture-problem" hidden role="alert"><p></p>'
-             f'<button type="button" data-action="picture-retry">Загрузить заново</button></div>')
-    keys = (f'<a hidden data-key="ArrowLeft" href="{esc(prev_href)}"></a>'
-            f'<a hidden data-key="ArrowRight" href="{esc(next_href)}"></a>')
-    ahead = "".join(f'<link rel="prefetch" href="{esc(pages[k - 1]["src"])}">' for k in range(p + 1, min(total, p + 2) + 1))
-    place = str(prefs.load().get("manga_strip") or "bottom")
-    place = place if place in MG.STRIP_PLACES else "bottom"
-    strip = ""
-    if place != "off":
-        thumbs = "".join(
-            f'<a class="strip-page{" current" if k == p else ""}" href="{esc(here)}{k}"{" aria-current=page" if k == p else ""}>'
-            f'<img src="{esc(f"/api/online/thumb?{q}&ch={n}&p={k}")}" alt="Страница {k}" loading="lazy" decoding="async">'
-            f'<span>{k}</span></a>' for k in range(1, total + 1))
-        strip = f'<nav class="page-strip" aria-label="Страницы главы">{thumbs}</nav>'
-    switch = "".join(
-        f'<button type="button" class="link{" active" if key == place else ""}" data-action="manga-strip" '
-        f'data-place="{key}"{" aria-pressed=true" if key == place else ""}>{label}</button>'
-        for key, label in MG.STRIP_PLACES.items())
-    places = f'<div class="strip-places" role="group" aria-label="Лента страниц">Лента страниц: {switch}</div>'
-    return (f'<div class="reader online-book strip-{place}" data-reader data-mode-api="{esc("/api/online/mode?" + q)}" '
-            f'data-chapter="{n}" data-page="{p}" data-total="{total}">{nav("at-top", True)}'
-            f'<h1 class="reader-title">{esc(title)}</h1><div class="reader-body">{image}{strip}</div>'
-            f'{nav("at-bottom", False)}{places}{book_modes_html(chosen)}{keys}{ahead}</div>')
-
-
-def _book_frame(req: Request, reading, title: str, body: str) -> Response:
-    """The reader of «Манга» in its tab's frame (a manga — by its type, also when the manga folder is not chosen and its
-    chapters would go to the manhwa folder; the others — «Манхва»'s)."""
+def _is_manga(reading) -> bool:
+    """A manga — by its type, also when the manga folder is not chosen and its chapters would go to the manhwa folder:
+    its pages are in the frame of «Манга» (the others — «Манхва»'s)."""
     from core.manhwa_download import kind_of
+    return getattr(reading.found, "kind", "") == "manga" or kind_of(reading.title) == "manga"
+
+
+def _frame(req: Request, reading, title: str, body: str, *, kind: str, assets: tuple, search: bool = True,
+           status: int = 200) -> Response:
+    """A page of the reader on the computer in its tab's frame: (v5.44.116; the review — the strip and «Не открылось»
+    were «Манхва»'s for a manga too) «Манга» for a manga (:func:`_is_manga`), else — and when the title is not known —
+    «Манхва»; ``assets`` — the stylesheets and scripts the page takes whatever its frame."""
     from webui.html import page_frame
-    if getattr(reading.found, "kind", "") == "manga" or kind_of(reading.title) == "manga":
+    if reading is not None and _is_manga(reading):
         from webui.pages import manga as MG
-        return Response.html(page_frame(title, body, active="manga", subnav=False, kind="manga-reader",
-                                        top_search=MG._search_form("", "newest"), assets=("manga", "online"),
-                                        **MG._prefs(req)))
+        return Response.html(page_frame(title, body, active="manga", subnav=False, kind=kind, assets=assets,
+                                        top_search=MG._search_form("", "newest") if search else "", **MG._prefs(req)),
+                             status=status)
     from webui.pages import manhwa as MH
-    return Response.html(page_frame(title, body, active="manhwa", subnav=False, kind="manga-reader",
-                                    top_search=MH._search_form(""), assets=("manga", "online")))
+    return Response.html(page_frame(title, body, active="manhwa", subnav=False, kind=kind, assets=assets,
+                                    top_search=MH._search_form("") if search else ""), status=status)
 
 
 def _small(data: bytes) -> bytes | None:
@@ -477,26 +282,24 @@ def thumb(req: Request) -> Response:
 
 
 def _read(req: Request, *, phone: bool) -> Response:
+    """A chapter of a site's title in the one reader (v5.44.117; ``webui/pages/reader.py``): a page open — what was
+    read (the strip keeps its place itself); the computer's page — in the frame of the title's kind (:func:`_frame`)."""
     from core import manga_online as O
-    reading, n, words = _open(req)
-    if reading is None:
-        return _problem(req, words, phone=phone, hidden=words == _hidden_words())
+    from webui.pages import reader as R
+    reading, n, words = _open(req, hidden_too=True)
+    if reading is None or words:
+        return _problem(req, words, phone=phone, reading=reading, hidden=words == _hidden_words())
     try:
-        pages = _pages(reading, n, req)
-        body, now = _body(req, reading, n, pages, phone=phone)
+        found = book(req, reading, n, phone=phone)
     except O.OnlineError as exc:
         return _problem(req, str(exc), phone=phone, reading=reading, n=n)
-    title = f"{reading.label(n)} — {reading.title.title}"
-    if now == "book":
-        return _book_frame(req, reading, title, body)
-    if phone:
-        from webui.pages import phone as P
-        return P.page(title, body, tabs=False, bare=True, kind="m-reader", scripts=("manhwa", "online"),
-                      head='<link rel="stylesheet" href="/static/online.css">')
-    from webui.html import page_frame
-    from webui.pages import manhwa as MH
-    return Response.html(page_frame(title, body, active="manhwa", subnav=False, kind="manhwa-reader",
-                                    top_search=MH._search_form(""), assets=("manhwa", "online")))
+    if not found.pages:
+        return _problem(req, "Глава не открылась — у неё нет страниц", phone=phone, reading=reading, n=n)
+    if found.mode != "strip":
+        total = len(found.pages)
+        O.PROGRESS.put(reading.url, reading, n, min(found.page, total - 1), 0.0, found.page >= total - 1, pages=total)
+    return R.page(req, found, frame=lambda title, body, kind, assets: _frame(req, reading, title, body, kind=kind,
+                                                                            assets=assets))
 
 
 def reader(req: Request) -> Response:
@@ -508,19 +311,20 @@ def phone_reader(req: Request) -> Response:
 
 
 def chapter_json(req: Request) -> Response:
-    """The next chapter for the strip: as ``/api/manhwa/chapter/<id>`` answers (``static/manhwa.js``)."""
+    """The next chapter for the strip: as ``/api/manhwa/chapter/<id>`` answers, with the words after it
+    (``reader.chapter_reply``); ``&m=1`` — the phone's addresses."""
     from core import manga_online as O
+    from webui.pages import reader as R
     reading, n, words = _open(req)
     if reading is None:
         return Response.json({"ok": False, "error": words}, 404)
     try:
-        pages = _pages(reading, n, req)
+        found = book(req, reading, n, phone=req.arg("m") == "1", asked="1")
     except O.OnlineError as exc:
         return Response.json({"ok": False, "error": str(exc)}, 502)
-    before, after = reading.neighbour(n, -1), reading.neighbour(n, 1)
-    return Response.json({"ok": True, "id": str(n), "title": "online", "label": reading.label(n),
-                          "full": reading.full(n), "pages": pages, "prev": str(before or ""),
-                          "next": str(after or ""), "read": False})
+    reply = R.chapter_reply(found, found.at, found.pages)
+    reply["title"] = "online"
+    return Response.json(reply)
 
 
 def picture(req: Request) -> Response:
@@ -560,7 +364,7 @@ def progress(req: Request) -> Response:
         return Response.json({"ok": False, "error": str(exc)}, 404)
     if not 1 <= n <= len(reading.takes):
         return Response.json({"ok": False, "error": "Такой главы нет"}, 404)
-    O.PROGRESS.put(url, reading, n, page, part, bool(body.get("done")))
+    O.PROGRESS.put(url, reading, n, page, part, bool(body.get("done")), pages=O.ONLINE.pages_known(url, n, branch))
     return Response.json({"ok": True})
 
 

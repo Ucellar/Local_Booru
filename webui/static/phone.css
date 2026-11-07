@@ -100,6 +100,16 @@ button, input, select { font: inherit; color: inherit; }
   cursor: pointer;
 }
 
+/* (v5.44.120) ⬇ «Загрузки» in every page's bar: the number of what goes and waits on the arrow */
+.m-dl { position: relative; }
+.m-dl .m-dl-n { position: absolute; top: 4px; right: 2px; min-width: 17px; height: 17px; padding: 0 4px; border-radius: 999px;
+  background: var(--accent-button); color: #fff; font-size: 11px; font-weight: 700; line-height: 17px; text-align: center; }
+.m-dl .m-dl-n[hidden] { display: none; }
+.m-get-chips { padding-top: 10px; }
+.m-get-chips .m-chip b { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.22);
+  font-size: 12px; }
+.m-get-chips .m-chip b[hidden] { display: none; }
+
 /* «SFW / Всё / NSFW»: the phone's own list, drawn as a chip */
 .m-mode {
   position: relative;
@@ -122,6 +132,9 @@ button, input, select { font: inherit; color: inherit; }
   font-weight: 600;
   cursor: pointer;
 }
+/* (v5.44.116) as wide as its chosen item («SFW»), not as its longest («ПК: NSFW» — the phone's own mode): the bar's
+   title keeps its room (a browser without field-sizing — as wide as the longest) */
+.m-mode select { field-sizing: content; }
 .m-mode svg, .m-order svg { position: absolute; right: 12px; pointer-events: none; }
 
 .m-main {
@@ -581,9 +594,12 @@ video.m-media { width: 100%; height: 100%; background: #000; }
 .m-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; }
 .m-facts span { padding: 3px 8px; border: 1px solid #4a4a4a; border-radius: var(--radius); font-size: 12px; }
 .m-read-line { margin: auto 0 0; color: var(--muted); font-size: 12px; }
-.m-go { display: flex; gap: 8px; padding: 0 14px 12px; }
-.m-go .m-button { height: 48px; gap: 8px; }
-.m-go-main { flex: 1; min-width: 0; font-weight: 700; }
+/* (v5.44.126) the buttons go on to a second line when they do not fit side by side: with «Докачать» (or a long
+   «Продолжить: …») the main one's words ran past it; the main one stays the widest */
+.m-go { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 14px 12px; }
+.m-go .m-button { flex: 1 1 auto; height: 48px; gap: 8px; }
+.m-go-main { flex-grow: 3; min-width: 0; font-weight: 700; }
+.m-go-main span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .m-tabs-line {
   display: flex;
   align-items: center;
@@ -616,15 +632,17 @@ video.m-media { width: 100%; height: 100%; background: #000; }
 }
 .m-desc { padding: 12px 14px 4px; }
 .m-desc p { margin: 0 0 10px; }
-.m-dl {
+/* (v5.44.126) the facts of a title — «dl.m-dl» only: the ⬇ «Загрузки» of every page's bar is «a.m-dl» too (5.44.120),
+   and this grid with its margins moved it off its place in the bar */
+dl.m-dl {
   display: grid;
   grid-template-columns: auto 1fr;
   gap: 6px 14px;
   margin: 8px 14px 16px;
   font-size: 14px;
 }
-.m-dl dt { color: var(--muted); }
-.m-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+dl.m-dl dt { color: var(--muted); }
+dl.m-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .m-chapters { margin: 0; padding: 0; list-style: none; }
 .m-ch {
   display: flex;
@@ -667,119 +685,17 @@ video.m-media { width: 100%; height: 100%; background: #000; }
 }
 .mh-tick[aria-pressed="true"] { color: var(--accent); }
 
-/* ── the strip of the manhwa: the computer's reader (manhwa.js) in the phone's bars ── */
-html:has(.mh-reader) { overflow-anchor: none; }
+/* ── (v5.44.117) a reader's page: the program's one reader (static/reader.css, webui/pages/reader.py) ── */
 .m-reader { background: var(--bar); }
-.m-mh-reader { padding: calc(var(--top) + 3px) 0 calc(76px + env(safe-area-inset-bottom, 0px)); }
-.m-mh-top {
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: 0;
-  z-index: 30;
-  background: rgba(13, 13, 13, 0.94);
-  border-bottom: 1px solid var(--panel);
-  transition: transform 0.22s ease-out;
-}
-.m-mh-row { height: var(--top); display: flex; align-items: center; gap: 2px; padding: 0 4px; }
-.mh-bar-where {
-  flex: 1;
-  min-width: 0;
-  height: 44px;
-  overflow: hidden;
-  background: transparent;
-  border: 0;
-  color: var(--strong);
-  font-weight: 600;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-.mh-bar-where::after { content: " ▾"; color: var(--muted); font-size: 12px; }
 .m-bar-thin { height: 3px; border-radius: 0; background: var(--panel); }
 .m-bar-thin > span { width: 0; }
-.m-mh-top .mh-list {
-  position: absolute;
-  left: 8px;
-  right: 8px;
-  top: calc(100% + 6px);
-  max-height: 60vh;
-  overflow-y: auto;
-  padding: 4px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-}
-.mh-list ol { margin: 0; padding: 0; list-style: none; }
-.mh-list a {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 12px;
-  border-radius: var(--radius);
-  color: var(--text);
-}
-.mh-list li.current a { background: var(--panel-2); color: var(--strong); font-weight: 600; }
-.mh-list li.read a span { color: var(--muted); }
-.mh-list i { font-style: normal; color: transparent; }
-.mh-list li.read i { color: var(--accent); }
-.m-mh-bottom {
-  position: fixed;
-  left: 14px;
-  right: 14px;
-  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
-  z-index: 30;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  transition: transform 0.22s ease-out;
-}
-.m-mh-bottom a {
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  background: rgba(43, 43, 43, 0.96);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  color: var(--strong);
-}
-.m-mh-bottom .mh-bar-next { background: var(--accent-button); border-color: var(--accent-button); font-weight: 700; }
-.m-mh-bottom a[aria-disabled="true"] { opacity: 0.4; pointer-events: none; }
-.mh-bar-away .m-mh-top { transform: translateY(-110%); }
-.mh-bar-away .m-mh-bottom { transform: translateY(calc(100% + 30px + env(safe-area-inset-bottom, 0px))); }
-.mh-strip { display: flex; flex-direction: column; align-items: center; }
-.mh-chapter { display: flex; flex-direction: column; align-items: center; width: 100%; }
-.mh-chapter-head {
-  width: 100%;
-  margin: 0;
-  padding: 22px 14px;
-  background: var(--bg);
-  border-top: 1px solid var(--panel);
-  border-bottom: 1px solid var(--panel);
-  color: var(--strong);
-  font-size: 15px;
-  text-align: center;
-}
-.mh-page {
-  display: block;
-  width: min(100%, var(--mh-w));
-  max-width: none;
-  height: auto;
-  background: var(--panel);
-}
-.mh-tail { padding: 30px 14px; text-align: center; color: var(--muted); }
-@media (prefers-reduced-motion: reduce) {
-  .m-mh-top, .m-mh-bottom { transition: none; }
-}
 
-/* ── (v5.44.67) the manga: a title's pages and chapters, the tags of the folder, the reader ── */
+/* ── (v5.44.67) the manga: a title's pages and chapters, the tags of the folder ── */
 .m-sub { margin: 18px 14px 10px; color: var(--strong); font-size: 16px; font-weight: 700; }
 .m-sub span { color: var(--muted); font-weight: 400; }
+/* (v5.44.126) «Главы N» of a series with «Сначала первые» at its right — the order of the phone's «Манхва» */
+.m-sub-line { display: flex; align-items: baseline; padding-right: 14px; }
+.m-sub-line .m-sub { flex: 1; min-width: 0; }
 .m-tags.m-pad { padding-top: 4px; }
 .m-tag-count { margin-left: 6px; color: var(--muted); font-size: 12px; }
 .m-tag-index { padding-bottom: 16px; }
@@ -809,110 +725,7 @@ html:has(.mh-reader) { overflow-anchor: none; }
   color: #fff;
   font-size: 11px;
 }
-.m-ch-done { flex: none; color: var(--accent); }
 .m-set-head { padding-top: 20px; }
-
-.m-manga-read { background: #000; }
-.m-mr-stage {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  background: #000;
-  touch-action: pan-y pinch-zoom;
-}
-.m-mr-img {
-  display: block;
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  user-select: none;
-  -webkit-user-select: none;
-}
-.m-mr-zone { position: absolute; top: 0; bottom: 0; width: 33%; }
-.m-mr-left { left: 0; }
-.m-mr-right { right: 0; }
-.m-mr-top {
-  position: fixed;
-  left: 0;
-  right: 0;
-  top: 0;
-  z-index: 10;
-  height: var(--top);
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 4px;
-  background: rgba(13, 13, 13, 0.92);
-  border-bottom: 1px solid var(--panel);
-  transition: transform 0.2s ease-out;
-}
-.m-mr-head { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; }
-.m-mr-title {
-  max-width: 100%;
-  overflow: hidden;
-  color: var(--strong);
-  font-size: 14px;
-  font-weight: 600;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.m-mr-count { color: var(--muted); font-size: 12px; }
-.m-mr-bottom {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px));
-  background: rgba(13, 13, 13, 0.92);
-  border-top: 1px solid var(--panel);
-  transition: transform 0.2s ease-out;
-}
-.m-mr-line { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
-.m-mr-line input { flex: 1; min-width: 0; height: 32px; accent-color: var(--accent); }
-.m-mr-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.m-mr-modes button {
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  background: var(--panel);
-  border: 0;
-  border-radius: var(--radius);
-  color: var(--text);
-  cursor: pointer;
-}
-.m-mr-modes button[aria-pressed="true"] { background: var(--accent-button); color: #fff; }
-.m-mr-bare .m-mr-top { transform: translateY(-110%); }
-.m-mr-bare .m-mr-bottom { transform: translateY(110%); }
-.m-mr-rtl .m-mr-line input { direction: rtl; }
-.m-mr-strip { display: flex; flex-direction: column; align-items: center; background: #000; }
-.m-mr-strip img { display: block; width: 100%; height: auto; min-height: 240px; background: #111; }
-.m-mr-strip img[data-n] + img { margin-top: 2px; }
-.m-mr-end {
-  position: fixed;
-  inset: 0;
-  z-index: 20;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 14px;
-  padding: 24px;
-  background: rgba(13, 13, 13, 0.96);
-  text-align: center;
-}
-.m-mr-end p { margin: 0; }
-.m-mr-end-title { color: var(--strong); font-size: 18px; font-weight: 700; }
-@media (prefers-reduced-motion: reduce) {
-  .m-mr-top, .m-mr-bottom { transition: none; }
-}
-.m-mr-rtl .m-mr-line { flex-direction: row-reverse; }
 
 /* ── (v5.44.68) the videos: «Продолжить просмотр», a series, the player of an episode ── */
 .m-going-list { display: flex; flex-direction: column; gap: 12px; padding: 0 14px; }
@@ -940,6 +753,7 @@ html:has(.mh-reader) { overflow-anchor: none; }
 }
 .m-going-pic .m-bar { position: absolute; left: 0; right: 0; bottom: 0; }
 .m-going-text { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.m-going-what { color: var(--accent-text); font-size: 13.5px; font-weight: 600; }   /* (v5.44.121) «Продолжить: серия 5 с 12:34» */
 .m-more-text { margin: 4px 14px 8px; }
 .m-more-text summary { min-height: 44px; display: flex; align-items: center; color: var(--accent-text); cursor: pointer; }
 .m-more-text .m-desc { padding: 0 0 6px; }
@@ -1080,17 +894,32 @@ html:has(.mh-reader) { overflow-anchor: none; }
 .m-get-buttons { display: flex; gap: 8px; }
 .m-get-find { flex: 1; }
 .m-get-find:disabled { opacity: 0.7; }
-.m-get-kinds {
-  margin: 4px 14px 10px;
-  padding: 0;
-  list-style: none;
+/* (v5.44.122) «Поле понимает — как на компьютере»: under the results, what is pasted and its mark under the field */
+.m-get-kinds { margin: 12px 14px 18px; padding: 10px 12px; background: var(--panel); border-radius: 8px; }
+.m-get-kinds-h { margin: 0 0 8px; color: var(--strong); font-size: 14px; }
+.m-get-kinds ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 7px; }
+.m-get-kinds li {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 8px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
 }
-.m-get-kinds b { color: var(--text); font-weight: 600; }
+.m-get-chip {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 8px;
+  background: rgba(237, 37, 83, 0.22);
+  border-radius: 999px;
+  color: #ffd0da;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.m-get-kinds-more { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
 .m-get-step {
   display: flex;
   flex-wrap: wrap;
@@ -1205,34 +1034,170 @@ html:has(.mh-reader) { overflow-anchor: none; }
 .m-get-go:disabled { background: var(--panel-2); color: var(--muted); cursor: default; }
 .m-get-sum { margin: 0; color: var(--muted); font-size: 12px; text-align: center; overflow-wrap: anywhere; }
 
-.m-get-going { padding-bottom: 8px; }
-.m-get-jobs { display: flex; flex-direction: column; gap: 10px; padding: 0 14px; }
-.m-get-job {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  background: var(--panel);
-  border-radius: var(--radius);
+/* (v5.44.122, the mockup E) the field as the computer's: what the text is under it, the titles found by a name, the
+   card of a post of a booru site (static/phone-get.js) */
+.m-get-mark {
+  align-self: flex-start;
+  margin: 0;
+  padding: 3px 10px;
+  background: rgba(237, 37, 83, 0.22);
+  border-radius: 999px;
+  color: #ffd0da;
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
-.m-get-job[data-state="failed"] { box-shadow: inset 3px 0 0 var(--accent); }
-.m-get-job-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.m-get-job-kind { flex: none; color: var(--accent-text); font-size: 12px; font-weight: 700; }
-.m-get-job-title { min-width: 0; color: var(--strong); overflow-wrap: anywhere; }
-.m-get-job-text { margin: 0; color: var(--text); font-size: 14px; overflow-wrap: anywhere; }
-.m-get-job-sub { margin: 0; color: var(--muted); font-size: 12px; }
-.m-get-job-bar > span { transition: width 0.4s; }
-.m-get-job[data-state="paused"] .m-get-job-bar > span { background: #f0b35a; }
-.m-get-job-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.m-get-job-list li { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-.m-get-job-list li > span:first-child { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.m-get-gallery-pic { width: 34px; height: 48px; flex: none; object-fit: cover; border-radius: var(--radius); }
-.m-get-gallery-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.m-get-gallery-text b { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
-.m-get-job-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
-.m-get-job-buttons .m-button { flex: 1; min-width: 120px; }
-@media (prefers-reduced-motion: reduce) { .m-get-job-bar > span { transition: none; } }
-.m-get-job .m-button.m-quiet { background: var(--panel-2); }
+.m-get-mark.bad { background: var(--panel); color: var(--muted); }
+.m-get-hits-head { padding: 12px 14px 2px; }
+.m-get-hits-title { margin: 0; color: var(--strong); font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+.m-get-busy .m-get-hits-title::before {
+  content: "";
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 8px;
+  vertical-align: -1px;
+  border: 2px solid #5a5a5a;
+  border-top-color: var(--accent-text);
+  border-radius: 50%;
+  animation: m-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .m-get-busy .m-get-hits-title::before { animation: none; } }
+.m-get-hits-sites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.m-get-hits-sites b { color: var(--text); font-weight: 600; }
+.m-get-hits-site.failed b { color: var(--muted); }
+.m-get-hits { padding: 0 14px 14px; }
+.m-get-hits-group { margin-top: 10px; }
+.m-get-hits-sum {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+  cursor: pointer;
+}
+.m-get-hits-sum::-webkit-details-marker { display: none; }
+.m-get-hits-more {
+  display: none;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.m-get-hits-group:not([open]) > .m-get-hits-sum {
+  min-height: 44px;
+  padding: 0 12px;
+  background: var(--panel);
+  border-radius: 8px;
+  color: var(--strong);
+  font-weight: 600;
+}
+.m-get-hits-group:not([open]) .m-get-hits-more { display: block; }
+.m-get-hits-group[open] .m-get-hits-n { display: none; }
+.m-get-hits-group:not([open]) > .m-get-hits-sum::after { content: "›"; color: var(--muted); font-size: 18px; }
+.m-get-hits-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 10px; padding-top: 6px; }
+@media (min-width: 560px) { .m-get-hits-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.m-get-hit { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--text); }
+.m-get-hit-cover {
+  position: relative;
+  display: block;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  background: var(--panel);
+  border-radius: 6px;
+}
+.m-get-hit-cover img { position: relative; display: block; width: 100%; height: 100%; object-fit: cover; }
+.m-get-hit-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 0 6px;
+  background: rgba(13, 13, 13, 0.82);
+  border-radius: var(--radius);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+}
+.m-get-hit.picked .m-get-hit-cover { outline: 3px solid var(--accent); outline-offset: -3px; }
+.m-get-hit-name {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--strong);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+.m-get-hit-facts { color: var(--muted); font-size: 11.5px; line-height: 1.3; }
+.m-get-hit-sites { color: var(--accent-text); font-size: 11.5px; line-height: 1.3; overflow-wrap: anywhere; }
+.m-get-post { margin: 10px 14px 14px; overflow: hidden; background: var(--panel); border-radius: 10px; }
+.m-get-post-pic {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 110px;
+  background: #000;
+}
+.m-get-post-pic img { display: block; width: 100%; height: auto; max-height: 360px; object-fit: contain; }
+.m-get-post-note {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 2px 8px;
+  background: rgba(13, 13, 13, 0.82);
+  border-radius: var(--radius);
+  color: #fff;
+  font-size: 12px;
+}
+.m-get-post-body { display: flex; flex-direction: column; gap: 8px; padding: 12px; }
+.m-get-post-facts { margin: 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.m-get-post-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.m-get-post-tags .m-tag { min-height: 30px; padding: 3px 9px; background: var(--panel-2); font-size: 12.5px; }
+.m-get-post-more {
+  min-height: 30px;
+  padding: 0 6px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.m-get-post-state { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; font-size: 14px; }
+.m-get-post-state svg { flex: none; color: var(--tag-character); }
+.m-get-post-state.warn { color: #f0b35a; }
+.m-get-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.m-get-two .m-button { gap: 6px; padding: 0 10px; font-size: 14px; }
+.m-get-two .m-button.m-quiet { background: var(--panel-2); font-weight: 500; }
+.m-get-post-go:disabled { background: var(--panel-2); color: var(--muted); cursor: default; }
+
+/* (v5.44.122) «Это хентай» / «Это не хентай» of a title (webui/pages/phone.py mark_box): the computer's button, what the
+   mode does with the mark beside it, why the program takes the title for hentai under it */
+.m-mark { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 0 14px 12px; }
+.m-button.m-mark-btn { gap: 8px; min-height: 42px; padding: 0 14px; box-shadow: inset 0 0 0 1px #4a4a4a; font-weight: 500; }
+.m-button.m-mark-btn:disabled { opacity: 0.6; }
+.m-mark-words { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+.m-mark-why { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 12.5px; }
+.m-body .tt .m-mark, .m-body .sv .m-mark { padding: 0; }
 
 /* ── (v5.44.71) «Подключите телефон» — through the owner's server (webui/pages/phone_relay.py) ── */
 .m-pair-form { display: flex; flex-direction: column; gap: 10px; margin-top: 6px; }

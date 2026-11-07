@@ -18,31 +18,39 @@ on your computer.
   it finds are saved. What is not found goes to «Брак» (no match), to be checked again when you add sites.
 - **Gallery.** Tag search: a space means all tags, `-tag` excludes one, `a/b` means either. Sections for new, found,
   downloaded, favorite and deleted pictures. Every picture has its own page with each site's tags, and the gallery
-  has a tag list. Series and the pages of one work are shown as a single tile.
-- **Manga and manhwa.** Two tabs with readers of their own: manga page by page, manhwa as one long strip. The
-  program remembers where you stopped; the parts of one title are stacked as one.
+  has a tag list. Series and the pages of one work are shown as a single tile. The pictures you select, or everything
+  a search found, go to the trash in one go.
+- **Manga and manhwa.** Two tabs and one reader — for what you downloaded and for chapters from the sites: page by
+  page or by scrolling, whichever suits the title. The program remembers where you stopped, what you read and which
+  chapters are new; the parts of one title are stacked as one.
 - **Titles from manga sites.** Find a title by its name or paste a link: read it right in the program without
   downloading anything, or download every chapter or only the ones you tick, with a queue and a pause. Paid chapters
   are never bought or bypassed: a chapter another site has for free is taken from there, otherwise it waits. The
-  program checks the titles you downloaded for new chapters once a day.
+  program checks the titles you downloaded for new chapters once a day. A title has one page: what is already in the
+  folder, what you read, «Продолжить» (continue); you can pick its cover from every site's covers or use your own.
 - **The feed.** The sites' catalogs as one list with filters: genres, tags, type, status, chapter count, rating, year.
   Every title has its own page: description, chapters, «Read» and «Download».
 - **Manga in your folders.** The program recognizes the titles in your archive folders by itself — by their files,
-  names and pictures — and adds the description, the cover and the missing chapters. Comics from the gallery (15 pages
-  and more) move to the manga: each into a folder of its own, the pages in order.
-- **Videos.** Series by folders, resume where you stopped, «Skip opening / ending» buttons (found by the program
-  itself), audio and subtitle tracks, ratings. «Download from a site» takes the files and open streams a page gives.
+  names and pictures — and adds the description, the cover and the missing chapters. Manga in the parser's folder goes
+  to «Манга» only when a manga site confirms it (the pages matched); everything else is parsed as usual and becomes
+  one set in the gallery. The program never changes the files of the source folder.
+- **Videos.** Series from your folders and from the sites — on one page and in one player, resume where you stopped,
+  «Skip opening / ending» buttons (found by the program itself), audio and subtitle tracks, ratings. «Download from a
+  site» takes the files and open streams a page gives.
 - **One download field.** Paste a link or type a name: the program tells by itself whether it is a post for the
-  gallery, manga, manhwa or a video. All downloads are in one list: pause, queue, carry on after a restart.
-- **Phone.** The gallery, manga, manhwa and videos on your phone, at home or anywhere — through Tailscale or your
-  own server, with pages made for touch.
+  gallery, manga, manhwa or a video. All downloads are on the «Загрузки» page: one queue you can reorder, pause,
+  carry on after a restart, a week of finished downloads and a retry of what failed.
+- **Phone.** The gallery, manga, manhwa, videos and downloads on your phone work as on the computer, at home or
+  anywhere — through Tailscale or your own server, with pages made for touch.
 - **What to show.** A «SFW / All / NSFW» switch at the top of every page.
-- **Grabber and subscriptions.** Search several sites by tags at once, with previews. Subscriptions to tags and
-  artists check themselves and download only what is new: originals, nothing you already have.
+- **«Галерея (booru)» and subscriptions.** Search several sites by tags at once, with previews. Subscriptions to
+  tags and artists check themselves and download only what is new: originals, nothing you already have.
 - **Duplicates.** Similar pictures are shown in pairs: the better one stays, the other goes to the trash, and its
   tags move to the one you keep.
-- **Diagnostics.** Library and database checks, maintenance of the database and files. Cleanup and reset first show
-  what they will remove, and only then remove it.
+- **Diagnostics.** Library and database checks; one check and one repair of the files — the repair shows its plan
+  first. Cleanup and reset first show what they will remove, and only then remove it.
+- **A window with tabs.** The middle mouse button opens a page in a second window with tabs, so several titles load
+  at once.
 - **Browser extension** (Chrome, Edge, Firefox). Cards on the sites show what your library already has. A post goes
   to the program in one click, you can subscribe to a search right from the site, and posts with tags from your
   blocklist are blurred.

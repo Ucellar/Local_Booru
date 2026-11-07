@@ -86,7 +86,7 @@ def usable(settings: dict) -> str:
     """"" — SauceNAO may be asked for the archive; else why not, in words."""
     settings = settings or {}
     if not settings.get("manga_archive_pictures", True):
-        return "выключено на этой странице"
+        return "выключено в «Настройки → Сайты манги»"      # (v5.44.116) the switch moved there from «Из архива»
     if not settings.get("enable_saucenao", True):
         return "SauceNAO выключен в настройках парсера"
     if not key_of(settings):
@@ -244,11 +244,13 @@ def answers(data: dict) -> tuple:
     return names, links
 
 
-def _ask(settings: dict, http, path: Path) -> dict:
-    """One picture asked: {"names", "links"} | {"later": why, "until"} | {"off": why} | {"bad": why} | {"stopped"}."""
+def _ask(settings: dict, http, path: Path, *, dbs: tuple = INDEXES) -> dict:
+    """One picture asked: {"names", "links", "data"} | {"later": why, "until"} | {"off": why} | {"bad": why} |
+    {"stopped"}; (v5.44.125) ``dbs`` — the indexes asked (``core/parser_manga``: the manga's and e621's at once),
+    ``data`` — SauceNAO's answer as it came (the key is not in it)."""
     from core.http_rate_limiter import SauceNAOQuotaDeferred, take_saucenao_admission_serial
     from core.parser.http import Cancelled, HttpFailure
-    params = {"api_key": key_of(settings), "output_type": 2, "numres": 8, "dedupe": 2, "dbs[]": list(INDEXES)}
+    params = {"api_key": key_of(settings), "output_type": 2, "numres": 8, "dedupe": 2, "dbs[]": list(dbs)}
     try:
         response = http.post_file(API, path, params=params)
     except SauceNAOQuotaDeferred as exc:
@@ -305,7 +307,41 @@ def _ask(settings: dict, http, path: Path) -> dict:
             return {"later": "лимит SauceNAO", "until": _set_pause(settings, "лимит исчерпан"), "sent": True}
         return {"bad": "SauceNAO не взял картинку", "sent": True}
     names, links = answers(data)
-    return {"names": names, "links": links, "sent": True}
+    return {"names": names, "links": links, "sent": True, "data": data}
+
+
+def ask_one(settings: dict, http, data: bytes, *, dbs: tuple = INDEXES) -> dict:
+    """(v5.44.125) One picture (its bytes) asked of SauceNAO for ``core/parser_manga`` — within the searches of the day
+    knowing manga may take (:func:`per_day`, one count with «Из архива»): :func:`_ask`'s answer, or {"later": …}
+    (the day's searches spent, the pause), {"off": …} (no key, switched off), {"bad": …} (not a picture).  The switch
+    of «Из архива» (``manga_archive_pictures``) is not this one: the parser's folder has its own (``parser_skip_manga``)."""
+    settings = settings or {}
+    if not settings.get("enable_saucenao", True):
+        return {"off": "SauceNAO выключен в настройках парсера"}
+    if not key_of(settings):
+        return {"off": "нет ключа SauceNAO («Сайты и ключи»)"}
+    until, reason = _pause(settings)
+    if until > time.time():
+        return {"later": f"пауза SauceNAO ({reason or 'после лимита'})", "until": until}
+    budget = per_day(settings)
+    if asked_today() >= budget:
+        return {"later": f"на сегодня поисков SauceNAO хватит ({budget} из {budget})", "until": _tomorrow()}
+    picture = prepared(data)
+    if not picture:
+        return {"bad": "картинка не прочиталась"}
+    handle, name = tempfile.mkstemp(prefix="lb_sauce_", suffix=".jpg")
+    try:
+        with os.fdopen(handle, "wb") as fh:
+            fh.write(picture)
+        got = _ask(settings, http, Path(name), dbs=dbs)
+    finally:
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+    if got.get("sent"):
+        _count_one()
+    return got
 
 
 def look(settings: dict, pages: list, *, stop_check=None, say=None) -> Seen:

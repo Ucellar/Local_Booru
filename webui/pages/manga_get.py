@@ -11,6 +11,11 @@ before), ``?nh=`` — galleries of nhentai, ``?q=`` — a name searched at once.
 «Манга → Лента» leads there): its titles, tags by kind, pages, its cover and the thumbnails of its pages (through the
 program: ``/api/catalog/cover``), whether it is in the manga folder already; a gallery the program's rule leaves out —
 said, nothing of it shown.
+
+(v5.44.116, the owner's review) «Не продолжать» for the galleries of the last run while they wait to be begun again
+(``/api/manga/download/forget-restore``); in «SFW» «Загрузки» show a download of nhentai without its galleries' names
+and covers — «Скрытая загрузка 18+» (``download-state`` itself, so the phone's page too); a gallery whose pages are all
+in its folder — «✓ В папке» on its card, not «Скачать заново» (nothing would be downloaded: ``have.missing``).
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ def register(router) -> None:
     router.add("GET", r"/api/manga/download-cover", download_cover)
     router.add("POST", r"/api/manga/download/stop", download_stop)
     router.add("POST", r"/api/manga/download/unqueue", download_unqueue)     # (v5.44.107)
+    router.add("POST", r"/api/manga/download/forget-restore", download_forget_restore)     # (v5.44.116)
     router.add("GET", r"/api/manga/gallery", gallery)
     from core import manga_download
     if manga_download.await_restore():               # (v5.44.107) the galleries the program was busy with when it closed
@@ -102,8 +108,10 @@ def _root(req: Request) -> tuple[Path | None, str]:
 def page(req: Request) -> Response:
     from core import manga_download
     from webui import content_mode
-    from webui.pages import get_hub, manhwa_get
+    from webui.pages import get_hub, manhwa_get, title as T
     asked = req.arg("url").strip()
+    if T.is_title_link(asked):                 # (v5.44.119) a title of a site: its one page (title.py)
+        return Response.redirect(T.address_for(asked, req.settings, hint="manga", branch=req.arg("b").strip()))
     galleries = req.arg("nh").strip()
     numbers, bad = manga_download.gallery_ids(asked) if asked else ([], [])
     if numbers and not bad:                 # a gallery's link or number: nhentai's field, as before
@@ -252,20 +260,35 @@ def _first_page(folder: str) -> Path | None:
     return pages[0] if pages else None
 
 
+def _hidden() -> bool:
+    """(v5.44.116) «SFW»: a download of nhentai is all hentai — «Загрузки» show neither its galleries' names nor their
+    covers (the owner's review), only «Скрытая загрузка 18+»."""
+    from webui import content_mode
+    return content_mode.mode() == "sfw"
+
+
 def download_state(req: Request) -> Response:
     from core import manga_download, page_jobs
+    from webui.pages.manhwa_get import HIDDEN, HIDDEN_KIND
     task = page_jobs.current(GET)
+    hidden = _hidden()
     soon = manga_download.restoring_public()          # (v5.44.107) the galleries the last run left, soon begun again
-    extra = {"queue": [{"id": q["number"], "title": q["title"] or f"Галерея {q['number']}", "count": 0}
+    if soon and hidden:
+        soon["titles"] = [HIDDEN]
+    extra = {"queue": [{"id": q["number"], "title": HIDDEN if hidden else q["title"] or f"Галерея {q['number']}",
+                        "count": 0}
                        for q in manga_download.waiting()] if task is not None and task.running else [],
-             **({"restoring": soon} if soon else {})}
+             **({"restoring": soon} if soon else {}), **({"hidden": True, "what": HIDDEN_KIND} if hidden else {})}
     if task is None:
         return Response.json({"ok": True, "status": "idle", **extra})
     state = {"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0)), **extra}
+    if hidden:                                       # its journal names the galleries
+        state.update(label=HIDDEN, log=[])
     if task.running:
-        state["meter"] = {k: v for k, v in manga_download.meter().items() if k != "items"}
+        state["meter"] = {k: v for k, v in manga_download.meter().items()
+                          if k != "items" and not (hidden and k == "title")}
     result = task.result if isinstance(task.result, dict) else {}
-    if result.get("open"):
+    if result.get("open") and not hidden:
         state["open"] = str(result["open"])
     links = result.get("links") or {}
     items = []
@@ -275,15 +298,29 @@ def download_state(req: Request) -> Response:
                                                   "why")}
         public["cover"] = f"/api/manga/download-cover?task={task.id}&k={k}" if folder and _first_page(folder) else ""
         public["open"] = str(links.get(folder) or "")
+        if hidden:
+            public.update(title="", cover="", open="")
         items.append(public)
     state["items"] = items
     return Response.json(state)
 
 
+def download_forget_restore(req: Request) -> Response:
+    """(v5.44.116) «Не продолжать»: the galleries of the last run are not begun again (the owner's review: during the
+    30 s of «С прошлого запуска … продолжится через N с» there was no way to cancel)."""
+    from core import manga_download
+    if not manga_download.forget_restore():
+        return Response.json({"ok": False, "error": "Они уже продолжаются — остановить можно «Остановить»"}, 409)
+    return Response.json({"ok": True})
+
+
 def download_cover(req: Request) -> Response:
-    """The first page of a gallery of the download (``k`` — its place in it), small: its line on the page."""
+    """The first page of a gallery of the download (``k`` — its place in it), small: its line on the page; (v5.44.116)
+    none in «SFW»."""
     from core import page_jobs
     from webui.pages.manga import COVER_SIZE, _thumb_response
+    if _hidden():
+        return Response.not_found("Обложки нет")
     task = page_jobs.current(GET)
     if task is None or req.arg("task") != str(task.id):
         return Response.not_found("Этой загрузки уже нет")
@@ -358,11 +395,10 @@ def gallery(req: Request) -> Response:
     if root is not None:
         folder, new = D.folder_for(root, found)
         if not new:
-            try:
-                there = sum(1 for p in folder.iterdir() if p.is_file() and p.suffix.lower() in M.IMG_EXTS)
-            except OSError:
-                there = 0
-            have = {"folder": folder.name, "pages": there,
+            # (v5.44.116) the pages as the download counts them: none missing — «✓ В папке» (it would download nothing,
+            # «Скачать заново» lied), else «Докачать N» — exactly the pages it will ask for
+            there = D.pages_there(folder, found.pages)
+            have = {"folder": folder.name, "pages": there, "missing": max(0, found.pages - there),
                     "open": str(_links(root, [str(folder)]).get(str(folder)) or "")}
     shown = found.pretty or N.pretty(found.english)
     if len(re.sub(r"[\W_]", "", shown)) < 2:          # «[Artist] ♥ [English]»: the brackets were the most of it

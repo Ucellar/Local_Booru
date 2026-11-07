@@ -146,21 +146,39 @@ def _settings_link(active: str) -> str:
             f'{current}>{_GEAR}<span class="skin-label">Настройки</span></a>')
 
 
+# (v5.44.116) «←» of the header: a line arrow in the colour of the buttons beside it, as the gear
+_BACK = ('<svg class="back-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M14 8H2.6M7.4 3.2 '
+         '2.6 8l4.8 4.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+         'stroke-linejoin="round"/></svg>')
+
+
+def _back_button() -> str:
+    """(v5.44.116; the review: the window has no «Назад» of its own) back to the program's page before this one — the
+    button of «Настройки» with an arrow; ``booru.js`` shows it only when that page is the program's (none — hidden)."""
+    return ('<button type="button" class="skin-button top-back" data-action="history-back" hidden '
+            f'title="Назад — на прошлую страницу программы" aria-label="Назад">{_BACK}'
+            '<span class="skin-label">Назад</span></button>')
+
+
 # The stylesheet and the script of a page of the menu (``page_frame``'s ``assets``, else its ``active``)
 PAGE_CSS = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
             "manhwa": '\n<link rel="stylesheet" href="/static/manhwa.css">',
             "videos": '\n<link rel="stylesheet" href="/static/videos.css">',
+            "series": '\n<link rel="stylesheet" href="/static/series.css">',      # (v5.44.121) a series, its player
             "grab": '\n<link rel="stylesheet" href="/static/grab.css">',
             "archive": '\n<link rel="stylesheet" href="/static/archive.css">',
-            "online": '\n<link rel="stylesheet" href="/static/online.css">',       # (v5.44.82) read from a site
+            "reader": '\n<link rel="stylesheet" href="/static/reader.css">',       # (v5.44.117) the one reader
             "getlink": '\n<link rel="stylesheet" href="/static/get-link.css">',    # (v5.44.87) «Скачать → По ссылке»
             "catalog": '\n<link rel="stylesheet" href="/static/catalog.css">',     # (v5.44.90) «Лента» of the tabs
             "title": '\n<link rel="stylesheet" href="/static/title.css">',        # (v5.44.102) a title of «Лента»
-            "watch": '\n<link rel="stylesheet" href="/static/watch.css">'}        # (v5.44.106) «Смотреть» a series
+            "watch": '\n<link rel="stylesheet" href="/static/watch.css">',       # (v5.44.106) «Смотреть» a series
+            "covers": '\n<link rel="stylesheet" href="/static/covers.css">',     # (v5.44.123) the menu of covers
+            "downloads": '\n<link rel="stylesheet" href="/static/downloads.css">'}  # (v5.44.120) «Скачать → Загрузки»
 PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            "manga": '\n<script src="/static/manga.js" defer></script>',
            "manhwa": '\n<script src="/static/manhwa.js" defer></script>',
            "videos": '\n<script src="/static/videos.js" defer></script>',
+           "series": '\n<script src="/static/series.js" defer></script>',     # (v5.44.121) a series, its player
            "grab": '\n<script src="/static/grab.js" defer></script>',
            "get": '\n<script src="/static/get-hub.js" defer></script>',
            "getlink": '\n<script src="/static/get-link.js" defer></script>',    # (v5.44.87) «Скачать → По ссылке»
@@ -169,9 +187,11 @@ PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            # (v5.44.106) «Смотреть»: hls.js for a browser that does not play HLS itself (the window: its own player)
            "hls": '\n<script src="/static/vendor/hls.light.min.js" defer></script>',
            "watch": '\n<script src="/static/watch.js" defer></script>',
+           "covers": '\n<script src="/static/covers.js" defer></script>',       # (v5.44.123) the menu of covers
            "archive": '\n<script src="/static/archive.js" defer></script>',
-           "online": '\n<script src="/static/online.js" defer></script>',     # (v5.44.82) read from a site
+           "reader": '\n<script src="/static/reader.js" defer></script>',     # (v5.44.117) the one reader
            "dupes": '\n<script src="/static/dupes.js" defer></script>',
+           "downloads": '\n<script src="/static/downloads.js" defer></script>',   # (v5.44.120) «Загрузки»
            "diag": '\n<script src="/static/diag.js" defer></script>',
            "settings": '\n<script src="/static/settings.js" defer></script>'
                        '\n<script src="/static/phone-relay.js" defer></script>'
@@ -248,7 +268,7 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
   <a class="brand" href="{content_mode.home(mode)}"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name"><span class="bn-1">Local</span> <span class="bn-2">Booru</span></span></a>
   <nav class="main-nav" aria-label="Основное меню">{"".join(nav)}</nav>
   {top_search}
-  <div class="top-tools">{drawer_button}{content_mode.switch(mode)}{_settings_link(active)}{_skin_menu(look, active, motion)}<span class="tray-clock" aria-hidden="true"></span></div>
+  <div class="top-tools">{_back_button()}{drawer_button}{_downloads_badge()}{content_mode.switch(mode)}{_settings_link(active)}{_skin_menu(look, active, motion)}<span class="tray-clock" aria-hidden="true"></span></div>
 </header>
 {sections}
 <div class="{layout_cls}">
@@ -257,6 +277,13 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
 </div>
 </body>
 </html>"""
+
+
+def _downloads_badge() -> str:
+    """(v5.44.120) «Загрузки» with the number of the downloads going and waiting — in the header of every page
+    (``webui/pages/downloads.py``; ``booru.js`` asks for the number while the page is seen)."""
+    from webui.pages import downloads
+    return downloads.badge_html()
 
 
 def _reset_notice() -> str:

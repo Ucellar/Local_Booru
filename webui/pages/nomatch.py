@@ -126,6 +126,57 @@ def reasons_html(settings: dict, item: dict) -> tuple[str, str]:
     return "".join(lines), str(entry.get("manual_url") or "")
 
 
+def why_lines(settings: dict, item: dict) -> list:
+    """(v5.44.118) Why the card is in Брак, as plain lines — the phone's card says it (:func:`reasons_html` without
+    the computer's buttons and links)."""
+    from core.nomatch_db import entry_for_path
+    try:
+        entry = entry_for_path(settings, str(item.get("path") or "")) or {}
+    except Exception as exc:  # an old base without the Брак table
+        _LOG.warning("Брак entry of card %s not read: %s", item.get("id"), exc)
+        entry = {}
+    if str(entry.get("reason") or "") == "source_only":
+        label = str(entry.get("source_label") or entry.get("source_host") or "источник")
+        lines = ["Обратный поиск нашёл, откуда картинка, но это не booru-сайт — тегов оттуда не взять.",
+                 f"Источник: {label}"]
+    elif entry:
+        lines = ["Ни один сайт не знает эту картинку: её не нашли ни по MD5, ни обратным поиском."]
+    else:
+        lines = ["Тегов у файла нет: его не нашли ни на одном сайте."]
+    kind = _kind_line(entry)
+    if kind:
+        lines.append(kind)
+    return lines
+
+
+def kinds_of(settings: dict, paths) -> dict:
+    """(v5.44.118) {path of a Брак card: «фото» / «рисунок»} — what the model (or the person) said of it, for the
+    corner of the phone's tile; a card without an answer — none."""
+    from core.database.connection import db
+    wanted = [str(p) for p in paths or [] if p]
+    out: dict = {}
+    if not wanted:
+        return out
+    try:
+        with db(settings, readonly=True) as con:
+            for start in range(0, len(wanted), 400):
+                part = wanted[start:start + 400]
+                inside = set(part)
+                marks = ",".join("?" for _ in part)
+                # the card's path is the copy in Брак or (a file downloaded into Брак) the file itself — as the words
+                # «брак:…» find them (``data.brak_condition``)
+                for row in con.execute(f"SELECT media_path, original_path, visual_status FROM no_match_items "
+                                       f"WHERE active=1 AND (media_path IN ({marks}) OR original_path IN ({marks}))",
+                                       part + part):
+                    word = {"real": "фото", "booru": "рисунок"}.get(str(row[2] or "").lower(), "")
+                    for path in (str(row[0] or ""), str(row[1] or "")):
+                        if word and path in inside:
+                            out.setdefault(path, word)
+    except Exception as exc:  # the corners are a convenience: the tiles are shown without them
+        _LOG.warning("Брак kinds of tiles: %s", exc)
+    return out
+
+
 def box(settings: dict, item: dict) -> str:
     """The sidebar box «Брак» of a card's page ("" for a card that is not in Брак)."""
     if int(item.get("deleted") or 0) or str(item.get("bucket") or "") not in BRAK_BUCKETS:

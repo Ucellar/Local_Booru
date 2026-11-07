@@ -7,6 +7,8 @@ Where Qt WebEngine does not work (``ui/program_window.py`` decides: «Откры
 failure), the window is small (``browser=True``): the pages open in the usual browser, and the window keeps the program
 running, asks its questions and opens its dialogs for them; closing it ends the program.
 The program's exit work (backup, checkpoint, thumbnails) stays in ``app.py``: it needs only ``.settings``.
+(v5.44.117) A page's link opened in a new window or tab (the middle button…) — the second window, of tabs
+(``ui/web_tabs.py``); it closes with this one, its own closing touches nothing here.
 """
 from __future__ import annotations
 
@@ -287,6 +289,8 @@ class WebShell(QMainWindow):
             self._asking.stop()
         self._close_plan_box()
         self.hide()
+        from ui import web_tabs
+        web_tabs.close_all()                  # (v5.44.117) the window of tabs ends with the program's window
         from core import background_duties
         from core.shutdown import begin_shutdown
         from ui import program_window

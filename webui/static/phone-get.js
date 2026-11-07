@@ -3,7 +3,11 @@
    and nhentai (manga_get): what was found, what to take, the downloads going with «Пауза» and «Остановить».  The
    computer's pages stay as they are — their answers are only read here.  (v5.44.74) The manhwa as the computer's page
    has it now: its chapters as tiles to tick, «Пауза» and the queue of its downloads; its state without the chapters'
-   list (items=none: the card says the chapter going and the counts). */
+   list (items=none: the card says the chapter going and the counts).
+   (v5.44.122, the mockup E) The field understands what the computer's «Скачать → По ссылке» does (one parse —
+   get_link.classify; the mark under the field says what it is): a name — the sites of manga searched at once
+   (/api/manhwa/search: the titles as covers in their groups, one picked — its page /m/title); a post of a booru
+   site — its card (the grabber's machinery: /api/grab/search → its picture, tags, «В галерею» — /api/grab/download). */
 (function () {
   "use strict";
 
@@ -14,22 +18,19 @@
   var field = form.querySelector("input[name='url']");
   var findButton = form.querySelector("button[type='submit']");
   var pasteButton = form.querySelector("[data-get-paste]");
+  var markLine = form.querySelector("[data-get-mark]");
   var step = box.querySelector("[data-get-step]");
   var foundBox = box.querySelector("[data-get-found]");
-  var goingBox = box.querySelector("[data-get-going]");
-  var jobsBox = box.querySelector("[data-get-jobs]");
   var RUNNING = ["starting", "running", "stopping"];
+  // (v5.44.120) what the cards ask of each kind; «Пауза», «Остановить», «Не продолжать» — «Загрузки» (downloads.js)
   var KINDS = {
     video: {label: "Видео", find: "/api/videos/find", findState: "/api/videos/find-state", get: "/api/videos/download",
-            state: "/api/videos/download-state", stop: "/api/videos/download/stop", pause: "/api/videos/download/pause",
-            unqueue: "/api/videos/download/unqueue", prefix: /^Скачать с сайта:\s*/},
+            state: "/api/videos/download-state", unqueue: "/api/videos/download/unqueue"},
     manhwa: {label: "Манхва", find: "/api/manhwa/find", findState: "/api/manhwa/find-state",
              get: "/api/manhwa/download", state: "/api/manhwa/download-state?items=none",
-             stop: "/api/manhwa/download/stop", pause: "/api/manhwa/download/pause",
-             unqueue: "/api/manhwa/download/unqueue", prefix: /^Скачать:\s*/},
+             unqueue: "/api/manhwa/download/unqueue"},
     manga: {label: "nhentai", get: "/api/manga/download", state: "/api/manga/download-state",
-            stop: "/api/manga/download/stop", unqueue: "/api/manga/download/unqueue",   // (v5.44.107) a queue
-            prefix: /^(?:С прошлого запуска — )?Скачать с nhentai:\s*/}
+            unqueue: "/api/manga/download/unqueue"}   // (v5.44.107) a queue
   };
   var ORDER = ["video", "manhwa", "manga"];
 
@@ -55,17 +56,6 @@
   function word(n, forms) {
     var d = n % 10, h = n % 100;
     return d === 1 && h !== 11 ? forms[0] : d >= 2 && d <= 4 && (h < 12 || h > 14) ? forms[1] : forms[2];
-  }
-
-  function speedOf(bytes) {           // the strips of a chapter come by hundreds of kilobytes
-    var n = Number(bytes) || 0;
-    return n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + " КБ/с"
-      : (n / 1024 / 1024).toFixed(1).replace(".", ",") + " МБ/с";
-  }
-
-  function clockOf(seconds) {
-    var m = Math.max(1, Math.round((Number(seconds) || 0) / 60));
-    return m < 60 ? m + " мин" : Math.floor(m / 60) + " ч" + (m % 60 ? " " + (m % 60) + " мин" : "");
   }
 
   function natural(a, b) {
@@ -102,6 +92,57 @@
         return data;
       });
     }, function () { throw new Error("Нет связи с компьютером"); });
+  }
+
+  // (v5.44.122) what the text is (/api/phone/get/what — get_link.classify, as the computer's field): its answer, or an
+  // error that keeps it (``data``: the mark of a link the mode refuses)
+  function whatOf(text) {
+    return fetch("/api/phone/get/what", {
+      method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({text: text})
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok || data.ok === false) {
+          var err = new Error(data.error || "Компьютер ответил ошибкой " + response.status);
+          err.data = data;
+          throw err;
+        }
+        return data;
+      });
+    }, function () { throw new Error("Нет связи с компьютером"); });
+  }
+
+  var isLink = function (text) { return /^https?:\/\//i.test(String(text || "").trim()); };
+  var same = function (text) { return String(text || "").replace(/\s+/g, " ").trim().toLowerCase(); };
+
+  // the mark under the field: what the text is («Название — поиск по сайтам», «Галерея (booru) · Danbooru» …)
+  var markGen = 0;
+  var markTimer = 0;
+  function showMark(label, bad) {
+    markLine.textContent = label || "";
+    markLine.hidden = !label;
+    markLine.classList.toggle("bad", !!bad);
+  }
+
+  function markKind() {
+    var text = field.value.trim();
+    var gen = ++markGen;
+    if (!text) { showMark(""); return; }
+    whatOf(text).then(function (w) {
+      if (gen === markGen) { showMark(w.label); }
+    }, function (err) {
+      var data = err.data || {};
+      if (gen === markGen) { showMark(data.sfw ? data.label : "", true); }
+    });
+  }
+
+  // (v5.44.117) the state of this page's own search: a title of the sites — by its number (each page has its own
+  // search: the computer's «Найти» does not take the phone's place); the videos — as their page asks (the other chat's)
+  function findAddress(kind, id) {
+    return KINDS[kind].findState + (kind === "manhwa" && id ? "?find=" + encodeURIComponent(id) : "");
+  }
+  function withAfter(address, after) {
+    return address + (address.indexOf("?") >= 0 ? "&" : "?") + "after=" + after;
   }
 
   // a task's state with only the lines of its journal not seen yet (a long download has hundreds): a task not seen
@@ -158,21 +199,41 @@
 
   function ask(text) {
     text = String(text || "").trim();
-    if (!text) { tell("Вставьте ссылку", true); field.focus(); return; }
+    if (!text) { tell("Вставьте ссылку или напишите название", true); field.focus(); return; }
     keepField(text);
     foundBox.hidden = true;
     foundBox.textContent = "";
     shown = null;
+    finding = null;
+    dropHits();
+    postGen += 1;
+    clearTimeout(markTimer);
+    markGen += 1;
     busy(true);
-    tell("Смотрю, что это за ссылка…");
-    send("/api/phone/get/what", {text: text}).then(function (w) {
+    tell("Смотрю, что это…");
+    whatOf(text).then(function (w) {
+      showMark(w.label);
       if (w.kind === "manga") {
         busy(false);
         tell("");
         showManga(w.ids);
         return null;
       }
-      tell(w.kind === "manhwa" ? w.site + ": ищу тайтл…" : "Читаю страницу…");
+      if (w.kind === "manhwa") {        // (v5.44.119) a title of a site: its one page (the phone's, title.py)
+        store("m-get-last", JSON.stringify({kind: "title", text: text, url: w.url}));
+        tell("Открываю страницу тайтла…");
+        location.assign("/m/title?url=" + encodeURIComponent(w.url));
+        return null;
+      }
+      if (w.kind === "name") {          // (v5.44.122) a name: the sites searched at once, the titles as covers
+        searchName(w.q, text);
+        return null;
+      }
+      if (w.kind === "booru") {         // (v5.44.122) a post of a booru site: its card, «В галерею»
+        showPost(w, text);
+        return null;
+      }
+      tell("Читаю страницу…");
       return send(KINDS[w.kind].find, {url: w.url}).then(function (reply) {
         finding = {kind: w.kind, id: reply.id, text: text};
         store("m-get-last", JSON.stringify(finding));
@@ -180,8 +241,10 @@
       });
     }).catch(function (err) {
       busy(false);
-      var sfw = /SFW/.test(err.message);
+      var data = err.data || {};
+      var sfw = !!data.sfw || /SFW/.test(err.message);
       var extra = null;
+      if (data.sfw) { showMark(data.label, true); }
       if (sfw) {
         keepField(text, true);
         extra = el("button", "m-button m-quiet", "Показать всё");
@@ -195,10 +258,22 @@
   function waitFound() {
     if (!finding) { return; }
     var mine = finding;
-    stateOf(KINDS[mine.kind].findState).then(function (st) {
+    stateOf(findAddress(mine.kind, mine.id)).then(function (st) {
       if (finding !== mine) { return; }
-      if (st.id !== mine.id || RUNNING.indexOf(st.status) >= 0) {
-        if (st.id === mine.id && st.line) { tell(st.line); }
+      var going = RUNNING.indexOf(st.status) >= 0;
+      // (v5.44.117) the title so far: the link's site's chapters at once, the other sites' as they answer (drawn again
+      // each time something came — the chapters ticked stay ticked)
+      if (st.id === mine.id && going && st.found) {
+        if (!shown || shown.id !== st.id || shown.mark !== st.mark) {
+          busy(false);
+          tell("");
+          showFound(mine.kind, st);
+        }
+        setTimeout(waitFound, 800);
+        return;
+      }
+      if (st.id !== mine.id || going) {
+        if (st.id === mine.id && st.line && !(shown && shown.id === st.id)) { tell(st.line); }
         setTimeout(waitFound, 700);
         return;
       }
@@ -206,22 +281,24 @@
       busy(false);
       if (st.found) {
         tell("");
-        showFound(mine.kind, st);
+        if (!shown || shown.id !== st.id || shown.mark !== st.mark) { showFound(mine.kind, st); }
         return;
       }
       var why = st.failed || st.error || (st.status === "stopped" ? "Поиск остановлен" : "Не нашлось — проверьте ссылку");
-      tell(why, true, mine.kind === "video" ? el("p", "m-muted", "Мангу и манхву программа берёт с Remanga, ReComics, "
-        + "MangaLib, MangaBuff, ReadManga, Desu, com-x.life, MangaDex, а хентай — с nhentai, Хентай-тян, HentaiLib и "
-        + "AllHentai; с других сайтов — только видео.") : null);
+      // (v5.44.116) the sites — the server's lists (manhwa_get.SITES; the ones of hentai only outside «SFW»)
+      var sites = box.dataset.sites || "", adultSites = box.dataset.adultSites || "";
+      tell(why, true, mine.kind === "video" && sites ? el("p", "m-muted", "Мангу и манхву программа берёт с " + sites
+        + (adultSites ? ", а хентай — с " + adultSites : "") + "; с других сайтов — только видео.") : null);
     }).catch(function () {
       if (finding === mine) { setTimeout(waitFound, 1500); }
     });
   }
 
   function showFound(kind, st) {
+    if (kind !== "video") { return; }       // (v5.44.119) a title of a site has its own page (the phone's title.py)
     foundBox.textContent = "";
-    shown = {kind: kind, id: st.id};
-    if (kind === "video") { showVideo(st); } else { showManhwa(st); }
+    shown = {kind: kind, id: st.id, mark: st.mark || ""};
+    showVideo(st);
     foundBox.hidden = false;
   }
 
@@ -298,11 +375,12 @@
       view.about.append(el("p", "m-get-note" + (x.exact ? "" : " m-get-warn"),
         (x.dub || "Серии — с " + x.site) + ": " + x.what + " — " + x.how));
     });
-    // (v5.44.106) a series of YummyAnime, (v5.44.109) of Hentasis: watched without downloading (/api/watch/can)
+    // (v5.44.106) a series of YummyAnime, (v5.44.109) of Hentasis: watched without downloading (/api/watch/can);
+    // (v5.44.116) «Смотреть онлайн» — the computer's words too
     fetch("/api/watch/can?phone=1&url=" + encodeURIComponent(f.page_url || ""), { credentials: "same-origin" })
       .then(function (r) { return r.json(); }).then(function (can) {
         if (!can || !can.watch || view.about.querySelector(".m-watch-link")) return;
-        var watching = el("a", "m-button m-quiet m-watch-link", "Смотреть без скачивания");
+        var watching = el("a", "m-button m-quiet m-watch-link", "Смотреть онлайн");
         watching.href = can.href;
         view.about.append(watching);
       }).catch(function () { /* no «Смотреть» — «Скачать» is there */ });
@@ -338,9 +416,9 @@
       send(KINDS.video.get, {find: findId, files: files, quality: pick.quality(), merge: pick.merge()})
         .then(function (reply) {
           window.LocalBooru.say(null, reply.queued ? (reply.queued > 1 ? "В очереди " + reply.queued + "-м" :
-            "В очереди следующим") + ": начнётся само" : "Скачивание началось");
+            "В очереди следующим") + ": начнётся само" : "Скачивание началось — оно в «Загрузках»");
           watch("video", true);
-          goingBox.scrollIntoView({block: "start", behavior: "smooth"});
+          bumpCount();
         }).catch(function (err) { window.LocalBooru.say(null, err.message); })
         .then(function () { bar.go.disabled = false; count(); });
     });
@@ -584,277 +662,6 @@
     };
   }
 
-  // ── the manhwa ────────────────────────────────────────────────────────────────────────────────────────────────
-  function showManhwa(st) {
-    var f = st.found;
-    var findId = st.id;
-    var view = hero(f.cover ? "/api/manhwa/find-cover?find=" + encodeURIComponent(findId) : "", f.title,
-      (f.alt || []).join(" · "), [f.site_label, f.type, f.year, f.status, f.age]);
-    if (f.cover_hidden) { view.about.append(el("p", "m-muted", "Обложка скрыта (SFW)")); }
-    foundBox.append(view.head);
-    // (v5.44.72) the card's own words: a link of a site that lets no program in, a list of chapters not given
-    (f.notes || []).forEach(function (note) { foundBox.append(el("p", "m-get-note m-get-warn m-get-said", note)); });
-    if (f.about) {
-      var more = el("details", "m-more-text m-get-about");
-      more.append(el("summary", "", "Описание"), el("p", "m-get-about-text", f.about));
-      foundBox.append(more);
-    }
-    foundBox.append(readBlock(f));                    // (v5.44.82) read it without downloading
-    var opts = el("div", "m-get-opts");
-    var branches = f.branches || [];
-    if (branches.length > 1) {
-      var pickBox = el("label", "m-pick");
-      var select = el("select");
-      branches.forEach(function (b) {
-        var option = el("option", "", (b.name || "без названия") + " — " + plural(b.count, ["глава", "главы", "глав"])
-          + (b.votes ? ", " + plural(b.votes, ["оценка", "оценки", "оценок"]) : ""));
-        option.value = b.id;
-        option.selected = b.id === f.branch;
-        select.append(option);
-      });
-      select.addEventListener("change", function () {
-        busy(true);
-        tell("Читаю главы этих переводчиков…");
-        send(KINDS.manhwa.find, {url: f.url, branch: select.value}).then(function (reply) {
-          finding = {kind: "manhwa", id: reply.id, text: field.value};
-          store("m-get-last", JSON.stringify(finding));
-          waitFound();
-        }).catch(function (err) { busy(false); tell(err.message, true); });
-      });
-      pickBox.append(el("span", "", "Переводчики"), select);
-      opts.append(pickBox);
-    } else if (branches.length === 1 && branches[0].name) {
-      opts.append(el("p", "m-get-note", "Переводчики: " + branches[0].name));
-    }
-    var where = el("fieldset", "m-get-where-pick");
-    where.append(el("legend", "", "Куда"));
-    [["manhwa", "Манхва — лентой"], ["manga", "Манга — по страницам"]].forEach(function (pair) {
-      var row = el("label", "m-check");
-      var radio = el("input");
-      radio.type = "radio";
-      radio.name = "m-get-where";
-      radio.value = pair[0];
-      radio.checked = f.kind === pair[0];
-      radio.disabled = pair[0] === "manga" && !(f.roots && f.roots.manga);
-      row.append(radio, el("span", "", pair[1] + (radio.disabled ? " (папка манги не выбрана)" : "")));
-      where.append(row);
-    });
-    opts.append(where);
-    var follow = check("Новые главы — скачивать самой (раз в сутки, ночью)", true, "follow");
-    opts.append(follow.node);
-    var giving = (f.helpers || []).filter(function (h) { return h.gives > 0; });
-    var helpers = null;
-    if (giving.length) {
-      helpers = check("Главы, которых нет бесплатно на " + f.site_label + ", — брать с других сайтов",
-        f.helpers_on !== false, "helpers");
-      opts.append(helpers.node);
-      var list = el("ul", "m-get-helpers");
-      giving.forEach(function (h) {
-        list.append(el("li", "", h.site_label + " — «" + h.title + "»: " + plural(h.gives, ["глава", "главы", "глав"])
-          + (h.first ? " (" + h.first + (h.last !== h.first ? " — " + h.last : "") + ")" : "")));
-      });
-      opts.append(list);
-    } else if ((f.helpers || []).length) {
-      opts.append(el("p", "m-get-note", "Тайтл есть и на " + f.helpers.map(function (h) { return h.site_label; })
-        .join(", ") + " — новых глав оттуда сейчас нет"));
-    }
-    var counts = el("p", "m-get-note");
-    var paid = el("p", "m-get-note m-get-warn");
-    opts.append(counts, paid);
-    foundBox.append(opts);
-    var others = function () { return helpers ? helpers.tick.checked : f.helpers_on !== false; };
-    var pick = chaptersPicker(f, others, update);       // (v5.44.74) the chapters as tiles to tick, by tomes
-    foundBox.append(pick.node);
-    if (helpers) {
-      helpers.tick.addEventListener("change", function () { pick.repaint(helpers.tick.checked ? "on" : "off"); update(); });
-    }
-    var bar = goBar();
-    foundBox.append(bar.node);
-
-    function update() {
-      var on = !!(helpers && helpers.tick.checked);
-      var chosen = pick.chosen().length, open = pick.open(), waiting = pick.waiting();
-      var job = jobs.manhwa;
-      var other = !!(job && RUNNING.indexOf(job.status) >= 0 && String(job.find) !== String(findId));
-      counts.textContent = "Глав: " + f.chapters + (f.first ? " (" + f.first + " — " + f.last + ")" : "")
-        + (f.have ? " · уже в папке: " + f.have : "");
-      var left = on ? f.paid_left : f.paid_count;
-      var covered = on ? f.paid_count - f.paid_left : 0;
-      var soon = function (items) {
-        return (items || []).slice(0, 3).map(function (c) { return c.label + (c.free_at ? " — " + c.free_at : ""); })
-          .join("; ");
-      };
-      // (v5.44.73) a paid chapter with no date to become free (Remanga's licensed ones): it waits for another site
-      var dated = function (items) { return (items || []).some(function (c) { return c.free_at; }); };
-      var nowhere = "бесплатно их пока нет ни на одном из сайтов — появятся, программа скачает сама.";
-      var words = "";
-      if (f.paid_count && covered && !left) {
-        words = "Платных на " + f.site_label + ": " + f.paid_count + " — все есть бесплатно на других сайтах.";
-      } else if (f.paid_count && covered) {
-        words = "Платных: " + f.paid_count + ", из них " + covered + " есть бесплатно на других сайтах; " + (dated(f.waiting)
-          ? "остальные программа возьмёт, когда сайт сделает их бесплатными" + (soon(f.waiting) ? ": "
-          + soon(f.waiting) : "") + "." : "остальные " + left + " — " + nowhere);
-      } else if (f.paid_count) {
-        words = "Платных: " + f.paid_count + " — " + (dated(f.paid) ? "их программа не скачивает, возьмёт сама, когда "
-          + "сайт сделает их бесплатными" + (soon(f.paid) ? ": " + soon(f.paid) : "") + "." : nowhere);
-      }
-      paid.textContent = words;
-      paid.hidden = !words;
-      var waits = !chosen && !open && waiting;    // nothing to take now: the title kept, its paid ones awaited
-      bar.go.textContent = chosen ? (other ? "В очередь: " : "Скачать ") + plural(chosen, ["главу", "главы", "глав"])
-        : open ? "Отметьте главы" : waits ? "Ждать платные" : "Всё уже скачано";
-      bar.go.disabled = !chosen && !waits;
-      bar.sum.textContent = (f.folder ? "в папку «" + String(f.folder).split(/[\\/]/).filter(Boolean).pop() + "»" : "")
-        + (other && chosen ? " — после текущего скачивания" : "");
-      pick.counted.textContent = open ? "отмечено " + chosen + " из " + open : "";
-    }
-    update();
-    bar.go.addEventListener("click", function () {
-      var whereTick = where.querySelector("input:checked");
-      bar.go.disabled = true;
-      send(KINDS.manhwa.get, {find: findId, where: whereTick ? whereTick.value : "", follow: follow.tick.checked,
-        helpers: others(), chapters: pick.chosen()}).then(function (reply) {
-        window.LocalBooru.say(null, reply.queued ? (reply.queued > 1 ? "В очереди " + reply.queued + "-м" :
-          "В очереди следующим") + ": начнётся само" : "Скачивание началось");
-        watch("manhwa", true);
-        goingBox.scrollIntoView({block: "start", behavior: "smooth"});
-      }).catch(function (err) { window.LocalBooru.say(null, err.message); }).then(function () { update(); });
-    });
-    shownCount = update;
-  }
-
-  // (v5.44.74) the chapters of a title as tiles, by tomes: the ones some site has free ticked; the ones in the folder
-  // «есть», the paid ones nobody has free «платная», another site's — «с MangaLib» (or not, without that box)
-  // (v5.44.82) «Читать с начала», «Продолжить: Глава 12» and every chapter — read without downloading it, in the
-  // program's reader (webui/pages/manga_online.py): the chapter's place in the card's list
-  function readBlock(f) {
-    var href = function (n, extra) {
-      return "/m/online?url=" + encodeURIComponent(f.url) + (f.branch ? "&branch=" + encodeURIComponent(f.branch) : "")
-        + "&ch=" + n + (extra || "");
-    };
-    var box = el("div", "m-get-read");
-    var list = f.list || [];
-    var first = -1;
-    list.some(function (c, i) { if (!c.wait) { first = i; return true; } return false; });
-    if (first < 0) { return box; }
-    var row = el("div", "m-get-read-row");
-    var start = el("a", "m-button m-quiet", "Читать с начала");
-    start.href = href(first + 1, "&from=start");
-    row.append(start);
-    box.append(row);
-    fetch("/api/online/last?url=" + encodeURIComponent(f.url), {credentials: "same-origin"})
-      .then(function (r) { return r.json(); }).then(function (reply) {
-        var last = reply && reply.last;
-        if (!last || !last.ch) { return; }
-        var n = last.done && last.ch < list.length ? last.ch + 1 : last.ch;
-        var go = el("a", "m-button", "Продолжить: " + ((list[n - 1] && list[n - 1].label) || last.label));
-        go.href = href(n);
-        row.prepend(go);
-      }).catch(function () { /* nothing kept: «Читать с начала» only */ });
-    var all = el("details", "m-more-text m-get-read-all");
-    all.append(el("summary", "", "Читать главу без скачивания"));
-    var ol = el("ol", "m-get-read-list");
-    for (var i = list.length - 1; i >= 0; i--) {
-      var c = list[i];
-      var li = el("li");
-      if (c.wait) {
-        li.append(el("span", "m-muted", c.label + " — платная"));
-      } else {
-        var a = el("a", "", c.label + (c.name ? " — " + c.name : ""));
-        a.href = href(i + 1);
-        li.append(a);
-      }
-      ol.append(li);
-    }
-    all.append(ol);
-    box.append(all);
-    return box;
-  }
-
-  function chaptersPicker(f, others, changed) {
-    var node = el("div", "m-get-pick");
-    var head = el("div", "m-count m-get-head");
-    var counted = el("span", "m-get-counted");
-    head.append(el("h3", "m-count-title", "Главы"), counted, quick([["all", "все"], ["none", "ничего"]], function (how) {
-      boxes().forEach(function (tick) {
-        if (!tick.disabled) { tick.checked = how === "all"; paintTile(tick); }
-      });
-      changed();
-    }));
-    node.append(head);
-    var chapters = f.list || [];
-    var tomes = {}, order = [];
-    chapters.forEach(function (c) {
-      var key = String(Number(c.tome) || 0);
-      if (!tomes[key]) { tomes[key] = []; order.push(key); }
-      tomes[key].push(c);
-    });
-    order.forEach(function (key) {
-      if (order.length > 1) { node.append(el("h4", "m-get-group", Number(key) ? "Том " + key : "Без тома")); }
-      var grid = el("div", "m-ep-grid m-get-eps");
-      tomes[key].forEach(function (c) { grid.append(tile(c)); });
-      node.append(grid);
-    });
-    if (!chapters.length) { node.append(el("p", "m-get-note m-get-pad", "Глав у тайтла нет ни на одном из сайтов.")); }
-    node.addEventListener("change", function (event) {
-      if (event.target.matches("input[type='checkbox']")) { paintTile(event.target); changed(); }
-    });
-
-    function base(c) {
-      if (c.have) { return {ok: false, mark: "есть", kind: "have"}; }
-      if (c.wait) { return {ok: false, mark: "платная", kind: "wait"}; }
-      if (c.from) {
-        return others() ? {ok: true, mark: "с " + c.from, kind: "from"}
-          : {ok: false, mark: c.paid ? "платная" : "нет", kind: "wait"};
-      }
-      return {ok: true, mark: "", kind: ""};
-    }
-
-    function tile(c) {
-      var label = el("label", "m-ep m-get-ep");
-      label.dataset.id = String(c.id);
-      var tick = el("input", "m-sr");
-      tick.type = "checkbox";
-      tick.value = String(c.id);
-      label.append(tick, el("span", "m-get-ep-n", c.n || "•"), el("span", "m-get-ep-mark", ""));
-      tick.setAttribute("aria-label", c.label + (c.name ? " — " + c.name : ""));
-      return label;
-    }
-
-    function boxes() { return Array.prototype.slice.call(node.querySelectorAll("input[type='checkbox']")); }
-
-    function paint(mode) {
-      var byId = {};
-      chapters.forEach(function (c) { byId[String(c.id)] = c; });
-      boxes().forEach(function (tick) {
-        var c = byId[tick.value];
-        var b = base(c);
-        var was = tick.disabled;
-        tick.disabled = !b.ok;
-        if (!b.ok) { tick.checked = false; }
-        else if (mode === "all" || (mode === "on" && b.kind === "from" && was)) { tick.checked = true; }
-        var label = tick.closest(".m-get-ep");
-        label.dataset.have = b.kind === "have" ? "whole" : "";
-        label.querySelector(".m-get-ep-mark").textContent = b.mark;
-        label.title = [c.label + (c.name ? " — " + c.name : ""), c.free_at ? "Платная — бесплатной станет " + c.free_at : "",
-          c.from && b.ok ? "Скачается с " + c.from : ""].filter(Boolean).join("\n");
-        paintTile(tick);
-      });
-    }
-    paint("all");
-
-    return {
-      node: node,
-      counted: counted,
-      repaint: paint,
-      chosen: function () {
-        return boxes().filter(function (t) { return t.checked && !t.disabled; }).map(function (t) { return t.value; });
-      },
-      open: function () { return boxes().filter(function (t) { return !t.disabled; }).length; },
-      waiting: function () { return chapters.filter(function (c) { return base(c).kind === "wait"; }).length; }
-    };
-  }
-
   // ── nhentai ───────────────────────────────────────────────────────────────────────────────────────────────────
   function showManga(ids) {
     foundBox.textContent = "";
@@ -876,16 +683,405 @@
         window.LocalBooru.say(null, reply && reply.already ? "Уже в «Загрузках»" : reply && reply.queued
           ? (reply.queued > 1 ? "В очереди " + reply.queued + "-й" : "В очереди следующей") : "Скачивание началось");
         watch("manga", true);
-        goingBox.scrollIntoView({block: "start", behavior: "smooth"});
+        bumpCount();
       }).catch(function (err) { window.LocalBooru.say(null, err.message); })
         .then(function () { bar.go.disabled = false; });
     });
     shownCount = null;
   }
 
-  // ── the downloads going ───────────────────────────────────────────────────────────────────────────────────────
+  // ── (v5.44.122) a name: the sites' searches at once, the titles as covers (manhwa_search, as the computer's) ──────
+  var GROUPS = [["manga", "Манга"], ["strip", "Манхва, маньхуа и другие"]];
+  var TITLES = ["тайтл", "тайтла", "тайтлов"];
+  var hits = null;               // {id, query, picked, tiles, groups, list, head, sites} — the titles found by a name
+  var hitsTimer = 0;
+
+  function initial(text) { return String(text || "?").trim().charAt(0).toUpperCase() || "?"; }
+
+  function searchName(q, text) {
+    busy(true);
+    tell("Ищу «" + q + "» на сайтах…");
+    send("/api/manhwa/search", {q: q}).then(function (reply) {
+      busy(false);
+      tell("");
+      store("m-get-last", JSON.stringify({kind: "name", text: text}));
+      startHits(reply.id, q);
+      pollHits();
+    }).catch(function (err) {
+      busy(false);
+      tell(err.message, true);
+    });
+  }
+
+  function dropHits() {
+    clearTimeout(hitsTimer);
+    hits = null;
+  }
+
+  function startHits(id, q) {
+    clearTimeout(hitsTimer);
+    foundBox.textContent = "";
+    shown = {kind: "name", id: id};
+    var head = el("div", "m-get-hits-head");
+    var title = el("h2", "m-get-hits-title");
+    var sites = el("ul", "m-get-hits-sites");
+    sites.setAttribute("aria-label", "Что ответили сайты");
+    head.append(title, sites);
+    var list = el("div", "m-get-hits");
+    list.setAttribute("aria-live", "polite");
+    hits = {id: id, query: q, picked: "", tiles: {}, groups: {}, list: list, head: title, sites: sites, count: 0};
+    GROUPS.forEach(function (pair) {
+      var group = el("details", "m-get-hits-group");
+      group.setAttribute("data-group", pair[0]);
+      group.hidden = true;
+      var summary = el("summary", "m-get-hits-sum");
+      var name = el("span", "m-get-hits-name", pair[1]);
+      var count = el("span", "m-get-hits-n");        // folded: «Манга — 3» and its first title
+      var more = el("span", "m-get-hits-more");
+      name.append(count);
+      summary.append(name, more);
+      var grid = el("div", "m-get-hits-grid");
+      group.append(summary, grid);
+      var entry = {node: group, grid: grid, count: count, more: more, chosen: false};
+      summary.addEventListener("click", function () { entry.chosen = true; });     // opened or folded by hand
+      hits.groups[pair[0]] = entry;
+      list.append(group);
+    });
+    foundBox.append(head, list);
+    foundBox.hidden = false;
+  }
+
+  function pollHits() {
+    clearTimeout(hitsTimer);
+    var mine = hits;
+    if (!mine) { return; }
+    getJson("/api/manhwa/search-state?id=" + encodeURIComponent(mine.id)).then(function (st) {
+      if (hits !== mine) { return; }
+      showHits(st);
+      if (!st.done) { hitsTimer = setTimeout(pollHits, 500); }
+    }).catch(function () {
+      if (hits === mine) { hitsTimer = setTimeout(pollHits, 2000); }
+    });
+  }
+
+  function showHits(st) {
+    var titles = st.titles || [];
+    var q = hits.query;
+    hits.count = st.count || titles.length;
+    foundBox.classList.toggle("m-get-busy", !st.done);
+    hits.head.textContent = !st.done
+      ? "Ищу «" + q + "»…" + (hits.count ? " Пока " + plural(hits.count, TITLES) : "")
+      : hits.count ? "По названию «" + q + "» — " + plural(hits.count, TITLES)
+        : "По названию «" + q + "» ничего не нашлось — попробуйте другое название (по-английски, по-русски) или ссылку";
+    hits.sites.textContent = "";
+    (st.sites || []).forEach(function (x) {
+      var item = el("li", "m-get-hits-site " + (x.state || ""));
+      item.append(el("b", "", x.label), document.createTextNode(" " + (x.state === "asking" ? "…"
+        : x.state === "failed" ? "не ответил" : String(x.count))));
+      if (x.error) { item.title = x.error; }
+      hits.sites.append(item);
+    });
+    var lists = {manga: [], strip: []};
+    var first = {};
+    var seen = {};
+    titles.forEach(function (t, k) {
+      var key = t.kind === "manga" ? "manga" : "strip";
+      lists[key].push(hitTile(t));
+      if (!(key in first)) { first[key] = k; }
+      seen[t.url] = true;
+    });
+    Object.keys(hits.tiles).forEach(function (url) {
+      if (!seen[url]) { hits.tiles[url].remove(); delete hits.tiles[url]; }
+    });
+    // the group of the best title first, open; the other — folded into a line (its count, its first title)
+    var order = GROUPS.map(function (pair) { return pair[0]; }).sort(function (a, b) {
+      return (a in first ? first[a] : 1e9) - (b in first ? first[b] : 1e9);
+    });
+    order.forEach(function (key, n) {
+      var group = hits.groups[key];
+      var tiles = lists[key];
+      var now = Array.prototype.slice.call(group.grid.children);
+      if (now.length !== tiles.length || now.some(function (tile, k) { return tile !== tiles[k]; })) {
+        tiles.forEach(function (tile) { group.grid.append(tile); });
+      }
+      group.node.hidden = !tiles.length;
+      group.count.textContent = " — " + tiles.length;
+      var top = tiles[0] && tiles[0].hit;
+      group.more.textContent = top ? "«" + top.title + "»" + ((top.sites || []).length ? " · " + top.sites.map(function (x) {
+        return x.label;
+      }).join(", ") : "") : "";
+      if (!group.chosen) { group.node.open = n === 0; }
+      hits.list.append(group.node);
+    });
+  }
+
+  function titleHref(t) {
+    return "/m/title?url=" + encodeURIComponent(t.url) + "&k=" + (t.kind === "manga" ? "manga" : "manhwa")
+      + (t.title ? "&t=" + encodeURIComponent(t.title) : "") + (t.rating ? "&r=" + t.rating : "");
+  }
+
+  function hitTile(t) {
+    var tile = hits.tiles[t.url];
+    if (!tile) {
+      tile = el("a", "m-get-hit");
+      var cover = el("span", "m-get-hit-cover");
+      cover.append(el("span", "m-get-initial", initial(t.title)));
+      tile.append(cover, el("b", "m-get-hit-name"), el("span", "m-get-hit-facts"), el("span", "m-get-hit-sites"));
+      tile.addEventListener("click", function () { pickHit(tile); });     // the link opens the title's page
+      hits.tiles[t.url] = tile;
+    }
+    tile.hit = t;
+    tile.href = titleHref(t);
+    var cover = tile.querySelector(".m-get-hit-cover");
+    if ((t.cover || "") !== (tile.getAttribute("data-cover") || "")) {
+      tile.setAttribute("data-cover", t.cover || "");
+      cover.querySelectorAll("img").forEach(function (img) { img.remove(); });
+      if (t.cover) {
+        var img = el("img");
+        img.alt = "";
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.onerror = function () { img.remove(); };
+        img.src = "/api/manhwa/hit-cover?s=" + encodeURIComponent(hits.id) + "&c=" + encodeURIComponent(t.cover);
+        cover.append(img);
+      }
+    }
+    cover.title = t.cover_hidden ? "Обложка скрыта (SFW)" : "";
+    var badge = cover.querySelector(".m-get-hit-badge");
+    if (t.adult && !badge) { cover.append(el("span", "m-get-hit-badge", "18+")); }
+    else if (!t.adult && badge) { badge.remove(); }
+    tile.querySelector(".m-get-hit-name").textContent = t.title || "Без названия";
+    var facts = [t.type, t.year || "", t.chapters ? t.chapters + " гл." : "",
+      t.rating ? "★ " + String(t.rating).replace(".", ",") : ""].filter(Boolean);
+    tile.querySelector(".m-get-hit-facts").textContent = facts.join(" · ");
+    var sites = (t.sites || []).map(function (x) { return x.label; });
+    tile.querySelector(".m-get-hit-sites").textContent = sites.join(", ");
+    var on = t.url === hits.picked;
+    tile.classList.toggle("picked", on);
+    if (on) { tile.setAttribute("aria-current", "true"); } else { tile.removeAttribute("aria-current"); }
+    tile.setAttribute("aria-label", [t.title].concat(facts, sites.length ? ["на " + sites.join(", ")] : [])
+      .filter(Boolean).join(", "));
+    return tile;
+  }
+
+  // a title picked — its one page (the link); back here — the titles of the name, it marked (restoreHits)
+  function pickHit(tile) {
+    if (!hits || !tile.hit) { return; }
+    hits.picked = tile.hit.url;
+    Object.keys(hits.tiles).forEach(function (url) {
+      var on = url === hits.picked;
+      hits.tiles[url].classList.toggle("picked", on);
+      if (on) { hits.tiles[url].setAttribute("aria-current", "true"); } else { hits.tiles[url].removeAttribute("aria-current"); }
+    });
+    store("m-get-last", JSON.stringify({kind: "title", text: field.value.trim() || hits.query, url: tile.hit.url}));
+    tell("Открываю страницу тайтла…");
+  }
+
+  // back to the page (a title read, a reload): the name searched before — its titles as they were, the picked one
+  // marked; the search let go meanwhile (or another name since) — searched anew
+  function restoreHits(text, url) {
+    getJson("/api/manhwa/search-state?id=last").then(function (st) {
+      if (hits || finding) { return; }
+      if (!st.id || st.gone || same(st.query) !== same(text)) { ask(text); return; }
+      startHits(st.id, st.query);
+      hits.picked = url || "";
+      showHits(st);
+      if (!st.done) { pollHits(); }
+    }).catch(function () { ask(text); });
+  }
+
+  // ── (v5.44.122) a post of a booru site: its card — the grabber's machinery, as the computer's «Галерея (booru)»
+  // opens a post by its link (/api/grab/search → the one card; its picture through the program; «В галерею» — a
+  // download of that one post, seen in «Загрузки») ───────────────────────────────────────────────────────────────
+  var OWNED = {file: "Уже в галерее", post: "Похожая уже в галерее — найдена обратным поиском, файл может отличаться",
+               trash: "В корзине — вернуть можно там"};
+  var TAGS = ["тег", "тега", "тегов"];
+  var TAGS_SHOWN = 8;
+  var postGen = 0;               // the post shown: a later answer for one not shown any more is dropped
+  var TICK = "M5 12.5l4.5 4.5L19 7.5";
+
+  function icon(d, size) {
+    var ns = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", String(size || 16));
+    svg.setAttribute("height", String(size || 16));
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    d.split("|").forEach(function (one) {
+      var path = document.createElementNS(ns, "path");
+      path.setAttribute("d", one);
+      svg.append(path);
+    });
+    return svg;
+  }
+
+  function showPost(w, text) {
+    var gen = ++postGen;
+    tell("Спрашиваю пост у сайта…");
+    store("m-get-last", JSON.stringify({kind: "booru", text: text}));
+    send("/api/grab/search", {q: w.url}).then(function (data) {
+      if (gen !== postGen) { return; }
+      busy(false);
+      var card = (data.cards || [])[0];
+      if (!card) { tell(data.error_note || "Пост не получен", true); return; }
+      tell("");
+      drawPost(data.search || {}, card, gen);
+    }).catch(function (err) {
+      if (gen !== postGen) { return; }
+      busy(false);
+      tell(err.message, true);
+    });
+  }
+
+  function drawPost(search, c, gen) {
+    foundBox.textContent = "";
+    shown = {kind: "booru", id: search.id};
+    var media = function (v) {
+      return "/grab/media?s=" + encodeURIComponent(search.id) + "&k=" + encodeURIComponent(c.key) + "&v=" + v;
+    };
+    var site = (c.sites || [])[0] || "";
+    showMark("Галерея (booru)" + (site ? " · " + site : ""));
+    var card = el("article", "m-get-post");
+    var pic = el("span", "m-get-post-pic");
+    var img = el("img");
+    img.alt = "";
+    img.decoding = "async";
+    img.onerror = function () {          // no larger copy: the preview; none at all — no picture
+      if (img.getAttribute("data-tried")) { pic.hidden = true; return; }
+      img.setAttribute("data-tried", "1");
+      img.src = media("preview");
+    };
+    img.src = media(c.video ? "preview" : "sample");
+    pic.append(img);
+    if (c.video) { pic.append(el("span", "m-get-post-note", "Видео — здесь только кадр")); }
+    var body = el("div", "m-get-post-body");
+    body.append(el("h2", "m-get-title", (c.post ? "Пост " + c.post : "Пост") + (site ? " · " + site : "")));
+    var facts = [c.w && c.h ? c.w + " × " + c.h : "", c.ext ? c.ext.toUpperCase() : "",
+      (c.tags || []).length ? plural(c.tags.length, TAGS) : ""].filter(Boolean);
+    if ((c.sites || []).length > 1) { facts.push("ещё на: " + c.sites.slice(1).join(", ")); }
+    body.append(el("p", "m-get-post-facts", facts.join(" · ")));
+    var tags = el("div", "m-get-post-tags");
+    body.append(tags);
+    var state = el("p", "m-get-post-state");
+    state.setAttribute("role", "status");
+    body.append(state);
+    var two = el("div", "m-get-two");
+    var go = el("button", "m-button m-get-post-go");
+    go.type = "button";
+    var onSite = el("a", "m-button m-quiet m-get-post-site", "На сайте");
+    onSite.href = c.url || "#";
+    onSite.target = "_blank";
+    onSite.rel = "noopener noreferrer";
+    two.append(go, onSite);
+    body.append(two);
+    card.append(pic, body);
+    foundBox.append(card);
+    foundBox.hidden = false;
+    drawTags(tags, c.tags || [], false);
+    paintPost(c, state, go);
+    go.addEventListener("click", function () { getPost(search, c, state, go, gen); });
+    // the tags by kind as the site gives them (a site of the Gelbooru kind is asked for them now) — as the computer's
+    getJson("/api/grab/card?s=" + encodeURIComponent(search.id) + "&k=" + encodeURIComponent(c.key)).then(function (r) {
+      if (gen !== postGen) { return; }
+      var named = [];
+      (r.groups || []).forEach(function (g) { (g[2] || []).forEach(function (name) { named.push([name, g[0]]); }); });
+      if (named.length) { drawTags(tags, named, tags.classList.contains("all")); }
+    }).catch(function () { /* the tags of the card stay */ });
+  }
+
+  function drawTags(box, list, all) {
+    box.textContent = "";
+    box.classList.toggle("all", !!all);
+    list.forEach(function (pair, k) {
+      var cat = String(pair[1] || "general").replace(/[^a-z]/g, "");
+      var tag = el("span", "m-tag m-cat-" + cat, String(pair[0]).replace(/_/g, " "));
+      if (!all && k >= TAGS_SHOWN) { tag.hidden = true; }
+      box.append(tag);
+    });
+    if (!all && list.length > TAGS_SHOWN) {
+      var more = el("button", "m-get-post-more", "ещё " + (list.length - TAGS_SHOWN));
+      more.type = "button";
+      more.addEventListener("click", function () { drawTags(box, list, true); });
+      box.append(more);
+    }
+  }
+
+  // what the gallery has of it, and whether «В галерею» can take it
+  function paintPost(c, state, go) {
+    state.textContent = "";
+    state.className = "m-get-post-state";
+    var blocked = (c.blocked || []).length > 0;
+    go.textContent = "";
+    if (blocked) {
+      state.classList.add("warn");
+      state.append(document.createTextNode("Теги из блоклиста подписок и «Галереи (booru)»: " + c.blocked.join(", ")
+        + " — такой пост не скачивается. Блоклист — на компьютере, «Подписки»."));
+    } else if (!c.original) {
+      state.classList.add("warn");
+      state.append(document.createTextNode("Сайт не даёт оригинал этого поста — скачивать нечего."));
+    } else if (c.owned && OWNED[c.owned]) {
+      state.append(icon(TICK, 15), document.createTextNode(OWNED[c.owned]));
+    } else {
+      state.append(icon(TICK, 15), document.createTextNode("Такой картинки в галерее нет"));
+    }
+    if (c.owned && c.image_id) {
+      var open = el("a", "m-link m-get-post-open", "Открыть");
+      open.href = "/m/post/" + c.image_id;
+      state.append(document.createTextNode(" · "), open);
+    }
+    var had = c.owned === "file";
+    go.append(icon(had ? TICK : "M12 4v11|M7 10.5l5 5 5-5|M5 19.5h14", 16), el("span", "", had ? "В галерее" : "В галерею"));
+    go.disabled = had || blocked || !c.original;
+  }
+
+  function getPost(search, c, state, go, gen) {
+    go.disabled = true;
+    send("/api/grab/download", {s: search.id, keys: [c.key]}).then(function (reply) {
+      window.LocalBooru.say(null, "Скачивание началось — оно в «Загрузках»");
+      bumpCount();
+      go.querySelector("span").textContent = "Скачивается…";
+      followGrab(reply.id, search, c, state, go, gen);
+    }).catch(function (err) {
+      window.LocalBooru.say(null, err.message);
+      go.disabled = false;
+    });
+  }
+
+  // the download of the post (a check of subscriptions for one run): when it has ended — what the gallery has now
+  function followGrab(job, search, c, state, go, gen) {
+    var troubles = 0;
+    var poll = function () {
+      if (gen !== postGen) { return; }
+      getJson("/api/subs/state?after=999999999").then(function (st) {
+        troubles = 0;
+        if (String(st.id) === String(job) && ["starting", "running", "waiting", "stopping"].indexOf(st.status) >= 0) {
+          setTimeout(poll, 1200);
+          return;
+        }
+        return send("/api/grab/owned", {s: search.id}).then(function (r) {
+          if (gen !== postGen) { return; }
+          var m = (r.marks || {})[c.key] || {};
+          c.owned = m.owned || "";
+          c.image_id = m.image_id || 0;
+          paintPost(c, state, go);
+          if (c.owned !== "file") { window.LocalBooru.say(null, "Пост не скачался — почему, видно в «Загрузках»"); }
+        });
+      }).catch(function () {
+        if (++troubles < 20) { setTimeout(poll, 2500); }
+      });
+    };
+    setTimeout(poll, 800);
+  }
+
+  // ── the downloads going, as the card needs them (v5.44.120: «Загрузки» are a page of their own — /m/get/downloads,
+  // downloads.js; here only «В очередь» while another title downloads, and the card read again when its download has
+  // ended) ─────────────────────────────────────────────────────────────────────────────────────────────────────────
   var jobs = {};                 // kind -> its last state
-  var cards = {};                // kind -> its card on the page
   var polling = {};
   var shownCount = null;         // the video list's button: «В очередь» while another title downloads
 
@@ -899,7 +1095,6 @@
     stateOf(KINDS[kind].state).then(function (st) {
       var was = jobs[kind];
       jobs[kind] = st;
-      paintJob(kind, st);
       if (shownCount && shown && shown.kind === kind) { shownCount(); }
       var goes = RUNNING.indexOf(st.status) >= 0 || (!!KINDS[kind].unqueue && ((st.queue || []).length || st.restoring));
       if (goes) {
@@ -918,232 +1113,20 @@
 
   function refreshFound(kind) {
     var mine = shown;
-    getJson(KINDS[kind].findState + "?after=999999999").then(function (st) {
+    getJson(withAfter(findAddress(kind, mine.id), 999999999)).then(function (st) {
       if (shown === mine && st.found && st.id === mine.id) { showFound(kind, st); }
     }).catch(function () { /* the list stays as it was */ });
   }
 
-  function jobCard(kind) {
-    if (cards[kind]) { return cards[kind]; }
-    var node = el("article", "m-get-job");
-    node.dataset.kind = kind;
-    var head = el("div", "m-get-job-head");
-    var title = el("b", "m-get-job-title");
-    head.append(el("span", "m-get-job-kind", KINDS[kind].label), title);
-    var text = el("p", "m-get-job-text");
-    var meter = el("span", "m-bar m-get-job-bar");
-    var fill = el("span");
-    meter.append(fill);
-    var sub = el("p", "m-get-job-sub");
-    var list = el("ul", "m-get-job-list");
-    var buttons = el("div", "m-get-job-buttons");
-    var pause = el("button", "m-button m-quiet", "Пауза");
-    pause.type = "button";
-    var stop = el("button", "m-button m-quiet", "Остановить");
-    stop.type = "button";
-    var open = el("a", "m-button m-quiet", "Открыть");
-    buttons.append(pause, stop, open);
-    node.append(head, text, meter, sub, list, buttons);
-    stop.addEventListener("click", function () {
-      stop.disabled = true;
-      send(KINDS[kind].stop, {}).then(function () { window.LocalBooru.say(null, "Останавливаю…"); watch(kind, true); })
-        .catch(function (err) { window.LocalBooru.say(null, err.message); })
-        .then(function () { stop.disabled = false; });
-    });
-    pause.addEventListener("click", function () {
-      var st = jobs[kind] || {};
-      pause.disabled = true;
-      send(KINDS[kind].pause, {pause: !st.paused}).then(function (reply) {
-        window.LocalBooru.say(null, reply.paused ? (kind === "manhwa" ? "Пауза: глава остановится, где она есть"
-          : "Пауза: файл остановится, где он есть") : "Продолжаю");
-        watch(kind, true);
-      }).catch(function (err) { window.LocalBooru.say(null, err.message); })
-        .then(function () { pause.disabled = false; });
-    });
-    cards[kind] = {node: node, title: title, text: text, meter: meter, fill: fill, sub: sub, list: list, pause: pause,
-                   stop: stop, open: open};
-    jobsBox.append(node);
-    return cards[kind];
-  }
-
-  function paintJob(kind, st) {
-    var soon = !!KINDS[kind].unqueue && st.restoring;
-    var queue = KINDS[kind].unqueue ? st.queue || [] : [];
-    if (!st.id && !soon && !queue.length) {
-      if (cards[kind]) { cards[kind].node.hidden = true; }
-      goingBox.hidden = !ORDER.some(function (k) { return cards[k] && !cards[k].node.hidden; });
-      return;
-    }
-    var c = jobCard(kind);
-    c.node.hidden = false;
-    goingBox.hidden = false;
-    var running = RUNNING.indexOf(st.status) >= 0;
-    c.node.dataset.state = running ? (st.paused ? "paused" : "running") : st.status || "idle";
-    c.title.textContent = String(st.label || "").replace(KINDS[kind].prefix, "").replace(/^«(.*)»$/, "$1")
-      || (soon ? "С прошлого запуска" : "");
-    c.stop.hidden = !running && !queue.length;
-    c.stop.textContent = queue.length ? "Остановить всё" : "Остановить";
-    c.pause.hidden = !KINDS[kind].pause || !running || st.status === "stopping";
-    c.pause.textContent = st.paused ? "Продолжить" : "Пауза";
-    c.list.textContent = "";
-    var said = {text: "", sub: "", part: running ? 0.02 : 1, open: ""};
-    if (kind === "video") { paintVideo(st, said, running, soon, queue, c); }
-    else if (kind === "manhwa") { paintManhwa(st, said, running, soon, queue, c); }
-    else { paintManga(st, said, running, soon, queue, c); }
-    if (!running && st.status === "failed") { said.text = st.error || "Не вышло — причина в журнале на компьютере"; }
-    c.text.textContent = said.text;
-    c.text.hidden = !said.text;
-    c.sub.textContent = said.sub;
-    c.sub.hidden = !said.sub;
-    c.meter.hidden = !running;
-    c.fill.style.width = Math.max(2, Math.min(100, said.part * 100)).toFixed(1) + "%";
-    c.open.hidden = running || !said.open;
-    c.open.href = phoneLink(said.open);
-    c.list.hidden = !c.list.children.length;
-    // the downloads going first, then the ones that have ended (in the order of the kinds)
-    ORDER.map(function (k) { return cards[k]; }).filter(Boolean).sort(function (a, b) {
-      return (a.node.dataset.state === "running" || a.node.dataset.state === "paused" ? 0 : 1)
-        - (b.node.dataset.state === "running" || b.node.dataset.state === "paused" ? 0 : 1);
-    }).forEach(function (card) { jobsBox.append(card.node); });
-  }
-
-  function paintVideo(st, said, running, soon, queue, c) {
-    var m = st.meter || {};
-    if (running && m.count) {
-      if (m.merging) {
-        said.text = "Собираю озвучки в общие файлы серий: " + (m.name || "");
-        said.part = Math.max(0, (Number(m.index) || 1) - 1) / m.count;
-      } else {
-        var part = m.total ? Math.min(1, m.done / m.total) : 0;
-        said.part = Math.min(1, ((Number(m.index) || 1) - 1 + part) / m.count);
-        var name = String(m.name || "Файл").replace(/\.[^.]+$/, "");
-        var bits = [];
-        if (m.total) { bits.push(Math.floor(part * 100) + "% (" + megabytes(m.done) + " из " + megabytes(m.total) + ")"); }
-        else if (m.done) { bits.push(megabytes(m.done)); }
-        if (m.speed) { bits.push(megabytes(m.speed) + "/с"); }
-        said.text = (st.paused ? "Пауза — " : "") + name + (bits.length ? ": " + bits.join(", ") : "");
-      }
-      said.sub = "Всего: " + m.index + " из " + m.count;
-    } else if (running) {
-      said.text = st.line || "Начинаю…";
-    } else if (st.id) {
-      var sum = st.summary || {};
-      var done = Number(sum.done) || 0, failed = Number(sum.failed_files) || 0, had = Number(sum.whole) || 0;
-      said.text = (st.status === "stopped" || sum.stopped ? "Остановлено: " : "Готово: ")
-        + (done ? "скачано " + plural(done, ["файл", "файла", "файлов"]) : "ничего не скачано")
-        + (had ? ", уже были: " + had : "") + (failed ? ", не скачались: " + failed : "")
-        + (Number(sum.merged) ? ", собрано в общие файлы: " + plural(Number(sum.merged), ["серия", "серии", "серий"]) : "");
-      said.open = st.series_url || "";
-    }
-    if (soon) {
-      said.sub = "С прошлого запуска программы продолжится: " + soon.titles.map(function (t) { return "«" + t + "»"; })
-        .join(", ") + (soon["in"] > 0 ? " — через " + soon["in"] + " с" : " — сейчас");
-    }
-    queueLines("video", queue, c, function (q) { return plural(q.files, ["файл", "файла", "файлов"]); });
-  }
-
-  function queueLines(kind, queue, c, what) {
-    queue.forEach(function (q, n) {
-      var li = el("li");
-      li.append(el("span", "", (n ? "Потом" : "Дальше") + ": «" + q.title + "»" + (what(q) ? " — " + what(q) : "")));
-      var drop = el("button", "m-get-link", "убрать");
-      drop.type = "button";
-      drop.addEventListener("click", function () {
-        send(KINDS[kind].unqueue, {id: q.id}).then(function () { watch(kind, true); })
-          .catch(function (err) { window.LocalBooru.say(null, err.message); });
+  // (v5.44.120) «Скачать» pressed: the number of «Загрузки» (the chip on top, ⬇ of the bar) at once
+  function bumpCount() {
+    getJson("/api/downloads/count").then(function (data) {
+      var n = Number(data.count) || 0;
+      document.querySelectorAll("[data-dl-n]").forEach(function (pill) {
+        pill.textContent = n ? String(n) : "";
+        pill.hidden = !n;
       });
-      li.append(drop);
-      c.list.append(li);
-    });
-  }
-
-  // (v5.44.74) the manhwa: the chapter going, its strips, the speed, the counts — from the meter (no chapters' list)
-  function paintManhwa(st, said, running, soon, queue, c) {
-    var m = st.meter || {};
-    var now = m.now;
-    if (running && m.total) {
-      var part = now && now.pages ? Math.min(1, now.got / now.pages) : 0;
-      said.part = Math.min(1, ((m.done || 0) + (m.failed || 0) + part) / m.total);
-      var bits = [];
-      if (now) {
-        bits.push(now.label + (now.from ? " (с " + now.from + ")" : "") + (now.pages ? ": " + now.got + " из " + now.pages
-          + " " + word(now.pages, ["полосы", "полос", "полос"]) : ""));
-      }
-      if (m.speed && !st.paused) { bits.push(speedOf(m.speed)); }
-      if (m.eta && !st.paused) { bits.push("осталось ≈ " + clockOf(m.eta)); }
-      said.text = (st.paused ? "Пауза" + (bits.length ? " — " : "") : "") + (bits.join(", ") || (st.paused ? "" : st.line || "Начинаю…"));
-      said.sub = "Глав: " + (m.done || 0) + " из " + m.total + (m.retrying ? ", ждут повтора: " + m.retrying : "")
-        + (m.failed ? ", не скачались: " + m.failed : "") + (m.title && !st.find ? " · «" + m.title + "»" : "");
-    } else if (running) {
-      said.text = st.line || "Начинаю…";
-    }
-    var result = st.result;
-    if (!running && result) {
-      var failed = (result.failed || []).length;
-      said.text = (result.got ? "Скачано: " + plural(result.got, ["глава", "главы", "глав"]) : "Новых глав не скачано")
-        + (failed ? ", не скачались: " + failed : "") + (result.stopped ? " (остановлено)" : "")
-        + (result.gave_up ? ". " + result.gave_up : "");
-      said.open = result.open || "";
-      (result.failed || []).slice(-3).forEach(function (x) {
-        c.list.append(el("li", "m-get-warn", x.label + ": не скачалась" + (x.why ? " — " + x.why : "")));
-      });
-    }
-    if (soon) {
-      said.sub = "С прошлого запуска программы продолжится: " + soon.titles.map(function (t) { return "«" + t + "»"; })
-        .join(", ") + (soon["in"] > 0 ? " — через " + soon["in"] + " с" : " — сейчас");
-    }
-    queueLines("manhwa", queue, c, function (q) { return q.count ? plural(q.count, ["глава", "главы", "глав"]) : ""; });
-  }
-
-  var MANGA_STATES = {wait: "в очереди", reading: "читаю описание…", done: "готово", had: "уже была скачана",
-    failed: "не скачана", stopped: "остановлена — докачается"};
-
-  function paintManga(st, said, running, soon, queue, c) {
-    var items = st.items || [];
-    var meter = st.meter || {};
-    var done = items.filter(function (x) { return x.state === "done" || x.state === "had"; }).length;
-    var now = items.filter(function (x) { return x.state === "pages" || x.state === "reading"; })[0];
-    if (running) {
-      said.part = items.length ? (done + (now && now.pages ? (now.page || 0) / now.pages : 0)) / items.length : 0.02;
-      said.text = now ? (now.title || "Галерея " + now.number) + (now.state === "pages" ? ": страница "
-        + (now.page || 1) + " из " + (now.pages || "?") : ": читаю описание…") : st.line || "Начинаю…";
-      said.sub = items.length > 1 ? "Галерей: " + done + " из " + items.length : "";
-    } else if (st.id) {
-      var failed = items.filter(function (x) { return x.state === "failed"; }).length;
-      said.text = (st.status === "stopped" ? "Остановлено: " : "Готово: ")
-        + plural(done, ["галерея", "галереи", "галерей"]) + (failed ? ", не скачаны: " + failed : "");
-      said.open = st.open || "";
-    }
-    if (meter && !items.length && running) { said.sub = ""; }
-    if (soon) {
-      said.sub = "С прошлого запуска программы продолжится: " + soon.titles.join(", ")
-        + (soon.in > 0 ? " — через " + soon.in + " с" : " — сейчас");
-    }
-    // (v5.44.107) the galleries waiting — the queue below, each with «убрать»
-    var waits = {};
-    if (running) { queue.forEach(function (q) { waits[String(q.id)] = true; }); }
-    items.filter(function (x) { return !(x.state === "wait" && waits[String(x.number)]); }).slice(-8).forEach(function (x) {
-      var li = el("li", "m-get-gallery" + (x.state === "failed" ? " m-get-warn" : ""));
-      var state = x.state === "pages" ? "страница " + (x.page || 1) + " из " + (x.pages || "?") : MANGA_STATES[x.state] || "";
-      if (x.state === "failed" && x.why) { state += ": " + x.why; }
-      if (x.cover) {
-        var img = el("img", "m-get-gallery-pic");
-        img.alt = "";
-        img.loading = "lazy";
-        img.src = x.cover;
-        li.append(img);
-      }
-      var text = el("span", "m-get-gallery-text");
-      text.append(el("b", "", x.title || "Галерея " + x.number), el("span", "", state));
-      li.append(text);
-      if (x.open && (x.state === "done" || x.state === "had") && items.length > 1) {
-        var a = el("a", "m-get-link", "Открыть");
-        a.href = phoneLink(x.open);
-        li.append(a);
-      }
-      c.list.append(li);
-    });
-    if (running) { queueLines("manga", queue, c, function () { return ""; }); }
+    }).catch(function () { /* the next question of phone.js says it */ });
   }
 
   // ── the page ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1154,6 +1137,10 @@
   });
   field.addEventListener("paste", function () {
     setTimeout(function () { if (field.value.trim() && !findButton.disabled) { ask(field.value); } }, 30);
+  });
+  field.addEventListener("input", function () {          // (v5.44.122) what it is, said under the field as it is typed
+    clearTimeout(markTimer);
+    markTimer = setTimeout(markKind, 300);
   });
   if (navigator.clipboard && navigator.clipboard.readText && window.isSecureContext) {
     pasteButton.hidden = false;
@@ -1170,14 +1157,44 @@
   });
 
   ORDER.forEach(function (kind) { watch(kind); });
+
+  // (v5.44.119) back from a title's page: the line to open it again (not that page again by itself)
+  function titleLine(url) {
+    var again = el("a", "m-link", "открыть снова");
+    again.href = "/m/title?url=" + encodeURIComponent(url);
+    step.textContent = "";
+    step.className = "m-get-step";
+    step.append(el("span", "m-get-step-text", "Этот тайтл — на своей странице: "), again);
+    step.hidden = false;
+  }
+  // …by the history, the page kept as it was left («Открываю…», «Найти» held): not busy any more ((v5.44.122) a title
+  // picked among the ones of a name: they are there as they were)
+  window.addEventListener("pageshow", function (event) {
+    if (!event.persisted || finding) { return; }
+    var was = null;
+    try { was = JSON.parse(stored("m-get-last") || "null"); } catch (e) { was = null; }
+    if (!was || was.kind !== "title" || was.text !== field.value.trim()) { return; }
+    busy(false);
+    if (isLink(was.text)) { titleLine(was.url || was.text); } else { tell(""); }
+  });
+
+  if (field.value.trim()) { markKind(); }
   if (box.dataset.autofind === "1" && field.value.trim()) {
     ask(field.value);
   } else if (field.value.trim()) {     // back to the page: the list found for this link, if it is still there
     var last = null;
     try { last = JSON.parse(stored("m-get-last") || "null"); } catch (e) { last = null; }
-    if (last && last.text === field.value.trim() && KINDS[last.kind] && KINDS[last.kind].findState) {
-      getJson(KINDS[last.kind].findState + "?after=999999999").then(function (st) {
-        if (st.id !== last.id) { return; }
+    var asked = field.value.trim();
+    if (last && last.kind === "title" && last.text === asked) {
+      // a link — the line to open its page again; (v5.44.122) a name — the titles found by it, the picked one marked
+      if (isLink(asked)) { titleLine(last.url || last.text); } else { restoreHits(asked, last.url); }
+    } else if (last && last.kind === "name" && last.text === asked) {
+      restoreHits(asked, "");
+    } else if (last && last.kind === "booru" && last.text === asked) {
+      ask(asked);                      // (v5.44.122) the post's card again (one question of its site)
+    } else if (last && last.text === field.value.trim() && KINDS[last.kind] && KINDS[last.kind].findState) {
+      getJson(withAfter(findAddress(last.kind, last.id), 999999999)).then(function (st) {
+        if (st.gone || st.id !== last.id) { return; }
         if (RUNNING.indexOf(st.status) >= 0) {
           finding = last;
           busy(true);

@@ -61,7 +61,8 @@
     }
     if (!c.original) box.appendChild(badge("без оригинала", "Сайт не отдаёт оригинал — скачать нельзя", "warn"));
     if (c.blocked && c.blocked.length) {
-      box.appendChild(badge("в блоклисте", "Теги из блоклиста граббера и подписок: " + c.blocked.join(", "), "warn"));
+      box.appendChild(badge("в блоклисте", "Теги из блоклиста подписок и «Галереи (booru)»: " + c.blocked.join(", "),
+        "warn"));
     }
   }
 
@@ -340,7 +341,9 @@
     line.textContent = "";
     const blocked = c.blocked && c.blocked.length;
     line.hidden = !c.owned && !blocked;
-    if (blocked) line.append(`Теги из блоклиста граббера и подписок: ${c.blocked.join(", ")} — такой пост не скачивается. `);
+    if (blocked) {
+      line.append(`Теги из блоклиста подписок и «Галереи (booru)»: ${c.blocked.join(", ")} — такой пост не скачивается. `);
+    }
     if (!c.owned) return;
     line.append(OWNED[c.owned] ? OWNED[c.owned][1] + ". " : "");
     if (c.image_id) {

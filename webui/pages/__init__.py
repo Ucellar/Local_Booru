@@ -18,6 +18,8 @@ def register(router) -> None:
     api.register(router)
     post_sets.register(router)
     tools.register(router)
+    from webui.pages import parser_manga         # (v5.44.125) «Парсер» → «Манга в исходной папке»
+    parser_manga.register(router)
     nomatch.register(router)
     trash.register(router)
     visual.register(router)
@@ -32,12 +34,16 @@ def register(router) -> None:
     manga_sites.register(router)
     from webui.pages import manga_online         # (v5.44.82) «Читать» a title of the sites without downloading it
     manga_online.register(router)
+    from webui.pages import reader               # (v5.44.117) the one reader: a folder's title's chapters on its site
+    reader.register(router)
     from webui.pages import catalog              # (v5.44.90) «Лента» of «Манга», «Манхва», «Видео»: the sites' titles
     catalog.register(router)
     from webui.pages import title                # (v5.44.102) a title of «Лента»: its page in the tab of the feed
     title.register(router)
     from webui.pages import video_watch          # (v5.44.106) «Смотреть» a series of a site in the program
     video_watch.register(router)
+    from webui.pages import covers               # (v5.44.123) the menu of covers of a title and of a series
+    covers.register(router)
     dupes.register(router)
     diag.register(router)
     maintenance.register(router)

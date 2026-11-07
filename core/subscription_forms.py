@@ -89,7 +89,8 @@ def grab_download(query: str, cards: list, site_order: list) -> dict:
     sites = [{"site": host, "priority": max(1, 5 - i)} for i, host in enumerate(order)]
     key = hashlib.md5("\n".join(sorted(c["key"] for c in cards)).encode("utf-8")).hexdigest()[:12]
     count = len(cards)
-    return {"id": GRAB_PREFIX + key, "name": f"Граббер: {query or 'выбранное'} ({count})",
+    return {"id": GRAB_PREFIX + key, "name": f"Галерея (booru): {query or 'выбранное'} ({count})",
             "query": " ".join(str(query or "grabber").split()), "sites": sites, "given_posts": posts,
-            "max_pages": 1, "run_mode": "all", "run_direction": "newest_to_oldest", "one_off": True}
+            "max_pages": 1, "run_mode": "all", "run_direction": "newest_to_oldest", "one_off": True,
+            "cards": count}                        # (v5.44.120) «Загрузки»: «Скачано картинок: N из <cards>»
 

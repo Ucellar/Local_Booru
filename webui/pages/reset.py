@@ -267,8 +267,9 @@ def _results_html(counts: dict) -> str:
             "можно вернуть; пока они в корзине, парсер не добавит те же картинки снова.")
     downloads = _find_form("downloads", '<label class="reset-field"><span>Что</span><select name="mode">'
                            f'{_options(cleanup.DOWNLOAD_MODES, counts.get("downloads"))}</select></label>')
-    lead_dl = ("Что скачала программа: граббер, подписки и расширение (папка subscriptions) и старый загрузчик "
-               "(папка downloads). В корзину, оттуда можно вернуть; пока они в корзине, те же картинки не скачаются снова.")
+    lead_dl = ("Что скачала программа: «Галерея (booru)», подписки и расширение (папка subscriptions) и старый "
+               "загрузчик (папка downloads). В корзину, оттуда можно вернуть; пока они в корзине, те же картинки не "
+               "скачаются снова.")
     return (_block("reset-parser", "Результаты парсера", esc(lead), parser)
             + _block("reset-downloads", "Скачанное", esc(lead_dl), downloads))
 
@@ -316,8 +317,8 @@ def _everything_html(settings: dict) -> str:
         items.append(f"<li><code>{esc(path)}</code>{esc(note)}</li>")
     items.append(f'<li><code>{esc(what["base"])}</code> — база: теги, источники, корзина, запреты «не добавлять '
                  f'снова», история скачивания</li>')
-    items.append(f'<li><code>{esc(what["cache"])}</code> — кэш: превью, кэш граббера и парсера, список «Скрыть» '
-                 f'граббера</li>')
+    items.append(f'<li><code>{esc(what["cache"])}</code> — кэш: превью, кэш парсера и «Галереи (booru)» с её '
+                 f'списком «Скрыть»</li>')
     kept = "".join(f'<li><code>{esc(p)}</code> — <span class="tool-warn">останется: в ней исходная папка</span></li>'
                    for p in what["kept"])
     root = str(settings.get("root") or "")
@@ -340,8 +341,8 @@ def _everything_html(settings: dict) -> str:
                 '<label class="reset-field"><span>Впишите DELETE</span><input type="text" name="confirm" '
                 'autocomplete="off" spellcheck="false" placeholder="DELETE" aria-describedby="reset-all-lead"></label>'
                 '<label class="check"><input type="checkbox" name="subscriptions" checked> и подписки — их список и папка '
-                'subscriptions со всем, что скачали граббер, подписки и расширение (без галочки она останется, но без '
-                'карточек)</label>'
+                'subscriptions со всем, что скачали «Галерея (booru)», подписки и расширение (без галочки она '
+                'останется, но без карточек)</label>'
                 '<div class="tool-actions"><button type="submit" class="danger" disabled '
                 'data-ask="Всё будет удалено при следующем запуске. Нажмите ещё раз">Удалить всё</button>'
                 '<span class="action-status" role="status"></span></div></form>')

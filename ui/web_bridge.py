@@ -5,6 +5,11 @@ The web server answers in its own threads; Qt windows may be touched only from t
 ``AppBridge.request`` may be called from any thread: it emits a signal, and Qt runs the action
 later in the main thread.  The server looks up everything from the library first (paths, tags),
 so the actions here only deal with the window.
+
+(v5.44.117) A page of the window of tabs (``ui/web_tabs.py``) asks too: its request carries its tab's mark
+(``payload["tab"]`` — ``webui/pages/api.py`` from the header ``X-LB-Tab``), and the action is that tab's — a dialog over
+its window, the page it opens next in that tab, its full screen (:meth:`AppBridge._page_of`, :meth:`AppBridge._owner`);
+the program's own video player stays the main window's (the server refuses it for a tab in words).
 """
 from __future__ import annotations
 
@@ -38,6 +43,7 @@ class AppBridge(QObject):
         self._drag_copy_ready.connect(self._drag_copy_made)
         self._drag_copies: dict[str, str] = {}   # file key -> its copy with tags (made once per run)
         self._drag_making: set[str] = set()
+        self._drag_from = None                   # (v5.44.117) the page the last drag was asked by (a tab's too)
 
     def request(self, name: str, payload=None) -> bool:
         """Ask the program to do ``name``; returns False for an unknown request (nothing is done)."""
@@ -53,30 +59,47 @@ class AppBridge(QObject):
         except Exception as exc:  # a failed dialog must not take the window down; tell the log
             _LOG.error("web request %s failed: %s", name, exc, exc_info=True)
 
-    def _do_choose_manga_folder(self, _payload) -> None:
+    def _page_of(self, payload):
+        """(v5.44.117) The page that asked: a tab of the window of tabs (its mark — ``payload["tab"]``), else (or that
+        tab closed meanwhile) the main window's page."""
+        mark = payload.get("tab") if isinstance(payload, dict) else None
+        if mark:
+            from ui import web_tabs
+            tab = web_tabs.tab_of(str(mark))
+            if tab is not None:
+                return tab
+        return self.page
+
+    def _owner(self, payload):
+        """(v5.44.117) The window a dialog asked by a page opens over: the page's own."""
+        page = self._page_of(payload)
+        return self.mw if page is self.page else page.window()
+
+    def _do_choose_manga_folder(self, payload) -> None:
         from PySide6.QtWidgets import QFileDialog
         current = str(self.mw.settings.get("manga_root") or "")
-        chosen = QFileDialog.getExistingDirectory(self.mw, "Папка с мангой", current)
+        chosen = QFileDialog.getExistingDirectory(self._owner(payload), "Папка с мангой", current)
         if not chosen:
             return
         self.mw.settings["manga_root"] = chosen
         self.mw.save_settings()
         from core import manga_library
         manga_library.LIBRARY.invalidate()        # the server scans the new folder on the next page
-        self.page.open_path("/manga")
+        self._page_of(payload).open_path("/manga")
 
-    def _do_choose_video_folder(self, _payload) -> None:
+    def _do_choose_video_folder(self, payload) -> None:
         from PySide6.QtWidgets import QFileDialog
 
         from core import video_library
         current = video_library.video_root(self.mw.settings)
-        chosen = QFileDialog.getExistingDirectory(self.mw, "Папка видео: одна папка — один сериал", current)
+        chosen = QFileDialog.getExistingDirectory(self._owner(payload), "Папка видео: одна папка — один сериал",
+                                                  current)
         if not chosen:
             return
         self.mw.settings["video_root"] = chosen
         self.mw.save_settings()
         video_library.LIBRARY.invalidate()
-        self.page.open_path("/videos")
+        self._page_of(payload).open_path("/videos")
 
     def _do_fetch_page(self, payload) -> None:
         """«Описание с сайта» of a site that checks for robots: the window's browser opens the page out of sight
@@ -96,15 +119,15 @@ class AppBridge(QObject):
                           visible=bool(payload.get("visible")))
         fetch.start()
 
-    def _do_choose_parser_folder(self, _payload) -> None:
+    def _do_choose_parser_folder(self, payload) -> None:
         from PySide6.QtWidgets import QFileDialog
         current = str(self.mw.settings.get("root") or "")
-        chosen = QFileDialog.getExistingDirectory(self.mw, "Папка с картинками для парсера", current)
+        chosen = QFileDialog.getExistingDirectory(self._owner(payload), "Папка с картинками для парсера", current)
         if not chosen:
             return
         self.mw.settings["root"] = chosen
         self.mw.save_settings()
-        self.page.open_path("/parser")
+        self._page_of(payload).open_path("/parser")
 
     def _do_choose_path(self, payload) -> None:
         """A folder or a file for a setting of «Настройки» (only the keys of ``PATH_KEYS``)."""
@@ -114,10 +137,11 @@ class AppBridge(QObject):
             return
         kind, title, flt = PATH_KEYS[key]
         current = str(self.mw.settings.get(key) or "")
+        owner = self._owner(payload)
         if kind == "folder":
-            chosen = QFileDialog.getExistingDirectory(self.mw, title, current)
+            chosen = QFileDialog.getExistingDirectory(owner, title, current)
         else:
-            chosen, _ = QFileDialog.getOpenFileName(self.mw, title, current, flt)
+            chosen, _ = QFileDialog.getOpenFileName(owner, title, current, flt)
         if not chosen:
             return
         if key == "light_backup_dir":
@@ -126,7 +150,7 @@ class AppBridge(QObject):
             problem = backup_folder_problem(self.mw.settings, chosen)
             if problem:
                 from PySide6.QtWidgets import QMessageBox
-                QMessageBox.warning(self.mw, title, f"{chosen}\n\n{problem}. Папка не изменена.")
+                QMessageBox.warning(owner, title, f"{chosen}\n\n{problem}. Папка не изменена.")
                 return
         self.mw.settings[key] = chosen
         self.mw.save_settings()
@@ -136,47 +160,49 @@ class AppBridge(QObject):
         if key == "video_root":
             from core import video_library
             video_library.LIBRARY.invalidate()
-        self.page.open_path("/settings")
+        self._page_of(payload).open_path("/settings")
 
-    def _do_choose_archive(self, _payload) -> None:
+    def _do_choose_archive(self, payload) -> None:
         """«Настройки → Папки → Подключить другой архив»: it opens at the next start (``core.archive_switch``); this
         run keeps its archive, settings and folders."""
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from core import archive_switch
         title = "Папка архива Local_Booru_Archive"
-        chosen = QFileDialog.getExistingDirectory(self.mw, title, str(archive_switch.open_archive().parent))
+        owner = self._owner(payload)
+        chosen = QFileDialog.getExistingDirectory(owner, title, str(archive_switch.open_archive().parent))
         if not chosen:
             return
         result = archive_switch.connect(chosen)
         if not result.get("ok"):
-            QMessageBox.warning(self.mw, title, str(result.get("error") or "Не получилось"))
+            QMessageBox.warning(owner, title, str(result.get("error") or "Не получилось"))
         elif result.get("stayed"):
-            QMessageBox.information(self.mw, title, "Это архив, который сейчас открыт: при следующем запуске "
+            QMessageBox.information(owner, title, "Это архив, который сейчас открыт: при следующем запуске "
                                     "откроется он же.")
         else:
             QMessageBox.information(
-                self.mw, title, f"При следующем запуске откроется архив:\n{result['archive']}\n\n"
+                owner, title, f"При следующем запуске откроется архив:\n{result['archive']}\n\n"
                 "Закройте программу и откройте снова. До этого программа работает с открытым сейчас архивом и "
                 "сохраняет всё в него; подключённый архив не меняется.")
-        self.page.open_path("/settings#set-folders")
+        self._page_of(payload).open_path("/settings#set-folders")
 
-    def _do_choose_move_target(self, _payload) -> None:
+    def _do_choose_move_target(self, payload) -> None:
         """«Настройки → Папки → Перенести архив на другой диск…»: the folder it goes to; the copy starts at once (a
         page task of ``core/archive_move.py``), the rest is done at the next start."""
         from PySide6.QtWidgets import QFileDialog, QMessageBox
         from core import archive_move, page_jobs
         title = "Куда перенести архив"
+        owner = self._owner(payload)
         root = archive_move.source()
-        chosen = QFileDialog.getExistingDirectory(self.mw, title, str(root.parent) if root is not None else "")
+        chosen = QFileDialog.getExistingDirectory(owner, title, str(root.parent) if root is not None else "")
         if not chosen:
             return
         try:
             target = archive_move.target_for(chosen)
         except archive_move.MoveError as exc:
-            QMessageBox.warning(self.mw, title, str(exc))
+            QMessageBox.warning(owner, title, str(exc))
             return
         sure = QMessageBox.question(
-            self.mw, title, f"Весь архив будет скопирован сюда:\n{target}\n\nКопирование идёт, пока вы работаете с "
+            owner, title, f"Весь архив будет скопирован сюда:\n{target}\n\nКопирование идёт, пока вы работаете с "
             "программой; большой архив копируется часами. Потом программа попросит перезапуск: при запуске она "
             "докопирует изменённое, перенесёт базу и откроет архив на новом месте. Старый архив останется как есть, "
             "пока вы сами не удалите его в «Настройках».\n\nНачать копирование?",
@@ -187,12 +213,12 @@ class AppBridge(QObject):
             archive_move.request(chosen)
             page_jobs.start(archive_move.KIND, "Перенос архива", archive_move.copy_job)
         except archive_move.MoveError as exc:
-            QMessageBox.warning(self.mw, title, str(exc))
+            QMessageBox.warning(owner, title, str(exc))
         except page_jobs.TaskBusy as exc:
-            QMessageBox.information(self.mw, title, f"Уже идёт: {exc.label}")
+            QMessageBox.information(owner, title, f"Уже идёт: {exc.label}")
         except OSError as exc:
-            QMessageBox.warning(self.mw, title, f"Не получилось начать: {exc}")
-        self.page.open_path("/settings#set-folders")
+            QMessageBox.warning(owner, title, f"Не получилось начать: {exc}")
+        self._page_of(payload).open_path("/settings#set-folders")
 
     def _do_restart_app(self, _payload) -> None:
         """«Перезапустить» of a page: the window closes, app.py starts the program again at the end of its exit."""
@@ -237,8 +263,8 @@ class AppBridge(QObject):
             if done is not None:
                 done.set()
 
-    def _do_open_settings(self, _payload) -> None:
-        self.page.open_path("/settings")
+    def _do_open_settings(self, payload) -> None:
+        self._page_of(payload).open_path("/settings")
 
     def _do_open_card(self, payload) -> None:
         """«Уже есть» clicked in the browser extension (v5.31): the card's page, the window in front (out of the
@@ -260,16 +286,23 @@ class AppBridge(QObject):
                 done.set()
 
     def _do_play_video(self, payload) -> None:
+        if self._page_of(payload) is not self.page:   # (v5.44.117) the program's player is the main window's (the
+            _LOG.info("the window's player is not asked from a tab")    # server said so to the page already)
+            return
         image_id = payload.get("id")
         self.page.play_video(str(payload["path"]), str(payload.get("title") or ""),
                              int(image_id) if image_id is not None else None,
                              prefer=payload.get("prefer") or None, series=str(payload.get("series") or ""),
                              top=str(payload.get("top") or ""), episode=str(payload.get("episode") or ""),
                              start_at=float(payload.get("start_at") or 0.0), paused=bool(payload.get("paused")),
-                             resume=float(payload.get("resume") or 0.0))
+                             resume=float(payload.get("resume") or 0.0),
+                             loop=payload.get("loop") is not False, memory=str(payload.get("memory") or ""))
 
     def _do_video(self, payload) -> None:
-        """A video played inside the page: start (the server made the token) or a command of its buttons."""
+        """A video played inside the page: start (the server made the token) or a command of its buttons; (v5.44.117)
+        the program's player is one, the main window's — a tab's page never reaches it (the server refuses it)."""
+        if self._page_of(payload) is not self.page:
+            return
         self.page.inline_video(dict(payload))
 
     def _do_copy_file(self, payload) -> None:
@@ -293,6 +326,7 @@ class AppBridge(QObject):
             _LOG.warning("drag: %s", exc)
             return
         key = f'{item["path"]}|{st.st_mtime_ns}|{st.st_size}'
+        self._drag_from = self._page_of(payload)    # (v5.44.117) the drag starts from the page that asked
         ready = self._drag_copies.get(key)
         if ready and Path(ready).is_file():
             self._start_drag(ready)
@@ -328,7 +362,12 @@ class AppBridge(QObject):
             return            # the button was let go before the copy was ready; the next drag starts at once
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(path)])
-        drag = QDrag(self.page)
+        source = getattr(self, "_drag_from", None)
+        try:
+            alive = source is not None and source.isVisible()
+        except RuntimeError:                       # (a tab closed meanwhile)
+            alive = False
+        drag = QDrag(source if alive else self.page)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.CopyAction)
 
@@ -344,11 +383,12 @@ class AppBridge(QObject):
 
     def _do_export_results(self, payload) -> None:
         from PySide6.QtWidgets import QFileDialog, QMessageBox
+        owner = self._owner(payload)
         ids = [int(x) for x in payload.get("ids") or []]
         if not ids:
-            QMessageBox.information(self.mw, "Экспорт", "В этой выдаче нет картинок — экспортировать нечего.")
+            QMessageBox.information(owner, "Экспорт", "В этой выдаче нет картинок — экспортировать нечего.")
             return
-        path, selected = QFileDialog.getSaveFileName(self.mw, f"Экспорт тегов и источников ({len(ids)} шт.)",
+        path, selected = QFileDialog.getSaveFileName(owner, f"Экспорт тегов и источников ({len(ids)} шт.)",
                                                      "local_booru_metadata.json", "JSON (*.json);;CSV (*.csv)")
         if not path:
             return
@@ -358,13 +398,14 @@ class AppBridge(QObject):
             count = export_metadata(self.mw.settings, path, fmt, image_ids=ids)
         except Exception as exc:  # disk full, no access, a locked base: say so instead of a silent log line
             _LOG.error("export of %d cards failed: %s", len(ids), exc, exc_info=True)
-            QMessageBox.warning(self.mw, "Экспорт", f"Экспорт не удался: {exc}")
+            QMessageBox.warning(owner, "Экспорт", f"Экспорт не удался: {exc}")
             return
-        QMessageBox.information(self.mw, "Экспорт", f"Экспортировано файлов: {count}\n{path}")
+        QMessageBox.information(owner, "Экспорт", f"Экспортировано файлов: {count}\n{path}")
 
-    def _do_fullscreen(self, _payload) -> None:
-        self.page.toggle_fullscreen()
+    def _do_fullscreen(self, payload) -> None:
+        self._page_of(payload).toggle_fullscreen()
 
     def _do_video_screen(self, payload) -> None:
-        """⛶ of the page's player: the window full screen for it, or back."""
-        self.page.video_screen(bool(payload.get("on")))
+        """⛶ of the page's player: the window full screen for it, or back — (v5.44.117) the window of the page that
+        asked (a tab's — the window of tabs; the main window as it was)."""
+        self._page_of(payload).video_screen(bool(payload.get("on")))

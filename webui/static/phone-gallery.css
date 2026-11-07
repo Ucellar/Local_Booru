@@ -1,0 +1,143 @@
+/* (v5.44.118) The phone's gallery as the computer's (the sketch E, webui/pages/phone_gallery.py, phone-gallery.js):
+   «В корзину», the rating and «+ / −» of the card; «Брак» and «Корзина» — why, their words, choosing tiles.  The
+   colours are phone.css's tokens; touch targets — 36 px and more (the tags' own height), the buttons 44 px. */
+
+/* ── the card ── */
+.m-act.m-act-trash { color: var(--accent-text); }
+.m-act.m-act-trash svg { color: var(--accent-text); }
+.m-act.confirming { background: var(--accent-button); color: #fff; font-size: 11px; line-height: 1.2; }
+.m-act.confirming svg { display: none; }
+
+.m-rate { display: flex; align-items: center; gap: 10px; }
+.m-rate > span { color: var(--muted); font-size: 13px; }
+.m-rate-stars { display: flex; gap: 2px; }
+.m-rate-star {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: #6b6b6b;
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+}
+.m-rate-star.on { color: var(--accent); }
+
+.m-why-box { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--panel);
+  border-left: 3px solid var(--accent); border-radius: var(--radius); font-size: 13px; }
+.m-why-box b { color: var(--strong); }
+.m-why-box p { margin: 0; }
+.m-why-box .m-muted { font-size: 12px; }
+
+.m-tagline { display: inline-flex; align-items: stretch; max-width: 100%; overflow: hidden; background: var(--panel);
+  border-radius: var(--radius); }
+.m-tagline .m-tag { background: transparent; border-radius: 0; min-width: 0; }
+.m-tag-op {
+  flex: none;
+  width: 34px;
+  min-height: 36px;
+  display: grid;
+  place-items: center;
+  border-left: 1px solid var(--bg);
+  color: var(--muted);
+  font-size: 18px;
+  font-weight: 700;
+}
+.m-tag-plus { color: var(--tag-character); }
+.m-tag-minus { color: var(--accent-text); }
+
+/* ── «Брак» and «Корзина» ── */
+.m-secbar { display: flex; flex-direction: column; gap: 6px; padding: 2px 12px 8px; font-size: 13px; }
+.m-secbar p { margin: 0; }
+.m-secbar b { color: var(--strong); }
+.m-secbar .m-muted { font-size: 12.5px; }
+.m-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.m-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 36px;
+  padding: 0 10px;
+  background: var(--panel);
+  border-radius: 999px;
+  color: var(--text);
+  font-size: 13px;
+}
+.m-filter span { color: var(--muted); font-size: 12px; }
+.m-filter[aria-current="true"] { background: var(--accent-button); color: #fff; font-weight: 600; }
+.m-filter[aria-current="true"] span { color: #fff; }
+.m-sep { width: 1px; align-self: stretch; margin: 4px 2px; background: #4a4a4a; }
+
+.m-sel { display: grid; grid-template-columns: auto 1fr; gap: 8px; padding: 0 12px 10px; }
+.m-sel .m-button { min-height: 44px; padding: 0 14px; font-size: 14px; }
+.m-sel .m-button[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--accent); }
+.m-sel .m-button.confirming { background: var(--accent-button); color: #fff; }
+.m-pc-only { margin: 0; padding: 0 12px 10px; font-size: 12.5px; }
+
+.m-job { margin: 0 12px 10px; padding: 8px 10px; background: var(--panel); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); font-size: 13px; }
+.m-job-head { margin: 0 0 6px; }
+.m-job-head .m-link { min-height: 36px; padding: 0 6px; background: transparent; border: 0; cursor: pointer; }
+.m-job-log { max-height: 30vh; margin: 0; overflow: auto; color: var(--text); font-size: 11.5px; white-space: pre-wrap;
+  overflow-wrap: anywhere; }
+
+.m-tile .m-why {
+  position: absolute;
+  left: 4px;
+  bottom: 4px;
+  max-width: calc(100% - 8px);
+  overflow: hidden;
+  padding: 2px 6px;
+  background: rgba(13, 13, 13, 0.82);
+  border-radius: var(--radius);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.m-tile .m-badge-top { top: 4px; bottom: auto; }
+
+/* choosing: a tap chooses the tile; the bar of the choice above the sections */
+.m-choosing .m-grid .m-tile { cursor: pointer; }
+.m-tile.m-picked { outline: 3px solid var(--accent); outline-offset: -3px; }
+.m-tile.m-picked::after {
+  content: "✓";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-button);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+}
+.m-tile.m-picked .m-star { display: none; }
+.m-actbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--tabs) + env(safe-area-inset-bottom, 0px));
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #2a2a2a;
+  border-top: 1px solid #3d3d3d;
+  box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.5);
+}
+.m-actbar b { color: var(--strong); font-size: 14px; white-space: nowrap; }
+.m-actbar .m-button { flex: 1; min-height: 44px; padding: 0 10px; font-size: 14px; }
+.m-actbar .m-button.m-quiet { flex: 0 0 auto; background: transparent; color: var(--muted); font-weight: 400; }
+.m-actbar .m-button:disabled { opacity: 0.55; }
+.m-choosing .m-main { padding-bottom: calc(var(--tabs) + env(safe-area-inset-bottom, 0px) + 80px); }
+.m-choosing .m-note { bottom: calc(var(--tabs) + env(safe-area-inset-bottom, 0px) + 76px); }

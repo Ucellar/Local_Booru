@@ -307,8 +307,8 @@ def open_link(settings: dict, url: str) -> GrabberSearch:
     search = GrabberSearch(settings, query, link=(host, servers))
     if not search.sites:
         search.close()
-        raise LinkError(f"С сайта {host} граббер брать не умеет: только с booru-сайтов (Danbooru, Gelbooru, rule34, "
-                        "e621, Moebooru, rule34.us…). Свой booru-сайт можно добавить на странице «Сайты».")
+        raise LinkError(f"С сайта {host} «Галерея (booru)» брать не умеет: только с booru-сайтов (Danbooru, Gelbooru, "
+                        "rule34, e621, Moebooru, rule34.us…). Свой booru-сайт можно добавить на странице «Сайты».")
     reason = search.sites[0].disabled_reason
     if reason:
         search.close()

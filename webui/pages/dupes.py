@@ -1,7 +1,8 @@
 """The page «Дубли»: pictures of the library that look the same (pHash), in pairs — keep one, the
 other goes to the trash and gives its tags, sources and the rest to the one kept; «Альтернативная
-версия» and «Не дубль» are remembered (the pair is not shown again).  The search runs as a page
-task (``core/page_jobs``); the pairs are what the last search stored (``duplicate_relations``)."""
+версия» and «Не дубль» are remembered (the pair is not shown again), (v5.44.116) and «Альтернативная версия» puts the
+two cards into one сборка.  The search runs as a page task (``core/page_jobs``); the pairs are what the last search
+stored (``duplicate_relations``)."""
 from __future__ import annotations
 
 import time
@@ -68,7 +69,8 @@ def _pair_html(group: dict) -> str:
             f'<div class="dupe-pair">{"".join(_item_html(it, rid, i == best) for i, it in enumerate(items))}</div>'
             f'<div class="tool-actions">'
             f'<button type="button" class="primary" data-action="dupe-resolve">Оставить отмеченную, вторую — в корзину</button>'
-            f'<button type="button" data-action="dupe-relation" data-relation-kind="alternative">Альтернативная версия</button>'
+            f'<button type="button" data-action="dupe-relation" data-relation-kind="alternative" '
+            f'title="Обе остаются и собираются в одну сборку; пара больше не показывается">Альтернативная версия</button>'
             f'<button type="button" data-action="dupe-relation" data-relation-kind="not_duplicate">Не дубль</button>'
             f'<button type="button" class="link" data-action="dupe-skip">Пропустить</button>'
             f'<span class="action-status" role="status"></span></div></article>')
@@ -237,7 +239,9 @@ def dupes_resolve(req: Request) -> Response:
 
 def dupes_relation(req: Request) -> Response:
     """«Альтернативная версия» / «Не дубль»: remembered by the MD5 of both pictures — the pair is
-    not offered again (a picture replaced by other bytes is compared anew)."""
+    not offered again (a picture replaced by other bytes is compared anew).  (v5.44.116) «Альтернативная версия» also
+    puts the two cards into one сборка (:func:`_together`; the review: it only remembered the pair)."""
+    from core.nomatch_manual import library_busy
     from core.services.library_service import remember_duplicate_relation
     body = req.json()
     kind = str(body.get("relation") or "")
@@ -252,5 +256,31 @@ def dupes_relation(req: Request) -> Response:
     rows = _live_rows(req.settings, ids)
     if len(rows) != 2:
         return Response.json({"ok": False, "error": "Одной из картинок уже нет в библиотеке — обновите страницу"}, 409)
+    busy = library_busy() if kind == "alternative" else ""     # a сборка is not written while «Обслуживание» works
+    if busy:                                                    # (the gallery's «Собрать в одну сборку» waits too)
+        return Response.json({"ok": False, "error": busy}, 409)
     done = remember_duplicate_relation(req.settings, [{"image_id": i, "md5": rows[i]["hash_md5"]} for i in ids], relation=kind)
-    return Response.json({"ok": True, "remembered": int(done or 0)})
+    answer = {"ok": True, "remembered": int(done or 0)}
+    if kind == "alternative":
+        answer.update(_together(req.settings, ids))
+    return Response.json(answer)
+
+
+def _together(settings: dict, ids: list) -> dict:
+    """(v5.44.116) «Альтернативная версия»: the two cards in one сборка — by ``card_sets.gather``, as «Собрать в одну
+    сборку» of the gallery does (``post_sets.gather``): a card of a сборка brings its whole сборка; when one of them is
+    in a сборка already, the other joins it (its name and number stay — as «+ добавить карточки» of a сборка); both
+    in one already — nothing to do.  {"set": id, "cards": n, "joined": bool} or {"set_error": why} (the pair is
+    remembered all the same)."""
+    from core import card_sets
+    sets = [card_sets.set_id_of(settings, image_id) for image_id in ids]
+    target = sets[0] or sets[1]
+    try:
+        if target and sets[0] == sets[1]:
+            found = card_sets.describe_set(settings, target) or {}
+            return {"set": target, "cards": int(found.get("count") or 0), "joined": False}
+        others = [image_id for image_id, set_id in zip(ids, sets) if set_id != target]
+        result = card_sets.gather(settings, others, into=target) if target else card_sets.gather(settings, ids)
+    except card_sets.SetError as exc:
+        return {"set_error": str(exc)}
+    return {"set": int(result["set"]), "cards": int(result["cards"]), "joined": True}

@@ -4,10 +4,11 @@ from, «Докачать» (the title's card of «Скачать → Манга 
 недостающее у всех» (the downloads' queue), «Отвязать».  The work — ``core/manga_archive.py`` (a page task); the page —
 ``static/archive.js``, ``static/archive.css``.
 
-(v5.44.81) The ways a title was known (``how``, ``by``) and what was tried for one «не нашлось» (``tried``); «Узнавать
-само, в фоне» and «…и по картинкам (SauceNAO)» (``manga_archive_auto``, ``manga_archive_pictures`` —
-``/api/archive/auto``); a round of the background shown as the page's own work, its buttons free (the page's work
-stops it first).
+(v5.44.81) The ways a title was known (``how``, ``by``) and what was tried for one «не нашлось» (``tried``); a round of
+the background shown as the page's own work, its buttons free (the page's work stops it first).  (v5.44.116) Its
+switches «Узнавать само, в фоне» and «…и по картинкам (SauceNAO)» (``manga_archive_auto``, ``manga_archive_pictures``)
+are normal fields of «Настройки → Сайты манги» now (the owner's review): here — a line of what they are and the way
+there.
 """
 from __future__ import annotations
 
@@ -27,33 +28,37 @@ def register(router) -> None:
     router.add("POST", r"/api/archive/counts", counts)
     router.add("POST", r"/api/archive/download", download)
     router.add("POST", r"/api/archive/stop", stop)
-    router.add("POST", r"/api/archive/auto", auto)
     router.add("GET", r"/api/archive/cover", cover)
     router.add("GET", r"/api/archive/folder-cover", folder_cover)
     router.add("POST", r"/api/archive/scan", scan)
     router.add("POST", r"/api/archive/not-manga", not_manga)
 
 
+SETTINGS_LINK = "/settings#set-manga_auto"   # (v5.44.116) «Настройки → Сайты манги → Что программа делает сама»
+
+
 def _switches(settings: dict) -> str:
-    """(v5.44.81) «Узнавать само, в фоне», «…и по картинкам (SauceNAO)» and what SauceNAO needs."""
-    from core import manga_pictures as P
-    auto = bool(settings.get("manga_archive_auto", True))
-    pictures = bool(settings.get("manga_archive_pictures", True))
-    note = ""
-    if not P.key_of(settings):
-        note = "Ключа SauceNAO нет (Настройки → Парсер) — по картинкам программа не ищет."
-    elif not settings.get("enable_saucenao", True):
-        note = "SauceNAO выключен в настройках парсера — по картинкам программа не ищет."
+    """(v5.44.81) «Узнавать само, в фоне», «…и по картинкам (SauceNAO)» — (v5.44.116) fields of «Настройки → Сайты
+    манги» now: what they are and the way there."""
+    if not settings.get("manga_archive_auto", True):
+        now = "сама, в фоне, программа тайтлы не узнаёт"
+    elif settings.get("manga_archive_pictures", True):
+        now = "программа узнаёт тайтлы сама, в фоне, — и по картинкам (SauceNAO)"
     else:
-        note = (f"По картинкам — не больше {P.PER_TITLE} поисков SauceNAO на тайтл и {P.per_day(settings)} в день, "
-                "в фоне — только когда не работает парсер.")
-    return f"""<form class="ar-auto" data-ar-auto>
-      <label><input type="checkbox" name="auto"{" checked" if auto else ""}> Узнавать само, в фоне</label>
-      <label><input type="checkbox" name="pictures"{" checked" if pictures else ""}> …и по картинкам (SauceNAO), когда
-        не помогли файлы и названия</label>
-      <span class="action-status" role="status"></span>
-      <p class="ar-auto-note">{esc(note)}</p>
-    </form>"""
+        now = "программа узнаёт тайтлы сама, в фоне, — по картинкам нет"
+    return (f'<p class="ar-auto">Сейчас {esc(now)}. Это меняется в <a href="{SETTINGS_LINK}">«Настройки → Сайты '
+            'манги»</a>.</p>')
+
+
+def stop_background() -> bool:
+    """(v5.44.116) «Узнавать само, в фоне» switched off (``webui/pages/settings.py``): a round of the background going
+    stops.  True — one was stopped."""
+    from core import manga_archive as A, page_jobs
+    task = page_jobs.current(A.TASK)
+    if task is not None and task.running and task.about == A.BACKGROUND:
+        task.stop()
+        return True
+    return False
 
 
 def _folder_line(settings: dict) -> str:
@@ -76,12 +81,14 @@ def page(req: Request) -> Response:
     body = f"""<div class="ar" id="archive">
   <section class="ar-head" aria-labelledby="ar-title">
     <h1 id="ar-title">Манга и манхва из архива</h1>
-    <p class="ar-lead">Манга и манхва в папке, из которой парсер booru берёт файлы, — в любой вложенной папке. Папку
-      со страницами по номерам («001.jpg»), с главами («Глава 12», «Chapter 5»), с ComicInfo.xml или с архивами .cbz
-      парсер на booru-сайты не отправляет: здесь программа узнаёт, что это за тайтл, — по ссылке на сайт в файлах
-      папки, по названию из файлов, по имени папки (если это название, а не «Новая папка» или «123») и по картинкам.
-      Узнанный привязывает на месте, берёт обложку и описание с тегами и докачивает главы, которых в папке нет. Если
-      папка — не манга, нажмите «Это не манга»: парсер возьмёт её как обычно.</p>
+    <p class="ar-lead">Тайтлы папок манги и манхвы программы, которые лежат в папке парсера booru, и копии манги,
+      которую программа взяла из папки парсера: туда попадает только манга, которую подтвердил сайт манги, —
+      ComicInfo.xml, ссылка в файлах, тайтл с теми же страницами или SauceNAO; пул e621 сам по себе мангу не
+      подтверждает (блок «Манга в исходной папке» на странице «<a href="/parser">Парсер</a>»). Здесь
+      программа узнаёт, что это за тайтл, — по ссылке на сайт в файлах папки, по названию из файлов, по имени папки (если
+      это название, а не «Новая папка» или «123») и по картинкам; узнанный привязывает, берёт обложку и описание с
+      тегами и докачивает главы, которых в папке нет. Файлы самой папки парсера не трогаются — всё делается в копии.
+      Если копия — не манга, нажмите «Это не манга»: копия останется, а папку парсер возьмёт как обычно.</p>
     {_folder_line(req.settings)}
     {_switches(req.settings)}
     <div class="ar-actions">
@@ -232,24 +239,6 @@ def download(req: Request) -> Response:
     return _start(req, "download", _keys(req.json()))
 
 
-def auto(req: Request) -> Response:
-    """(v5.44.81) {auto, pictures} — «Узнавать само, в фоне», «…и по картинкам (SauceNAO)»."""
-    from webui import settings_store
-    body = req.json()
-    changes = {k: bool(body[v]) for k, v in (("manga_archive_auto", "auto"), ("manga_archive_pictures", "pictures"))
-               if isinstance(body.get(v), bool)}
-    if not changes:
-        return Response.json({"ok": False, "error": "Нечего сохранять"}, 400)
-    if not settings_store.save(changes):
-        return Response.json({"ok": False, "error": "Программа не ответила — не сохранено"}, 503)
-    if changes.get("manga_archive_auto") is False:        # switched off: a round of the background stops
-        from core import manga_archive as A, page_jobs
-        task = page_jobs.current(A.TASK)
-        if task is not None and task.running and task.about == A.BACKGROUND:
-            task.stop()
-    return Response.json({"ok": True, **changes})
-
-
 def stop(req: Request) -> Response:
     from core import manga_archive as A, page_jobs
     task = page_jobs.current(A.TASK)
@@ -266,16 +255,19 @@ def scan(req: Request) -> Response:
 
 def not_manga(req: Request) -> Response:
     """(v5.44.84) {key} — «Это не манга»: the folder goes back to the parser (its link, if the program made one,
-    taken off first)."""
+    taken off first).  (v5.44.116) A row of a copy ``core/comic_manga`` made in the manga folder («root:<id>»): the
+    parser's own folder it was copied from is the one marked (``moved()[key]["source"]``), not the copy."""
     from pathlib import Path
-    from core import manga_archive as A, manga_detect as MD
+    from core import comic_manga, manga_archive as A, manga_detect as MD
     key = str(req.json().get("key") or "")[:80]
     entry = next((e for e in A.entries(req.settings) if e.key == key), None)
     if entry is None:
         return Response.json({"ok": False, "error": "Такой папки в списке нет — откройте страницу заново"}, 404)
     if entry.linked and entry.linked.get("archive"):
         A.unlink_folder(Path(entry.path))
-    MD.set_not_manga(entry.path)
+    record = comic_manga.moved().get(entry.key) if entry.key.startswith("root:") else None
+    source = str(record.get("source") or "") if isinstance(record, dict) else ""
+    MD.set_not_manga(source or entry.path)
     A.STORE.put(entry.key, None)
     return Response.json({"ok": True})
 

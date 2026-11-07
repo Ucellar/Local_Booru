@@ -34,6 +34,9 @@ _EXIT_HOOKED = False
 
 _SITE_LINE = re.compile(r"^\[MD5:([^:\]]+):[^\]]*\]")
 _FILE_LINE = re.compile(r"^\[(?:MD5|REVERSE):[^\]]*\]")
+# (v5.44.125) «Манга через парсер» (core/parser_manga.line): «МАНГА: …», «НЕ МАНГА: …», «ЖДЁТ: …», «СБОРКА: …»,
+# «МАНГА В ПАПКЕ: …» — the tab «Манга» of the journal
+_MANGA_LINE = re.compile(r"^(?:МАНГА(?: В ПАПКЕ)?|НЕ МАНГА|ЖДЁТ|СБОРКА): ")
 
 
 class ParserBusy(RuntimeError):
@@ -90,13 +93,15 @@ def current() -> "ParserJob | None":
 
 def channel_of(line: str) -> str:
     """The log channel of a parser line (the protocol of core/parser/engine.py): a site, «final»
-    (the result of a file), «reverse» (reverse search) or «main»."""
+    (the result of a file), «reverse» (reverse search), (v5.44.125) «manga» (core/parser_manga.py) or «main»."""
     text = str(line or "")
     m = _SITE_LINE.match(text)
     if m:
         return "site:" + m.group(1).strip()
     if text.startswith("[REVERSE:"):        # (v5.44.35) also «[REVERSE:…] … — так же ещё N файлов» (core/parser/tally.py)
         return "final" if "ФИНАЛ" in text else "reverse"
+    if _MANGA_LINE.match(text):
+        return "manga"
     return "main"
 
 

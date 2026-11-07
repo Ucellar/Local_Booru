@@ -18,9 +18,28 @@ The state gives only the chapters that changed after the page's last question (`
 (:func:`block` — the same search and download, the manga first there).  The field takes a name too: «Найти» asks the
 sites' searches at once (``core/manhwa_search.py``, a page task — :func:`search`, :func:`search_state`) and shows the
 titles as covers (``/api/manhwa/hit-cover``); a cover picked — its chapters looked for as by its link.
+
+(v5.44.116, the owner's review) In «SFW» a download of hentai (a site of hentai alone, a title its site marks as erotica
+or marked «Это хентай») is in «Загрузки» without its name and cover — «Скрытая загрузка 18+» (:func:`download_state`
+itself, so the phone's page too); «Не продолжать» for the downloads of the last run while they wait to be begun again
+(``/api/manhwa/download/forget-restore``); the sites' names of the pages' hints — :func:`site_names`.
+
+(v5.44.117) Each «Найти» is a search of its own (:class:`_Find`, by its task's number): several go at once
+(:data:`FINDS_AT_ONCE`), and a page asks ``find-state``, ``find-cover`` and ``download`` by its own number (``find``) —
+before, one search for the whole program: a second «Найти» (another tab, another title's page, the phone) stopped the
+first, and the first page heard «Найденное устарело».  The same title asked again while it is searched joins that
+search.  Ended searches are let go by time and by number (:data:`FIND_KEEP`, :data:`FINDS_KEPT`); «Найденное устарело»
+only when the page's search is not there any more.  The page sees the link's site's chapters at once and the other
+sites' as they answer (``manhwa_download.look(shown=)``: ``found.asking``; ``mark`` — «number.version» while it goes).
+
+(v5.44.119, step 3A of the plan) The card of a title found here is gone: a link of a title (``/manhwa/get?url=``
+included) or a cover picked opens the title's one page (``webui/pages/title.py``), whose block «Скачивание» is the card's
+download, queue and boxes.  This module keeps its machinery — the searches, the download, the queue — and the parts'
+field with the search by a name; :func:`follow` takes the page's search too (``{find, follow|helpers}``).
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -32,13 +51,22 @@ from webui.html import esc
 from webui.server import Request, Response
 
 _LOG = logging.getLogger("local_booru.manhwa_get")
-FIND = "manhwa_find"                  # the page task «Найти»
+FIND = "manhwa_find"                  # the page tasks «Найти» — (v5.44.117) each page's its own (``many``: by its number)
+FINDS_AT_ONCE = 5                     # (v5.44.117) searches going at once (one more — an abandoned one stops for it)
+FIND_KEEP = 30 * 60                   # an ended search is kept this long after a page last asked of it…
+FINDS_KEPT = 16                       # …and this many of them at most
+ABANDONED = 20.0                      # a search going that no page has asked of for this long: its page has gone
+FIND_WAIT_MORE = 15.0                 # «Скачать» while the other sites still answer: their time and this much more
+STALE = "Найденное устарело — нажмите «Найти» ещё раз"
 SITES = ("remanga.org", "recomics.org", "mangalib.me", "mangabuff.ru", "readmanga (a.zazaza.me)", "desu.uno",
          "com-x.life", "mangadex.org")         # (v5.44.77) ReadManga and Desu, (v5.44.79) MangaDex
 # (v5.44.85) the sites of hentai alone: named only where hentai is shown; (v5.44.99) HentaiLib, AllHentai
 ADULT_SITES = ("hentaichan.live", "hentailib.me", "allhentai (20.allhen.online)")
 # (v5.44.75) not searched by a name (their search goes through the window's browser: a check for browsers first)
 LINK_ONLY = ("com-x.life", "mangadex.org")
+# (v5.44.116) a download of hentai in «Загрузки» while «SFW» is on: these words for its name, no cover
+HIDDEN = "Скрытая загрузка 18+"
+HIDDEN_KIND = "18+"
 MAX_CHAPTERS = 20000                  # the ids «Скачать» may name
 # (v5.44.75) the words of the two parts of «Скачать» this block is in: (the heading, the folder, the kind shown first)
 PARTS = {"manhwa": ("Скачать манхву", "в папку манхвы", "manhwa"),
@@ -85,6 +113,123 @@ def forget_found() -> None:
         _FOUND.clear()
 
 
+class _Find:
+    """(v5.44.117) One «Найти» of a page: its task (the page keeps its number), what was asked (site, key, translators,
+    folder), the title as found so far (``found``, a copy given by ``manhwa_download.look(shown=)``, and ``rev`` — how
+    many times it changed) — the page shows the link's site's chapters at once, the other sites' as they answer — and
+    when a page last asked of it (``seen``: an ended search no page asks of is let go; a search going that no page asks
+    of is abandoned)."""
+
+    def __init__(self, ask: tuple, url: str):
+        self.ask = ask
+        self.url = url
+        self.task = None
+        self.found = None
+        self.rev = 0
+        self.seen = time.monotonic()
+        self.stamp = None                # (the title shown, the time of its folder when its chapters were read)
+        self.lock = threading.Lock()
+
+    def show(self, found) -> None:
+        """(``look``'s ``shown``) the title as it is so far."""
+        with self.lock:
+            self.found, self.rev = found, self.rev + 1
+
+    def now(self) -> tuple:
+        """(the title to show — None: not yet, or it ended without one —, its mark: the task's number, «number.rev»
+        while it goes — a page that has it is not sent it again)."""
+        task = self.task
+        if task is None:
+            return None, ""
+        if task.running:
+            with self.lock:
+                found, rev = self.found, self.rev
+            return found, (f"{task.id}.{rev}" if found is not None else "")
+        kept = _found_of(task)
+        return (kept["found"] if kept is not None else None), str(task.id)
+
+
+_FINDS: "OrderedDict[int, _Find]" = OrderedDict()     # (v5.44.117) the searches by their numbers, the oldest first
+_FINDS_LOCK = threading.Lock()
+_START_LOCK = threading.Lock()                        # one «Найти» started at a time: the same title — one search
+
+
+def _find_of(asked: str, *, newest: bool = True) -> "_Find | None":
+    """The search of the number ``asked`` — "" (a page that has none yet): the newest one, when ``newest`` — asked of
+    now (it is kept on)."""
+    with _FINDS_LOCK:
+        if not str(asked or ""):
+            entry = next(reversed(_FINDS.values()), None) if newest else None
+        else:
+            try:
+                entry = _FINDS.get(int(asked))
+            except (TypeError, ValueError):
+                entry = None
+        if entry is not None:
+            entry.seen = time.monotonic()
+        return entry
+
+
+def _forget_old(now: float) -> None:
+    """(under ``_FINDS_LOCK``) The ended searches no page has asked of for :data:`FIND_KEEP`, and the oldest-asked
+    beyond :data:`FINDS_KEPT`, let go; the ones going stay."""
+    ended = [(n, f) for n, f in _FINDS.items() if f.task is not None and not f.task.running]
+    for number, entry in ended:
+        if now - entry.seen > FIND_KEEP:
+            del _FINDS[number]
+    ended = sorted(((n, f) for n, f in _FINDS.items() if f.task is not None and not f.task.running),
+                   key=lambda x: x[1].seen)
+    for number, _entry in ended[:max(0, len(ended) - FINDS_KEPT)]:
+        del _FINDS[number]
+
+
+def _room(now: float) -> bool:
+    """(under ``_FINDS_LOCK``) May one more search start: fewer than :data:`FINDS_AT_ONCE` go — or one of them has been
+    abandoned by its page (no question for :data:`ABANDONED` seconds): that one stops for it."""
+    going = [f for f in _FINDS.values() if f.task is not None and f.task.running]
+    if len(going) < FINDS_AT_ONCE:
+        return True
+    left = sorted((f for f in going if now - f.seen > ABANDONED), key=lambda f: f.seen)
+    if not left:
+        return False
+    left[0].task.stop()
+    return True
+
+
+def found_titles() -> list:
+    """(v5.44.117) The titles the pages' searches found, the newest first: [(Found, the link asked)] — the reader
+    without downloading (``core/manga_online.Online._card``) takes a title found by its card instead of asking the
+    sites again."""
+    from core import page_jobs
+    with _FINDS_LOCK:
+        entries = [(e.task, e.url) for e in reversed(_FINDS.values())]
+    newest = page_jobs.current(FIND)             # (one started without this registry: the newest of the kind)
+    if newest is not None and all(task is not newest for task, _url in entries):
+        entries.insert(0, (newest, ""))
+    out = []
+    for task, url in entries:
+        kept = _found_of(task) if task is not None else None
+        if kept is not None:
+            out.append((kept["found"], str(kept.get("url") or url)))
+    return out
+
+
+def site_names(adult: bool = False) -> list:
+    """(v5.44.116) The sites of manga and manhwa as the hints of the pages name them («Скачать → По ссылке», the phone's
+    page and their words when a link is not one of them) — :data:`SITES` («readmanga», not its address in brackets);
+    ``adult`` — the sites of hentai alone instead (:data:`ADULT_SITES`: a hint names them only outside «SFW»).  One
+    list, not a hand-written one in each hint."""
+    return [site.split(" (")[0] for site in (ADULT_SITES if adult else SITES)]
+
+
+def hint_sites(adult: bool) -> tuple:
+    """(v5.44.116) (the sites of manga and manhwa, the sites of hentai — nhentai and :data:`ADULT_SITES`; "" when
+    ``adult`` is false: «SFW») as one text each, for the hints and the pages' scripts (``data-sites``)."""
+    from core.manga_download import SITE
+    hentai = [SITE.split("//", 1)[-1], *site_names(adult=True)] if adult else []
+    return ", ".join(site_names()), ", ".join(hentai)
+
+
 def register(router) -> None:
     from core import manhwa_queue
     router.add("GET", r"/manhwa/get", page)
@@ -96,6 +241,7 @@ def register(router) -> None:
     router.add("POST", r"/api/manhwa/download/stop", download_stop)
     router.add("POST", r"/api/manhwa/download/pause", download_pause)
     router.add("POST", r"/api/manhwa/download/unqueue", download_unqueue)
+    router.add("POST", r"/api/manhwa/download/forget-restore", download_forget_restore)     # (v5.44.116)
     router.add("GET", r"/api/manhwa/download-cover", download_cover)   # (v5.44.87) «Загрузки» of «По ссылке»
     router.add("POST", r"/api/manhwa/follow", follow)
     router.add("POST", r"/api/manhwa/search", search)              # (v5.44.75) «Найти» by a name
@@ -112,17 +258,21 @@ def register(router) -> None:
 
 
 def page(req: Request) -> Response:
-    """«Скачать → Манхва»."""
-    from webui.pages import get_hub
-    body = block(req, "manhwa", req.arg("url").strip(), req.arg("q").strip())
+    """«Скачать → Манхва»; (v5.44.119) with a title's link — that title's one page (``webui/pages/title.py``)."""
+    from webui.pages import get_hub, title as T
+    asked = req.arg("url").strip()
+    if T.is_title_link(asked):
+        return Response.redirect(T.address_for(asked, req.settings, hint="manhwa", branch=req.arg("b").strip()))
+    body = block(req, "manhwa", asked, req.arg("q").strip())
     return get_hub.frame(req, "Скачать манхву", body, part="manhwa", kind="manhwa-get", assets=("manhwa",))
 
 
 def block(req: Request, part: str = "manhwa", asked: str = "", name: str = "", note: str = "") -> str:
-    """The search and the download of a title of the sites (``#manhwa-get``, ``static/manhwa.js``): «Скачать →
-    Манхва», and «Скачать → Манга» before its nhentai.  ``asked`` — a link looked for at once (``?url=`` — «Докачать
-    сейчас» of a title, a link from another part of «Скачать»), ``name`` — a name searched at once (``?q=``); ``note``
-    — words under the lead (the manga folder not chosen)."""
+    """The search of a title of the sites (``#manhwa-get``, ``static/manhwa.js``): «Скачать → Манхва», and «Скачать →
+    Манга» before its nhentai.  ``asked`` — a link looked for at once (a link from another part of «Скачать»), ``name``
+    — a name searched at once (``?q=``); ``note`` — words under the lead (the manga folder not chosen).  (v5.44.119) A
+    title found — a link, or one picked among the ones found by its name — opens its one page (``title.py``): the card
+    of before with its chapters and its download is gone."""
     from webui import content_mode
     heading, folder, first = PARTS.get(part, PARTS["manhwa"])
     trouble = f'\n    <p class="mh-note" role="note">{esc(note)}</p>' if note else ""
@@ -160,58 +310,6 @@ def block(req: Request, part: str = "manhwa", asked: str = "", name: str = "", n
     <div class="mh-hits-list" aria-live="polite"></div>
     <p class="mh-hits-fold" hidden><button type="button" class="mh-btn" data-action="manhwa-hits-all"></button></p>
   </section>
-  <section class="mh-find job" data-job="find" hidden aria-live="polite">
-    <div class="job-head"><span class="mh-spin" aria-hidden="true"></span><b class="job-title"></b>
-      <span class="job-status"></span></div>
-    <p class="mh-step"></p>
-    <details class="mh-log"><summary>Подробности</summary>
-      <pre class="job-log" tabindex="0" aria-label="Журнал поиска"></pre></details>
-  </section>
-  <section class="mh-going" hidden aria-label="Скачивание">
-    <p class="mh-going-note" hidden aria-live="polite"></p>
-  </section>
-  <section class="mh-found" hidden aria-labelledby="mh-found-title">
-    <div class="mh-fcard">
-      <div class="mh-fcard-cover"><img alt="" hidden><span class="mh-fcard-initial" aria-hidden="true"></span></div>
-      <div class="mh-fcard-head">
-        <p class="mh-found-head">Нашлось</p>
-        <h2 class="mh-found-title" id="mh-found-title"></h2>
-        <p class="mh-found-alt"></p>
-      </div>
-      <div class="mh-fcard-more">
-        <ul class="mh-found-facts"></ul>
-        <p class="mh-found-about" hidden title="Нажмите, чтобы прочитать целиком"></p>
-        <div class="mh-found-notes"></div>
-        <div class="mh-found-choice"></div>
-        <p class="mh-found-paid" hidden></p>
-      </div>
-    </div>
-    <div class="mh-pick">
-      <div class="mh-pick-head"><h3>Главы</h3><span class="mh-read-tools"></span>
-        <span class="mh-pick-count" aria-live="polite"></span>
-        <span class="mh-pick-tools" role="group" aria-label="Отметить"><span class="mh-pick-label">Отметить:</span>
-          <button type="button" class="link" data-pick="all">все</button>
-          <button type="button" class="link" data-pick="none">ничего</button></span></div>
-      <div class="mh-chapters" role="group" aria-label="Главы"></div>
-    </div>
-    <div class="mh-dlbar">
-      <div class="mh-dlbar-go"><button type="button" class="mh-btn primary" data-action="manhwa-get-go">Скачать</button>
-        <span class="mh-dlbar-sum"></span><span class="action-status" role="status"></span></div>
-      <div class="mh-run job" data-job="download" hidden>
-        <div class="job-head"><b class="job-title"></b> <span class="job-status"></span>
-          <span class="action-status" role="status"></span>
-          <span class="mh-run-buttons"><button type="button" class="mh-btn" data-action="manhwa-get-pause" hidden>Пауза</button>
-          <button type="button" class="mh-btn" data-action="manhwa-get-stop" hidden>Остановить</button></span></div>
-        <ul class="mh-queue" hidden aria-label="Очередь скачивания"></ul>
-        <div class="mh-meter" hidden><progress max="1000" value="0"></progress><b class="mh-meter-pct"></b>
-          <span class="mh-meter-text"></span></div>
-        <div class="mh-run-end"><p class="mh-result" hidden></p>
-          <p class="mh-open" hidden><a class="mh-btn primary" href="/manhwa">Открыть тайтл</a></p></div>
-        <details class="mh-log"><summary>Подробности</summary>
-          <pre class="job-log" tabindex="0" aria-label="Журнал скачивания"></pre></details>
-      </div>
-    </div>
-  </section>
 </div>"""
 
 
@@ -237,69 +335,105 @@ def find(req: Request) -> Response:
     name = str(body.get("name") or "").strip()[:200]       # (v5.44.112) the tile's name: a 404 of the link — by it
     settings = dict(req.settings)
     ask = (source.name, key, branch, where)
-    kept = None if body.get("again") else _kept_found(ask)
+    with _START_LOCK:
+        with _FINDS_LOCK:
+            now = time.monotonic()
+            # (v5.44.117) the same title searched now (another page, «Найти» pressed again): this page joins that search
+            going = next((f for f in reversed(_FINDS.values())
+                          if f.ask == ask and f.task is not None and f.task.running), None)
+            if going is not None:
+                going.seen = now
+                return Response.json({"ok": True, "id": going.task.id, "joined": True})
+        kept = None if body.get("again") else _kept_found(ask)
+        with _FINDS_LOCK:
+            if kept is None and not _room(time.monotonic()):     # (one found a while ago is shown at once)
+                return Response.json({"ok": False, "error": f"Сейчас ищутся уже {FINDS_AT_ONCE} тайтлов — подождите, "
+                                                            "пока один из них найдётся"}, 409)
+        entry = _Find(ask, url)
 
-    def run(say, stop_check):
-        if kept is not None:                         # (v5.44.93) found a while ago: at once, the folder read anew
-            kept.have = D.had(Path(kept.folder), kept.title.site)
-            say(f"«{kept.title.title}» уже открывали — показываю сразу")
-            return {"found": kept, "url": url, "kept": True}
-        if source.readable:
-            say(f"{source.label}: читаю тайтл «{key}»")
-        try:
-            found = D.look(url, settings, branch=branch, net=S.Net(stop_check), where=where, say=say, name=name)
-        except D.DownloadError as exc:
-            return {"failed": str(exc)}
-        if stop_check():
-            return {"failed": "остановлено"}
-        _keep_found(ask, found)
-        extra = len([t for t in found.new(True) if t.helped])
-        say(f"Нашлось: «{found.title.title}» — глав {len(found.chapters)}, новых бесплатных {len(found.new(False))}"
-            + (f", с других сайтов — ещё {extra}" if extra else ""))
-        return {"found": found, "url": url}
-    try:
-        # (v5.44.93) another title asked while one is still searched: that one stops, this one starts (it said «уже
-        # идёт» before — a tile of the feed after another one seemed not to open at all)
-        task = page_jobs.start(FIND, f"Найти: {source.label}", run, replace=True)
-    except page_jobs.TaskBusy as exc:
-        return Response.json({"ok": False, "error": f"{exc}. Дождитесь конца."}, 409)
+        def run(say, stop_check):
+            if kept is not None:                     # (v5.44.93) found a while ago: at once, the folder read anew
+                kept.have = D.had(Path(kept.folder), kept.title.site)
+                say(f"«{kept.title.title}» уже открывали — показываю сразу")
+                return {"found": kept, "url": url, "kept": True}
+            if source.readable:
+                say(f"{source.label}: читаю тайтл «{key}»")
+            try:
+                found = D.look(url, settings, branch=branch, net=S.Net(stop_check), where=where, say=say, name=name,
+                               shown=entry.show)
+            except D.DownloadError as exc:
+                return {"failed": str(exc)}
+            if stop_check():
+                return {"failed": "остановлено"}
+            if not found.late:                       # (v5.44.117) a site did not answer in time: asked anew next time
+                _keep_found(ask, found)
+            extra = len([t for t in found.new(True) if t.helped])
+            say(f"Нашлось: «{found.title.title}» — глав {len(found.chapters)}, новых бесплатных {len(found.new(False))}"
+                + (f", с других сайтов — ещё {extra}" if extra else ""))
+            return {"found": found, "url": url}
+        # (v5.44.117) each page's search is its own: a second one does not stop the first (it did since 5.44.93)
+        task = page_jobs.start(FIND, f"Найти: {source.label}", run, many=True)
+        entry.task = task
+        with _FINDS_LOCK:
+            _FINDS[task.id] = entry
+            _forget_old(time.monotonic())
     return Response.json({"ok": True, "id": task.id})
 
 
 def find_state(req: Request) -> Response:
-    """The search going, or the title it found — (v5.44.74) with its chapters as they are in the folder now (read
-    again when the folder changed); ``seen`` — the search whose title the page shows already: not sent again (a title
-    has hundreds of chapters, the page asks every few seconds)."""
-    from core import content_marks, manhwa_download as D, page_jobs
-    task = page_jobs.current(FIND)
-    if task is None:
+    """The page's search (``find`` — its number; none — the newest one: a page opened anew shows the last title
+    found), or the title it found — (v5.44.74) with its chapters as they are in the folder now (read again when the
+    folder changed); ``seen`` — the mark of the title the page shows already (``mark``): not sent again (a title has
+    hundreds of chapters, the page asks every few seconds).  (v5.44.117) While the other sites still answer — the title
+    so far (``found.asking``, ``partial``); the page's search gone — ``gone`` and words."""
+    from core import content_marks, manhwa_download as D
+    asked = req.arg("find")
+    entry = _find_of(asked)
+    if entry is None or entry.task is None:
+        if asked:
+            try:
+                number = int(asked)
+            except ValueError:
+                number = 0
+            return Response.json({"ok": True, "id": number, "status": "failed", "gone": True, "failed": STALE,
+                                  "error": STALE})
         return Response.json({"ok": True, "status": "idle"})
+    task = entry.task
     state = {"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0))}
-    kept = _found_of(task)
-    if kept is not None and req.arg("seen") == str(task.id):
+    found, mark = entry.now()
+    state["mark"] = mark
+    if found is not None and mark and req.arg("seen") == mark:
         state["found_same"] = True
-    elif kept is not None:
-        found = kept["found"]
+    elif found is not None:
         folder = Path(found.folder)
         try:
             stamp = folder.stat().st_mtime_ns
         except OSError:
             stamp = 0
-        if stamp and stamp != kept.get("stamp"):         # chapters came (or went) since the search: as they are now
+        if stamp and (id(found), stamp) != entry.stamp:  # chapters came (or went) since the search: as they are now
             found.have = D.had(folder, found.title.site)
-            kept["stamp"] = stamp
+            entry.stamp = (id(found), stamp)
+        if (folder / D.LB_DIR / D.SOURCE_FILE).is_file():  # (v5.44.116) «Новые главы» as a download of it left them
+            stored = D.read_source(folder)
+            found.follow_on = D.follow_choice(stored)
+            found.helpers_on = bool(stored.get("helpers_on", True))   # (v5.44.119) its page's box saved at once
         public = found.public()
         from webui import content_mode
         from types import SimpleNamespace
+        from webui.pages.title import hand_mark
         hentai = bool(content_marks.manhwa_reason(SimpleNamespace(info=found.title.info())))
+        hand = hand_mark(found, req.settings)        # (v5.44.122) «Это хентай» / «Это не хентай» of its folder wins
+        if hand:
+            hentai = hand == "hentai"
         hidden = content_mode.mode() == "sfw" and hentai
         public["cover"] = bool(found.cover) and not hidden
         public["cover_hidden"] = bool(found.cover) and hidden
         public["roots"] = _roots_public(req.settings)
         from core import manhwa_sources as S          # (v5.44.87) «Хентай» in the field of «По ссылке»
         public["adult_site"] = bool(getattr(S.by_name(found.title.site), "adult_only", False))
-        public["hentai"] = hentai or public["adult_site"]     # (v5.44.102) the title's page: hidden by the mode
+        public["hentai"] = hentai if hand else hentai or public["adult_site"]   # (v5.44.102) the page: hidden by the mode
         state["found"] = public
+        state["partial"] = task.running                # (v5.44.117) the other sites still answer: more is coming
     elif isinstance(task.result, dict) and task.result.get("failed"):
         state["failed"] = str(task.result["failed"])
     return Response.json(state)
@@ -312,12 +446,18 @@ def _roots_public(settings: dict) -> dict:
 
 
 def find_cover(req: Request) -> Response:
-    from core import page_jobs
-    task = page_jobs.current(FIND)
-    kept = _found_of(task)
-    if kept is None or req.arg("find") != str(task.id) or not kept["found"].cover:
+    """The cover of the title of the page's search (``find`` — its number); (v5.44.117) asked beside the other sites,
+    it may come after the chapters (the page asks for it once ``found.cover`` says it is there)."""
+    entry = _find_of(req.arg("find"), newest=False)
+    found = entry.now()[0] if entry is not None else None
+    if found is None:
         return Response.not_found("Обложки нет")
-    found = kept["found"]
+    from webui.pages.covers import title_picture
+    fresh = title_picture(found, req.settings)       # (v5.44.123) the cover the owner chose (the menu of covers)
+    if fresh is not None:
+        return Response(200, bytes(fresh[0]), fresh[1], {"Cache-Control": "private, max-age=600"})
+    if not found.cover:
+        return Response.not_found("Обложки нет")
     from core.manhwa_download import _picture_type
     kinds = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
              ".avif": "image/avif", ".bmp": "image/bmp"}
@@ -326,12 +466,21 @@ def find_cover(req: Request) -> Response:
 
 
 def download(req: Request) -> Response:
+    """«Скачать» of the title of the page's search (``find`` — its number): the chapters ticked (``chapters``; none
+    named — every new one), where, the boxes.  (v5.44.117) While the other sites still answer, it waits for them (the
+    chapters each site gives are decided by the owner's order — the same whoever answered first)."""
     from core import manhwa_download as D, manhwa_queue as Q, manhwa_sources as S, page_jobs
     body = req.json()
-    task = page_jobs.current(FIND)
+    entry = _find_of(str(body.get("find") or ""), newest=False)
+    if entry is None or entry.task is None:
+        return Response.json({"ok": False, "error": STALE}, 409)
+    task = entry.task
+    if task.running and not task.wait(D.ASK_DEADLINE + FIND_WAIT_MORE):
+        return Response.json({"ok": False, "error": "Тайтл ещё ищется на других сайтах — подождите немного и нажмите "
+                                                    "«Скачать» ещё раз"}, 409)
     kept = _found_of(task)
-    if kept is None or str(body.get("find") or "") != str(task.id):
-        return Response.json({"ok": False, "error": "Найденное устарело — нажмите «Найти» ещё раз"}, 409)
+    if kept is None:
+        return Response.json({"ok": False, "error": STALE}, 409)
     found = kept["found"]
     where = str(body.get("where") or found.kind)
     if where not in ("manhwa", "manga"):
@@ -398,9 +547,19 @@ def download_state(req: Request) -> Response:
     changed after ``since`` (all of them when ``run`` is not this download's; none — ``items=none``: the phone's card
     needs only the counts), «Пауза», the queue, what goes on soon after a restart; its result once it has ended."""
     from core import manhwa_queue as Q, manhwa_run as R, page_jobs
+    from webui import content_mode
     task = page_jobs.current(GET)
+    sfw = content_mode.mode() == "sfw"
     soon = Q.restoring_public()
-    extra = {"queue": Q.public(), **({"restoring": soon} if soon else {})}
+    if soon:                                         # (v5.44.116) a title of hentai: not named in «SFW»
+        hentai = soon.pop("hentai", [])
+        if sfw:
+            soon["titles"] = [HIDDEN if k < len(hentai) and hentai[k] else t for k, t in enumerate(soon["titles"])]
+    queue = Q.public()
+    for q in queue:
+        if q.pop("hentai", False) and sfw:
+            q["title"] = HIDDEN
+    extra = {"queue": queue, **({"restoring": soon} if soon else {})}
     if task is None:
         return Response.json({"ok": True, "status": "idle", **extra})
     state = {"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0)), "find": task.about, **extra}
@@ -414,7 +573,57 @@ def download_state(req: Request) -> Response:
         state["result"] = {k: result.get(k) for k in ("title", "got", "paid", "stopped", "open", "kind", "helped",
                                                       "gave_up", "skipped")}
         state["result"]["failed"] = list(result.get("failed_chapters") or [])   # the chapters that did not come
+    if sfw and hentai_download(req.settings, meter, Q.current_record() if task.running else None):
+        _hide(state)
     return Response.json(state)
+
+
+def hentai_download(settings: dict, meter: dict, record: "dict | None" = None) -> bool:
+    """(v5.44.116) The download is of hentai: its record says so (``manhwa_queue.hentai_of`` — known before its title is
+    read), its site is one of hentai alone (:func:`what_of`), or the description in its folder does — the site's mark
+    of erotica, a genre, a mark by hand on the title's page (``core/content_marks``, as the libraries judge it)."""
+    from core import manhwa_queue as Q
+    if Q.hentai_of(record) or what_of(meter) == "Хентай":
+        return True
+    folder = Path(str(meter.get("folder") or ""))
+    if not str(meter.get("folder") or "") or not (folder / "info.json").is_file():
+        return False
+    from types import SimpleNamespace
+    from core import content_marks, manga_library as M, manhwa_library as H
+    try:
+        info = json.loads((folder / "info.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        info = {}
+    reason = content_marks.manhwa_reason(SimpleNamespace(info=info if isinstance(info, dict) else {}))
+    if meter.get("kind") == "manga":
+        root = M.manga_root(settings)
+        mark = content_marks.verdict("manga", M._id_for(Path(root), folder), reason) if root else None
+    else:
+        mark = content_marks.verdict("manhwa", H._id_for(Path(H.manhwa_root(settings)), folder), reason)
+    return bool(reason) if mark is None else mark.hentai
+
+
+def _hide(state: dict) -> None:
+    """(v5.44.116) A download of hentai in «SFW»: «Скрытая загрузка 18+» — no name (its label, the meter's title and
+    site, its folder, the site its chapters come from, its journal — the lines name it), no cover (``hidden``: the
+    page does not ask for it; :func:`download_cover` refuses it too), no link to its page."""
+    state.update(label=HIDDEN, what=HIDDEN_KIND, hidden=True, log=[])
+    meter = state.get("meter") or {}
+    meter.update(title="", site="", folder="")
+    if isinstance(meter.get("now"), dict):
+        meter["now"] = dict(meter["now"], name="", **{"from": ""})
+    state["items"] = [dict(x, name="", **{"from": ""}) for x in state.get("items") or []]
+    if state.get("result"):
+        state["result"].update(title=HIDDEN, open="")
+
+
+def download_forget_restore(req: Request) -> Response:
+    """(v5.44.116) «Не продолжать»: the downloads of the last run are not begun again (the owner's review: during the
+    30 s of «С прошлого запуска … продолжится через N с» there was no way to cancel)."""
+    from core import manhwa_queue as Q
+    if not Q.forget_restore():
+        return Response.json({"ok": False, "error": "Они уже продолжаются — остановить можно «Остановить»"}, 409)
+    return Response.json({"ok": True})
 
 
 def what_of(meter: dict) -> str:
@@ -432,10 +641,13 @@ COVER_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
 
 def download_cover(req: Request) -> Response:
     """(v5.44.87) The cover of the title being downloaded (the one its download put into its folder) — ``run``: the
-    download's number (a cover asked by an older page is not another title's)."""
+    download's number (a cover asked by an older page is not another title's); (v5.44.116) none of hentai in «SFW»."""
     from core import manhwa_run as R
+    from webui import content_mode
     meter, _items = R.meter(since=10 ** 12, run=req.int_arg("run", 0, lo=0))
     if not meter.get("run") or str(meter.get("run")) != req.arg("run") or not meter.get("folder"):
+        return Response.not_found("Обложки нет")
+    if content_mode.mode() == "sfw" and hentai_download(req.settings, meter):
         return Response.not_found("Обложки нет")
     folder = Path(str(meter["folder"]))
     for ext, kind in COVER_TYPES.items():
@@ -490,22 +702,57 @@ def download_unqueue(req: Request) -> Response:
     return Response.json({"ok": True})
 
 
+def library_folder(settings: dict, item_id: str, kind: str = "") -> "Path | None":
+    """(v5.44.124) The folder of a title of either library by its id there: «Вся манхва» (``kind`` "manhwa"), «Вся
+    манга» (``kind`` "manga": a series or a manga of a folder — a chapter's id names its series), "" — the manhwa's,
+    then the manga's (their ids are made apart: ``manhwa_library._id_for`` takes the kind in)."""
+    from core import manga_library as M, manhwa_library as H
+    item_id = str(item_id or "")
+    if kind in ("", "manhwa"):
+        title = next((t for t in H.LIBRARY.items(H.manhwa_root(settings)) if t.id == item_id), None)
+        if title is not None:
+            return Path(title.path)
+    if kind in ("", "manga"):
+        root = M.manga_root(settings)
+        manga = M.LIBRARY.get(root, item_id) if root and Path(root).is_dir() else None
+        if manga is not None and manga.parent_id:
+            manga = M.LIBRARY.get(root, manga.parent_id)
+        if manga is not None and Path(manga.path).is_dir():
+            return Path(manga.path)
+    return None
+
+
 def follow(req: Request) -> Response:
     """«Следить за новыми главами» on a title's page: {id, follow} — the nightly round takes it or leaves it;
-    (v5.44.62) {id, helpers} — «брать с других сайтов» the chapters its site has not free."""
-    from core import manhwa_download as D, manhwa_library as H
+    (v5.44.62) {id, helpers} — «брать с других сайтов» the chapters its site has not free; (v5.44.119) {find, …} — the
+    title of the page's search (the one page of a title: the folder of either library, or the booru parser's);
+    (v5.44.124) {id, kind: "manga", …} — a title of «Вся манга» (the same block on its page: both folders)."""
+    from core import manhwa_download as D
     body = req.json()
-    title = next((t for t in H.LIBRARY.items(H.manhwa_root(req.settings)) if t.id == str(body.get("id") or "")), None)
-    if title is None:
-        return Response.json({"ok": False, "error": "Такого тайтла нет"}, 404)
-    data = D.read_source(Path(title.path))
+    if body.get("find"):
+        entry = _find_of(str(body.get("find") or ""), newest=False)
+        found = entry.now()[0] if entry is not None else None
+        if found is None:
+            return Response.json({"ok": False, "error": STALE}, 409)
+        folder = Path(found.folder)
+    else:
+        kind = str(body.get("kind") or "")
+        if kind not in ("", "manga", "manhwa"):
+            return Response.json({"ok": False, "error": "Такой библиотеки нет"}, 400)
+        folder = library_folder(req.settings, str(body.get("id") or ""), kind)
+        if folder is None:
+            return Response.json({"ok": False, "error": "Такого тайтла нет"}, 404)
+    data = D.read_source(folder) if (folder / D.LB_DIR / D.SOURCE_FILE).is_file() else {}
     if not data.get("site"):
         return Response.json({"ok": False, "error": "Этот тайтл скачан не программой — следить не за чем"}, 409)
     if "helpers" in body:
         data["helpers_on"] = bool(body.get("helpers"))
     else:
         data["follow"] = bool(body.get("follow"))
-    D.write_source(Path(title.path), data)
+    D.write_source(folder, data)
+    if body.get("find"):                             # the search's title as the page shows it again
+        found.helpers_on = bool(data.get("helpers_on", True))
+        found.follow_on = D.follow_choice(data)
     return Response.json({"ok": True, "follow": bool(data.get("follow", True)),
                           "helpers": bool(data.get("helpers_on", True))})
 

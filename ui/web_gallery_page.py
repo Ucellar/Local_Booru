@@ -3,6 +3,8 @@
 Links to other sites (post sources) open in the usual browser; «Скачать оригинал» asks where to save.
 Without Qt WebEngine — or where it does not work (``ui/program_window.py``) — the pages open in the usual browser, and
 this part of the window says so and offers its buttons (``browser=True``).
+(v5.44.117) A page's own address asked for a new window or tab (the middle button, Ctrl+click, ``target=_blank``) — a
+tab of the program's second window (``ui/web_tabs.py``), not this view.
 """
 from __future__ import annotations
 
@@ -65,25 +67,60 @@ if QWebEnginePage is not None:
                 return False
             return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
-        def createWindow(self, _window_type):
-            # target="_blank" or a middle click: a throwaway page that sends the address on.
-            return _NewWindowPage(self.profile(), self)
+        def createWindow(self, window_type):
+            # target="_blank", a middle click, Ctrl+click, «Открыть ссылку в новой вкладке»: a throwaway page that
+            # sends the address on; (v5.44.117) the middle button and Ctrl+click — a tab «in the background»
+            background = window_type == QWebEnginePage.WebWindowType.WebBrowserBackgroundTab
+            return _NewWindowPage(self.profile(), self, background=background)
 
     class _NewWindowPage(QWebEnginePage):
-        """A gallery page asked for a new window: the gallery address opens in the same view (a
-        browser outside has no session cookie and would show «откройте из программы»), any other
-        site in the usual browser."""
+        """A gallery page asked for a new window: (v5.44.117) the gallery address opens in a tab of the program's
+        second window (``ui/web_tabs.py`` — the same profile and cookies; before, in the same view: a browser outside
+        has no session cookie and would show «откройте из программы»), any other site in the usual browser."""
+
+        def __init__(self, profile, opener, *, background: bool = False):
+            super().__init__(profile, opener)
+            self._background = bool(background)
 
         def acceptNavigationRequest(self, url, _nav_type, _is_main_frame):
             if url.isEmpty() or url.scheme() == "about":
                 return False                    # the blank start of the new window; the real address follows
             opener = self.parent()
+            settings = opener.settings_provider if isinstance(opener, _GalleryPage) else None
             if _gallery_url(url) and isinstance(opener, QWebEnginePage):
-                opener.setUrl(url)
+                if not _open_in_tabs(url, background=self._background, settings_provider=settings):
+                    opener.setUrl(url)          # no window of tabs: here, as before
             else:
-                _open_outside(url, opener.settings_provider() if isinstance(opener, _GalleryPage) else None)
+                _open_outside(url, settings() if settings is not None else None)
             self.deleteLater()
             return False
+
+
+def new_page(profile, parent, settings_provider):
+    """A page of the program for a web view (``_GalleryPage``: its own addresses there, other sites in the usual
+    browser, (v5.44.117) a new window — a tab of the window of tabs) with what every page of the window has: a
+    request for a permission refused at once, a video started without a press — the main window's and (v5.44.117) a
+    tab's (``ui/web_tabs.py``)."""
+    page = _GalleryPage(profile, parent)
+    page.settings_provider = settings_provider
+    if hasattr(page, "permissionRequested"):                   # Qt 6.8 and later
+        page.permissionRequested.connect(_refuse_permission)
+    try:            # (v5.44) the program's own pages: an episode asked to play plays (as the program's own player)
+        from PySide6.QtWebEngineCore import QWebEngineSettings
+        page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
+    except (ImportError, AttributeError) as exc:
+        _LOG.debug("autoplay of the window's pages not allowed: %s", exc)
+    return page
+
+
+def _open_in_tabs(url, *, background: bool, settings_provider) -> bool:
+    """(v5.44.117) The program's address in a tab of its second window (``ui/web_tabs.open_tab``); False — not there."""
+    try:
+        from ui import web_tabs
+        return web_tabs.open_tab(url, background=background, settings_provider=settings_provider)
+    except Exception as exc:  # noqa: BLE001 - a window that could not be made: the page opens where it was asked
+        _LOG.error("the window of tabs did not open: %s", exc, exc_info=True)
+        return False
 
 
 _PROFILE = None            # the gallery's one web profile for the program run
@@ -107,6 +144,12 @@ def _shared_profile(page: "WebGalleryPage"):
         profile.downloadRequested.connect(_download_requested)
         _PROFILE = profile
     _DOWNLOADS = weakref.ref(page)
+    return _PROFILE
+
+
+def profile():
+    """(v5.44.117) The gallery's web profile of this run (None before the first page): the window of tabs
+    (``ui/web_tabs.py``) shares it — the same cookies, the same session."""
     return _PROFILE
 
 
@@ -136,7 +179,13 @@ def _download_requested(download) -> None:
     if page is None:
         download.cancel()
         return
-    page._on_download(download)
+    owner = None
+    try:                       # (v5.44.117) asked by a page of the window of tabs: the question over that window
+        from ui import web_tabs
+        owner = web_tabs.window_of(download.page())
+    except (AttributeError, RuntimeError, ImportError) as exc:
+        _LOG.debug("the page of a download not known: %s", exc)
+    page._on_download(download, owner)
 
 
 class WebGalleryPage(QWidget):
@@ -162,15 +211,7 @@ class WebGalleryPage(QWidget):
             return
         self._profile = _shared_profile(self)
         self._view = QWebEngineView(self)
-        page = _GalleryPage(self._profile, self._view)
-        page.settings_provider = lambda: getattr(self.mw, "settings", {}) or {}
-        if hasattr(page, "permissionRequested"):                   # Qt 6.8 and later
-            page.permissionRequested.connect(_refuse_permission)
-        try:            # (v5.44) the program's own pages: an episode asked to play plays (as the program's own player)
-            from PySide6.QtWebEngineCore import QWebEngineSettings
-            page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
-        except (ImportError, AttributeError) as exc:
-            _LOG.debug("autoplay of the window's pages not allowed: %s", exc)
+        page = new_page(self._profile, self._view, lambda: getattr(self.mw, "settings", {}) or {})
         self._view.setPage(page)
         from ui.qt_language import hide_dead_actions
         hide_dead_actions(page)                 # the menu over a page: only what works in this window
@@ -391,14 +432,15 @@ class WebGalleryPage(QWidget):
     # ── the video player ─────────────────────────────────────────────────────
     def play_video(self, path: str, title: str = "", image_id: int | None = None, *, prefer: dict | None = None,
                    series: str = "", top: str = "", episode: str = "", start_at: float = 0.0, paused: bool = False,
-                   resume: float = 0.0) -> None:
+                   resume: float = 0.0, loop: bool = True, memory: str = "") -> None:
         """Play a video in the native player in place of the page (Esc goes back to the page — and its own player
         goes on from the moment this one was left: ``_player_left``).
         ``image_id``: the post that asked; if another page is shown by now, the request is stale.  An episode of
         the tab «Видео»: ``prefer`` — the voice-over and subtitles chosen for its ``series`` (or on the page just now),
         a new choice is kept; ``top`` — the series' folder (its folders of subtitles); ``episode`` — what was watched
         of it is kept, it is played once.  ``start_at``, ``paused``, ``resume`` — the page's player's moment, whether
-        it was paused, the furthest place reached («Продолжить просмотр»)."""
+        it was paused, the furthest place reached («Продолжить просмотр»).  (v5.44.121) ``loop`` False — a long video
+        of the library: played once, its place kept under ``memory`` (its key in the one memory)."""
         if self._view is None:
             return
         if image_id is not None and self.current_path() != f"/post/{int(image_id)}":
@@ -414,19 +456,26 @@ class WebGalleryPage(QWidget):
         self._layers.setCurrentWidget(self._player)
         _full_player(True)
         on_choice = on_progress = None
-        if series:
+        settings = self.mw.settings
+        if series:                                  # (v5.44.121) the one memory of the series (its folder and site)
             def on_choice(kind: str, value, series=series) -> None:
                 from core import video_library     # a JSON file written: not in the window's thread
-                threading.Thread(target=video_library.PROGRESS.set_tracks, args=(series, kind, value),
+                threading.Thread(target=video_library.choose_tracks, args=(settings, series, kind, value),
                                  name="video-tracks", daemon=True).start()
             if episode:
                 def on_progress(position: float, length: float, ended: bool, series=series, episode=episode) -> None:
                     from core import video_library
-                    threading.Thread(target=video_library.PROGRESS.record, args=(series, episode, position, length),
+                    threading.Thread(target=video_library.record_ids,
+                                     args=(settings, series, episode, position, length),
                                      kwargs={"ended": ended}, name="video-progress", daemon=True).start()
+        elif memory and not loop:                   # a long video of the library: its place
+            def on_progress(position: float, length: float, ended: bool, memory=memory) -> None:
+                from core import video_library
+                threading.Thread(target=video_library.PROGRESS.record, args=(memory, "1", position, length),
+                                 kwargs={"ended": ended}, name="video-progress", daemon=True).start()
         self._player_episode = bool(episode)
         self._player.play(path, title, prefer=prefer, on_choice=on_choice, top=top or None, start_at=start_at,
-                          paused=paused, resume=resume, on_progress=on_progress, loop=not episode)
+                          paused=paused, resume=resume, on_progress=on_progress, loop=loop and not episode)
 
     def player_visible(self) -> bool:
         return self._player is not None and self._layers.currentWidget() is self._player
@@ -438,10 +487,10 @@ class WebGalleryPage(QWidget):
         token = str(payload.get("token") or "")
         if payload.get("cmd") == "start":
             image_id = payload.get("id")
-            if payload.get("episode"):             # an episode of the tab «Видео»: its series page is still shown
-                gone = not self.current_path().startswith("/videos/s/")
-            elif payload.get("stream"):            # (v5.44.106) an episode of «Смотреть»: its page is still shown
-                gone = not self.current_path().startswith("/videos/watch")
+            if payload.get("episode") or payload.get("stream"):
+                # an episode of the tab «Видео» — (v5.44.121) of the folder or of its site: the one page of its series
+                # is still shown (``/videos/s/<id>``, or a title of a site — ``/videos/watch``)
+                gone = not self.current_path().startswith(("/videos/s/", "/videos/watch"))
             else:
                 gone = image_id is not None and self.current_path() != f"/post/{int(image_id)}"
             if self._view is None or gone:
@@ -517,12 +566,12 @@ class WebGalleryPage(QWidget):
             self._show_page()
         self._stop_inline()
 
-    def _on_download(self, download) -> None:
+    def _on_download(self, download, owner=None) -> None:
         from pathlib import Path
 
         from PySide6.QtWidgets import QFileDialog
         suggested = Path(download.downloadDirectory()) / download.downloadFileName()
-        target, _ = QFileDialog.getSaveFileName(self, "Сохранить оригинал", str(suggested))
+        target, _ = QFileDialog.getSaveFileName(owner or self, "Сохранить оригинал", str(suggested))
         if not target:
             download.cancel()
             return

@@ -177,7 +177,8 @@ def _thumb(item: dict, ctx: dict, index: int) -> str:
         cls += " is-video"
     if in_set:
         cls += " is-set"
-    set_attr = f' data-set="{int(item["set_id"])}"' if in_set else ""
+    # (v5.44.118) a сборка's tile is all its files: «В корзину выбранные» says how many go (tools.js)
+    set_attr = f' data-set="{int(item["set_id"])}" data-files="{int(item["set_count"])}"' if in_set else ""
     return (f'<article class="{cls}" style="--ar:{ratio:.4f}" data-id="{int(item["id"])}"{set_attr}>'
             f'<a class="thumb-link" href="{esc(href)}" title="{esc(title)}">'
             f'<img src="{esc(data.media_url("thumb", item))}" alt="" loading="lazy" decoding="async">'
@@ -250,7 +251,7 @@ def posts(req: Request) -> Response:
         first = (page - 1) * per_page
         grid = '<div class="thumbs">' + "".join(_thumb(it, ctx, first + n) for n, it in enumerate(items)) + "</div>"
     else:
-        grid = _empty_result(ctx)
+        grid = _empty_result(ctx, req.settings)
     summary = _result_bar(total, files_total, req) if total else ""
     summary += _long_videos_note(req, ctx)
     labels = data.split_query(ctx["tags"])[3]
@@ -263,7 +264,7 @@ def posts(req: Request) -> Response:
     elif ctx["section"] == "trash":
         from webui.pages import trash
         brak = trash.bar(req.settings, ctx)
-    body = (_tag_chips(groups, ctx) + summary + brak + _select_bar(ctx, total, add_to) + grid
+    body = (_tag_chips(groups, ctx) + summary + brak + _select_bar(ctx, total, add_to, files_total) + grid
             + paginator(page, pages, lambda n: url("/posts", page=n, **ctx, **keep)))
     title = ctx["tags"] or "Галерея"
     # booru.js counts how many pictures fit the window and asks again with that many (``_per_page``)
@@ -284,36 +285,43 @@ def _long_videos_note(req: Request, ctx: dict) -> str:
             f'<a href="{esc(href)}">на вкладке «Видео»</a>.</p>')
 
 
-def _select_bar(ctx: dict, total: int, add_to: dict | None = None) -> str:
+def _select_bar(ctx: dict, total: int, add_to: dict | None = None, files_total: int = 0) -> str:
     """Actions on many cards (static/tools.js): «Выбрать», then clicks select pictures instead of opening them.
     «Корзина» and «Брак» — their own actions; the rest of the gallery — сборки (core/card_sets.py): «Собрать в одну
-    сборку», «Разобрать сборки»; ``add_to`` — the page was opened to choose cards for that сборка."""
+    сборку», «Разобрать сборки»; ``add_to`` — the page was opened to choose cards for that сборка.  (v5.44.118) Beside
+    them (not in the trash) — «В корзину выбранные» and, with a search, «В корзину все найденные (N)»
+    (``trash.move_buttons``; ``files_total`` — the cards of the search) with its journal under the bar."""
     section = ctx["section"]
     if not total:
         return ""
+    from webui.pages import trash
     if section not in {"trash", "no_match"}:
-        return _sets_select_bar(add_to)
+        return _sets_select_bar(add_to, ctx, files_total)
     if section == "trash":
-        from webui.pages import trash
         chosen = ('<button type="button" data-action="trash-restore" data-needs-selection disabled>Вернуть выбранные</button>'
                   '<button type="button" class="danger" data-action="trash-purge" data-needs-selection disabled>'
                   'Удалить выбранные навсегда</button>')
         whole = (trash.restore_button(ctx, total)
                  + '<button type="button" class="danger" data-action="trash-purge-all">Очистить корзину</button>')
+        job = ""
     else:
+        from webui.pages import tools
+        to_trash, all_to_trash = trash.move_buttons(ctx, files_total)
         chosen = ('<button type="button" data-action="nomatch-retry" data-needs-selection disabled '
-                  'title="Ещё раз через парсер: сайты по MD5 и обратный поиск">Искать снова выбранные</button>')
-        whole = '<button type="button" data-action="nomatch-retry-all">Искать снова весь Брак</button>'
+                  'title="Ещё раз через парсер: сайты по MD5 и обратный поиск">Искать снова выбранные</button>'
+                  + to_trash)
+        whole = tools.retry_button(ctx, total) + all_to_trash   # (v5.44.116) a search in the address: the cards found
+        job = trash.move_job()
     return (f'<div class="select-bar" data-section="{esc(section)}">'
             '<button type="button" data-action="select-mode" aria-pressed="false">Выбрать</button>'
             '<span class="select-tools" hidden>'
             '<button type="button" class="link" data-action="select-page">все на странице</button>'
             '<button type="button" class="link" data-action="select-none">снять</button>'
             f'<span class="select-count">0 выбрано</span>{chosen}</span>{whole}'
-            '<span class="action-status" role="status"></span></div>')
+            f'<span class="action-status" role="status"></span></div>{job}')
 
 
-def _sets_select_bar(add_to: dict | None) -> str:
+def _sets_select_bar(add_to: dict | None, ctx: dict | None = None, files_total: int = 0) -> str:
     if add_to:
         name = f"«{add_to['title']}»" if add_to.get("title") else f"из {add_to['count']} карточек"
         return (f'<div class="select-bar sets-add" data-section="sets" data-add-to="{int(add_to["id"])}" '
@@ -329,9 +337,12 @@ def _sets_select_bar(add_to: dict | None) -> str:
                 '</span>'
                 f'<a class="sets-add-cancel" href="{esc(add_to["back"])}">Отмена</a>'
                 '<span class="action-status" role="status"></span></div>')
+    from webui.pages import trash
+    to_trash, all_to_trash = trash.move_buttons(ctx, files_total) if ctx is not None else ("", "")
     return ('<div class="select-bar" data-section="sets">'
             '<button type="button" data-action="select-mode" aria-pressed="false" '
-            'title="Выбрать карточки, чтобы собрать их в одну сборку или разобрать сборки">Выбрать</button>'
+            'title="Выбрать карточки, чтобы собрать их в одну сборку, разобрать сборки или убрать в корзину">'
+            'Выбрать</button>'
             '<span class="select-tools" hidden>'
             '<button type="button" class="link" data-action="select-page">все на странице</button>'
             '<button type="button" class="link" data-action="select-none">снять</button>'
@@ -340,7 +351,8 @@ def _sets_select_bar(add_to: dict | None) -> str:
             'title="Выбранные карточки — одной сборкой (плитка сборки — со всеми её карточками)">Собрать в одну сборку</button>'
             '<button type="button" data-action="sets-dissolve" data-needs-selection disabled '
             'title="Сборки выбранных плиток — снова отдельными карточками">Разобрать сборки</button>'
-            '</span><span class="action-status" role="status"></span></div>')
+            f'{to_trash}</span>{all_to_trash}<span class="action-status" role="status"></span></div>'
+            + (trash.move_job() if ctx is not None else ""))
 
 
 def _add_to(req: Request) -> dict | None:
@@ -387,14 +399,41 @@ def _result_bar(total: int, files_total: int, req: Request) -> str:
             f'<div class="thumb-sizes" role="group" aria-label="Размер превью">{sizes}</div>{lucky}{export}</div>')
 
 
-def _empty_result(ctx: dict) -> str:
+def empty_words(section: str, settings: dict | None = None) -> tuple[str, str]:
+    """(v5.44.116) What an empty section of the gallery says — (the line, what it means) — on the computer
+    (``_empty_result``) and on the phone (``phone_gallery._empty``) alike: the review found one text for «Избранное»,
+    «Брак», «Новые» and «Скачанные» («…когда парсер разберёт папку»); an empty Брак is good news, «Избранное» says
+    how to add."""
+    if section == "inbox":
+        if not (settings or {}).get("imports_to_inbox", True):
+            return ("Новых картинок нет", "Новые файлы сюда не попадают — так выбрано в «Настройки → Библиотека».")
+        try:
+            hours = max(1, int((settings or {}).get("inbox_auto_archive_hours", 24) or 24))
+        except (TypeError, ValueError):
+            hours = 24
+        return ("Новых картинок нет", f"Найденное парсером и скачанное лежит здесь первые {hours} ч, потом уходит "
+                                      "из этого раздела само.")
+    words = {
+        "found": ("Найденных пока нет", "Здесь картинки, для которых парсер нашёл теги на сайтах."),
+        "downloaded": ("Скачанного пока нет", "Здесь то, что скачали подписки, «Скачать → Галерея (booru)» и "
+                                              "расширение браузера."),
+        "no_match": ("Брак пуст — это хорошо", "Сюда попадают картинки, которых парсер не нашёл ни на одном сайте; "
+                                                "сейчас таких нет."),
+        "favorites": ("В избранном пока ничего нет", "Откройте картинку и нажмите «В избранное» — она появится здесь."),
+        "trash": ("Корзина пуста", "Сюда уходят удалённые карточки — отсюда их можно вернуть."),
+        data.VIDEO_SECTION: ("Длинных видео нет", "Здесь видео библиотеки длиннее, чем выбрано в настройках "
+                                                   "(«Вкладка «Видео»»)."),
+    }
+    return words.get(section, ("Здесь пока пусто", "Картинки появятся, когда парсер разберёт папку с ними или "
+                                                    "что-нибудь скачается в «Скачать → Галерея (booru)»."))
+
+
+def _empty_result(ctx: dict, settings: dict | None = None) -> str:
     if ctx["tags"]:
         return (f'<div class="empty"><p>По запросу «{esc(ctx["tags"])}» ничего нет.</p>'
                 '<p>Уберите часть тегов или поищите в другом разделе.</p></div>')
-    if ctx["section"] == "trash":
-        return '<div class="empty"><p>Корзина пуста.</p></div>'
-    return ('<div class="empty"><p>Здесь пока пусто.</p>'
-            '<p>Картинки появятся, когда парсер разберёт папку с ними или граббер что-нибудь скачает.</p></div>')
+    line, meaning = empty_words(ctx["section"], settings)
+    return f'<div class="empty"><p>{esc(line)}.</p><p>{esc(meaning)}</p></div>'
 
 
 # ── /post/<id> ───────────────────────────────────────────────────────────────
@@ -444,15 +483,27 @@ def post(req: Request) -> Response:
         if in_app and req.arg("player") not in (video_probe.BROWSER, video_probe.OWN):
             other = url(f"/post/{image_id}", i=index if index >= 0 else None, tag_source=tag_source,
                         player=video_probe.OWN if player == video_probe.BROWSER else video_probe.BROWSER, **ctx)
+        # (v5.44.121) a long video (the tab «Видео»): played once — at its end «Видео закончилось» —, its place kept
+        # («Продолжить с 12:34», a bar on its tile: videos.js, /api/videos/card-progress); a short one goes round
+        long_video = data.is_long_video(req.settings, item)
+        memory = {}
+        if long_video:
+            from webui.pages.videos import card_place
+            place = card_place(item)
+            start = 0.0 if place.get("done") else float(place.get("at") or 0)
+            memory = {"loop": "0", "memory": "1", "from": f"{start:.1f}", "resume": f"{start:.1f}"}
+            if place.get("length"):
+                memory["length"] = f"{float(place['length']):.1f}"
         if player == video_probe.OWN:
             # The program window's browser cannot decode H.264, H.265, AAC (MP4, MOV, MKV, AVI — and a «.webm» with
             # them inside): the program plays the video and shows its frames right here, in the video's place
             # (webui/video_relay.py); ⛶ — its full-size player.
-            viewer = _native_video_html(req, item, poster_url, other=other)
+            viewer = _native_video_html(req, item, poster_url, other=other, memory=memory)
         else:
             picture = ' data-picture="1"' if int(item.get("width") or 0) > 0 else ""
-            viewer = (f'<video class="post-media" src="{media_url}" controls loop preload="metadata" '
-                      f'poster="{poster_url}" data-id="{image_id}"'
+            kept = "".join(f' data-{k}="{esc(v)}"' for k, v in memory.items() if k != "loop")
+            viewer = (f'<video class="post-media" src="{media_url}" controls{"" if long_video else " loop"} '
+                      f'preload="metadata" poster="{poster_url}" data-id="{image_id}"{kept}'
                       + (f' data-other="{esc(other)}"' if other else "") + f'{picture}></video>'
                       f'<div class="video-fallback" hidden><p>Это видео встроенный просмотр не показывает '
                       f'(формат не поддерживается).</p><button type="button" data-action="open-external" '
@@ -507,26 +558,31 @@ def window_player(req: Request, path: Path, *, prefer: str = "browser") -> str:
     return video_probe.BROWSER if path.suffix.lower() == ".webm" else video_probe.OWN
 
 
-def _native_video_html(req: Request, item: dict, poster_url: str, *, other: str = "") -> str:
+def _native_video_html(req: Request, item: dict, poster_url: str, *, other: str = "", memory: dict | None = None) -> str:
     """A video played by the program inside the page: its frames take the poster's place (booru.js
     ``setupNativeVideo``), the bar under it has the usual buttons; ``other`` — this page with the window's browser
-    playing it, when the program's player cannot (AV1 without the graphics card's help)."""
+    playing it, when the program's player cannot (AV1 without the graphics card's help); ``memory`` — (v5.44.121) a
+    long video: once, from its place (data-loop, data-memory, data-from…)."""
     image_id = int(item["id"])
     width, height = int(item.get("width") or 0), int(item.get("height") or 0)
-    attrs = {"id": image_id, **({"other": other} if other else {})}
+    attrs = {"id": image_id, **({"other": other} if other else {}), **(memory or {})}
+    # (v5.44.116) the card page keeps F for «В избранное» (its keys, «Горячие клавиши»): ⛶ does not name it there
+    f_free = not any(str(key).upper() == "F" for key in _hotkeys(req).values())
     return native_video_box(req, attrs, poster_url, width=width, height=height,
                             frame_class="post-media fit", full=f'data-id="{image_id}"',
-                            external=f'<button type="button" data-action="open-external" data-id="{image_id}">'
-                                     f'Открыть в видеоплеере</button>')
+                            external=f'<button type="button" data-action="open-external" data-id="{image_id}" '
+                                     f'title="Открыть файл в программе, которой Windows открывает видео">'
+                                     f'Плеер Windows</button>', full_key=f_free)
 
 
 def native_video_box(req: Request, attrs: dict, poster_url: str, *, width: int = 0, height: int = 0,
                      frame_class: str = "", full: str = "", external: str = "", overlay: str = "", title: str = "",
-                     bar: str = "") -> str:
+                     bar: str = "", full_key: bool = True) -> str:
     """The box of a video the program plays (``attrs`` — its data-… : a card's ``id`` or a series' ``episode``,
     and how it starts), shared by the post page and the tab «Видео»; ``overlay`` — markup over its picture (the tab's
     slides of the episode), ``title`` — shown over the picture on the whole screen, ``bar`` — buttons of the bar
-    before ⛶ (the next episode).  ⛶ puts this same player over the whole screen (booru.js ``setFull``)."""
+    before ⛶ (the next episode); ``full_key`` — F puts it on the whole screen (not on the card page: F is «В
+    избранное» there).  ⛶ puts this same player over the whole screen (booru.js ``setFull``)."""
     try:
         volume = max(0, min(100, int(req.settings.get("media_volume", 50) or 0)))
     except (TypeError, ValueError):
@@ -556,14 +612,17 @@ def native_video_box(req: Request, attrs: dict, poster_url: str, *, width: int =
             f'{icons.SOUND}{icons.MUTED}</button>'
             f'<input type="range" class="nv-volume" min="0" max="100" step="1" value="{volume}" aria-label="Громкость">'
             f'{bar}<button type="button" class="nv-full" data-action="nv-full" {full} '
-            f'title="Во весь экран (F, двойной щелчок; Esc — выйти)" aria-label="Во весь экран">'
+            f'title="Во весь экран ({"F, " if full_key else ""}двойной щелчок; Esc — выйти)" aria-label="Во весь экран">'
             f'{icons.FULL}{icons.UNFULL}</button></div>'
             # the voice-overs and subtitles of the file (and subtitle files next to it): shown when there is a choice
             f'<div class="nv-tracks" hidden><label class="nv-track" hidden>Озвучка <select class="nv-audio">'
             f'</select></label><label class="nv-track" hidden>Субтитры <select class="nv-subs"></select></label>'
             f'<span class="nv-track-note" role="status"></span></div>'
+            # (v5.44.116) the two players side by side, named by whose they are: the program's own window player and
+            # the one Windows opens the file in (the review: «Открыть в проигрывателе окна» / «Открыть в видеоплеере»)
             f'<div class="nv-problem" hidden role="alert"><p></p>'
-            f'<button type="button" data-action="nv-player" {full}>Открыть в проигрывателе окна</button> {external}'
+            f'<button type="button" data-action="nv-player" {full} title="Открыть в плеере самой программы — он '
+            f'займёт окно вместо страницы (Esc — назад)">Плеер программы</button> {external}'
             f'</div></div>')
 
 

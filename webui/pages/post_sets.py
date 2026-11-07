@@ -177,7 +177,7 @@ def box_html(req: Request, image_id: int, ctx: dict, index: int, *, remote_curre
             f'<img src="{esc(data.media_url("thumb", member))}" alt="" loading="lazy" decoding="async">{video}</a>'
             f'{controls}</div>')
     grab = _grab_link(req.settings, found)
-    grab_html = f' (<a href="{esc(grab)}">все части — в граббере</a>)' if grab else ""
+    grab_html = f' (<a href="{esc(grab)}">все части — в «Галерее (booru)»</a>)' if grab else ""
     mine = (' <span class="post-set-mine" title="Эту сборку меняли вы: программа её не пересобирает, только добавляет '
             'новые части">✎</span>') if found["locked"] else ""
     add = url("/posts", add_to=found["id"])
@@ -289,14 +289,16 @@ def dissolve(req: Request) -> Response:
 
 def to_manga(req: Request) -> Response:
     """(v5.44.111) «В мангу»: the сборка's pictures copied into the manga folder as one manga, its cards to the trash
-    (``core/comic_manga.py``) — {"name", "pages", "trashed", "page"}: the page of the manga in «Манга»."""
+    (``core/comic_manga.py``) — {"name", "pages", "trashed", "page"}: the page of the manga in «Манга».  (v5.44.116)
+    Under the round's lock of the background (``comic_manga.round_held``): never at the same time as a round."""
     from core import comic_manga
     from core.card_sets import SetError
 
     def run(body: dict) -> dict:
         try:
-            comic = comic_manga.of_set(req.settings, int(body.get("set") or 0))
-            return comic_manga.move(req.settings, comic)
+            with comic_manga.round_held():
+                comic = comic_manga.of_set(req.settings, int(body.get("set") or 0))
+                return comic_manga.move(req.settings, comic)
         except (comic_manga.ComicError, OSError) as exc:
             raise SetError(str(exc)) from exc
     return _edit(req, run)
@@ -502,7 +504,7 @@ def remote_post(req: Request) -> Response:
         return Response.html(page_frame(title, body, active="posts", **_prefs(req)), status=error.status)
     search, card = fam.find(req.arg("k"))
     if card is None:
-        body = ('<div class="empty"><p>Этой части сборки на сайте больше нет (или она скрыта в граббере).</p>'
+        body = ('<div class="empty"><p>Этой части сборки на сайте больше нет (или её скрыли в «Галерее (booru)»).</p>'
                 + (f'<p><a href="{esc(url(f"/post/{from_id}", i=index if index >= 0 else None, **ctx))}">← к карточке</a></p>'
                    if from_id else "") + '</div>')
         return Response.html(page_frame(title, body, active="posts", **_prefs(req)), status=404)
@@ -515,7 +517,8 @@ def remote_post(req: Request) -> Response:
     blocked = search.blocked_tags(card)
     can = bool(entry.get("original") or entry.get("sample"))
     if blocked:
-        action = (f'<span class="remote-note">У поста теги из блоклиста граббера и подписок ({esc(", ".join(blocked[:6]))})'
+        action = (f'<span class="remote-note">У поста теги из блоклиста подписок и «Галереи (booru)» '
+                  f'({esc(", ".join(blocked[:6]))})'
                   ' — такой пост не скачивается.</span>')
     elif not can:
         action = '<span class="remote-note">Сайт не даёт этот файл — скачивать нечего.</span>'
@@ -571,7 +574,7 @@ def remote_download(req: Request) -> Response:
         return Response.json({"ok": True, "done": True, "image_id": int(card["image_id"])})
     blocked = search.blocked_tags(card)
     if blocked:
-        return Response.json({"ok": False, "error": "У поста теги из блоклиста граббера и подписок: "
+        return Response.json({"ok": False, "error": "У поста теги из блоклиста подписок и «Галереи (booru)»: "
                               + ", ".join(blocked[:8]) + " — такой пост не скачивается."}, 409)
     if not downloads_enabled(req.settings):
         return Response.json({"ok": False, "error": "Скачивание новых файлов в этой сессии выключено "

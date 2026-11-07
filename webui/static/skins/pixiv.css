@@ -141,10 +141,12 @@ body { font: 400 var(--font-size)/22px var(--font); }
   transition: background-color 0.2s;
 }
 .skin-button:hover, .drawer-toggle:hover { background: var(--panel-2); color: var(--text); }
-.settings-link.skin-button { width: 32px; padding: 0; justify-content: center; background: transparent; }
-.settings-link.skin-button:hover, .settings-link.active { background: var(--panel); }
+.settings-link.skin-button, .top-back.skin-button {
+  width: 32px; padding: 0; justify-content: center; background: transparent;
+}
+.settings-link.skin-button:hover, .settings-link.active, .top-back.skin-button:hover { background: var(--panel); }
 .settings-link .skin-label { display: none; }
-.settings-link .gear-icon { width: 18px; height: 18px; }
+.settings-link .gear-icon, .top-back .back-icon { width: 18px; height: 18px; }   /* (v5.44.116) «←» as the gear */
 .skin-icon { box-shadow: none; }
 
 /* the menu «Оформление»: pixiv's pop-up */

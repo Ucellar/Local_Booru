@@ -1,8 +1,8 @@
 """The tab «Обслуживание» of «Диагностика» (/diag/maintenance): what the old settings page kept under
-«Обслуживание библиотеки» — the base (optimize, VACUUM, a copy, integrity, the index), the tables built
-from it (similar pictures, tag categories), the files (are they there, are their bytes right, recover,
-thumbnails, paths after the archive moved) and the tags (e621 junk, general-only sets, site synonyms,
-old .tags/.sources files).
+«Обслуживание библиотеки» — the base (optimize, VACUUM, a copy, the integrity of its rows, the index), the tables
+built from it (similar pictures, tag categories) and the tags (e621 junk, general-only sets, site synonyms, old
+.tags/.sources files).  (v5.44.118) The files (are they there, are their bytes right, recover, thumbnails, paths after
+the archive moved) are one check and one repair on «Проверка» (``diag._files_panel``, ``core/file_check.py``).
 
 Each job is a page task of the diagnostics' kind (``diag.KIND``): one at a time together with the check
 and the repairs, with the same journal, «Остановить» and history.  A job that changes the base makes its
@@ -134,7 +134,7 @@ def _library_in_place(settings: dict, progress) -> None:
         raise RuntimeError(str(moved["error"]))
     if _n(moved.get("found")):
         raise RuntimeError(f"{_n(moved['found'])} карточек указывают на старое место архива, а их файлы есть здесь — "
-                           "сначала «Найти файлы после переноса архива» и «Переписать пути». Ничего не изменено.")
+                           "сначала «Проверить файлы» и «Починить файлы» на странице «Проверка». Ничего не изменено.")
 
 
 def _index_lines(result: dict) -> list:
@@ -144,7 +144,7 @@ def _index_lines(result: dict) -> list:
              f"Убрано записей о файлах, которых нет на диске: {_n(result.get('removed'))}"]
     if _n(result.get("elsewhere")):
         lines.append(f"Файлов, чьи карточки указывают на старое место архива: {_n(result['elsewhere'])} — второй "
-                     "карточкой не записаны; «Переписать пути» перенесёт карточки к ним")
+                     "карточкой не записаны; «Починить файлы» на странице «Проверка» перенесёт карточки к ним")
     if _n(result.get("missing_refused")):
         lines.append(f"Файлов нет у {_n(result['missing_refused'])} карточек — больше половины: похоже, папку "
                      "библиотеки подменили или очистили; записи не удалены")
@@ -214,9 +214,10 @@ def _issue_lines(result: dict) -> list:
 
 
 def _integrity_check(settings, progress, stop_check, options):
+    """(v5.44.118) The rows of the base only: the files of the cards are «Проверить файлы» on «Проверка»."""
     from core.services.library_service import check_integrity, unfinished_operations
-    progress("Сверяю записи базы с файлами на диске и ищу осиротевшие строки…")
-    result = dict(check_integrity(settings) or {})
+    progress("Ищу строки тегов и источников, оставшиеся без картинки…")
+    result = dict(check_integrity(settings, files=False) or {})
     lines = _issue_lines(result)
     unfinished = list(unfinished_operations(settings, limit=100) or [])
     if unfinished:
@@ -225,23 +226,18 @@ def _integrity_check(settings, progress, stop_check, options):
 
 
 def _integrity_repair(settings, progress, stop_check, options):
+    """(v5.44.118) The rows of the base only; the cards of gone files — «Починить файлы» on «Проверка» (after the
+    archive's new place and a download by the links kept: in that order)."""
     from core.services.library_service import repair_integrity
-    _library_in_place(settings, progress)
     backup = _backup(settings, progress, "integrity_repair")
-    progress("Карточки пропавших файлов — в корзину, осиротевшие строки — прочь…")
-    result = dict(repair_integrity(settings) or {})
+    progress("Строки тегов и источников без картинки — прочь…")
+    result = dict(repair_integrity(settings, mark_missing_deleted=False) or {})
     _tags_changed()
     fixed = dict(result.get("fixed") or {})
     after = dict(result.get("after") or {})
     left = _issue_lines(after)
     lines = [f"Копия базы: {backup}",
-             f"В корзину как «файл пропал»: {_n(fixed.get('missing_marked_deleted'))}",
              f"Убрано осиротевших строк: {_n(fixed.get('orphan_rows_removed'))}"]
-    if _n(fixed.get("moved_left")):
-        lines.append(f"Не тронуты — файл переехал вместе с архивом: {_n(fixed['moved_left'])} («Переписать пути»)")
-    if _n(fixed.get("missing_refused")):
-        lines.append(f"Файлов нет у {_n(fixed['missing_refused'])} карточек — больше половины: похоже, папку библиотеки "
-                     "подменили или очистили; в корзину ничего не убрано")
     lines.append("После починки: " + ("проблем нет" if left == ["Проблем не найдено"] else "; ".join(left[:4])))
     return lines
 
@@ -272,90 +268,6 @@ def _derived(cache: str):
         lines = [f"Готово: строк {_n(result.get('cache_rows'))} из {_n(result.get('source_rows'))} записей базы, {where}"]
         if _n(result.get("skipped_invalid")):
             lines.append(f"Пропущено записей с неверными данными: {_n(result.get('skipped_invalid'))}")
-        return lines
-    return work
-
-
-# ── the files ──────────────────────────────────────────────────────────────
-def _presence(settings, progress, stop_check, options):
-    from core.file_integrity import run_presence_check
-    result = dict(run_presence_check(settings, mode="forced", progress=_plain(progress), stop_check=stop_check) or {})
-    lines = [f"Проверено карточек: {_n(result.get('checked'))} из {_n(result.get('total'))}",
-             f"Файл на месте: {_n(result.get('present'))}",
-             f"Файла нет: {_n(result.get('missing'))}",
-             f"Диск или папка недоступны: {_n(result.get('offline_root'))}",
-             f"Путь не читается: {_n(result.get('path_error'))}"]
-    if _n(result.get("stale_skipped")):
-        lines.append(f"Изменились во время проверки (не учтены): {_n(result['stale_skipped'])}")
-    return {"stopped": bool(result.get("cancelled")), "lines": lines}
-
-
-def _hashes(settings, progress, stop_check, options):
-    from core.file_integrity import run_hash_verification
-    result = dict(run_hash_verification(settings, mode="idle", progress=_plain(progress), stop_check=stop_check) or {})
-    lines = [f"Проверено файлов: {_n(result.get('checked'))} из {_n(result.get('total'))}, прочитано "
-             f"{human_size(result.get('bytes_read'))}",
-             f"MD5 совпал: {_n(result.get('hash_ok'))}",
-             f"Байты не те, что записаны в базе: {_n(result.get('hash_mismatch'))}",
-             f"Не прочитались: {_n(result.get('hash_unreadable'))}",
-             f"Отложены (файла нет, он занят или диск недоступен): {_n(result.get('hash_deferred'))}"]
-    if _n(result.get("hash_mismatch")):
-        lines.append("Несовпадения записаны: «Восстановить пропавшие и испорченные» скачает их заново по источникам")
-    return {"stopped": bool(result.get("cancelled")), "lines": lines}
-
-
-def _recovery(settings, progress, stop_check, options):
-    from core.file_integrity import run_verified_recovery
-    result = dict(run_verified_recovery(settings, mode="idle", progress=_plain(progress), stop_check=stop_check) or {})
-    _tags_changed()
-    return {"stopped": bool(result.get("cancelled")), "lines": [
-        f"Кандидатов (нет файла или байты не те): {_n(result.get('total'))}, разобрано: {_n(result.get('checked'))}",
-        f"Восстановлено: {_n(result.get('recovered'))}",
-        f"Не восстановлено: {_n(result.get('recovery_failed'))} — из них нет сохранённых источников: "
-        f"{_n(result.get('no_source'))}, защищены или заняты: {_n(result.get('blocked'))}, не скачалось или MD5 не "
-        f"совпал: {max(0, _n(result.get('recovery_failed')) - _n(result.get('no_source')) - _n(result.get('blocked')))}"]}
-
-
-def _thumbs(settings, progress, stop_check, options):
-    from core.maintenance_tasks import repair_missing_thumbnails
-    result = dict(repair_missing_thumbnails(settings, progress=progress, stop_check=stop_check) or {})
-    return {"stopped": bool(stop_check()), "lines": [
-        f"Карточек: {_n(result.get('checked'))}",
-        f"Превью готово: {_n(result.get('created'))}",
-        f"Файла нет — превью не из чего: {_n(result.get('missing'))}",
-        f"Ошибок: {_n(result.get('errors'))}"]}
-
-
-def _relocate(apply: bool):
-    def work(settings, progress, stop_check, options):
-        from core.library_lifecycle import relocate_missing_library_paths
-        from core.storage_roots import configured_output_root
-        target = configured_output_root(settings)
-        if apply:
-            from core.storage_roots import managed_output_root_state
-            if not managed_output_root_state(settings).available:
-                raise RuntimeError(f"Папки рабочей библиотеки нет или диск недоступен: {target} — ничего не изменено")
-        progress(f"Ищу файлы карточек в {target} по их пути внутри рабочей библиотеки…")
-        result = dict(relocate_missing_library_paths(settings, target, apply=apply) or {})
-        if result.get("error"):
-            raise RuntimeError(result["error"])
-        lines = [f"Рабочая библиотека: {result.get('new_base') or target}",
-                 f"Карточек уже здесь: {_n(result.get('already_ok'))}",
-                 f"Найдены здесь по старому пути: {_n(result.get('found'))}",
-                 f"Не найдены: {_n(result.get('missing_target'))}",
-                 f"Путь не из какой-либо рабочей библиотеки: {_n(result.get('no_relative'))}"]
-        if result.get("old_base"):
-            lines.append(f"Старое место: {result['old_base']}")
-        if _n(result.get("duplicates_here")) and not apply:
-            lines.append(f"Из них уже есть карточка без тегов, сделанная пересборкой индекса: "
-                         f"{_n(result['duplicates_here'])} — при переносе она сольётся с настоящей")
-        if apply:
-            _tags_changed()
-            lines += [f"Переписано путей: {_n(result.get('updated'))}", f"Копия базы: {result.get('backup') or '—'}"]
-            if _n(result.get("merged_duplicates")):
-                lines.append(f"Слито карточек, сделанных из этих файлов заново: {_n(result['merged_duplicates'])}")
-        elif _n(result.get("found")):
-            lines.append("Чтобы карточки смотрели сюда, нажмите «Переписать пути»")
         return lines
     return work
 
@@ -430,22 +342,21 @@ GROUPS = (
             "Полная копия базы в папку резервных копий архива; ей можно вернуть библиотеку, как была.",
             lambda settings, progress, stop_check, options: diag._lines_backup(settings, progress, stop_check),
             stoppable=False),
-        Job("integrity_check", "Проверить целостность", "Проверка целостности базы",
-            "Сверяет каждую карточку с файлом на диске (отключённый диск отличает от пропавшего файла) и ищет "
-            "строки тегов и источников, оставшиеся без картинки. Только читает; на большом архиве — минуты, "
-            "остановить на середине нельзя.", _integrity_check, stoppable=False),
-        Job("integrity_repair", "Починить безопасное", "Починка целостности базы",
-            "Карточки файлов, которых точно нет на диске (диск подключён), уходят в корзину как «файл пропал»; "
-            "строки без картинки убираются. Сами файлы не трогает. Скачать заново по источникам можно только до "
-            "этого — сначала «Восстановить пропавшие и испорченные»: карточки из корзины оно не берёт. Если "
-            "архив переносили, сначала «Переписать пути». " + _COPY,
-            _integrity_repair, ask="Карточки пропавших файлов уйдут в корзину — нажмите ещё раз", quiet=True,
+        Job("integrity_check", "Проверить целостность базы", "Проверка целостности базы",
+            "Ищет строки тегов и источников, оставшиеся без картинки, и незавершённые операции в журнале базы. "
+            "Только читает. Файлы карточек — «Проверить файлы» на странице «Проверка».", _integrity_check,
+            stoppable=False),
+        Job("integrity_repair", "Убрать осиротевшие строки", "Починка целостности базы",
+            "Строки тегов и источников, оставшиеся без картинки, убираются. Карточки и файлы не трогает: карточки "
+            "пропавших файлов — «Починить файлы» на странице «Проверка». " + _COPY,
+            _integrity_repair, ask="Строки без картинки уберутся — нажмите ещё раз", quiet=True,
             holds_imports=True, stoppable=False),
         Job("reindex", "Пересобрать индекс", "Пересборка индекса базы",
             "Сверяет базу с папками рабочей библиотеки: записывает файлы, которых в базе нет, обновляет "
             "изменённые и удаляет записи о файлах, которых точно нет в её папках, — и в корзине тоже, вместе с их "
-            "тегами (поэтому сначала «Восстановить пропавшие и испорченные»). Отключённый диск и карточки, "
-            "указывающие за пределы библиотеки, не трогает; если архив переносили — сначала «Переписать пути». "
+            "тегами (поэтому сначала «Починить файлы» на странице «Проверка»: оно скачивает пропавшие заново). "
+            "Отключённый диск и карточки, указывающие за пределы библиотеки, не трогает; если архив переносили — "
+            "сначала «Проверить файлы» и «Починить файлы». "
             + _COPY,
             _reindex, ask="Записи пропавших файлов удалятся вместе с тегами — нажмите ещё раз", danger=True, quiet=True,
             options=(("force", "заново все файлы, а не только новые и изменённые (очень долго)"),
@@ -460,30 +371,6 @@ GROUPS = (
         Job("categories", "Пересобрать категории тегов", "Пересборка категорий тегов",
             "Кто у картинки персонаж, автор, копирайт — от этого цвет тега и его место в списке. Нужно, если "
             "цвета тегов не сходятся с сайтами.", _derived("image_effective_tag_category")),
-    )),
-    ("files", "Файлы", "Сами картинки и видео рабочей библиотеки. Исходная папка не меняется никогда.", (
-        Job("presence", "Проверить наличие файлов", "Проверка наличия файлов",
-            "Смотрит, на месте ли файл каждой карточки, и отличает пропавший файл от отключённого диска. "
-            "Ничего не меняет.", _presence),
-        Job("hashes", "Проверить MD5 по байтам", "Проверка MD5 по байтам",
-            "Читает каждый файл и сверяет его MD5 с записанным в базе — это десятки гигабайт, поэтому идёт "
-            "только пока вы не работаете с программой. Ничего не исправляет: несовпадения записывает.",
-            _hashes, ask="Прочитает весь архив, это долго — нажмите ещё раз"),
-        Job("recovery", "Восстановить пропавшие и испорченные", "Восстановление файлов",
-            "Скачивает заново файлы, которых нет или чьи байты не совпали с MD5 (по двум проверкам выше), — "
-            "только по сохранённым источникам и только если MD5 скачанного совпал точно; испорченный файл "
-            "сначала откладывается в карантин. Нужен интернет; идёт, пока вы не работаете с программой.",
-            _recovery, ask="Начнёт скачивать — нажмите ещё раз"),
-        Job("thumbs", "Достроить превью", "Превью для всех карточек",
-            "Делает превью карточкам, у которых его нет (например, после «Очистить кэш превью»).", _thumbs),
-        Job("relocate_find", "Найти файлы после переноса архива", "Поиск файлов после переноса архива",
-            "Если архив переносили на другой диск, а карточки указывают на старое место: ищет те же файлы в "
-            "текущей рабочей библиотеке по пути внутри неё (по одному имени не угадывает). Только смотрит.",
-            _relocate(False), stoppable=False),
-        Job("relocate_apply", "Переписать пути", "Перенос путей карточек",
-            "Переписывает пути карточек, найденных кнопкой выше, на текущую рабочую библиотеку. " + _COPY,
-            _relocate(True), ask="Пути карточек перепишутся — нажмите ещё раз", quiet=True, holds_imports=True,
-            stoppable=False),
     )),
     ("tags", "Теги", "Наборы тегов, полученные с сайтов. Новых тегов эти кнопки не придумывают.", (
         Job("general_only", "Переразложить «general»", "Раскладка тегов, оставшихся «general»",
@@ -505,6 +392,12 @@ GROUPS = (
     )),
 )
 JOBS = {job.id: job for _gid, _title, _lead, jobs in GROUPS for job in jobs}
+# (v5.44.118) the files: one check and one repair on «Проверка» (the sketch E) — here only where they are
+FILES_NOTE = ('<section class="settings-block maint-group" id="maint-files"><h2>Файлы</h2>'
+              '<p class="hint">Сами картинки и видео рабочей библиотеки — одна проверка и одна починка: «Проверить '
+              'файлы» и «Починить файлы» на странице <a href="/diag#diag-files-check">«Проверка»</a>. Починка сама '
+              'делает всё по порядку: новое место архива → скачать заново по сохранённым ссылкам → остальное в корзину. '
+              'Исходная папка не меняется никогда.</p></section>')
 
 
 def _writers_now() -> str:
@@ -520,7 +413,7 @@ def _writers_now() -> str:
             return f"идёт {owner}"
         return "идёт парсер — дождитесь конца или остановите его на странице «Парсер»"
     if subscription_jobs.is_running():
-        return "идёт проверка подписок или загрузка граббера"
+        return "идёт проверка подписок или скачивание в галерею"
     others = [task.label for task in page_jobs.running() if task.kind != KIND]
     return f"идёт «{others[0]}»" if others else ""
 
@@ -573,7 +466,7 @@ def _last_run(job: Job, history: list) -> str:
             f'{esc(first)}</p>')
 
 
-_QUIET = " Пока идёт, парсер, подписки и загрузки граббера не запускаются."
+_QUIET = " Пока идёт, парсер, подписки и скачивание в галерею не запускаются."
 
 
 def _job_html(job: Job, history: list, busy: bool) -> str:
@@ -599,6 +492,8 @@ def maintenance_page(req: Request) -> Response:
         groups.append(f'<section class="settings-block maint-group" id="maint-{esc(gid)}"><h2>{esc(title)}</h2>'
                       f'<p class="hint">{esc(lead)}</p>{extra}'
                       f'{"".join(_job_html(job, history, busy) for job in jobs)}</section>')
+        if gid == "derived":
+            groups.append(FILES_NOTE)
     body = f"""
 <section class="tool tool-wide settings diag maint" id="diag">
   <header class="tool-head">

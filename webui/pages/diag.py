@@ -5,7 +5,14 @@ the library, SQLite indexes, stale tag-category jobs, old logs cleaned of keys.
 
 The check and the repairs are page tasks of one kind (``core/page_jobs``): one at a time, with a journal
 and «Остановить».  The last report and the last repairs are kept on disk (``library_diagnostics``), so the
-page shows them after a restart too."""
+page shows them after a restart too.
+
+(v5.44.118, the sketch E) «Файлы библиотеки» on top (:func:`_files_panel`): one check of the files — «Проверить файлы»
+— and one repair — «Починить файлы (N)», which does by itself, in order, what the check showed and nothing else
+(``core/file_check.py``); the five checks and four repairs of the files of before («Проверить библиотеку» с наличием
+файлов, «Проверить целостность», «Проверить наличие файлов», «Проверить MD5 по байтам», «Найти файлы после переноса
+архива»; «Починить безопасное», «Восстановить пропавшие и испорченные», «Переписать пути», «Достроить превью») are in
+these two."""
 from __future__ import annotations
 
 import json
@@ -28,6 +35,8 @@ def register(router) -> None:
     router.add("POST", r"/api/diag/repair", diag_repair)
     router.add("POST", r"/api/diag/sources", diag_sources)
     router.add("GET", r"/api/diag/sources\.json", diag_sources_json)
+    router.add("POST", r"/api/diag/files/check", files_check)          # (v5.44.118) «Проверить файлы»
+    router.add("POST", r"/api/diag/files/repair", files_repair)        # «Починить файлы»
 
 
 def _prefs() -> dict:
@@ -494,8 +503,8 @@ def _files_html(report: dict) -> str:
     lib, samples = _part(report, "library"), _part(report, "samples")
     parts = []
     if lib.get("missing_on_disk") is None:
-        parts.append('<p class="hint">Наличие каждого файла не проверялось — отметьте «и наличие каждого файла на диске» '
-                     'и проверьте снова.</p>')
+        parts.append('<p class="hint">Наличие каждого файла этой проверкой не смотрелось — это делает «Проверить '
+                     'файлы» (<a href="#diag-files-check">«Файлы библиотеки»</a> выше).</p>')
     else:
         parts.append(f'<p>Проверено файлов: {_n(lib.get("checked_on_disk"))}. Нет на диске: <b>{_n(lib.get("missing_on_disk"))}</b>, '
                      f'диск не подключён: {_n(lib.get("offline_root_on_disk"))}, путь не читается: '
@@ -647,6 +656,101 @@ def _sources_html(report: dict | None, busy: bool) -> str:
                     form + last + numbers + classes_html + hosts_html + groups_html + download)
 
 
+# ── (v5.44.118) «Файлы библиотеки»: one check and one repair of the files ────
+def _which(rows: list) -> str:
+    """«какие»: the cards (their pages) of one kind, the first of them — by their files' names (a page never shows
+    a whole path)."""
+    from core.file_check import name_of
+    items = "".join(f'<li><a href="/post/{int(r["id"])}">{esc(r.get("file_name") or name_of(r.get("path")) or "?")}'
+                    f'</a></li>' for r in rows if str(r.get("id") or "").isdigit())
+    if not items:
+        return ""
+    return f'<details class="files-which"><summary>какие</summary><ul class="diag-files">{items}</ul></details>'
+
+
+def _files_found(report: dict) -> str:
+    """What the check found, kind by kind (the lines of «Что требует внимания»)."""
+    from core.file_check import _plural, place_of
+    files = ("файл", "файла", "файлов")
+    samples = report.get("samples") if isinstance(report.get("samples"), dict) else {}
+    items = []
+    whole = "На месте и целы" if report.get("md5") else "На месте"
+    items.append(("ok", f"{whole} — {_n(report.get('present'))}", ""))
+    if report.get("library_gone"):
+        items.append(("bad", str(report["library_gone"]), ""))
+    if int(report.get("missing") or 0):
+        items.append(("bad", f"Нет на диске — {_n(report['missing'])}", _which(_rows(samples.get("missing")))))
+    if int(report.get("relocate") or 0):
+        items.append(("bad", f"Смотрят в старое место архива — {_n(report['relocate'])}: их файлы нашлись в новом "
+                             f"месте архива", _which(_rows(samples.get("relocate")))))
+    if int(report.get("damaged") or 0):
+        how = "" if report.get("md5") else ", по прошлой сверке MD5"
+        items.append(("bad", f"Испорчены — {_n(report['damaged'])} · байты не совпали с MD5{how}",
+                      _which(_rows(samples.get("damaged")))))
+    for root in _rows(report.get("offline_roots")):
+        where = place_of(root.get("root"))         # «Диск F:» / «Папка «name»» — not its whole path
+        count = _plural(int(root.get("files") or 0), files)
+        items.append(("note", f"{where} недоступна — {count} в ней · их программа не трогает"
+                      if where.startswith("Папка") else
+                      f"{where} не подключён — {count} на нём · их программа не трогает", ""))
+    if int(report.get("path_error") or 0):
+        items.append(("note", f"Путь не читается — {_n(report['path_error'])} · их программа не трогает",
+                      _which(_rows(samples.get("path_error")))))
+    thumbs = report.get("thumbs") if isinstance(report.get("thumbs"), dict) else {}
+    if int(thumbs.get("made") or 0):
+        items.append(("note", f"Превью достроено: {_n(thumbs['made'])}", ""))
+    return "".join(f'<li class="{level}"><span class="what">{esc(text)}</span>{fix}</li>' for level, text, fix in items)
+
+
+def _files_fix(report: dict, busy: bool) -> str:
+    """«Починить файлы (N)» and what it will do, step by step — or why there is nothing to do."""
+    from core.file_check import plan_words
+    if report.get("cancelled"):
+        return '<p class="hint">Проверка была остановлена — числа неполные, чинить по ней нельзя. Проверьте снова.</p>'
+    if report.get("repaired_at"):
+        return ('<p class="hint">По этой проверке уже чинили — проверьте снова, чтобы увидеть, что осталось.</p>')
+    steps = plan_words(report)
+    fix = int(report.get("fix") or 0)
+    if not fix or not steps:
+        return '<p class="hint files-nothing">Чинить нечего.</p>'
+    from webui.pages.post_sets import FILES, plural
+    ask = f"Точно починить {plural(fix, FILES)}? Нажмите ещё раз"
+    return (f'<div class="files-fix"><div class="tool-actions">'
+            f'<button type="button" class="danger" data-action="files-repair" data-stamp="{esc(report.get("stamp"))}" '
+            f'data-ask="{esc(ask)}" data-needs-idle{" disabled" if busy else ""}>Починить файлы ({fix})</button>'
+            f'<b>Что сделает — по порядку, само:</b><span class="action-status" role="status"></span></div>'
+            f'<ol>{"".join(f"<li>{esc(step)}</li>" for step in steps)}</ol>'
+            '<p class="hint">Перед починкой — копия базы. '
+            + ('Скачивание идёт через интернет и только пока вы не работаете с программой. '
+               if int(report.get("recover") or 0) else "")
+            + 'Сделает ровно показанное: что изменилось после проверки, не тронет.</p></div>')
+
+
+def _files_panel(report: dict | None, busy: bool) -> str:
+    """(v5.44.118) The panel «Файлы библиотеки» (``core/file_check.py``)."""
+    form = ('<form class="tool-actions" data-form="files-check">'
+            f'<button type="submit" class="primary" data-files-check data-needs-idle{" disabled" if busy else ""}>'
+            'Проверить файлы</button>'
+            '<label class="check"><input type="checkbox" name="md5"> и сверить каждый файл по MD5 — читает весь архив, '
+            'идёт, пока вы не работаете с программой</label>'
+            f'<button type="button" class="danger" data-action="diag-stop"{"" if _can_stop() else " disabled"}>'
+            'Остановить</button><span class="action-status" role="status"></span></form>')
+    lead = ("Одна проверка: на месте ли файл каждой карточки, цел ли он, не переносили ли архив; заодно достраивает "
+            "превью, которых нет. Проверка только смотрит — карточки и файлы не меняет.")
+    head = (f'<section class="panel diag-main diag-files-check" id="diag-files-check" aria-labelledby="files-title">'
+            f'<h2 id="files-title">Файлы библиотеки</h2><p class="hint">{esc(lead)}</p>{form}')
+    if not report:
+        return head + '<p class="hint">Проверки файлов ещё не было.</p></section>'
+    from core.file_check import _plural
+    when = _when(report.get("finished_at"))
+    took = f", заняла {_took(report.get('took_seconds'))}" if report.get("took_seconds") else ""
+    md5 = ", со сверкой MD5" if report.get("md5") else ""
+    last = (f'<p class="hint files-last">Последняя проверка — {esc(when)}{esc(took)}: '
+            f'{esc(_plural(int(report.get("total") or 0), ("файл", "файла", "файлов")))}{md5}.</p>')
+    return (head + last + f'<ul class="diag-attention files-found">{_files_found(report)}</ul>'
+            + _files_fix(report, busy) + '</section>')
+
+
 def _history_html(history: list) -> str:
     if not history:
         return ""
@@ -689,6 +793,7 @@ def diag_page(req: Request) -> Response:
     from core.library_diagnostics import last_report, repair_history
     report = last_report()
     sources = last_report("sources")
+    files_report = last_report("files")
     history = repair_history()
     busy = _busy()
     if report:
@@ -715,21 +820,23 @@ def diag_page(req: Request) -> Response:
   </header>
   <div class="tool-board">
     <div class="board-main">
+      {_running_now()}
+      <div class="job panel" data-job hidden>
+        <div class="job-head"><b class="job-title"></b> <span class="job-status"></span></div>
+        <pre class="job-log" tabindex="0" aria-label="Журнал проверки и починки"></pre>
+      </div>
+      {_safe("Файлы библиотеки", _files_panel, files_report, busy)}
       <section class="panel diag-main" aria-labelledby="audit-title">
         <h2 id="audit-title">Проверка библиотеки</h2>
+        <p class="hint">База, точные копии, очереди, корзина, ошибки — всё, кроме самих файлов (их — «Проверить
+          файлы» выше).</p>
         <form class="tool-actions" data-form="diag-audit">
           <button type="submit" class="primary" data-audit data-needs-idle{disabled}>Проверить библиотеку</button>
-          <label class="check"><input type="checkbox" name="verify_files"> и наличие каждого файла на диске (на большом архиве — долго)</label>
           <button type="button" class="danger" data-action="diag-stop"{"" if _can_stop() else " disabled"}>Остановить</button>
           {download}
           <span class="action-status" role="status"></span>
         </form>
         <p class="hint diag-last">{esc(last)}</p>
-        {_running_now()}
-        <div class="job" data-job hidden>
-          <div class="job-head"><b class="job-title"></b> <span class="job-status"></span></div>
-          <pre class="job-log" tabindex="0" aria-label="Журнал проверки и починки"></pre>
-        </div>
         <div class="diag-report">{body_report}</div>
         {"" if report else '<div class="empty">Нажмите «Проверить библиотеку»: на небольшой библиотеке это секунды, на архиве в сотни тысяч файлов — минуты.</div>'}
       </section>
@@ -849,6 +956,67 @@ def diag_sources(req: Request) -> Response:
     except page_jobs.TaskBusy as exc:
         return Response.json({"ok": False, "error": str(exc)}, 409)
     return Response.json({"ok": True, "id": task.id})
+
+
+# ── (v5.44.118) «Проверить файлы» and «Починить файлы» ─────────────────────
+FILES_CHECK = "Проверка файлов"            # the journal's and the history's titles
+FILES_REPAIR = "Починка файлов"
+
+
+def _files_check_work(settings, progress, stop_check, options):
+    from core import file_check
+    from core.library_diagnostics import remember_report
+    from webui.pages import maintenance
+    report = file_check.check(settings, md5=bool(options.get("md5")), progress=maintenance._plain(progress),
+                              stop_check=stop_check)
+    if report.get("cancelled"):                 # a plan of half a check is not a plan
+        report["plan"] = {}
+        report["fix"] = 0
+    remember_report(report, "files")
+    lines = list(report.get("lines") or [])
+    if report.get("cancelled"):
+        lines.insert(0, "Остановлено на середине — числа неполные, починки по ней не будет")
+    return {"lines": lines, "stopped": bool(report.get("cancelled"))}
+
+
+def files_check(req: Request) -> Response:
+    """«Проверить файлы» ({md5}: also read every file and compare its MD5) — a page task of the diagnostics' lane."""
+    from webui.pages import maintenance
+    from webui.settings_store import for_task
+    job = maintenance.Job("files_check", "Проверить файлы", FILES_CHECK, "", _files_check_work,
+                          options=(("md5", "и сверить каждый файл по MD5"),))
+    return maintenance.start_job(job, for_task(req.settings), {"md5": bool(req.json().get("md5"))})
+
+
+def files_repair(req: Request) -> Response:
+    """«Починить файлы»: exactly the plan of the last «Проверить файлы» — the one the page showed (``stamp``), once."""
+    from core import file_check
+    from core.library_diagnostics import last_report, remember_report
+    from webui.pages import maintenance
+    from webui.settings_store import for_task
+    report = last_report("files")
+    stamp = str(req.json().get("stamp") or "")
+    if not report or not stamp or str(report.get("stamp") or "") != stamp:
+        return Response.json({"ok": False, "error": "Проверка файлов с тех пор была другая — обновите страницу"}, 409)
+    if report.get("repaired_at"):
+        return Response.json({"ok": False, "error": "По этой проверке уже чинили — проверьте файлы снова"}, 409)
+    if report.get("cancelled") or not int(report.get("fix") or 0):
+        return Response.json({"ok": False, "error": "Чинить нечего — проверьте файлы снова"}, 409)
+    writers = maintenance._writers_now()        # the downloads wait for the parser (its lane), so it is not taken
+    if writers:
+        return Response.json({"ok": False, "error": f"Сейчас нельзя: {writers}"}, 409)
+
+    def work(settings, progress, stop_check, options):
+        try:
+            out = file_check.repair(settings, report, progress=maintenance._plain(progress), stop_check=stop_check)
+        finally:
+            report["repaired_at"] = time.time()     # done (or half done): the next repair needs a new check
+            remember_report(report, "files")
+            maintenance._tags_changed()
+        return {"lines": out["lines"], "stopped": out["stopped"]}
+
+    job = maintenance.Job("files_repair", "Починить файлы", FILES_REPAIR, "", work)
+    return maintenance.start_job(job, for_task(req.settings), {})
 
 
 def diag_stop(req: Request) -> Response:

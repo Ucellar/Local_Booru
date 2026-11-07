@@ -1,9 +1,10 @@
 // Local Booru «Скачать → По ссылке» (v5.44.87, webui/pages/get_link.py): one field for every download.  A link or a
 // name → what it is (/api/get/what: the mark in the field) → the card of what was found, from the program's own
-// machinery by its addresses: the titles of the sites of manga (manhwa_get: «Найти», its chapters as tiles, «Читать»
-// without downloading — /online, «Скачать»), the videos (video_get — the other chat's: its answers are only read, its
-// download is its own) and nhentai (manga_get).  On the right — «Загрузки»: the downloads of the three going, their
-// queues, «Пауза», «Остановить», the ones ended with «Открыть».  The phone's page of it — phone-get.js.
+// machinery by its addresses: the videos (video_get — the other chat's: its answers are only read, its download is
+// its own) and nhentai (manga_get); (v5.44.119, the approved mockup A) a title of a site of manga — a link, or a title
+// picked among the ones found by its name — opens the title's one page (webui/pages/title.py: /title?url=), no card
+// of its own here any more.  On the right — (v5.44.120) the way to «Скачать → Загрузки» (downloads.js: every kind,
+// one queue, «Готово»).  The phone's page of it — phone-get.js.
 (() => {
   "use strict";
   const LB = window.LocalBooru || {};
@@ -21,23 +22,17 @@
   const hitsSites = hitsBox.querySelector(".gl-hits-sites");
   const hitsList = hitsBox.querySelector(".gl-hits-list");
   const hitsFold = hitsBox.querySelector(".gl-hits-fold");
-  const side = box.querySelector(".gl-side");
-  const jobsList = side.querySelector(".gl-jobs");
-  const sideCount = side.querySelector(".gl-side-count");
-  const sideEmpty = side.querySelector(".gl-side-empty");
-  const sideButtons = side.querySelector(".gl-side-buttons");
   const RUNNING = ["starting", "running", "stopping"];
+  // (v5.44.120) what the cards ask of each kind; «Пауза», «Остановить», «Не продолжать» — «Скачать → Загрузки»
+  // (downloads.js)
   const KINDS = {
     video: { label: "Видео", find: "/api/videos/find", findFile: "/api/videos/find-file",
              findState: "/api/videos/find-state", get: "/api/videos/download",
-             state: "/api/videos/download-state", stop: "/api/videos/download/stop",
-             pause: "/api/videos/download/pause", unqueue: "/api/videos/download/unqueue", prefix: /^Скачать с сайта:\s*/ },
+             state: "/api/videos/download-state", unqueue: "/api/videos/download/unqueue" },
     manhwa: { label: "Манга и манхва", find: "/api/manhwa/find", findState: "/api/manhwa/find-state",
-              get: "/api/manhwa/download", state: "/api/manhwa/download-state", stop: "/api/manhwa/download/stop",
-              pause: "/api/manhwa/download/pause", unqueue: "/api/manhwa/download/unqueue", prefix: /^Скачать:\s*/ },
+              get: "/api/manhwa/download", state: "/api/manhwa/download-state", unqueue: "/api/manhwa/download/unqueue" },
     manga: { label: "Хентай", get: "/api/manga/download", state: "/api/manga/download-state",
-             stop: "/api/manga/download/stop", unqueue: "/api/manga/download/unqueue",      // (v5.44.107) a queue
-             prefix: /^(?:С прошлого запуска — )?Скачать с nhentai:\s*/ },
+             unqueue: "/api/manga/download/unqueue" },      // (v5.44.107) a queue
   };
   const ORDER = ["manhwa", "video", "manga"];
   const CHAPTERS = ["глава", "главы", "глав"];
@@ -72,27 +67,10 @@
   }
   const plural = (n, forms) => n + " " + word(n, forms);
 
-  // Remanga's counts of a translators' votes run to millions: «1,1 млн оценок», not «1119791 оценок»
-  function votesText(n) {
-    if (n >= 1e6) return String(Math.round(n / 1e5) / 10).replace(".", ",") + " млн оценок";
-    if (n >= 1e4) return Math.round(n / 1e3) + " тыс. оценок";
-    return plural(n, ["оценка", "оценки", "оценок"]);
-  }
-
   function megabytes(bytes) {
     const n = Number(bytes) || 0;
     if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1).replace(".", ",") + " ГБ";
     return Math.max(1, Math.round(n / 1024 / 1024)) + " МБ";
-  }
-
-  function speedOf(bytes) {
-    const n = Number(bytes) || 0;
-    return n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + " КБ/с" : (n / 1024 / 1024).toFixed(1).replace(".", ",") + " МБ/с";
-  }
-
-  function clockOf(seconds) {
-    const m = Math.max(1, Math.round((Number(seconds) || 0) / 60));
-    return m < 60 ? m + " мин" : Math.floor(m / 60) + " ч" + (m % 60 ? " " + (m % 60) + " мин" : "");
   }
 
   const natural = (a, b) => (parseFloat(a) - parseFloat(b)) || String(a).localeCompare(String(b), "ru");
@@ -135,6 +113,13 @@
     if (!response.ok || data.ok === false) throw new Error(data.error || "Программа ответила ошибкой " + response.status);
     return data;
   }
+
+  // (v5.44.117) the state of this page's own search: the titles of the sites — by its number (each page has its own
+  // search; another page's «Найти» does not take this one's place); the videos — as their page asks (the other chat's)
+  function findAddress(kind, id) {
+    return KINDS[kind].findState + (kind === "manhwa" && id ? "?find=" + encodeURIComponent(id) : "");
+  }
+  const withAfter = (address, after) => address + (address.includes("?") ? "&" : "?") + "after=" + after;
 
   // a task's state with only the lines of its journal not seen yet (a long download has hundreds): a task not seen
   // before — asked without lines, then its newest line alone
@@ -204,9 +189,10 @@
       extra.dataset.mode = "all";
       keepField(field.value.trim(), true);
     } else if (kind === "video") {
-      extra = el("span", "gl-step-more", "Мангу и манхву программа берёт с Remanga, ReComics, MangaLib, MangaBuff, "
-        + "ReadManga, Desu, com-x.life, MangaDex, хентай — с nhentai, Хентай-тян, HentaiLib и AllHentai; с других "
-        + "сайтов — только видео. "
+      // (v5.44.116) the sites — the server's lists (manhwa_get.SITES; the ones of hentai only outside «SFW»)
+      const sites = box.dataset.sites || "", adultSites = box.dataset.adultSites || "";
+      extra = el("span", "gl-step-more", (sites ? "Мангу и манхву программа берёт с " + sites
+        + (adultSites ? ", хентай — с " + adultSites : "") + "; с других сайтов — только видео. " : "")
         + "Сайт не пускает программу — сохраните его страницу в браузере (Ctrl+S) и дайте её программе: ");
       extra.append(savedPicker());
     }
@@ -266,8 +252,41 @@
 
   // ── «Найти» ───────────────────────────────────────────────────────────────────────────────────────────────────
   let finding = null;            // {kind, id, text, url} — a search going
-  let shown = null;              // {kind, id, count?, tiles?} — what the card shows
-  const hitFacts = new Map();    // a title's address → its tile of the search by name (its rating: the card says it)
+  let shown = null;              // {kind, id, count?} — what the card shows
+
+  // (v5.44.119) a title of a site — its one page (webui/pages/title.py, /title?url=: in the tab its title belongs to);
+  // the field stays in this page's address and in «gl-last» — back here, the field (a link: «Открыть снова»; a name:
+  // the titles found by it, the one picked marked), not that page again by itself
+  function openTitle(url, text, hit) {
+    store("gl-last", JSON.stringify({ kind: "title", text, url }));
+    busy(true);
+    tell("Открываю страницу тайтла…");
+    const kind = hit ? (hit.kind === "manga" ? "manga" : "manhwa") : "";
+    location.assign("/title?url=" + encodeURIComponent(url) + (kind ? "&k=" + kind : "")
+      + (hit && hit.title ? "&t=" + encodeURIComponent(hit.title) : "") + (hit && hit.rating ? "&r=" + hit.rating : ""));
+  }
+
+  // back from a title's page: its link in the field, a line to open it again
+  function titleLine(url) {
+    step.textContent = "";
+    step.classList.remove("bad");
+    step.append(el("span", "gl-step-text", "Этот тайтл — на своей странице: "));
+    const again = el("a", "gl-link", "открыть снова");
+    again.href = "/title?url=" + encodeURIComponent(url);
+    step.append(again);
+    step.hidden = false;
+  }
+
+  // back from the title's page by the history, the page kept as it was left («Открываю…», «Найти» held): not busy
+  window.addEventListener("pageshow", (event) => {
+    if (!event.persisted || finding) return;
+    let last = null;
+    try { last = JSON.parse(stored("gl-last") || "null"); } catch (_) { last = null; }
+    if (!last || last.kind !== "title") return;
+    busy(false);
+    if (/^https?:\/\//i.test(field.value.trim())) titleLine(last.url || field.value.trim());
+    else tell("");
+  });
 
   // (v5.44.93) ``fresh`` — «Найти» pressed again for the card shown: asked anew (the program shows a title found a
   // while ago at once — manhwa_get._FOUND)
@@ -308,7 +327,11 @@
       showNhentai(w.ids);
       return;
     }
-    findLink(w.kind === "site" ? "manhwa" : "video", w.url, "", w.site, fresh);
+    if (w.kind === "site") {                     // (v5.44.119) its one page
+      openTitle(w.url, text);
+      return;
+    }
+    findLink("video", w.url, "", w.site, fresh);
   }
 
   async function findLink(kind, url, branch, siteLabel, fresh) {
@@ -331,14 +354,26 @@
     if (!mine) return;
     let st;
     try {
-      st = await stateOf("find-" + mine.kind, KINDS[mine.kind].findState);
+      st = await stateOf("find-" + mine.kind, findAddress(mine.kind, mine.id));
     } catch (_) {
       if (finding === mine) setTimeout(waitFound, 1500);
       return;
     }
     if (finding !== mine) return;
-    if (st.id !== mine.id || RUNNING.includes(st.status)) {
-      if (st.id === mine.id && st.line) tell(st.line);
+    const going = RUNNING.includes(st.status);
+    // (v5.44.117) the title so far: the link's site's chapters at once, the other sites' as they answer (the card is
+    // drawn again each time something came — the chapters ticked stay ticked)
+    if (st.id === mine.id && going && st.found) {
+      if (!shown || shown.id !== st.id || shown.mark !== st.mark) {
+        busy(false);
+        tell("");
+        showFound(mine.kind, st);
+      }
+      setTimeout(waitFound, 700);
+      return;
+    }
+    if (st.id !== mine.id || going) {
+      if (st.id === mine.id && st.line && !(shown && shown.id === st.id)) tell(st.line);
       setTimeout(waitFound, 600);
       return;
     }
@@ -346,7 +381,7 @@
     busy(false);
     if (st.found) {
       tell("");
-      showFound(mine.kind, st);
+      if (!shown || shown.id !== st.id || shown.mark !== st.mark) showFound(mine.kind, st);
       return;
     }
     const why = st.failed || st.error || (st.status === "stopped" ? "Поиск остановлен" : "Не нашлось — проверьте ссылку");
@@ -362,12 +397,13 @@
   }
 
   function showFound(kind, st) {
+    if (kind !== "video") return;                // (v5.44.119) a title of a site has its own page (openTitle)
     nhGen += 1;
     card.classList.remove("gl-busy");
     card.textContent = "";
     card.dataset.kind = kind;
-    shown = { kind, id: st.id, text: (finding && finding.text) || field.value.trim() };
-    if (kind === "video") showVideo(st); else showSite(st);
+    shown = { kind, id: st.id, mark: st.mark || "", text: (finding && finding.text) || field.value.trim() };
+    showVideo(st);
     card.hidden = false;
   }
 
@@ -430,28 +466,6 @@
     return { node: row, tick };
   }
 
-  // the segmented choice («Куда», the chapters' language)
-  function segmented(name, options, chosen, onPick) {
-    const group = el("div", "gl-seg");
-    group.setAttribute("role", "group");
-    group.setAttribute("aria-label", name);
-    options.forEach(([value, text, disabled, tip]) => {
-      const b = button("", text);
-      b.dataset.value = value;
-      b.setAttribute("aria-pressed", value === chosen ? "true" : "false");
-      b.disabled = !!disabled;
-      if (tip) b.title = tip;
-      b.addEventListener("click", () => {
-        if (b.getAttribute("aria-pressed") === "true") return;
-        group.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b ? "true" : "false"));
-        onPick(value);
-      });
-      group.append(b);
-    });
-    group.value = () => (group.querySelector('button[aria-pressed="true"]') || {}).dataset.value || chosen;
-    return group;
-  }
-
   function legend(items) {
     const ul = el("ul", "gl-legend");
     items.forEach(([cls, text]) => {
@@ -479,323 +493,6 @@
     span.append(el("span", "gl-quick-label", "Отметить:"));
     picks.forEach(([value, text]) => span.append(button("gl-link", text, () => onPick(value))));
     return span;
-  }
-
-  // ── the titles of the sites of manga ─────────────────────────────────────────────────────────────────────────
-  function showSite(st) {
-    const f = st.found;
-    const findId = st.id;
-    const hit = hitFacts.get(f.url);
-    showMark(f.adult_site ? "Хентай" : f.type || "Манга и манхва");
-    const view = hero(f.cover ? "/api/manhwa/find-cover?find=" + encodeURIComponent(findId) : "", f.title,
-      [f.type, f.year, f.status, f.age], (f.alt || []).join(" · "));
-    if (f.cover_hidden) view.pic.title = "Обложка скрыта (SFW)";
-    card.append(view.top);
-    const a = view.about;
-
-    // the chapters' language (MangaDex) or the translators, the rating, the counts
-    const row = el("div", "gl-row");
-    const branches = f.branches || [];
-    const again = (branch) => {
-      tell(f.languages ? "Читаю главы на этом языке…" : "Читаю главы этих переводчиков…");
-      findLink("manhwa", f.url, branch, f.site_label);
-    };
-    if (f.languages && branches.length > 1) {
-      row.append(segmented("Язык глав", branches.map((b) => [b.id, (b.name || b.id) + " · " + b.count]), f.branch, again));
-    } else if (branches.length > 1) {
-      const pick = el("label", "gl-select");
-      const select = el("select");
-      branches.forEach((b) => {
-        const option = el("option", "", (b.name || "без названия") + " — " + plural(b.count, CHAPTERS)
-          + (b.votes ? ", " + votesText(b.votes) : ""));
-        option.value = b.id;
-        option.selected = b.id === f.branch;
-        select.append(option);
-      });
-      select.addEventListener("change", () => again(select.value));
-      pick.append(el("span", "", "Переводчики"), select);
-      row.append(pick);
-    }
-    if (hit && hit.rating) {
-      const rate = el("span", "gl-rating");
-      rate.append(el("b", "", "★ " + String(hit.rating).replace(".", ",")));
-      rate.title = "Оценка на сайте";      // no count: Remanga's «total_votes» of a title are millions — not its ratings
-      row.append(rate);
-    }
-    row.append(el("span", "gl-fact", plural(f.chapters, CHAPTERS)));
-    if (f.updated) row.append(el("span", "gl-fact", "последняя — " + f.updated));
-    row.append(el("span", "gl-fact", "с " + f.site_label));
-    if (branches.length === 1 && branches[0].name && !f.languages) row.append(el("span", "gl-fact", "перевод: " + branches[0].name));
-    a.append(row);
-    if ((f.genres || []).length) a.append(chips(f.genres, "gl-genres"));
-    if (f.about) a.append(about(f.about));
-    if (f.about && f.about_site && f.about_site !== f.site_label) {      // (v5.44.112) Remanga's description first
-      a.append(el("p", "gl-note", `Описание — с ${f.about_site}, главы — с ${f.site_label}`));
-    }
-    (f.notes || []).forEach((note) => a.append(el("p", "gl-note warn", note)));
-
-    // what is read and what is downloaded
-    const actions = el("div", "gl-actions");
-    const readRow = el("span", "gl-read");
-    const all = iconButton("gl-btn", ICON.down);
-    const getAll = all.node;
-    const getMarked = button("gl-btn quiet", "");
-    actions.append(readRow, getAll, getMarked);
-    a.append(actions);
-    const sum = el("p", "gl-sum");
-    a.append(sum);
-
-    // how: where, the new chapters by night, the other sites
-    const opts = el("div", "gl-opts");
-    const rootsOk = !!(f.roots && f.roots.manga);
-    const where = segmented("Куда", [["manhwa", "В манхву — лентой"], ["manga", "В мангу — по страницам", !rootsOk,
-      rootsOk ? "" : "Папка манги не выбрана — «Настройки → Папки»"]], f.kind === "manga" && rootsOk ? "manga" : "manhwa",
-      () => update());
-    const whereBox = el("div", "gl-opt");
-    whereBox.append(el("span", "gl-opt-label", "Куда"), where);
-    const follow = check("Новые главы — скачивать самой (раз в сутки, ночью)", true);
-    opts.append(whereBox, follow.node);
-    const giving = (f.helpers || []).filter((h) => h.gives > 0);
-    let helpers = null;
-    if (giving.length) {
-      helpers = check("Главы, которых нет бесплатно на " + f.site_label + ", — брать с других сайтов: "
-        + giving.map((h) => h.site_label + " (" + plural(h.gives, CHAPTERS) + ")").join(", "), f.helpers_on !== false);
-      opts.append(helpers.node);
-    } else if ((f.helpers || []).length) {
-      opts.append(el("p", "gl-note", "Тайтл есть и на " + f.helpers.map((h) => h.site_label).join(", ")
-        + " — новых глав оттуда сейчас нет."));
-    }
-    const paid = el("p", "gl-note");
-    opts.append(paid);
-    card.append(opts);
-    const others = () => (helpers ? helpers.tick.checked : f.helpers_on !== false);
-
-    // the chapters: tiles, by tomes; ticked by hand
-    const pick = chaptersGrid(f, others, update);
-    card.append(pick.node);
-    if (helpers) helpers.tick.addEventListener("change", () => { pick.repaint(); update(); });
-
-    // the download going: of another title — «В очередь», of this one — its tiles fill, nothing to ask again
-    function going() {
-      const job = jobs.manhwa;
-      if (!job || !RUNNING.includes(job.status)) return "";
-      return String(job.find) === String(findId) ? "this" : "other";
-    }
-
-    function update() {
-      const open = pick.open();
-      const chosen = pick.chosen().length;
-      const waiting = pick.waiting();
-      const now = going();
-      const queued = now === "other";
-      // nothing to take now, nothing in the folder yet: the title kept, its paid ones awaited by the nightly round
-      const waits = !open && waiting && !f.have;
-      all.words.textContent = now === "this" ? "Качается — в «Загрузках»" : open ? (queued ? "В очередь — " : "Скачать всё — ")
-        + plural(open, CHAPTERS) : waits ? "Ждать платные" : "Всё уже в папке";
-      getAll.disabled = now === "this" || (!open && !waits);
-      getMarked.textContent = (queued ? "В очередь отмеченные" : "Скачать отмеченные") + " (" + chosen + ")";
-      getMarked.disabled = !chosen || now === "this";
-      pick.go.textContent = getMarked.textContent;
-      pick.go.hidden = !chosen || now === "this";
-      const folder = folderName(where.value() === f.kind ? f.folder : f.title);
-      sum.textContent = "В папку " + (where.value() === "manga" ? "манги" : "манхвы") + " — «" + folder + "»"
-        + (f.have ? ", там уже " + plural(f.have, CHAPTERS) : "") + (queued ? " · начнётся после текущего скачивания" : "");
-      const on = others();
-      const left = on ? f.paid_left : f.paid_count;
-      const covered = on ? f.paid_count - f.paid_left : 0;
-      const soon = (items) => (items || []).slice(0, 3).map((c) => c.label + (c.free_at ? " — " + c.free_at : "")).join("; ");
-      const dated = (items) => (items || []).some((c) => c.free_at);
-      const nowhere = "бесплатно их пока нет ни на одном из сайтов — появятся, программа скачает сама.";
-      let words = "";
-      if (f.paid_count && covered && !left) {
-        words = "Платных на " + f.site_label + ": " + f.paid_count + " — все есть бесплатно на других сайтах.";
-      } else if (f.paid_count && covered) {
-        words = "Платных: " + f.paid_count + ", из них " + covered + " есть бесплатно на других сайтах; " + (dated(f.waiting)
-          ? "остальные программа возьмёт, когда сайт сделает их бесплатными" + (soon(f.waiting) ? ": " + soon(f.waiting) : "")
-          + "." : "остальные " + left + " — " + nowhere);
-      } else if (f.paid_count) {
-        words = "Платных: " + f.paid_count + " — " + (dated(f.paid) ? "их программа не покупает и возьмёт сама, когда сайт "
-          + "сделает их бесплатными" + (soon(f.paid) ? ": " + soon(f.paid) : "") + "." : nowhere);
-      }
-      paid.textContent = words;
-      paid.hidden = !words;
-    }
-
-    async function download(chapters) {
-      getAll.disabled = true;
-      getMarked.disabled = true;
-      try {
-        const reply = await postJson(KINDS.manhwa.get, { find: findId, where: where.value(), follow: follow.tick.checked,
-          helpers: others(), chapters });
-        LB.say(null, reply.queued ? (reply.queued > 1 ? "В очереди " + reply.queued + "-м" : "В очереди следующим")
-          + ": начнётся само" : "Скачивание началось — оно справа, в «Загрузках»");
-        if (chapters) pick.clear();
-        watch("manhwa", true);
-      } catch (err) {
-        LB.say(null, err.message, true);
-      }
-      update();
-    }
-    getAll.addEventListener("click", () => download(null));
-    getMarked.addEventListener("click", () => download(pick.chosen()));
-    pick.go.addEventListener("click", () => download(pick.chosen()));
-    showRead(f, readRow);
-    update();
-    shown.count = update;
-    shown.tiles = pick;
-    shown.url = f.url;
-  }
-
-  // (v5.44.82) «Читать с начала», «Продолжить: Глава 12»: the title read without downloading it (/online)
-  function onlineHref(f, n, extra) {
-    return "/online?url=" + encodeURIComponent(f.url) + (f.branch ? "&branch=" + encodeURIComponent(f.branch) : "")
-      + "&ch=" + n + (extra || "");
-  }
-
-  function showRead(f, row) {
-    const list = f.list || [];
-    const first = list.findIndex((c) => !c.wait);
-    if (first < 0) return;
-    const start = el("a", "gl-btn primary", "Читать с начала");
-    start.prepend(svg(ICON.play, 16));
-    start.href = onlineHref(f, first + 1, "&from=start");
-    row.append(start);
-    getJson("/api/online/last?url=" + encodeURIComponent(f.url)).then((reply) => {
-      const last = reply && reply.last;
-      if (!last || !last.ch || !shown || shown.url !== f.url) return;
-      const n = last.done && last.ch < list.length ? last.ch + 1 : last.ch;
-      const go = el("a", "gl-btn primary", "Продолжить: " + ((list[n - 1] && list[n - 1].label) || last.label));
-      go.prepend(svg(ICON.play, 16));
-      go.href = onlineHref(f, n);
-      start.className = "gl-btn";
-      start.firstChild.remove();
-      row.prepend(go);
-    }).catch(() => { /* nothing kept: «Читать с начала» only */ });
-  }
-
-  // the chapters as tiles of one size, a tome at a time: in the folder «есть», the paid ones nobody has free locked,
-  // another site's — from there (or not, without that box); a tile ticked by a click, «▶» — read it
-  function chaptersGrid(f, others, changed) {
-    const node = el("section", "gl-pick");
-    node.setAttribute("aria-label", "Главы");
-    const list = f.list || [];
-    const tomes = new Map();
-    list.forEach((c, i) => {
-      const key = Number(c.tome) || 0;
-      if (!tomes.has(key)) tomes.set(key, []);
-      tomes.get(key).push([c, i + 1]);
-    });
-    const go = button("gl-btn small", "");
-    go.hidden = true;
-    const head = gridHead("Главы", list.length, [null, quick([["all", "все"], ["none", "ничего"]], (how) => {
-      boxes().forEach((t) => { if (!t.disabled) t.checked = how === "all"; paintTile(t); });
-      changed();
-    }), go]);
-    if (tomes.size > 1) {
-      const tabs = el("div", "gl-tabs");
-      tabs.setAttribute("role", "tablist");
-      tabs.setAttribute("aria-label", "Тома");
-      const keys = ["all", ...tomes.keys()];
-      keys.forEach((key) => {
-        const b = button("", key === "all" ? "Все" : key ? "Том " + key : "Без тома");
-        b.setAttribute("role", "tab");
-        b.dataset.tome = String(key);
-        b.setAttribute("aria-selected", key === "all" ? "true" : "false");
-        b.addEventListener("click", () => {
-          tabs.querySelectorAll("button").forEach((x) => x.setAttribute("aria-selected", x === b ? "true" : "false"));
-          grid.querySelectorAll(".gl-cell").forEach((cell) => {
-            cell.hidden = key !== "all" && cell.dataset.tome !== String(key);
-          });
-        });
-        tabs.append(b);
-      });
-      head.insertBefore(tabs, head.children[1]);
-    }
-    head.append(legend([["have", "в папке"], ["on", "отмечена"], ["from", "с другого сайта"], ["wait", "платная везде"]]));
-    node.append(head);
-    const grid = el("div", "gl-grid");
-    grid.setAttribute("role", "group");
-    grid.setAttribute("aria-label", "Главы");
-    list.forEach((c, i) => grid.append(tile(c, i + 1)));
-    node.append(grid);
-    if (!list.length) node.append(el("p", "gl-note", "Глав у тайтла нет ни на одном из сайтов."));
-    grid.addEventListener("change", (event) => {
-      if (event.target.matches("input[type='checkbox']")) { paintTile(event.target); changed(); }
-    });
-
-    function base(c) {
-      if (c.have) return { ok: false, mark: "есть", kind: "have" };
-      if (c.wait) return { ok: false, mark: "платная", kind: "wait" };
-      if (c.from) return others() ? { ok: true, mark: "с " + c.from, kind: "from" } : { ok: false, mark: c.paid ? "платная" : "нет", kind: "wait" };
-      return { ok: true, mark: "", kind: "" };
-    }
-
-    function tile(c, n) {
-      const cell = el("div", "gl-cell");
-      cell.dataset.tome = String(Number(c.tome) || 0);
-      cell.dataset.id = String(c.id);
-      const label = el("label", "gl-tile");
-      const tick = el("input", "gl-vh");
-      tick.type = "checkbox";
-      tick.value = String(c.id);
-      label.append(tick, el("span", "gl-tile-icon"), el("span", "gl-tile-n", c.n || "•"), el("span", "gl-tile-fill"));
-      cell.append(label);
-      if (!c.wait) {
-        const read = el("a", "gl-tile-read");
-        read.append(svg(ICON.play, 12));
-        read.href = onlineHref(f, n);
-        read.title = "Читать без скачивания";
-        read.setAttribute("aria-label", "Читать «" + c.label + "» без скачивания");
-        cell.append(read);
-      }
-      return cell;
-    }
-
-    function boxes() { return [...grid.querySelectorAll("input[type='checkbox']")]; }
-
-    function repaint() {
-      const byId = new Map(list.map((c) => [String(c.id), c]));
-      boxes().forEach((t) => {
-        const c = byId.get(t.value);
-        const b = base(c);
-        t.disabled = !b.ok;
-        if (!b.ok) t.checked = false;
-        const cell = t.closest(".gl-cell");
-        cell.dataset.state = b.kind;
-        const icon = cell.querySelector(".gl-tile-icon");
-        icon.textContent = "";
-        if (b.kind === "have") icon.append(svg(ICON.check, 12));
-        else if (b.kind === "wait") icon.append(svg(ICON.lock, 12));
-        cell.title = [c.label + (c.name ? " — " + c.name : ""), b.kind === "have" ? "Уже в папке" : "",
-          c.free_at ? "Платная — бесплатной станет " + c.free_at : b.kind === "wait" ? "Платная — бесплатно её нет нигде" : "",
-          b.kind === "from" ? "Скачается с " + c.from : ""].filter(Boolean).join("\n");
-        t.setAttribute("aria-label", c.label + (c.name ? " — " + c.name : "") + (b.mark ? ", " + b.mark : ""));
-        paintTile(t);
-      });
-    }
-    repaint();
-
-    // (v5.44.74) the download going of this title: each tile fills as its strips come
-    function paintRun(items) {
-      items.forEach((x) => {
-        const cell = grid.querySelector('.gl-cell[data-id="' + CSS.escape(String(x.id)) + '"]');
-        if (!cell) return;
-        cell.dataset.dl = x.state;
-        const p = x.state === "done" ? 100 : x.pages ? Math.round(100 * (x.got || 0) / x.pages) : 0;
-        cell.style.setProperty("--p", p + "%");
-        const said = { wait: "ждёт скачивания", going: "качается", paused: "пауза", retry: "повтор", done: "скачана",
-          failed: "не скачалась" + (x.why ? ": " + x.why : "") }[x.state] || "";
-        cell.title = (x.label || "") + (said ? " — " + said : "");
-      });
-    }
-
-    return {
-      node, go, repaint, paintRun,
-      chosen: () => boxes().filter((t) => t.checked && !t.disabled).map((t) => t.value),
-      open: () => boxes().filter((t) => !t.disabled).length,
-      waiting: () => list.filter((c) => base(c).kind === "wait").length,
-      clear: () => { boxes().forEach((t) => { t.checked = false; paintTile(t); }); },
-    };
   }
 
   function paintTile(tick) {
@@ -867,11 +564,11 @@
     const go = goButton.node;
     actions.append(go);                // (v5.44.89) no way to the page of before: «Скачать» is the menu's tab alone
     // (v5.44.106) a series of YummyAnime, (v5.44.109) of Hentasis: «Смотреть» — watched without downloading (the
-    // program says which links it shows: /api/watch/can)
+    // program says which links it shows: /api/watch/can); (v5.44.116) «Смотреть онлайн» — the phone's words too
     fetch("/api/watch/can?url=" + encodeURIComponent(f.page_url || ""), { credentials: "same-origin" })
       .then((r) => r.json()).then((can) => {
         if (!can || !can.watch || actions.querySelector(".gl-watch")) return;
-        const watch = el("a", "gl-btn gl-watch", "Смотреть");
+        const watch = el("a", "gl-btn gl-watch", "Смотреть онлайн");
         watch.href = can.href;
         actions.append(watch);
       }).catch(() => { /* no «Смотреть» — «Скачать» is there */ });
@@ -909,7 +606,7 @@
       try {
         const reply = await postJson(KINDS.video.get, { find: findId, files, quality: pick.quality(), merge: pick.merge() });
         LB.say(null, reply.queued ? (reply.queued > 1 ? "В очереди " + reply.queued + "-м" : "В очереди следующим")
-          + ": начнётся само" : "Скачивание началось — оно справа, в «Загрузках»");
+          + ": начнётся само" : "Скачивание началось — оно в «Загрузках»");
         watch("video", true);
       } catch (err) {
         LB.say(null, err.message, true);
@@ -1223,7 +920,7 @@
         // (v5.44.107) a download going: they wait in it — the queue
         LB.say(null, reply.already ? "Уже в «Загрузках» — качается или скачана"
           : reply.queued ? (reply.queued > 1 ? "В очереди " + reply.queued + "-й" : "В очереди следующей")
-            + " — справа, в «Загрузках»" : "Скачивание началось — оно справа, в «Загрузках»");
+            + " — в «Загрузках»" : "Скачивание началось — оно в «Загрузках»");
         watch("manga", true);
       } catch (err) {
         LB.say(null, err.message, true);
@@ -1274,10 +971,20 @@
       a.append(line);
     });
     if (g.have) {
+      // (v5.44.116) all its pages there: «✓ В папке» — «Скачать» would download nothing; cut short — «Докачать N»
+      // (the pages a download asks for: ``have.missing``, as it counts them)
+      const missing = g.have.missing !== undefined ? Number(g.have.missing) || 0 : Math.max(0, g.pages - g.have.pages);
+      const words = go.querySelector("span");
+      if (words) words.textContent = missing ? "Докачать " + plural(missing, ["страницу", "страницы", "страниц"])
+        : "✓ В папке";
+      if (!missing) {
+        go.disabled = true;
+        go.querySelectorAll("svg").forEach((icon) => icon.remove());
+      }
       const there = el("p", "gl-note", "");
       there.append("Уже в папке манги: ", el("b", "", g.have.folder),
-        g.have.pages >= g.pages ? " — все страницы на месте." : " — страниц там " + g.have.pages + " из " + g.pages
-          + ", «Скачать» докачает остальные.");
+        !missing ? " — все страницы на месте." : " — страниц там " + g.have.pages + " из " + g.pages
+          + ", «Докачать» скачает остальные.");
       a.append(there);
       if (g.have.open) {
         const open = el("a", "gl-btn", "");
@@ -1443,7 +1150,6 @@
       hitTiles.set(t.url, tile);
     }
     tile.hit = t;
-    hitFacts.set(t.url, t);
     const cover = tile.querySelector(".gl-hit-cover");
     if ((t.cover || "") !== (tile.dataset.cover || "")) {
       tile.dataset.cover = t.cover || "";
@@ -1494,29 +1200,30 @@
   }
 
   // back to the page (a title read, F5): the name searched before — folded over its card, as it was left
+  // (v5.44.119) back to the page from a title picked here: the titles found by the name, the picked one marked (the
+  // search let go meanwhile — searched anew)
   async function restoreHits(text, url) {
     if (/^https?:\/\//i.test(text)) return;
     try {
       const st = await getJson("/api/manhwa/search-state?id=last");
       const same = (x) => String(x || "").replace(/\s+/g, " ").trim().toLowerCase();
-      if (!st.id || hitsId || same(st.query) !== same(text)) return;
+      if (hitsId) return;
+      if (!st.id || same(st.query) !== same(text)) { ask(text); return; }
       startHits(st.id, text);
       showHits(st);
       markPicked(url || "");
-      if (url) { hitsBox.classList.add("folded"); showFold(); }
       if (!st.done) pollHits();
-    } catch (_) { /* the search is gone: the card alone */ }
+    } catch (_) {
+      ask(text);
+    }
   }
 
+  // (v5.44.119) a title picked — its one page (what it is is known: its kind goes with it, its name and rating too)
   function pickHit(url) {
     const tile = hitTiles.get(url);
     if (!tile || !tile.hit) return;
     markPicked(url);
-    hitsBox.classList.add("folded");
-    showFold();
-    hideCard();
-    findLink("manhwa", url, "", ((tile.hit.sites || [])[0] || {}).label || "");
-    hitsBox.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    openTitle(url, hitsQuery, tile.hit);
   }
 
   hitsFold.querySelector("button").addEventListener("click", () => {
@@ -1524,9 +1231,10 @@
     hitsFold.hidden = true;
   });
 
-  // ── «Загрузки»: the downloads going of the three, their queues ──────────────────────────────────────────────
+  // ── the downloads going, as the card needs them (v5.44.120: «Загрузки» are a part of «Скачать» of their own —
+  // downloads.py, downloads.js; here only what the cards use: «В очередь» while another download goes, the card read
+  // again when its download has ended) ─────────────────────────────────────────────────────────────────────────────
   const jobs = {};               // kind -> its last state
-  const items = {};              // kind -> its item in the list
   const polling = {};            // kind -> {gen, timer}: one loop of questions per kind, a newer one takes over
   const runs = { since: 0, run: 0 };    // the manhwa's chapters asked after this (its tiles on the card)
 
@@ -1560,7 +1268,6 @@
     const was = jobs[kind];
     jobs[kind] = st;
     if (kind === "manhwa") paintTiles(st);
-    paintJob(kind, st);
     if (shown && shown.count && shown.kind === kind) shown.count();
     const goes = RUNNING.includes(st.status) || (!!KINDS[kind].unqueue && ((st.queue || []).length || st.restoring));
     if (goes) {
@@ -1583,293 +1290,10 @@
   async function refreshFound(kind) {
     const mine = shown;
     try {
-      const st = await getJson(KINDS[kind].findState + "?after=999999999");
+      const st = await getJson(withAfter(findAddress(kind, mine.id), 999999999));
       if (shown === mine && st.found && st.id === mine.id) showFound(kind, st);
     } catch (_) { /* the card stays as it was */ }
   }
-
-  function item(kind) {
-    if (items[kind]) return items[kind];
-    const li = el("li", "gl-job");
-    li.dataset.kind = kind;
-    const pic = el("span", "gl-job-pic");
-    const initial = el("span", "gl-initial", "");
-    initial.setAttribute("aria-hidden", "true");
-    pic.append(initial);
-    const body = el("div", "gl-job-body");
-    const top = el("div", "gl-job-top");
-    const title = el("b", "gl-job-title");
-    const kindWord = el("span", "gl-job-kind", KINDS[kind].label);
-    top.append(title, kindWord);
-    const text = el("p", "gl-job-text");
-    const bar = el("span", "gl-job-bar");
-    const fill = el("i");
-    bar.append(fill);
-    const sub = el("p", "gl-job-sub");
-    const queue = el("ul", "gl-job-queue");
-    const tools = el("div", "gl-job-tools");
-    const pause = button("gl-icon-btn", "");
-    const stop = button("gl-icon-btn", "");
-    stop.append(svg(ICON.stop, 14));
-    stop.title = "Остановить";
-    stop.setAttribute("aria-label", "Остановить");
-    const open = el("a", "gl-link", "Открыть");
-    tools.append(pause, stop, open);
-    body.append(top, text, bar, sub, queue, tools);
-    li.append(pic, body);
-    stop.addEventListener("click", async () => {
-      stop.disabled = true;
-      try { await postJson(KINDS[kind].stop, {}); LB.say(null, "Останавливаю…"); } catch (err) { LB.say(null, err.message, true); }
-      stop.disabled = false;
-      watch(kind, true);
-    });
-    pause.addEventListener("click", async () => {
-      const st = jobs[kind] || {};
-      pause.disabled = true;
-      try {
-        const reply = await postJson(KINDS[kind].pause, { pause: !st.paused });
-        LB.say(null, reply.paused ? (kind === "manhwa" ? "Пауза: глава остановится, где она есть" : "Пауза: файл остановится, где он есть") : "Продолжаю");
-      } catch (err) {
-        LB.say(null, err.message, true);
-      }
-      pause.disabled = false;
-      watch(kind, true);
-    });
-    items[kind] = { li, pic, initial, title, kindWord, text, bar, fill, sub, queue, pause, stop, open, picture: "" };
-    jobsList.append(li);
-    return items[kind];
-  }
-
-  // the item's picture; one that did not come (a cover not written yet) is asked again, not more than every 10 s
-  function picture(it, address, letter) {
-    it.initial.textContent = String(letter || "").trim().charAt(0).toUpperCase();
-    if ((address || "") === it.picture) return;
-    if (address && it.failed && it.failed.address === address && Date.now() - it.failed.at < 10000) return;
-    it.picture = address || "";
-    it.pic.querySelectorAll("img").forEach((x) => x.remove());
-    it.pic.classList.remove("has-picture");
-    if (!address) return;
-    const img = el("img");
-    img.alt = "";
-    img.decoding = "async";
-    img.onload = () => it.pic.classList.add("has-picture");
-    img.onerror = () => {
-      img.remove();
-      it.failed = { address, at: Date.now() };
-      if (it.picture === address) it.picture = "";
-    };
-    img.src = address;
-    it.pic.append(img);
-  }
-
-  function paintJob(kind, st) {
-    const soon = !!KINDS[kind].unqueue && st.restoring;
-    const queue = KINDS[kind].unqueue ? st.queue || [] : [];
-    if (!st.id && !soon && !queue.length) {
-      if (items[kind]) items[kind].li.hidden = true;
-      sideSummary();
-      return;
-    }
-    const it = item(kind);
-    it.li.hidden = false;
-    const running = RUNNING.includes(st.status);
-    it.li.dataset.state = running ? (st.paused ? "paused" : "running") : soon && !st.id ? "soon" : st.status || "idle";
-    let title = String(st.label || "").replace(KINDS[kind].prefix, "").replace(/^«(.*)»$/, "$1") || (soon ? "С прошлого запуска" : "");
-    it.stop.hidden = !running && !queue.length;
-    it.stop.title = queue.length ? "Остановить и убрать очередь" : "Остановить";
-    it.stop.setAttribute("aria-label", it.stop.title);
-    it.pause.hidden = !KINDS[kind].pause || !running || st.status === "stopping";
-    it.pause.textContent = "";
-    it.pause.append(svg(st.paused ? ICON.play : ICON.pause, 14));
-    it.pause.title = st.paused ? "Продолжить" : "Пауза";
-    it.pause.setAttribute("aria-label", it.pause.title);
-    it.queue.textContent = "";
-    const said = { text: "", sub: "", part: running ? 0.02 : 1, open: "", pic: "", kind: KINDS[kind].label };
-    if (kind === "video") paintVideo(st, said, running, soon, queue, it);
-    else if (kind === "manhwa") paintManhwa(st, said, running, soon, queue, it);
-    else paintManga(st, said, running, soon, queue, it);
-    if (!running && st.status === "failed") said.text = st.error || "Не вышло — причина в журнале";
-    title = said.title || title;
-    it.title.textContent = title;
-    it.title.title = title;
-    it.kindWord.textContent = said.kind;
-    it.text.textContent = said.text;
-    it.text.hidden = !said.text;
-    it.sub.textContent = said.sub;
-    it.sub.hidden = !said.sub;
-    it.bar.hidden = !running;
-    it.fill.style.width = Math.max(2, Math.min(100, said.part * 100)).toFixed(1) + "%";
-    it.open.hidden = running || !said.open;
-    it.open.href = said.open || "#";
-    it.queue.hidden = !it.queue.children.length;
-    picture(it, said.pic, title || said.kind);
-    // the downloads going first, then the ones that have ended
-    const order = (x) => (x.li.dataset.state === "running" || x.li.dataset.state === "paused" ? 0 : x.li.dataset.state === "soon" ? 1 : 2);
-    const wanted = ORDER.map((k) => items[k]).filter(Boolean).sort((a, b) => order(a) - order(b)).map((x) => x.li);
-    const now = [...jobsList.children];
-    if (now.length !== wanted.length || now.some((li, k) => li !== wanted[k])) jobsList.append(...wanted);
-    sideSummary();
-  }
-
-  function queueLines(kind, queue, it, what) {
-    queue.forEach((q, n) => {
-      const li = el("li");
-      li.append(el("span", "gl-job-q", (n ? "Потом" : "Дальше") + ": «" + q.title + "»" + (what(q) ? " — " + what(q) : "")));
-      li.append(button("gl-link", "убрать", async () => {
-        try { await postJson(KINDS[kind].unqueue, { id: q.id }); } catch (err) { LB.say(null, err.message, true); }
-        watch(kind, true);
-      }));
-      it.queue.append(li);
-    });
-  }
-
-  function restoreWords(soon) {
-    return "С прошлого запуска программы продолжится: " + soon.titles.map((t) => "«" + t + "»").join(", ")
-      + (soon.in > 0 ? " — через " + soon.in + " с" : " — сейчас");
-  }
-
-  function paintVideo(st, said, running, soon, queue, it) {
-    const m = st.meter || {};
-    if (running && m.count) {
-      if (m.merging) {
-        said.text = "Собираю озвучки в общие файлы серий: " + (m.name || "");
-        said.part = Math.max(0, (Number(m.index) || 1) - 1) / m.count;
-      } else {
-        const part = m.total ? Math.min(1, m.done / m.total) : 0;
-        said.part = Math.min(1, ((Number(m.index) || 1) - 1 + part) / m.count);
-        const name = String(m.name || "Файл").replace(/\.[^.]+$/, "");
-        const bits = [];
-        if (m.total) bits.push(Math.floor(part * 100) + "% из " + megabytes(m.total));
-        else if (m.done) bits.push(megabytes(m.done));
-        if (m.speed && !st.paused) bits.push(megabytes(m.speed) + "/с");
-        said.text = (st.paused ? "Пауза — " : "") + name + (bits.length ? " · " + bits.join(" · ") : "");
-      }
-      said.sub = "Файлов: " + m.index + " из " + m.count;
-    } else if (running) {
-      said.text = st.line || "Начинаю…";
-    } else if (st.id) {
-      const sum = st.summary || {};
-      const done = Number(sum.done) || 0, failed = Number(sum.failed_files) || 0, had = Number(sum.whole) || 0;
-      said.text = (st.status === "stopped" || sum.stopped ? "Остановлено: " : "Готово: ")
-        + (done ? "скачано " + plural(done, ["файл", "файла", "файлов"]) : "ничего не скачано")
-        + (had ? ", уже были: " + had : "") + (failed ? ", не скачались: " + failed : "")
-        + (Number(sum.merged) ? ", собрано в общие файлы: " + plural(Number(sum.merged), ["серия", "серии", "серий"]) : "");
-      said.open = st.series_url || "";
-    }
-    if (soon) said.sub = restoreWords(soon);
-    if (shown && shown.kind === "video" && shown.poster && String(st.find) === String(shown.id)) {
-      said.pic = "/api/videos/find-poster?find=" + encodeURIComponent(shown.id);
-    }
-    queueLines("video", queue, it, (q) => plural(q.files, ["файл", "файла", "файлов"]));
-  }
-
-  function paintManhwa(st, said, running, soon, queue, it) {
-    const m = st.meter || {};
-    const now = m.now;
-    said.kind = st.what || KINDS.manhwa.label;
-    if (running && m.total) {
-      const part = now && now.pages ? Math.min(1, now.got / now.pages) : 0;
-      said.part = Math.min(1, ((m.done || 0) + (m.failed || 0) + part) / m.total);
-      const bits = [];
-      if (now) bits.push(now.label + (now.from ? " (с " + now.from + ")" : "") + (now.pages ? ": " + now.got + " из " + now.pages : ""));
-      if (m.speed && !st.paused) bits.push(speedOf(m.speed));
-      if (m.eta && !st.paused) bits.push("осталось ≈ " + clockOf(m.eta));
-      said.text = (st.paused ? "Пауза" + (bits.length ? " — " : "") : "") + (bits.join(" · ") || (st.paused ? "" : st.line || "Начинаю…"));
-      said.sub = "Глав: " + (m.done || 0) + " из " + m.total + (m.retrying ? ", ждут повтора: " + m.retrying : "")
-        + (m.failed ? ", не скачались: " + m.failed : "");
-    } else if (running) {
-      said.text = st.line || "Начинаю…";
-    }
-    const result = st.result;
-    if (!running && result) {
-      const failed = (result.failed || []).length;
-      said.text = (result.got ? "Скачано: " + plural(result.got, CHAPTERS) : "Новых глав не скачано")
-        + (failed ? ", не скачались: " + failed : "") + (result.stopped ? " (остановлено)" : "")
-        + (result.gave_up ? ". " + result.gave_up : "");
-      said.open = result.open || "";
-      (result.failed || []).slice(-3).forEach((x) => {
-        it.queue.append(el("li", "warn", x.label + ": не скачалась" + (x.why ? " — " + x.why : "")));
-      });
-    }
-    if (soon) said.sub = restoreWords(soon);
-    // the cover is in its folder once the first chapter goes (the download writes the title first)
-    if (m.run && ((running && (m.now || m.done)) || result)) said.pic = "/api/manhwa/download-cover?run=" + m.run;
-    queueLines("manhwa", queue, it, (q) => (q.count ? plural(q.count, CHAPTERS) : ""));
-  }
-
-  const MANGA_STATES = { wait: "в очереди", reading: "читаю описание…", done: "готово", had: "уже была скачана",
-    failed: "не скачана", stopped: "остановлена — докачается" };
-
-  function paintManga(st, said, running, soon, queue, it) {
-    const list = st.items || [];
-    const done = list.filter((x) => x.state === "done" || x.state === "had").length;
-    const now = list.find((x) => x.state === "pages" || x.state === "reading");
-    if (running) {
-      said.part = list.length ? (done + (now && now.pages ? (now.page || 0) / now.pages : 0)) / list.length : 0.02;
-      said.text = now ? (now.title || "Галерея " + now.number) + (now.state === "pages" ? ": страница " + (now.page || 1)
-        + " из " + (now.pages || "?") : ": читаю описание…") : st.line || "Начинаю…";
-      said.sub = list.length > 1 ? "Галерей: " + done + " из " + list.length : "";
-    } else if (st.id) {
-      const failed = list.filter((x) => x.state === "failed").length;
-      said.text = (st.status === "stopped" ? "Остановлено: " : "Готово: ") + plural(done, ["галерея", "галереи", "галерей"])
-        + (failed ? ", не скачаны: " + failed : "");
-      said.open = st.open || "";
-    }
-    // a gallery's cover is its first page: there once its second is coming
-    const covered = (x) => x.cover && (x.state === "done" || x.state === "had" || (x.state === "pages" && (x.page || 0) > 1));
-    const withCover = now && covered(now) ? now : list.find(covered);
-    if (withCover) said.pic = withCover.cover;
-    if (list.length === 1 && list[0].title) said.title = list[0].title;      // one gallery: its own name
-    // (v5.44.107) the galleries waiting — the queue, each with «убрать»; the others — their lines
-    const waits = new Set(running ? queue.map((q) => String(q.id)) : []);
-    const lines = list.filter((x) => !(x.state === "wait" && waits.has(String(x.number))));
-    if (list.length > 1) {
-      lines.slice(-8).forEach((x) => {
-        const state = x.state === "pages" ? "страница " + (x.page || 1) + " из " + (x.pages || "?") : MANGA_STATES[x.state] || "";
-        it.queue.append(el("li", x.state === "failed" ? "warn" : "", (x.title || "Галерея " + x.number) + " — " + state
-          + (x.state === "failed" && x.why ? ": " + x.why : "")));
-      });
-    }
-    if (soon) said.sub = restoreWords(soon);
-    if (running) queueLines("manga", queue, it, () => "");
-  }
-
-  function sideSummary() {
-    const shownItems = ORDER.map((k) => items[k]).filter((x) => x && !x.li.hidden);
-    const going = shownItems.filter((x) => x.li.dataset.state === "running" || x.li.dataset.state === "paused").length;
-    const queued = ORDER.reduce((s, k) => s + (KINDS[k].unqueue && jobs[k] ? (jobs[k].queue || []).length : 0), 0);
-    sideEmpty.hidden = shownItems.length > 0;
-    sideCount.textContent = [going ? (going === 1 ? "1 идёт" : going + " идут") : "", queued ? queued + " в очереди" : ""]
-      .filter(Boolean).join(" · ");
-    const pausable = ORDER.filter((k) => KINDS[k].pause && jobs[k] && RUNNING.includes(jobs[k].status) && jobs[k].status !== "stopping");
-    sideButtons.hidden = !going && !queued;
-    const pauseAll = sideButtons.querySelector('[data-all="pause"]');
-    pauseAll.hidden = !pausable.length;
-    pauseAll.textContent = pausable.length && pausable.every((k) => jobs[k].paused) ? "Продолжить" : "Пауза";
-  }
-
-  sideButtons.addEventListener("click", async (event) => {
-    const b = event.target.closest("[data-all]");
-    if (!b) return;
-    b.disabled = true;
-    if (b.dataset.all === "pause") {
-      const pausable = ORDER.filter((k) => KINDS[k].pause && jobs[k] && RUNNING.includes(jobs[k].status));
-      const pause = !pausable.every((k) => jobs[k].paused);
-      for (const k of pausable) {
-        try { await postJson(KINDS[k].pause, { pause }); } catch (err) { LB.say(null, err.message, true); }
-        watch(k, true);
-      }
-    } else {
-      for (const k of ORDER) {
-        const st = jobs[k];
-        if (!st || !(RUNNING.includes(st.status) || (st.queue || []).length)) continue;
-        try { await postJson(KINDS[k].stop, {}); } catch (err) { LB.say(null, err.message, true); }
-        watch(k, true);
-      }
-      LB.say(null, "Останавливаю…");
-    }
-    b.disabled = false;
-  });
 
   // ── the page ──────────────────────────────────────────────────────────────────────────────────────────────────
   form.addEventListener("submit", (event) => {
@@ -1895,13 +1319,17 @@
     let last = null;
     try { last = JSON.parse(stored("gl-last") || "null"); } catch (_) { last = null; }
     const text = field.value.trim();
-    if (last && last.text === text && KINDS[last.kind] && KINDS[last.kind].findState) {
-      getJson(KINDS[last.kind].findState + "?after=999999999").then((st) => {
-        if (st.id !== last.id) { ask(text); return; }
+    const same = (x) => String(x || "").replace(/\s+/g, " ").trim().toLowerCase();
+    if (last && last.kind === "title" && same(last.text) === same(text)) {
+      // (v5.44.119) back from a title's page: a link — the line to open it again; a name — the titles found by it
+      if (/^https?:\/\//i.test(text)) titleLine(last.url || text);
+      else restoreHits(text, last.url);
+    } else if (last && last.text === text && KINDS[last.kind] && KINDS[last.kind].findState) {
+      getJson(withAfter(findAddress(last.kind, last.id), 999999999)).then((st) => {
+        if (st.gone || st.id !== last.id) { ask(text); return; }
         if (RUNNING.includes(st.status)) { finding = last; busy(true); waitFound(); }
         else if (st.found && !shown) showFound(last.kind, st);
-        else if (!st.found) { ask(text); return; }
-        if (last.kind === "manhwa") restoreHits(text, last.url);
+        else if (!st.found) ask(text);
       }).catch(() => ask(text));
     } else {
       ask(text);

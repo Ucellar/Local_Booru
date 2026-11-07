@@ -7,7 +7,9 @@ episodes as tiles — in the folder, watched, now — the player, the episodes b
 ``/videos/watch?url=`` — a title of YummyAnime in the tab «Видео» («Лента» marked; «← Лента» back to it — a tile of
 «Видео → Лента» leads here): ``c`` — the tile's cover (``/api/catalog/cover``), ``r`` — its rating, ``t`` — its name,
 shown before the site answers.  ``/m/videos/watch`` — the phone's (its frame, back to its «Лента»).  The title, the
-streams and where it stopped — ``core/video_watch``; this page shows them (``static/watch.js``):
+streams and where it stopped — ``core/video_watch``; (v5.44.121) the page is the one page of a series
+(``webui/pages/video_series.py``, ``static/series.js``: the folder's episodes and the site's, one player, one memory —
+``static/watch.js`` before); these stay for it and for the cards of «По ссылке»:
 
 * ``/api/watch/title?url=`` — the title (waited for :data:`video_watch.LOOK_WAIT`, then «… отвечает» and asked again);
 * ``POST /api/watch/open`` {url, dub, ep, player, quality} — the episode's video asked of its player: a token and the
@@ -38,8 +40,6 @@ from webui.server import Request, Response
 
 BACK = "/videos/feed"
 PHONE_BACK = "/m/videos/feed"
-SCREEN = ("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 9'%3E%3Crect width='16' "
-          "height='9' fill='%23000'/%3E%3C/svg%3E")         # the window's player before an episode is chosen
 
 
 def register(router) -> None:
@@ -88,16 +88,15 @@ def _in_app(req: Request) -> bool:
 
 
 def _frame(req: Request, title: str, body: str, *, phone: bool, status: int = 200) -> Response:
+    """A page of its own (a link the program does not show online): the frame of the one page of a series."""
     if phone:
         from webui.pages import phone as P
         return P.page(title, body, status, active="videos", heading="Видео", back=PHONE_BACK, top=P.mode_switch(),
-                      scripts=("vendor/hls.light.min", "watch"), kind="m-watch-page",
-                      head='<link rel="stylesheet" href="/static/watch.css">')
+                      kind="m-series-page", head='<link rel="stylesheet" href="/static/series.css">')
     from webui.pages import videos
-    assets = ("watch",) if _in_app(req) else ("hls", "watch")
-    return Response.html(page_frame(title, body, active="videos", subnav=False, kind="watch",
+    return Response.html(page_frame(title, body, active="videos", subnav=False, kind="video-series",
                                     tabs=videos.tabs_of(req, "feed"), top_search=videos._search_form("", "all"),
-                                    assets=assets, **videos._look()), status=status)
+                                    assets=("videos", "series"), **videos._look()), status=status)
 
 
 def _hidden_words(phone: bool, mode: str, back: str) -> str:
@@ -115,8 +114,9 @@ def _hidden_words(phone: bool, mode: str, back: str) -> str:
 
 
 def page(req: Request, phone: bool = False) -> Response:
+    """(v5.44.121) The one page of a series (``webui/pages/video_series.py``): a title of a site — its episodes online,
+    and the folder's when it has one here (that series' page, the address kept)."""
     from core import video_watch as W
-    from webui import content_mode
     url = req.arg("url").strip()[:2000]
     back = PHONE_BACK if phone else BACK
     if not W.is_watchable(url):
@@ -125,83 +125,25 @@ def page(req: Request, phone: bool = False) -> Response:
             body = (f'<section class="m-hello"><h2>Не открылось</h2><p>{esc(words)}</p><p><a class="m-button m-quiet" '
                     f'href="{esc(back)}">К ленте</a></p></section>')
         else:
-            body = (f'<div class="wt wt-problem"><a class="wt-back" href="{esc(back)}" data-wt-back>← Лента</a>'
+            body = (f'<div class="sv sv-problem"><a class="sv-back" href="{esc(back)}" data-sv-back>← Лента</a>'
                     f'<h1>Не открылось</h1><p>{esc(words)}</p></div>')
         return _frame(req, "Не открылось", body, phone=phone, status=404)
-    name = req.arg("t").strip()[:200]
-    cover = req.arg("c").strip()[:64]
-    rating = _rating(req.arg("r"))
-    picture = (f'<img src="/api/catalog/cover?c={esc(quote(cover, safe=""))}" alt="" decoding="async" data-wt-tile>'
-               if cover else "")
-    rate = (f'<span class="wt-rate wt-rate-own"><b>{f"{rating:.1f}".replace(".", ",")}</b></span>' if rating else "")
-    mode = content_mode.mode()
-    hidden = ("<template data-wt-hidden>" + _hidden_words(phone, mode, back) + "</template>") if mode != "all" else ""
-    in_app = _in_app(req) and not phone
-    player = _player(req, name) if in_app else _browser_player()
-    site = W.site_of(url)
-    body = f"""<div class="wt" id="watch-page" data-url="{esc(url)}" data-back="{esc(back)}" data-mode="{esc(mode)}"
-  data-phone="{"1" if phone else ""}" data-app="{"1" if in_app else ""}" data-get="{"/m/get" if phone else "/get"}"
-  data-site="{esc(site)}">
-  <a class="wt-back" href="{esc(back)}" data-wt-back>← Лента</a>
-  <section class="wt-hero" aria-busy="true" aria-labelledby="wt-name">
-    <div class="wt-main">
-      <h1 class="wt-name" id="wt-name" data-wt-name>{esc(name or "Сериал")}</h1>
-      <ul class="wt-alt" data-wt-alt aria-label="Другие названия" hidden></ul>
-      <div class="wt-ratings" data-wt-ratings>{rate}</div>
-      <dl class="wt-facts" data-wt-facts hidden></dl>
-      <p class="wt-wait" data-wt-wait role="status">Читаю тайтл с {esc(site)}…</p>
-    </div>
-    <aside class="wt-side" aria-label="Постер и действия">
-      <div class="wt-poster" data-wt-poster>{picture}</div>
-      <div class="wt-actions" data-wt-actions></div>
-    </aside>
-  </section>
-  <section class="wt-about" data-wt-about aria-label="Описание" hidden></section>
-  <details class="wt-order" data-wt-order hidden></details>
-  <section class="wt-watch" data-wt-watch aria-label="Смотреть" hidden>
-    <div class="wt-picks" data-wt-picks></div>
-    <div class="wt-eps-head"><h2>Серии <span data-wt-count></span></h2>
-      <ul class="wt-legend" aria-label="Обозначения"><li><i class="wt-key have"></i>в папке</li>
-        <li><i class="wt-key seen"></i>просмотрено</li><li><i class="wt-key now"></i>сейчас</li></ul></div>
-    <div class="wt-eps" data-wt-eps role="list"></div>
-    <div class="wt-player" data-wt-player>
-      <p class="wt-now" data-wt-now role="status">Выберите серию</p>
-      {player}
-      <div class="wt-marks" data-wt-marks aria-hidden="true" hidden></div>
-    </div>
-    <div class="wt-under">
-      <button type="button" class="wt-btn" data-wt-prev disabled>‹ Предыдущая</button>
-      <button type="button" class="wt-btn" data-wt-next disabled>Следующая ›</button>
-      <label class="wt-auto"><input type="checkbox" data-wt-autonext{" checked" if _autonext() else ""}>
-        следующая серия сама</label>
-    </div>
-  </section>
-</div>{hidden}"""
-    return _frame(req, name or "Сериал", body, phone=phone)
-
-
-def _autonext() -> bool:
-    from webui import prefs
-    return str(prefs.load().get("video_autonext") or "on") == "on"
-
-
-def _skip_buttons() -> str:
-    return ('<button type="button" class="wt-skip nv-skip" data-wt-skip="opening" hidden>Пропустить опенинг</button>'
-            '<button type="button" class="wt-skip nv-skip" data-wt-skip="ending" hidden>Пропустить эндинг</button>')
-
-
-def _player(req: Request, name: str) -> str:
-    """The window's own player (booru.js ``nativeVideo``: ``data-stream`` — the token of the episode's stream,
-    set by watch.js before it starts)."""
-    from webui.pages.gallery import native_video_box
-    attrs = {"stream": "", "autoplay": "0", "loop": "0", "from": "0"}
-    return native_video_box(req, attrs, SCREEN, frame_class="wt-frame", overlay=_skip_buttons(), title=name)
-
-
-def _browser_player() -> str:
-    return ('<div class="wt-screen" data-wt-screen><video class="wt-video" data-wt-video controls playsinline '
-            'preload="none"></video>' + _skip_buttons() + '<p class="wt-problem-line" data-wt-problem role="alert" '
-            'hidden></p></div>')
+    from webui.pages import video_series
+    ref = video_series.resolve(req, url=url)
+    if ref is not None and ref.series is not None:
+        from core import content_marks as CM
+        from webui import content_mode
+        found = CM.series_verdict(ref.series)
+        if not content_mode.shows(found.hentai):
+            if phone:
+                from webui.pages.phone_videos import _hidden
+                return _hidden(ref.series)
+            from webui.pages import videos
+            body = content_mode.hidden_item(active="videos", what="этот сериал", reason=found.reason,
+                                            hentai=found.hentai, back=back, back_label="К ленте")
+            return videos._frame(req, "Скрыто", body, kind="mode-hidden")
+    tile = {"name": req.arg("t").strip()[:200], "cover": req.arg("c").strip()[:64], "rating": _rating(req.arg("r"))}
+    return video_series.render(req, ref, phone=phone, tile=tile)
 
 
 # ── the title, the episodes ──────────────────────────────────────────────────────────────────────────────────────

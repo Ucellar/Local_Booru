@@ -127,6 +127,13 @@ class Manga:
     adult: str = ""                                    # (v5.44.53) its site marks it as hentai: why (core/content_marks)
     cover_page: "PageRef | None" = None                # (v5.44.76) «cover.*» of a title the program looks after
     linked: bool = False                               # (v5.44.76) the folder names its site (``.lb/source.json``)
+    # (v5.44.125) a manga of a folder of several the parser's folder held («silver soul»: ``core/parser_manga``) — its
+    # сборка (``info.json`` «lb_set»: its key, its name, its place)
+    set_key: str = ""
+    set_name: str = ""
+    set_place: int = 0
+    info: dict = field(default_factory=dict)           # (v5.44.126) ``chapter.json`` of a chapter «Скачать» brought:
+    #                                                    ``downloaded_at``, ``source`` (its site) — as a manhwa one's
 
     @property
     def is_series(self) -> bool:
@@ -294,6 +301,14 @@ def _apply_meta(manga: Manga, data) -> None:
     adult = _adult_flag(data)
     if adult:
         manga.adult = adult
+    together = data.get("lb_set")                         # (v5.44.125) one folder's manga: one сборка (manga_works)
+    if isinstance(together, dict) and str(together.get("key") or "").strip():
+        manga.set_key = str(together["key"]).strip()[:64]
+        manga.set_name = str(together.get("name") or "").strip()[:200]
+        try:
+            manga.set_place = int(together.get("place") or 0)
+        except (TypeError, ValueError):
+            manga.set_place = 0
     tags = data.get("tags")
     if isinstance(tags, list):
         for item in tags:
@@ -374,10 +389,13 @@ def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
     manga.linked = _linked(folder)
     files = folder.rglob("*") if recursive else folder.iterdir()
     pages = []
+    from core.title_covers import is_aside
     for p in files:
         try:
             if LB_DIR in p.relative_to(folder).parts[:-1] or p.name == LB_DIR:
                 continue                                  # (v5.44.76) the program's own: a chapter half-downloaded
+            if p.parent == folder and is_aside(p.name):
+                continue                                  # (v5.44.123) a cover put aside («cover.old-…»): no page
             if p.suffix.lower() in PAGE_EXTS and p.is_file():
                 if manga.linked and p.parent == folder and p.stem.lower() == COVER_STEM:
                     manga.cover_page = PageRef(str(p))
@@ -402,8 +420,27 @@ def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
                     _add(manga.groups, "general", part)
             except OSError as exc:
                 _LOG.warning("manga tags %s unreadable: %s", txt, exc)
+    manga.info = _chapter_info(folder)
     _bracket_tags(manga)
     return manga
+
+
+CHAPTER_INFO = "chapter.json"
+
+
+def _chapter_info(folder: Path) -> dict:
+    """(v5.44.126) A chapter's ``chapter.json`` — «Скачать» writes it into every chapter it brings (when it came, the
+    site it came from: «новая», «с MangaLib · сегодня» on the title's pages, as a manhwa chapter's); {} — none."""
+    path = folder / CHAPTER_INFO
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_META_BYTES:
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:             # the journal names the folders, never the whole path
+        why = (exc.strerror or type(exc).__name__) if isinstance(exc, OSError) else exc
+        _LOG.warning("manga chapter description of «%s / %s» unreadable: %s", folder.parent.name, folder.name, why)
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _read_archive(root: Path, archive: Path) -> Manga:

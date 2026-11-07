@@ -338,9 +338,10 @@ input[type="search"], select {
 .mtag { border-radius: 0; background: var(--field-bg); box-shadow: var(--sunken); }
 .mtag:hover { background: var(--w-sel); color: var(--w-sel-ink); }
 .cover, .page-thumb img, .manga-cover img { border-radius: 0; }
-.manga-sorts a, .reader-nav a { border-radius: 0; background: var(--panel); color: var(--text); box-shadow: var(--raised); }
+.manga-sorts a { border-radius: 0; background: var(--panel); color: var(--text); box-shadow: var(--raised); }
 .manga-sorts a.active { background: var(--w-sel); color: var(--w-sel-ink); box-shadow: var(--sunken); }
-.reader-nav a:hover { background: var(--panel); color: var(--text); }
+/* (v5.44.117) the one reader's panel and buttons: raised, square, as the windows' own */
+.rd .rd-back, .rd .rd-arrow, .rd .rd-pg, .rd .rd-ch, .rd .rd-end-more :is(a, button) { border-radius: 0; box-shadow: var(--raised); }
 
 .toast { bottom: 48px; border-radius: 0; background: var(--w-tip); color: var(--w-tip-ink); box-shadow: 0 0 0 1px #000000; }
 .color-box { border-radius: 0; background: var(--panel); box-shadow: var(--raised); border: 0; }

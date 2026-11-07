@@ -212,6 +212,8 @@ class MangaSet:
     id: str                              # 12 hex: stable while its first part's place and the base stay
     title: str
     parts: list = field(default_factory=list)       # Manga, in their order
+    kind: str = "parts"                  # (v5.44.125) "parts" — the parts of one work; "folder" — the manga of one folder
+    #                                      of the parser's («silver soul»: different manga, one сборка by its name)
 
     @property
     def cover(self):
@@ -248,9 +250,13 @@ def sets(items: list, manual: dict | None = None) -> list:
             parent[max(ra, rb)] = min(ra, rb)
     bases: dict = {}
     numbers: dict = {}
+    folders: dict = {}                   # (v5.44.125) a folder's key -> its manga («lb_set» of their info.json)
     for manga in items:
         if manga.id in apart:
             continue
+        if getattr(manga, "set_key", ""):
+            folders.setdefault(manga.set_key, []).append(manga)
+            continue                     # one folder's manga: one сборка by the folder, not by their names
         found = [part_of(t) for t in (getattr(manga, "title_pretty", "") or manga.title,)]
         base, number = found[0]
         numbers[manga.id] = number
@@ -265,6 +271,13 @@ def sets(items: list, manual: dict | None = None) -> list:
                 if same_people(people_of(a), people_of(b), {base}) or len(base) >= LONG_CORE and \
                         not (people_of(a) and people_of(b)):
                     union(a.id, b.id)
+    named: dict = {}                     # a root of the union -> the folder's (key, name)
+    for key, members in folders.items():
+        if len(members) < 2:
+            continue
+        for manga in members[1:]:
+            union(members[0].id, manga.id)
+        named[find(members[0].id)] = (key, members[0].set_name or key)
     for one, other in joined.items():
         if one in by_id and other in by_id and one not in apart and other not in apart:
             union(one, other)
@@ -273,9 +286,17 @@ def sets(items: list, manual: dict | None = None) -> list:
         if manga.id in apart:
             continue
         groups.setdefault(find(manga.id), []).append(manga)
+    folder_of = {find(m.id): named[r] for r in named for m in folders.get(named[r][0], [])}
     out = []
     for root, members in groups.items():
         if len(members) < 2:
+            continue
+        found = folder_of.get(root)
+        if found is not None:            # one folder's manga: in their folder's order, named by it
+            members.sort(key=lambda m: (getattr(m, "set_key", "") != found[0], getattr(m, "set_place", 0) or 10 ** 6,
+                                        _natural(m.title)))
+            set_id = hashlib.md5(("folder|" + found[0]).encode("utf-8")).hexdigest()[:12]
+            out.append(MangaSet(id=set_id, title=found[1], parts=members, kind="folder"))
             continue
         members.sort(key=lambda m: (numbers.get(m.id, 0), _natural(m.title)))
         first = members[0]

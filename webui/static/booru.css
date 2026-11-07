@@ -157,6 +157,29 @@ a.settings-link, a.settings-link:hover { text-decoration: none; }
   .settings-link .skin-label { display: none; }
   .settings-link { padding-left: 7px; padding-right: 7px; }
 }
+/* (v5.44.116) «←» — back to the program's page before (booru.js shows it only then): the button of «Настройки», the
+   arrow alone (its title says «Назад»); «Legacy», whose tools are rows of its side menu, — «← Назад» */
+.top-back { padding-left: 7px; padding-right: 7px; }
+.top-back .skin-label { display: none; }
+.back-icon { width: 14px; height: 14px; flex: none; }
+@media (max-width: 480px) {           /* a window as narrow as a phone: the row of the tools has no room for it */
+  .top .top-back.skin-button { display: none; }
+}
+/* (v5.44.120) «Загрузки» — what downloads and waits, on every page (webui/pages/downloads.py, booru.js asks for the
+   number while the page is seen): the button of «Настройки» with an arrow down; the number — a pill of the accent */
+a.dl-badge, a.dl-badge:hover { text-decoration: none; white-space: nowrap; }
+.dl-badge-icon { width: 14px; height: 14px; flex: none; }
+.dl-badge-n { min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--accent); color: var(--accent-ink);
+  font-size: 11px; font-weight: bold; line-height: 17px; text-align: center; font-variant-numeric: tabular-nums; }
+.dl-badge-n[hidden] { display: none; }
+@media (max-width: 1099px) {          /* the arrow and the number alone (its title says «Загрузки»): the row keeps its width */
+  .dl-badge .skin-label { display: none; }
+  .dl-badge { padding-left: 7px; padding-right: 7px; }
+}
+@media (max-width: 480px) {           /* a window as narrow as a phone: with «Загрузки» the row of a page with a drawer
+                                         (the grabber's) is wider than it — its buttons go on a second line, not out */
+  .top .top-tools { flex-wrap: wrap; justify-content: flex-end; max-width: 100%; }
+}
 /* (v5.44.53) «SFW / Всё / NSFW» — what the pages show (webui/content_mode.py): three buttons in one frame, the mode
    now drawn as the chosen item of the menu */
 .mode-switch {
@@ -513,6 +536,14 @@ table.info td { padding: 1px 0; overflow-wrap: anywhere; }
 .copy-line { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0 0; color: var(--muted); font-size: 11px; }
 .copy-line button.link { font-size: 11px; }
 .video-fallback { padding: 30px 20px; text-align: center; color: var(--muted); }
+/* (v5.44.121) a long video played to its end (booru.js): «Видео закончилось», «Смотреть снова» — not round and round */
+.lv-end { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 16px; padding: 12px 16px;
+  background: #141414; color: #ececec; font-size: 14px; line-height: 1.35; }
+.nv-screen .lv-end { position: absolute; inset: 0; z-index: 4; flex-direction: column; background: rgba(8, 8, 8, 0.82); }
+.lv-end p { margin: 0; font-weight: 700; font-size: 18px; }
+.lv-end button { padding: 7px 16px; border: 1px solid rgba(255, 255, 255, 0.35); border-radius: 8px; background: none;
+  color: #ffffff; font: inherit; cursor: pointer; }
+.lv-end button:hover { border-color: #ffffff; background: rgba(255, 255, 255, 0.12); color: #ffffff; }
 
 /* a video played by the program inside the page: its frames in the poster's place, a bar under them */
 .native-video { display: inline-flex; flex-direction: column; max-width: 100%; vertical-align: top; }
@@ -734,7 +765,7 @@ html.lb-video-full, html.lb-video-full body { overflow: hidden !important; }
   display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
   pointer-events: none;
 }
-.media-wrap.loading img.post-media, .reader-stage.loading img.reader-image { visibility: hidden; }
+.media-wrap.loading img.post-media { visibility: hidden; }
 .picture-problem { padding: 30px 20px; text-align: center; color: var(--muted); }
 .picture-problem p { margin: 0 0 12px; }
 .notes { position: absolute; inset: 0; }
@@ -919,12 +950,12 @@ html[data-skin="nhentai"] .taglist-r34 { display: none; }
 @keyframes lb-come { from { opacity: 0.4; } }
 @keyframes lb-come-right { from { opacity: 0.4; transform: translateX(10px); } }
 @keyframes lb-come-left { from { opacity: 0.4; transform: translateX(-10px); } }
-/* pictures: hidden until they have come (motion.js marks them .lb-in), then shown softly; the picture of a card and
-   a page of the reader — when it is decoded (booru.js takes «loading» off); (v5.44.59) the strips of «Манхва» —
-   never hidden: a strip shows as it comes, on its place kept by its size */
-:where(:root[data-motion="on"]) main img:not(.post-media, .reader-image, .vslide, .mh-page, .lb-in) { opacity: 0; }
-:where(:root[data-motion="on"]) main img.lb-in:not(.lb-now, .post-media, .reader-image, .vslide, .mh-page) { animation: lb-arrive 0.28s ease-out; }
-:where(:root[data-motion="on"]) .reader-stage:not(.loading) img.reader-image,
+/* pictures: hidden until they have come (motion.js marks them .lb-in), then shown softly; the picture of a card —
+   when it is decoded (booru.js takes «loading» off); (v5.44.117) the reader's pages and the slices of its strip
+   (.reader-image) — never hidden by this: the reader puts a page when it has come whole (reader.js), a slice of the
+   strip shows as it comes, on its place kept by its size */
+:where(:root[data-motion="on"]) main img:not(.post-media, .reader-image, .vslide, .lb-in) { opacity: 0; }
+:where(:root[data-motion="on"]) main img.lb-in:not(.lb-now, .post-media, .reader-image, .vslide) { animation: lb-arrive 0.28s ease-out; }
 :where(:root[data-motion="on"]) .media-wrap:not(.loading) img.post-media { animation: lb-arrive 0.16s ease-out; }
 @keyframes lb-arrive { from { opacity: 0; } }
 /* menus, hints of tags, notes and the tabs of «Настройки» open, colours change — not jump */

@@ -1327,17 +1327,28 @@ def _tile(t: dict, order: tuple) -> dict:
         "title": t["names"][0] if t["names"] else best.key, "alt": t["names"][1] if len(t["names"]) > 1 else "",
         "type": next((i.shown_type for i in items if i.shown_type), ""), "year": t["year"], "url": best.url,
         "rating": rated.rating if rated else 0.0, "status": next((i.status for i in items if i.status), ""),
-        "adult": any(i.adult for i in items), "cover": cover_id(covered.cover, covered.url) if covered else "",
+        "adult": any(i.adult for i in items),
+        "cover": _chosen_cover([(i.site, i.key) for i in items]) or (cover_id(covered.cover, covered.url) if covered
+                                                                    else ""),
         "sites": [LABELS.get(i.site, i.site) for i in items], "keys": t["keys"],
         "ids": {(i.site, i.key) for i in items},
     }
+
+
+def _chosen_cover(ids: list) -> str:
+    """(v5.44.123) The cover the owner chose for the title (the menu of covers: ``core/title_covers``) — its number for
+    ``/api/catalog/cover``; "" — none chosen."""
+    from core import title_covers
+    entry = title_covers.chosen([f"{site}:{key}" for site, key in ids])
+    return title_covers.catalog_id(entry) if entry is not None else ""
 
 
 def hit_tile(hit, label: str) -> dict:
     """A tile of a title a site's own feed gave (``manhwa_feed``: one site, no filters)."""
     return {"title": (hit.names or [hit.key])[0], "alt": hit.names[1] if len(hit.names) > 1 else "",
             "type": hit.type, "year": hit.year, "url": hit.url, "rating": round(hit.rating or 0.0, 1), "status": "",
-            "adult": bool(hit.adult), "cover": cover_id(hit.cover, hit.url), "sites": [label]}
+            "adult": bool(hit.adult), "cover": _chosen_cover([(hit.site, hit.key)]) or cover_id(hit.cover, hit.url),
+            "sites": [label]}
 
 
 # ── what the program's folders hold: core/filter.py (Have, downloaded, forget_have) ──────────────────────────────
@@ -1362,5 +1373,7 @@ def cover(number: str, *, net=None) -> "tuple | None":
         kept = _COVERS.get(str(number or ""))
     if kept is None:
         return None
-    from core import manhwa_search as MS
+    from core import manhwa_search as MS, title_covers
+    if kept[0].startswith(title_covers.OWN_MARK):     # (v5.44.123) a picture of the owner's own, chosen for a title
+        return title_covers.own_picture(kept[0], shrink=COVER_WIDTH)
     return MS.fetch_cover(kept[0], kept[1], net=net, shrink=COVER_WIDTH)

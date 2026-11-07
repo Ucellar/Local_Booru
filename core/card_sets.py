@@ -24,7 +24,10 @@ loaded (``foldLocal`` of its ``sets.js``) — on every site separately:
 - (v5.44.111; the owner, of a comic found on e621 page by page: «они обязанны были войти в мангу или хотя бы в
   сборку») **a pool of e621** of the category «series» — a comic — is one work: its cards (any uploader), in the
   order of the pool's pages (``site_posts.pools``, ``site_pools``: :func:`pool_key`).  A pool of the category
-  «collection» (a theme) is not, nor one the site has not described yet.
+  «collection» (a theme) is not, nor one the site has not described yet;
+- (v5.44.125; the owner: «а если нет то просто в сборку потому что я раньше часто даже не мангу помечал 1 2 3») **a
+  folder of the parser found «not a manga»** (``core/parser_manga.folder_cards``: its pages by numbers, the cards the
+  parser made of them — ``source_originals``) is one work, in the folder's order («dir:<its id>»).
 
 Videos are never in a сборка; a card in the trash leaves its automatic сборка (and comes back with the card).
 
@@ -631,6 +634,15 @@ def _load(con) -> dict:
                 card.pages.setdefault(key, int(index or 0))
     except Exception as exc:  # an old base without families: nothing from there
         _LOG.debug("families not read: %s", exc)
+    try:                                            # (v5.44.125) a folder of the parser found «not a manga»: one work
+        from core.parser_manga import folder_cards
+        for image_id, key, place in folder_cards(con):
+            card = cards.get(int(image_id))
+            if card is not None and key not in card.keys:
+                card.keys.append(key)
+                card.pages[key] = int(place)
+    except Exception as exc:  # noqa: BLE001 - what the parser's folder holds unread: no such сборки this time
+        _LOG.debug("the parser's folders not read: %s", exc)
     sets = {int(r[0]): {"kind": str(r[1] or ""), "locked": bool(r[2]), "title": str(r[3] or "")}
             for r in con.execute("SELECT set_id, kind, locked, title FROM card_sets")}
     members = {int(r[0]): (int(r[1]), int(r[2])) for r in con.execute("SELECT image_id, set_id, position FROM card_set_members")}
@@ -956,6 +968,11 @@ def _library_signature(con) -> list:
         parts.append(int(row[0] or 0) if row else 0)
     except Exception:  # an old base without the counter: as before, the tags are not in the signature
         parts.append(0)
+    try:                                             # (v5.44.125) the parser's folders found «not a manga»
+        from core.parser_manga import signature
+        parts.extend(signature())
+    except Exception:  # noqa: BLE001
+        parts.extend([0, 0])
     return parts
 
 
@@ -1139,6 +1156,14 @@ def _expand(con, ids: list) -> list:
             if member not in out:
                 out.append(member)
     return out
+
+
+def expand(settings: dict, ids: list) -> list:
+    """(v5.44.118) The cards of the chosen tiles of the gallery: a card of a сборка stands for its whole сборка
+    (:func:`_expand`) — «В корзину выбранные»."""
+    from core.database.connection import db
+    with db(settings, readonly=True) as con:
+        return _expand(con, [int(i) for i in ids])
 
 
 def gather(settings: dict, ids: list, *, into: int = 0, title: str = "") -> dict:

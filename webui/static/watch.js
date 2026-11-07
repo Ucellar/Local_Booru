@@ -81,10 +81,10 @@
     if (LB.say) LB.say(null, text, !!bad);
   }
 
-  // «← Лента» (and the phone's «назад»): back in the history to the feed (catalog.js marks its entry: the program
-  // sends no Referer, the Navigation API hides the addresses) — (v5.44.107) wherever it is before this page (another
-  // series opened from «Порядок просмотра»); none — the link, to the feed's last address, and the feed takes its list
-  // back all the same (catalog.js: «lb-feed-return»)
+  // «← Лента» (and the phone's «назад»): back in the history to the feed (catalog.js marks its entry: until v5.44.116
+  // the program sent no Referer, the Navigation API hid the addresses) — (v5.44.107) wherever it is before this page
+  // (another series opened from «Порядок просмотра»); none — the link, to the feed's last address, and the feed takes
+  // its list back all the same (catalog.js: «lb-feed-return»)
   function feedEntry() {
     try {
       const nav = window.navigation;
@@ -116,13 +116,23 @@
     } catch (_) { /* the feed as the server gives it */ }
     location.assign(address);
   }
+  // (v5.44.116; the review) «← Лента» only when the feed is before this page; else «← Назад» — back to the program's
+  // page before (none — «← Лента» by its link, as before)
+  const programBefore = () => !!(LB.programBefore && LB.programBefore());
+  if (!feedEntry() && programBefore()) {
+    document.querySelectorAll("[data-wt-back]").forEach((back) => {
+      back.textContent = "← Назад";
+      back.title = "На прошлую страницу программы";
+    });
+  }
   document.querySelectorAll("[data-wt-back], .m-top [data-back]").forEach((back) => {
     back.addEventListener("click", (event) => {
       if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
       const entry = feedEntry();
       if (!entry) {
-        toFeed(back);
+        if (programBefore()) history.back();         // (v5.44.116) «← Назад»
+        else toFeed(back);
         return;
       }
       try {
@@ -591,7 +601,9 @@
     one.disabled = !ep || ep.have === "whole" || ep.have === "other";
     rest.dataset.list = JSON.stringify(missing.map((e) => e.n));
     rest.textContent = "";
-    rest.append(icon("down", 15), el("span", "", missing.length ? "Скачать остальные " + missing.length : "Все серии в папке"));
+    // (v5.44.116) none in the folder yet — «Скачать все 12»; some — «Скачать остальные 9»
+    rest.append(icon("down", 15), el("span", "", !missing.length ? "Все серии в папке"
+      : (missing.length === dub.episodes.length ? "Скачать все " : "Скачать остальные ") + missing.length));
     rest.disabled = !missing.length;
   }
 
@@ -943,7 +955,7 @@
       if (!files.length) throw new Error("Эти серии уже в папке");
       const reply = await post("/api/videos/download", { find: state.id, files, quality: quality || "best" });
       tell((reply.queued ? "В очереди скачивания" + (reply.queued > 1 ? " " + reply.queued + "-м" : "") + " — начнётся само. "
-        : "Скачивание началось. ") + "Его видно в «Скачать» справа, в «Загрузках».");
+        : "Скачивание началось. ") + "Его видно в «Скачать → Загрузки».");
     } catch (err) {
       tell(err.message, true);
     } finally {

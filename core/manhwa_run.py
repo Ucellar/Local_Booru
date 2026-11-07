@@ -18,7 +18,11 @@ The owner, 5.11.2026: «В манхве можно было бы сделать 
 * the meter (:func:`meter`): each chapter's state for its tile («wait», «going», «paused», «retry», «done»,
   «failed»), the strips of the one going, the bytes, the speed, the time left; ``run`` — the download (another one —
   the page forgets the tiles it had), ``rev`` — the newest change: the page asks only for what changed after it (a
-  title has hundreds of chapters, the page asks every second).
+  title has hundreds of chapters, the page asks every second);
+* (v5.44.120) «Пропустить главу» (:func:`skip`, «Загрузки»): the chapter going (or paused) stops where it is — its strips
+  there stay in ``.lb/partial`` for the next time — and the download goes on with the next one; the chapter skipped is
+  one that did not come (``failed``, «пропущена»: «Повторить не скачавшееся» of «Готово» takes it again), not one of
+  the chapters in a row that make it give up.
 """
 from __future__ import annotations
 
@@ -29,8 +33,10 @@ from collections import deque
 RETRY_WAITS = (5.0, 15.0, 30.0)     # a chapter that did not come is asked again after these (the owner: «3 раза»)
 GIVE_UP_AFTER = 5                   # chapters in a row that did not come, each asked again: the site gives none now
 SPEED_SPAN = 8.0                    # seconds the speed is counted over
+SKIPPED = "пропущена"               # (v5.44.120) why a chapter skipped by «Пропустить главу» did not come
 
 _PAUSE = threading.Event()          # «Пауза» of the download going (one at a time)
+_SKIP = threading.Event()           # (v5.44.120) «Пропустить главу»: the chapter going (or paused) is left for now
 _LOCK = threading.Lock()
 _STATE: dict = {"run": 0, "rev": 0, "items": []}
 _SAMPLES: deque = deque()           # (when, bytes so far) of the strips that came: the speed
@@ -49,6 +55,17 @@ def paused() -> bool:
     return _PAUSE.is_set()
 
 
+def skip() -> bool:
+    """(v5.44.120) «Пропустить главу»: the chapter going or paused now is left (the download goes on with the next).
+    False — no chapter is going (nothing to skip)."""
+    with _LOCK:
+        going = any(x.get("state") in ("going", "paused") for x in _STATE.get("items") or []) \
+            and not _STATE.get("finished")
+    if going:
+        _SKIP.set()
+    return going
+
+
 def _bump() -> int:
     _COUNT["rev"] += 1
     _STATE["rev"] = _COUNT["rev"]
@@ -58,6 +75,7 @@ def _bump() -> int:
 def begin(title: str, site: str, folder: str, takes: list, kind: str = "") -> None:
     """A new download: its chapters (``manhwa_download.Take``) waiting, nothing counted yet; ``kind`` — (v5.44.87) the
     folder it goes to («manhwa» / «manga»: «Загрузки» of «Скачать → По ссылке» names it)."""
+    _SKIP.clear()                           # (v5.44.120) a skip asked of the one before is not this one's
     with _LOCK:
         _COUNT["run"] += 1
         _STATE.clear()
@@ -153,9 +171,10 @@ TRY_WORDS = {2: "со второй", 3: "с третьей", 4: "с четвёр
 
 
 def _wait_paused(stop_check) -> bool:
-    """While «Пауза»: True — «Продолжить», False — «Остановить»."""
+    """While «Пауза»: True — «Продолжить» (or (v5.44.120) «Пропустить главу»: the paused one is left, the pause stays),
+    False — «Остановить»."""
     started = time.monotonic()
-    while _PAUSE.is_set() and not stop_check():
+    while _PAUSE.is_set() and not stop_check() and not _SKIP.is_set():
         time.sleep(0.2)
     with _LOCK:
         _STATE["paused_for"] = float(_STATE.get("paused_for") or 0.0) + (time.monotonic() - started)
@@ -212,9 +231,17 @@ def _attempt(k: int, take, chapter, halt, say, shut: set) -> tuple:
 def go(takes: list, chapter, *, say, stop_check) -> dict:
     """Every chapter of ``takes`` by ``chapter(take, k, halt)`` (-> the chapter's folder name; "" when ``halt()``
     stopped it half-way) — in their order, with «Пауза» and the chapters that failed asked again.
-    -> {"got": [(k, name, the take that gave it)], "failed": [{label, why}], "stopped", "gave_up": words}."""
+    -> {"got": [(k, name, the take that gave it)], "failed": [{label, why, id}], "stopped", "gave_up": words}."""
     def halt() -> bool:
-        return stop_check() or _PAUSE.is_set()
+        return stop_check() or _PAUSE.is_set() or _SKIP.is_set()
+
+    def skipped(k: int) -> None:
+        """(v5.44.120) «Пропустить главу»: chapter ``k`` left — one that did not come, «пропущена»."""
+        _SKIP.clear()
+        pending.pop(k, None)
+        failed.append((k, {"label": takes[k].label, "why": SKIPPED, "id": takes[k].id}))
+        item(k, state="failed", why=SKIPPED, again_at=0.0)
+        say(f"{takes[k].label}: пропущена — «Пропустить главу»; качаю следующую")
 
     pending = {k: 0.0 for k in range(len(takes))}   # a chapter → when it may be asked (again)
     tries: dict = {}
@@ -224,6 +251,13 @@ def go(takes: list, chapter, *, say, stop_check) -> dict:
         if stop_check():
             stopped = True
             break
+        if _SKIP.is_set():                          # (v5.44.120) asked while no chapter went (between two): the next
+            with _LOCK:                             # one is not skipped by it — only the one paused, if any
+                held = [x["k"] for x in _STATE.get("items") or [] if x.get("state") == "paused" and x["k"] in pending]
+            if held:
+                skipped(held[0])
+                continue
+            _SKIP.clear()
         if _PAUSE.is_set():
             if not _wait_paused(stop_check):
                 stopped = True
@@ -250,6 +284,9 @@ def go(takes: list, chapter, *, say, stop_check) -> dict:
                 item(k, state="wait", again_at=0.0)
                 stopped = True
                 break
+            if _SKIP.is_set():                      # (v5.44.120) «Пропустить главу»: left, the next one goes
+                skipped(k)
+                continue
             item(k, state="paused")                 # «Пауза»: the same chapter first after «Продолжить»
             pending[k] = 0.0
             continue
@@ -262,7 +299,7 @@ def go(takes: list, chapter, *, say, stop_check) -> dict:
             say(f"{take.label}: не скачалась — {value}; проверю ещё раз через {wait:g} с "
                 f"(повтор {n + 1} из {len(RETRY_WAITS)})" + (", пока качаются следующие" if len(pending) > 1 else ""))
             continue
-        failed.append((k, {"label": take.label, "why": str(value)}))
+        failed.append((k, {"label": take.label, "why": str(value), "id": take.id}))
         item(k, state="failed", why=str(value), again_at=0.0)
         say(f"{take.label}: не скачалась — {value}" + (f" (и после {n} {_forms(n, 'повтора', 'повторов', 'повторов')})"
                                                      if n else ""))

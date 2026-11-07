@@ -2,8 +2,9 @@
 // manga and manhwa folders the program did not download — «Узнать» (found on the sites by their names, linked when
 // sure), the covers to choose from, «Докачать» (the title's card of «Скачать → Манга / Манхва»), «Отвязать»; the work
 // is a page task, its journal under «Подробности».  Rows are kept by their key: a refresh while one is typed into does
-// not take the text away.  (v5.44.81) How each was known, what was tried for one not found; «Узнавать само, в фоне»
-// and «…и по картинкам» (/api/archive/auto); a round of the background leaves the buttons free (they stop it).
+// not take the text away.  (v5.44.81) How each was known, what was tried for one not found; a round of the background
+// leaves the buttons free (they stop it).  (v5.44.116) «Узнавать само, в фоне» and «…и по картинкам» — fields of
+// «Настройки → Сайты манги» now (the page says so in a line).
 (() => {
   "use strict";
   const LB = window.LocalBooru || {};
@@ -20,7 +21,6 @@
   const step = job.querySelector(".ar-step");
   const stopButton = job.querySelector('[data-action="ar-stop"]');
   const mainButtons = [...box.querySelectorAll(".ar-actions .ar-btn")];
-  const autoForm = box.querySelector("[data-ar-auto]");
   const HOWS = { link: "по ссылке на сайт в файлах папки", names: "по названию из файлов папки",
     folder: "по имени папки", pictures: "по картинкам (SauceNAO)", query: "по вашему названию", chosen: "выбран вами",
     url: "по вашей ссылке" };
@@ -351,20 +351,6 @@
       refresh(false);
     },
   });
-
-  // ── (v5.44.81) «Узнавать само, в фоне», «…и по картинкам» ──
-  if (autoForm) {
-    autoForm.addEventListener("change", async () => {
-      const status = autoForm.querySelector(".action-status");
-      try {
-        await postJson("/api/archive/auto", { auto: autoForm.elements.auto.checked,
-          pictures: autoForm.elements.pictures.checked });
-        if (status) status.textContent = "Сохранено";
-      } catch (err) {
-        if (status) status.textContent = err.message;
-      }
-    });
-  }
 
   refresh(false);
 })();

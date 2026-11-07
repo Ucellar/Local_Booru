@@ -9,6 +9,12 @@ for the answer; nobody answers in :data:`PLAN_WAIT_SECONDS` — the download is 
 
 After «Остановить» the automatic check rests for :data:`AUTO_PAUSE_SECONDS`: the subscriptions it
 did not get to are still due, and a minute later it would start them again.
+
+(v5.44.120) «Загрузки» (``webui/pages/downloads.py``): «Пауза» — the check waits before its next file (the engine asks
+its stop flag between files and between sites; the file on its way comes); «Пропустить подписку» — the subscription
+going stops as at «Остановить» (its found posts wait in its list), is noted as checked now (its time comes again after
+its interval, not a minute later) and the check goes on with the next one.  Every check that ends is told to
+:data:`ENDED` (``core/download_history``: «Готово»).
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ from collections import deque
 LOG_KEEP = 3000                  # lines a page can still fetch
 PLAN_WAIT_SECONDS = 30 * 60
 AUTO_PAUSE_SECONDS = 60 * 60
+ENDED: list = []                 # (v5.44.120) fn(job) when a check has ended (never in its way)
 _LOCK = threading.Lock()
 _OWNER = ""                      # who checks subscriptions now ("" — nobody)
 _CURRENT: "SubscriptionJob | None" = None
@@ -123,6 +130,9 @@ class SubscriptionJob:
         self._allowed = False
         self._ask_lock = threading.Lock()         # the question, its answer and the status change together
         self._stop_requested = False              # run_subscription reads it (stop_flag)
+        self._paused = threading.Event()          # (v5.44.120) «Пауза» of «Загрузки»: the next file waits
+        self._skip_now = False                    # (v5.44.120) «Пропустить подписку»: the one going stops, the next goes
+        self.skipped: list = []                   # the names of the subscriptions skipped
         self._log: deque = deque(maxlen=LOG_KEEP)
         self._seq = 0
         self._lock = threading.Lock()
@@ -168,6 +178,7 @@ class SubscriptionJob:
             self.status = "stopping"
             self._allowed = False
             self._decision.set()
+            self._paused.clear()                  # (v5.44.120) a stop while paused: not paused any more
         if by_user:
             with _LOCK:
                 _AUTO_PAUSED_UNTIL = time.time() + AUTO_PAUSE_SECONDS
@@ -175,6 +186,42 @@ class SubscriptionJob:
                       f"Автопроверка отдыхает {AUTO_PAUSE_SECONDS // 60} мин")
         else:
             self._say("СТОП: программа закрывается, доделываю текущий файл")
+
+    # (v5.44.120) «Пауза» / «Продолжить» and «Пропустить подписку» of «Загрузки»
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def pause(self) -> bool:
+        """The check waits before its next file; False — it does not go."""
+        with self._ask_lock:
+            if self.status not in {"running", "waiting", "starting"}:
+                return False
+            self._paused.set()
+        self._say("ПАУЗА: текущий файл докачается, следующий ждёт «Продолжить»")
+        return True
+
+    def resume(self) -> None:
+        if self._paused.is_set():
+            self._paused.clear()
+            self._say("ПРОДОЛЖАЮ")
+
+    def can_skip(self) -> bool:
+        """«Пропустить подписку» means something: a subscription goes and another one comes after it."""
+        return self.kind != "grab" and self.status in {"running", "waiting"} and 0 < self.index < len(self.subs) \
+            and not self._stop_requested
+
+    def skip(self) -> bool:
+        """The subscription going stops (its found posts wait), the check goes on with the next; False — none to skip."""
+        with self._ask_lock:
+            if not self.can_skip():
+                return False
+            self._skip_now = True
+            if self.status == "waiting":               # its large download asked: not this time
+                self._allowed = False
+                self._decision.set()
+        self._say(f"ПРОПУСКАЮ «{self.current_name}»: найденное скачается при её следующей проверке")
+        return True
 
     def decide(self, allowed: bool, seq: int | None) -> bool:
         """The answer to the large-download question, naming it: ``seq`` is the number of the question the person
@@ -231,9 +278,11 @@ class SubscriptionJob:
                     self._say(f"── {n}/{len(self.subs)}: {self.current_name}")
                 result = {"id": str(sub.get("id") or ""), "name": self.current_name, "downloaded": 0}
                 self.results.append(result)
+                self._skip_now = False
                 try:
                     got = run_subscription(sub, self.settings, log=self._say, progress=self._on_progress,
-                                           stop_flag=self, run_mode=self.run_mode or sub.get("run_mode") or "all",
+                                           stop_flag=_EngineFlag(self),
+                                           run_mode=self.run_mode or sub.get("run_mode") or "all",
                                            confirm_plan=self._confirm_plan)
                     result["downloaded"] = int(got or 0)
                 except Exception as exc:      # one subscription failing does not stop the others
@@ -243,6 +292,13 @@ class SubscriptionJob:
                     continue
                 finally:
                     self.downloaded = sum(int(r.get("downloaded") or 0) for r in self.results)
+                    if self._skip_now:            # (v5.44.120) «Пропустить подписку»: checked now, the next goes
+                        self._skip_now = False
+                        result["skipped"] = True
+                        self.skipped.append(self.current_name)
+                        if sub.get("id") and not sub.get("one_off"):
+                            from core.subscriptions import record_run
+                            record_run(str(sub["id"]), last_check=int(time.time()))
                 if self.forget_seeds and not self._stop_requested and sub.get("id"):
                     from core.subscription_engine.seed_cache import clear_seeds_for_subscription
                     clear_seeds_for_subscription(str(sub["id"]))
@@ -258,12 +314,18 @@ class SubscriptionJob:
             self.finished_at = time.time()
             self.current_name = ""
             self.plan = {}
+            self._paused.clear()
             with _LOCK:
                 if _CURRENT is self:
                     _CURRENT = None
                 _LAST = self
             release(self.owner)
             self._say(f"ГОТОВО: скачано файлов — {self.downloaded}" + (" (остановлено)" if self._stop_requested else ""))
+            for hook in list(ENDED):              # (v5.44.120) «Загрузки → Готово»
+                try:
+                    hook(self)
+                except Exception as exc:  # noqa: BLE001 - a record of the history not made: the check is over anyway
+                    self._say(f"(запись в «Готово» не сделана: {type(exc).__name__})")
 
     def _on_progress(self, downloaded_in_sub: int) -> None:
         # run_subscription counts the files of the subscription it is checking
@@ -316,7 +378,24 @@ class SubscriptionJob:
                 "index": self.index, "count": len(self.subs), "current": self.current_name,
                 "downloaded": self.downloaded, "elapsed": int(max(0.0, now - self.started_at)),
                 "plan": plan, "results": [dict(r) for r in self.results], "error": self.error,
+                "paused": self.paused and status in {"running", "waiting"}, "skipped": list(self.skipped),
                 "log": [{"seq": s, "t": int(t), "text": x} for s, t, x in lines], "last_seq": last}
+
+
+class _EngineFlag:
+    """(v5.44.120) The stop flag the engine (``subscriptions.run_subscription``) reads between files and between sites:
+    while «Пауза» — it waits there (the file on its way has come); «Остановить» or «Пропустить подписку» — a stop of
+    the subscription going (the check itself goes on after a skip)."""
+
+    def __init__(self, job: SubscriptionJob):
+        self._job = job
+
+    @property
+    def _stop_requested(self) -> bool:
+        job = self._job
+        while job._paused.is_set() and not job._stop_requested and not job._skip_now:
+            time.sleep(0.2)
+        return bool(job._stop_requested or job._skip_now)
 
 
 class _ExitWaiter:

@@ -13,9 +13,18 @@ journal instead of promising a stop.
 At the exit every task is asked to stop and waited for like the program's threads (``core.shutdown.join_qthreads``,
 ``_ExitJoin``): one still going after the exit's budget makes the exit an unclean one — no checkpoint and no copy of
 a base it is still writing.
+
+(v5.44.117) A kind several tasks of which go at once (``many``: each page's «Найти» of a title — its own task by its
+number, ``webui/pages/manhwa_get.py``): never «уже идёт»; the caller keeps each one by its id, the program knows the
+ones going (:func:`running`, the exit) and :func:`current` gives the newest.
+
+(v5.44.120) :func:`on_end` — work told of every task of a kind when it has ended (its status and result are set):
+«Загрузки → Готово» notes the downloads of the pages so (``core/download_history``), the videos' too — without a line
+of their code changed.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import traceback
@@ -23,8 +32,10 @@ from collections import deque
 from typing import Callable
 
 LOG_KEEP = 2000
+_ENDED: dict = {}                 # (v5.44.120) kind -> [fn(task)] told when a task of the kind has ended
 _LOCK = threading.Lock()
 _TASKS: dict = {}                 # kind -> the task in progress, else the last one
+_MANY: dict = {}                  # (v5.44.117) kind -> {id: task} of a kind several of which go at once: the ones going
 _SEQ = 0
 _EXIT_HOOKED = False
 
@@ -108,6 +119,12 @@ class PageTask:
             self.finished_at = time.time()
             if not (self.status == "failed" and isinstance(self.result, dict) and self.result.get("failed")):
                 self._say("ГОТОВО" if self.status == "done" else ("ОСТАНОВЛЕНО" if self.status == "stopped" else "ПРЕРВАНО ОШИБКОЙ"))
+            for hook in list(_ENDED.get(self.kind) or ()):      # (v5.44.120) never in the way of the task's end
+                try:
+                    hook(self)
+                except Exception as exc:  # noqa: BLE001 - the work told of the end failed: the task has ended anyway
+                    logging.getLogger("local_booru.page_jobs").warning(
+                        "the end of the task %s not told: %s: %s", self.kind, type(exc).__name__, exc)
 
     def _say(self, message: str) -> None:
         from core.redaction import sanitize_text
@@ -148,19 +165,26 @@ class _ExitJoin:
 
 
 def start(kind: str, label: str, fn: Callable, *, stoppable: bool = True, about=None,
-          replace: bool = False) -> PageTask:
+          replace: bool = False, many: bool = False) -> PageTask:
     """Start a task of ``kind`` (raises :class:`TaskBusy` while one of that kind is going); (v5.44.93) ``replace`` —
     the one going is asked to stop and this one starts at once (a search: the last one asked is the one wanted; the
-    old one ends on its own, its result is nobody's)."""
+    old one ends on its own, its result is nobody's); (v5.44.117) ``many`` — one of several tasks of ``kind`` going at
+    once (never busy: the caller keeps it by its id and decides how many may go)."""
     global _EXIT_HOOKED
     task = PageTask(kind, label, fn, stoppable=stoppable, about=about)
     with _LOCK:
-        old = _TASKS.get(kind)
-        if old is not None and old.running:
-            if not (replace and old.stoppable):
-                raise TaskBusy(old.label)
-            old.stop()
-        _TASKS[kind] = task
+        if many:
+            going = _MANY.setdefault(kind, {})
+            for ended in [n for n, t in going.items() if not t.running]:
+                del going[ended]                  # the ended ones are their callers' to keep
+            going[task.id] = task
+        else:
+            old = _TASKS.get(kind)
+            if old is not None and old.running:
+                if not (replace and old.stoppable):
+                    raise TaskBusy(old.label)
+                old.stop()
+        _TASKS[kind] = task                       # (of a kind of many: the newest — ``current``)
         hook = not _EXIT_HOOKED
         _EXIT_HOOKED = True
     from core.shutdown import register, register_qthread
@@ -176,15 +200,31 @@ def current(kind: str) -> PageTask | None:
         return _TASKS.get(kind)
 
 
+def _every() -> list:
+    """Every task known (one of a kind, and (v5.44.117) the ones going of a kind of many) — under ``_LOCK``."""
+    tasks = {t.id: t for t in _TASKS.values()}
+    for going in _MANY.values():
+        tasks.update(going)
+    return list(tasks.values())
+
+
 def running() -> list:
     """The page tasks going now (of every kind), oldest first."""
     with _LOCK:
-        return sorted((t for t in _TASKS.values() if t.running), key=lambda t: t.id)
+        return sorted((t for t in _every() if t.running), key=lambda t: t.id)
 
 
 def _stop_all_for_exit() -> None:
     """The exit asks every task to stop; it waits for them with the program's threads (``_ExitJoin``)."""
     with _LOCK:
-        tasks = [t for t in _TASKS.values() if t.running]
+        tasks = [t for t in _every() if t.running]
     for task in tasks:
         task.stop()
+
+
+def on_end(kind: str, fn: Callable) -> None:
+    """(v5.44.120) ``fn(task)`` when a task of ``kind`` has ended (once per ``fn``)."""
+    with _LOCK:
+        hooks = _ENDED.setdefault(kind, [])
+        if fn not in hooks:
+            hooks.append(fn)

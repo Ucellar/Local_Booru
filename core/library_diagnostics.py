@@ -857,7 +857,8 @@ def restore_critical_indices(settings: dict) -> dict[str, Any]:
 
 # ── the last report and the repairs, kept for the next start (pages show them) ──
 REPORT_FILES = {"library": "library_audit_last.json",          # audit_library
-                "sources": "source_audit_last.json"}           # source_contamination_audit
+                "sources": "source_audit_last.json",           # source_contamination_audit
+                "files": "files_check_last.json"}              # (v5.44.118) core/file_check.py: «Проверить файлы»
 # A big report (every picture of the sources search with every post) is kept whole on disk for the
 # download; the page reads a small copy (``_page_copy``) — on a big archive the whole one is tens of MB.
 PAGE_FILES = {"sources": "source_audit_last.page.json"}

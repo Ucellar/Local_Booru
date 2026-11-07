@@ -93,7 +93,10 @@ def _series_of(req: Request, episode_id: str) -> dict:
     series, _episode = video_library.LIBRARY.episode(root, episode_id) if Path(root).is_dir() else (None, None)
     if series is None:
         return {}
-    return {"series": series.id, "prefer": video_library.PROGRESS.tracks(series.id),
+    # (v5.44.121) the one memory: the choice of the series — its folder's and its site's keys read together
+    video_library.PROGRESS.adopt(series)
+    prefer = video_library.PROGRESS.view(video_library.memory_keys(series)).get("tracks") or {}
+    return {"series": series.id, "prefer": {k: v for k, v in prefer.items() if isinstance(v, dict)},
             "top": "" if series.single else series.path}
 
 
@@ -156,6 +159,9 @@ def _app_payload(req: Request, name: str):
                 taken = _taking_over(body, {})
                 payload.update(start_at=taken["start_at"], paused=taken["paused"], resume=taken["resume"],
                                **({"prefer": taken["prefer"]} if taken.get("prefer") else {}))
+                if data.is_long_video(req.settings, item):    # (v5.44.121) a long video: once, its place kept
+                    from core import video_library
+                    payload.update(loop=False, memory=video_library.card_key(item))
             if name == "drag_file":
                 payload["item"] = {"path": str(path), "tags": names, "tag_groups": item.get("tag_groups") or {},
                                    "sources": item.get("sources") or [], "hash_md5": item.get("hash_md5") or ""}
@@ -287,12 +293,28 @@ def _video_payload(req: Request, body: dict):
             series = _PLAYS.get(token)
         if series:                               # the choice is the series': its next episode opens with it
             from core import video_library
-            video_library.PROGRESS.set_tracks(series, cmd, _choice(body, cmd, value))
+            video_library.choose_tracks(req.settings, series, cmd, _choice(body, cmd, value))
     return payload, None
 
 
+TAB_HEADER = "x-lb-tab"             # (v5.44.117) a page of the window of tabs: its tab's mark (ui/web_tabs.py)
+_TAB_MARK = re.compile(r"t[0-9]{1,9}")
+# (v5.44.117) the program's own video player is one for the whole program — the main window's: a page of the window of
+# tabs asking for it hears this (the main window's video goes on); a video the window's browser plays — plays there
+IN_MAIN_WINDOW = ("Это видео программа показывает своим проигрывателем только в главном окне — откройте эту страницу "
+                  "там: правой кнопкой по вкладке → «Открыть в главном окне»")
+
+
+def tab_of(req: Request) -> str:
+    """(v5.44.117) The mark of the tab of the window of tabs the request came from ("" — the main window, a browser,
+    the phone)."""
+    mark = next((str(v) for k, v in (req.headers or {}).items() if str(k).lower() == TAB_HEADER), "")
+    return mark if _TAB_MARK.fullmatch(mark) else ""
+
+
 def app_request(req: Request) -> Response:
-    """Things only the program window can do: dialogs, the clipboard, the video player, dragging out."""
+    """Things only the program window can do: dialogs, the clipboard, the video player, dragging out; (v5.44.117) for
+    the page that asked — a tab of the window of tabs too (its mark goes with the request: ``payload["tab"]``)."""
     from webui import service
     name = req.params["name"].replace("-", "_")
     if name in ("save_settings", "import_profile"):   # only the server changes settings (after its own checks)
@@ -300,9 +322,14 @@ def app_request(req: Request) -> Response:
     bridge = service.bridge()
     if bridge is None:
         return Response.json({"ok": False, "error": "Это можно сделать только в окне программы Local Booru"}, 409)
+    tab = tab_of(req)
+    if tab and name in ("play_video", "video"):      # before its token is made: the main window's play goes on
+        return Response.json({"ok": False, "error": IN_MAIN_WINDOW, "main_window": True}, 409)
     payload, error = _app_payload(req, name)
     if error is not None:
         return error
+    if tab:
+        payload["tab"] = tab
     if not bridge.request(name, payload):
         if name == "video" and payload.get("cmd") == "start":
             from webui.video_relay import RELAY

@@ -110,6 +110,10 @@ a:hover { color: var(--link-hover); text-decoration: underline; }
 .settings-link.active { background: var(--bar-active-bg); color: var(--bar-active-ink); }
 .gear-icon, .skin-icon { display: none; }
 .settings-link .skin-label { display: inline; }
+.dl-badge-icon { display: none; }                     /* (v5.44.120) «Загрузки» — a word of the row, as «Настройки» */
+.dl-badge .skin-label { display: inline; }
+.dl-badge { gap: 5px; }
+.top-back { padding-left: 6px; padding-right: 6px; }   /* (v5.44.116) «←» — the arrow alone: the row keeps its width */
 .skin-list {
   top: calc(100% + 2px);
   border-radius: 0;
@@ -343,4 +347,10 @@ input[type="search"], input[type="text"], input[type="number"], select, textarea
   .skin-label { display: inline; }
   .thumbs { --cell: calc(var(--thumb) + 6px); }
   .post-nav { width: 100%; }
+}
+@media (max-width: 480px) {            /* (v5.44.120) a window as narrow as a phone: «Загрузки» — the arrow and the number,
+                                          and the words of the row go on a second line rather than out of the window */
+  .dl-badge .skin-label { display: none; }
+  .dl-badge-icon { display: inline-block; }
+  .top-tools { flex-wrap: wrap; justify-content: flex-end; max-width: 100%; }
 }

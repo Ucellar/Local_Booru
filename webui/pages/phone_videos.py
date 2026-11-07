@@ -3,28 +3,24 @@
 * ``/m/videos`` (:func:`index`) — the search, «Продолжить просмотр» (the series watched last: the episode where it
   stopped, how much is left), the series as posters in three columns (the person's mark, the episodes, how many
   watched), the order; «Длинные видео» — the phone's gallery of them (``/m/posts?section=videos``);
-* ``/m/videos/s/<id>`` (:func:`series_page`) — the poster, the names, the facts, the description, «Смотреть» /
-  «Продолжить: серия 6 с 12:40», the episodes (their groups as tabs, the watched ones ticked);
-* ``/m/videos/e/<episode id>`` (:func:`player`) — the episode: the phone's own player (its controls) with «Пропустить
-  опенинг / эндинг», the opening and the ending marked on a line under it, «Озвучка» and «Субтитры», the episodes
-  before and after, «Следующая серия сама» (the next one comes into the same player: the phone lets it play on), the
-  whole screen turned sideways; where it stopped — ``/api/videos/progress`` (the computer's), the voice-over chosen —
-  ``/api/videos/tracks`` (the computer's: one choice for the series on both).
+* ``/m/videos/s/<id>`` (:func:`series_page`) — (v5.44.121) the one page of a series, the computer's
+  (``webui/pages/video_series.py``) in the phone's frame: «Продолжить: серия 6 с 12:40», «Откуда серии» (the folder,
+  «Смотреть онлайн»), the episodes with their marks; ``?ep=<number>&play=1`` — its player (the same as the computer's:
+  the bar of the page, not the browser's buttons; the previous and next episode, the number, the opening and the ending on the bar);
+* ``/m/videos/e/<file id>`` (:func:`player`) — the address of before: the one page's player of that file.
 
 A file the phone's browser plays as it is (an MP4 or a WebM, one sound it plays) is sent as it is
 (``/videos/file/<id>``); any other is made into an MP4 for the phone first (``core/phone_video``: seconds — the picture
-is copied), its progress shown, then sent from the cache (``/m/videos/file/<id>?a=<voice-over>``); the next episode is
-made while this one plays.  Subtitle files beside the episode — the computer's ``/videos/subs``; inside the file —
-``/m/videos/subs/<id>?s=<n>``.
+is copied), its progress shown, then sent from the cache (``/m/videos/file/<id>?a=<voice-over>``; :func:`data_of`,
+``/api/phone/video/prepare|state``); the next episode is made while this one plays.  Subtitle files beside the episode
+— the computer's ``/videos/subs``; inside the file — ``/m/videos/subs/<id>?s=<n>``.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from core import video_library as V
-from core.video_probe import human_duration
-from webui.html import esc, url
+from webui.html import esc
 from webui.pages import phone, videos as VD
 from webui.server import Request, Response
 
@@ -70,28 +66,28 @@ def _episode(req: Request, episode_id: str) -> tuple:
     return V.LIBRARY.episode(root, episode_id) if Path(root).is_dir() else (None, None)
 
 
-def _resume(episode: V.Episode) -> tuple[float, float]:
-    """(where to start, the length known) — the very start or the end: anew."""
-    here = V.PROGRESS.episode(episode.id)
+def _resume(series: V.Series, episode: V.Episode) -> tuple[float, float]:
+    """(where to start, the length known) of a file of an episode — its episode's place in the one memory of the
+    series; the very start or the end: anew."""
+    here = V.PROGRESS.episode_state(series, episode)
     resume = float(here.get("pos") or 0) if not here.get("done") else 0.0
     length = float(here.get("dur") or 0)
-    if resume < 5 or (length and resume > length - min(10.0, length * 0.1)):
-        resume = 0.0
-    return resume, length
+    return V.resume_from(resume, length), length
 
 
 def _label(series: V.Series, episode: V.Episode) -> str:
-    return series.title if series.single else f"Серия {episode.label}"
+    unit = series.unit_of(episode)
+    return series.title if series.single else f"Серия {unit.label if unit is not None else episode.label}"
 
 
 # ── /m/videos ────────────────────────────────────────────────────────────────────────────────────────────────────
 def _card(series: V.Series) -> str:
-    done = V.PROGRESS.episodes([e.id for e in series.episodes])
-    watched = sum(1 for e in series.episodes if done.get(e.id, {}).get("done"))
+    counts = VD.series_counts(series)               # (v5.44.121) episodes, not files; the site's too when known
+    total, watched = counts["total"], min(counts["watched"], counts["total"])
     badge = (f'<span class="m-badge m-badge-top">★ {series.rating}</span>' if series.rating else "")
-    sub = (f"{len(series.episodes)} {VD._plural(len(series.episodes))}" if not series.single
-           else str(series.info.get("year") or "фильм"))
-    bar = (f'<span class="m-bar" aria-hidden="true"><span style="width:{100 * watched / max(1, len(series.episodes)):.0f}%">'
+    sub = (f"{total} {VD._plural(total)}" + (f" · в папке {counts['disk']}" if counts["disk"] < total else "")
+           if not series.single else str(series.info.get("year") or "фильм"))
+    bar = (f'<span class="m-bar" aria-hidden="true"><span style="width:{100 * watched / max(1, total):.0f}%">'
            f'</span></span>' if watched else "")
     return (f'<a class="m-card" href="/m/videos/s/{series.id}"><span class="m-cover">'
             f'<img src="/videos/cover/{series.id}?v={esc(VD._stamp(series))}" alt="" loading="lazy" decoding="async">'
@@ -99,26 +95,18 @@ def _card(series: V.Series) -> str:
             f'<span class="m-card-sub">{esc(sub)}</span></a>')
 
 
-def _going_on(series: V.Series) -> str:
-    """A card of «Продолжить просмотр»: the episode stopped at (the frame, the time, what is left)."""
-    episode = series.episode(V.PROGRESS.last(series.id)) or series.episodes[0]
-    here = V.PROGRESS.episode(episode.id)
-    if here.get("done"):
-        _before, after = series.neighbours(episode)
-        if after is not None:
-            episode, here = after, V.PROGRESS.episode(after.id)
-    pos, length = float(here.get("pos") or 0), float(here.get("dur") or 0)
-    time_line = f"{human_duration(pos) or '0:00'} / {human_duration(length)}" if length else ""
-    left = f" · осталось {max(1, round((length - pos) / 60))} мин" if length and pos else ""
-    bar = (f'<span class="m-bar m-bar-thin"><span style="width:{100 * pos / length:.0f}%"></span></span>'
-           if length and pos else "")
-    return (f'<a class="m-going" href="/m/videos/e/{episode.id}"><span class="m-going-pic">'
-            f'<img src="/videos/frame/{episode.id}" alt="" loading="lazy" decoding="async">'
+def _going_on(tile: dict) -> str:
+    """A card of «Продолжить просмотр»: the episode to go on with (the frame, the time, what is left, from where)."""
+    picture = f'<img src="{esc(tile["picture"])}" alt="" loading="lazy" decoding="async">' if tile["picture"] else ""
+    bar = (f'<span class="m-bar m-bar-thin"><span style="width:{int(tile["part"])}%"></span></span>'
+           if tile["part"] else "")
+    sub = " · ".join(x for x in (tile["left"], tile["from"]) if x)
+    return (f'<a class="m-going" href="{esc(tile["href"])}"><span class="m-going-pic">{picture}'
             f'{phone.svg(phone.PLAY, size=28, width=1.6, cls="m-going-play", fill="currentColor")}'
-            + (f'<span class="m-going-time">{esc(time_line)}</span>' if time_line else "") + f'{bar}</span>'
-            f'<span class="m-going-text"><span class="m-card-title">{esc(series.title)}</span>'
-            f'<span class="m-card-sub">{esc(_label(series, episode) if not series.single else "Фильм")}{esc(left)}'
-            f'</span></span></a>')
+            + (f'<span class="m-going-time">{esc(tile["clock"])}</span>' if tile["clock"] else "") + f'{bar}</span>'
+            f'<span class="m-going-text"><span class="m-card-title">{esc(tile["title"])}</span>'
+            f'<span class="m-going-what">{esc(tile["words"])}</span>'
+            f'<span class="m-card-sub">{esc(sub)}</span></span></a>')
 
 
 def _search(query: str, sort: str) -> str:
@@ -147,13 +135,13 @@ def index(req: Request) -> Response:
     sort = sort if sort in VD.SORTS else "newest"
     found = VD._sorted([s for s in items if VD._matches(s, query)] if query else list(items), sort)
     from webui.pages import catalog                 # (v5.44.105) «Сериалы · Лента · Длинные видео»
+    from webui.pages import video_series
     parts = [_search(query, sort), catalog.phone_chips("video", "all")]
-    if not query and found:
-        going = sorted((s for s in items if V.PROGRESS.last_at(s.id) and s.episodes),
-                       key=lambda s: -V.PROGRESS.last_at(s.id))
+    if not query:                                   # (v5.44.121) the series of the sites watched online too
+        going = video_series.going(every, items, limit=SHELF, phone=True)
         if going:
             parts.append('<section class="m-shelf" aria-labelledby="m-go-on"><h2 id="m-go-on">Продолжить просмотр</h2>'
-                         '<div class="m-going-list">' + "".join(_going_on(s) for s in going[:SHELF]) + "</div></section>")
+                         '<div class="m-going-list">' + "".join(_going_on(t) for t in going) + "</div></section>")
     if found:
         parts.append(f'<div class="m-count"><h2 class="m-count-title">{"Найдено" if query else "Сериалы"} '
                      f'<span>{len(found)}</span></h2>{_sort_select(sort, query)}</div>'
@@ -172,40 +160,7 @@ def index(req: Request) -> Response:
     return _page(query or "Видео", "".join(parts), top=phone.get_link() + phone.mode_switch())
 
 
-# ── /m/videos/s/<id> ─────────────────────────────────────────────────────────────────────────────────────────────
-def _episodes(series: V.Series, current_id: str = "") -> str:
-    if series.single:
-        return ""
-    done = V.PROGRESS.episodes([e.id for e in series.episodes])
-    watched = sum(1 for e in series.episodes if done.get(e.id, {}).get("done"))
-    groups = [(name, eps) for name, eps in series.groups if eps] or [("", series.episodes)]
-    tabs = ""
-    if len(groups) > 1:
-        tabs = ('<div class="m-tabs-line m-ep-groups" role="tablist" aria-label="Озвучки и сезоны">' + "".join(
-            f'<button type="button" role="tab" data-ep-group="{n}" aria-selected="'
-            f'{"true" if any(e.id == current_id for e in eps) or (not current_id and n == 0) else "false"}">'
-            f'{esc(name or "Серии")} <span>{len(eps)}</span></button>' for n, (name, eps) in enumerate(groups)) + "</div>")
-    lists = []
-    for n, (_name, eps) in enumerate(groups):
-        mine = any(e.id == current_id for e in eps) or (not current_id and n == 0) or len(groups) == 1
-        buttons = []
-        for e in eps:
-            state = done.get(e.id, {})
-            cls = "m-ep" + (" current" if e.id == current_id else "") + (" watched" if state.get("done") else "")
-            part = ""
-            if not state.get("done") and state.get("dur") and state.get("pos"):
-                part = (f'<i class="m-ep-bar" style="width:{min(100, 100 * float(state["pos"]) / float(state["dur"])):.0f}%">'
-                        f'</i>')
-            mark = phone.svg(phone.TICK, size=12, width=3, cls="m-ep-tick") if state.get("done") else ""
-            current = ' aria-current="true"' if e.id == current_id else ""
-            buttons.append(f'<a class="{cls}" href="/m/videos/e/{e.id}" data-episode="{e.id}" '
-                           f'aria-label="Серия {esc(e.label)}"{current}>{esc(e.label)}{mark}{part}</a>')
-        lists.append(f'<div class="m-ep-grid" data-ep-list="{n}"{"" if mine else " hidden"}>{"".join(buttons)}</div>')
-    return (f'<section class="m-episodes" aria-labelledby="m-eps"><div class="m-count"><h2 class="m-count-title" '
-            f'id="m-eps">Серии <span>{len(series.episodes)}</span></h2><span class="m-muted">просмотрено {watched} из '
-            f'{len(series.episodes)}</span></div>{tabs}{"".join(lists)}</section>')
-
-
+# ── /m/videos/s/<id> — (v5.44.121) the one page of a series and its player (``video_series``) ─────────────────────
 def series_page(req: Request) -> Response:
     series = VD._series(req)
     if series is None:
@@ -218,45 +173,17 @@ def series_page(req: Request) -> Response:
     if not series.episodes:
         return _page(series.title, f'<div class="m-empty"><h2>{esc(series.title)}</h2><p>Серий нет.</p></div>',
                      back="/m/videos")
-    episode = series.episode(V.PROGRESS.last(series.id)) or series.episodes[0]
-    if V.PROGRESS.episode(episode.id).get("done"):
-        _before, after = series.neighbours(episode)
-        episode = after or episode
-    resume, _length = _resume(episode)
-    watch = ("Смотреть" if not resume else f"Продолжить с {human_duration(resume)}")
-    if not series.single:
-        watch += f" · серия {episode.label}"
-    info = series.info
-    chips = "".join(f"<span>{esc(str(info.get(key))[:24])}</span>" for key in ("year", "type", "status")
-                    if info.get(key) and not isinstance(info.get(key), list))
-    if series.rating:
-        chips += f"<span>★ {series.rating}</span>"
-    alt = " / ".join(esc(t) for t in series.alt_titles[:3])
-    hero = (f'<section class="m-hero"><a class="m-cover m-hero-cover" href="/m/videos/e/{episode.id}">'
-            f'<img src="/videos/cover/{series.id}?size=l&amp;v={esc(VD._stamp(series))}" alt=""></a>'
-            f'<div class="m-hero-about"><h1>{esc(series.title)}</h1>' + (f'<p class="m-alt">{alt}</p>' if alt else "")
-            + (f'<p class="m-facts">{chips}</p>' if chips else "") + "</div></section>")
-    go = (f'<div class="m-go"><a class="m-button m-go-main" href="/m/videos/e/{episode.id}">'
-          f'{phone.svg(phone.PLAY, size=18, width=2)}<span>{esc(watch)}</span></a></div>')
-    text = str(info.get("description") or "").strip()
-    desc = ""
-    if text:
-        paragraphs = "".join(f"<p>{esc(p)}</p>" for p in text.split("\n\n") if p.strip())
-        desc = (f'<details class="m-more-text"><summary>Описание</summary><div class="m-desc">{paragraphs}</div>'
-                f'</details>')
-    genres = info.get("genres") if isinstance(info.get("genres"), list) else []
-    tags = "".join(f'<a class="m-tag" href="{esc(url("/m/videos", q=str(g)))}">{esc(g)}</a>' for g in genres[:20])
-    body = (hero + go + (f'<div class="m-tag-list m-pad">{tags}</div>' if tags else "") + desc
-            + _episodes(series, episode.id if not series.single else ""))
-    return _page(series.title, body, back="/m/videos", heading="Видео")
+    from webui.pages import video_series
+    return video_series.render(req, video_series.resolve(req, series.id), phone=True)
 
 
 # ── /m/videos/e/<id> ─────────────────────────────────────────────────────────────────────────────────────────────
 def data_of(req: Request, series: V.Series, episode: V.Episode, audio: int | None = None) -> dict:
-    """What the player needs of an episode (the page's JSON, and the next episode coming into the same player)."""
+    """What the phone's player needs of a file of an episode (the one page's player asks it for the file it plays):
+    the file as it is, or made for the phone (``core/phone_video``), its voice-overs, subtitles, opening and ending."""
     from core import phone_video as PV, video_tracks
     before, after = series.neighbours(episode)
-    resume, length = _resume(episode)
+    resume, length = _resume(series, episode)
     out = {"episode": episode.id, "series": series.id, "title": series.title, "label": _label(series, episode),
            "note": " · ".join(x for x in (episode.site_title, episode.note) if x), "direct": False, "src": "",
            "audio": [], "chosen": 0, "subs": [], "sub": "", "skips": {}, "resume": round(resume, 1),
@@ -266,7 +193,7 @@ def data_of(req: Request, series: V.Series, episode: V.Episode, audio: int | Non
            "next": {"episode": after.id, "label": _label(series, after)} if after else None}
     if not series.single:
         out["skips"] = VD._skips(series, episode)
-    prefer = V.PROGRESS.tracks(series.id)
+    prefer = V.PROGRESS.view(V.memory_keys(series)).get("tracks") or {}
     try:
         files = video_tracks.subtitle_files(episode.path, top=VD._top(series))
     except OSError:
@@ -304,53 +231,12 @@ def data_of(req: Request, series: V.Series, episode: V.Episode, audio: int | Non
     return out
 
 
-def _json_script(data: dict) -> str:
-    text = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    return f'<script type="application/json" id="m-vp-data">{text}</script>'
-
-
 def player(req: Request) -> Response:
+    """``/m/videos/e/<file>`` (v5.44.68–5.44.120): (v5.44.121) the one page's player of its episode, that file."""
     series, episode = _episode(req, req.params["id"])
     if series is None or episode is None:
         return Response.redirect("/m/videos")
-    hidden = _hidden(series)
-    if hidden is not None:
-        return hidden
-    data = data_of(req, series, episode)
-    from webui import prefs
-    autonext = str(prefs.load().get("video_autonext") or "on") == "on"
-    nav = []
-    for key, words, icon, cls in (("prev", "Предыдущая", phone.BACK, "m-quiet"), ("next", "Следующая", phone.FORTH, "")):
-        target = data[key]
-        inside = (f'{phone.svg(icon, size=18, width=2)}<span>{words}</span>' if key == "prev"
-                  else f'<span>{words}</span>{phone.svg(icon, size=18, width=2)}')
-        nav.append(f'<a class="m-button {cls}" data-vp-{key} href="/m/videos/e/{target["episode"]}">{inside}</a>'
-                   if target else f'<a class="m-button {cls}" data-vp-{key} aria-disabled="true">{inside}</a>')
-    box = (f'<div class="m-vp-box" data-vp-box>'
-           f'<video class="m-vp-video" playsinline preload="metadata" controls '
-           f'controlslist="nofullscreen nodownload noremoteplayback" poster="{esc(data["poster"])}" data-vp-video></video>'
-           f'<div class="m-vp-wait" data-vp-wait hidden><p data-vp-wait-text>Готовлю серию для телефона…</p>'
-           f'<span class="m-bar m-bar-always"><span data-vp-wait-bar style="width:0%"></span></span></div>'
-           f'<div class="m-vp-problem" data-vp-problem hidden><p data-vp-problem-text></p>'
-           f'<a class="m-button m-quiet" data-vp-save href="/videos/file/{episode.id}" download>Сохранить файл на '
-           f'телефон</a></div>'
-           f'<button type="button" class="m-vp-skip" data-vp-skip hidden></button>'
-           f'<button type="button" class="m-vp-full" data-vp-full aria-label="Во весь экран">'
-           f'{phone.svg(phone.FULL, size=22, width=2)}</button></div>'
-           f'<div class="m-vp-marks" data-vp-marks aria-hidden="true"></div>')
-    about = (f'<section class="m-vp-about"><h2 data-vp-label>{esc(data["label"])}</h2>'
-             f'<p class="m-muted" data-vp-note>{esc(data["note"])}</p>'
-             f'<div class="m-vp-picks"><label class="m-pick" data-vp-audio-box hidden><span>Озвучка</span>'
-             f'<select data-vp-audio aria-label="Озвучка"></select></label>'
-             f'<label class="m-pick" data-vp-subs-box hidden><span>Субтитры</span>'
-             f'<select data-vp-subs aria-label="Субтитры"></select></label></div>'
-             + ("" if series.single else
-                f'<div class="m-go m-vp-nav">{"".join(nav)}</div>'
-                f'<label class="m-check"><input type="checkbox" data-vp-autonext{" checked" if autonext else ""}> '
-                f'Следующая серия сама</label>') + "</section>")
-    body = (f'<div class="m-vp" data-vp>{box}{about}{_episodes(series, episode.id)}</div>{_json_script(data)}')
-    return _page(f"{data['label']} — {series.title}" if not series.single else series.title, body,
-                 back=f"/m/videos/s/{series.id}", heading=series.title, top="", tabs=False, kind="m-video")
+    return Response.redirect(f"/m/videos/s/{series.id}?ep={episode.id}&play=1")
 
 
 def episode_json(req: Request) -> Response:

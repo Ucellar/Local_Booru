@@ -242,9 +242,9 @@ def subs_page(req: Request) -> Response:
       <section class="panel" aria-labelledby="block-title">
         <h2 id="block-title">Блоклист</h2>
         <form class="settings-form" data-form="blocklist">
-          <p class="hint">Посты с этими тегами не скачиваются — ни подписками, ни граббером. Теги через пробел, запятую или с
-          новой строки; тег проверяется по всем сайтам, где нашёлся тот же файл. Расширение в браузере размывает или
-          прячет такие посты и на самих сайтах.</p>
+          <p class="hint">Посты с этими тегами не скачиваются — ни подписками, ни в «Скачать → Галерея (booru)». Теги
+          через пробел, запятую или с новой строки; тег проверяется по всем сайтам, где нашёлся тот же файл. Расширение в
+          браузере размывает или прячет такие посты и на самих сайтах.</p>
           <textarea name="blocklist" rows="4" spellcheck="false" aria-label="Блоклист">{esc(blocklist)}</textarea>
           <div class="tool-actions"><button type="submit" class="primary">Сохранить</button><span class="action-status" role="status"></span></div>
         </form>

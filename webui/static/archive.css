@@ -10,12 +10,9 @@
 .ar-note { max-width: 74ch; margin: -6px 0 16px; padding: 8px 12px; border-left: 3px solid var(--accent);
   border-radius: 0 6px 6px 0; background: color-mix(in srgb, var(--panel-2) 88%, transparent); font-size: 13px; }
 .ar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
-/* (v5.44.81) «Узнавать само, в фоне», «…и по картинкам»: two switches and what SauceNAO costs */
-.ar-auto { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; margin: 0 0 14px; font-size: 13px; }
-.ar-auto label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
-.ar-auto input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
-.ar-auto .action-status { color: var(--muted); }
-.ar-auto-note { flex: 1 0 100%; max-width: 74ch; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+/* (v5.44.81) «Узнавать само, в фоне», «…и по картинкам» — (v5.44.116) a line of what they are: the switches are in
+   «Настройки → Сайты манги» */
+.ar-auto { max-width: 74ch; margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .ar-btn {
   display: inline-flex;
   align-items: center;

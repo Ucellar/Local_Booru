@@ -200,6 +200,12 @@ a:hover { text-decoration: none; }
 }
 .settings-link .skin-label { display: inline; }
 .settings-link { padding-left: 13px; padding-right: 12px; }
+/* (v5.44.120) «Загрузки» — a row of the side menu's foot, as «Настройки» */
+.dl-badge .skin-label { display: inline; }
+.dl-badge { padding-left: 13px; padding-right: 12px; }
+/* (v5.44.116) «← Назад» — a row of the side menu's foot, as «Настройки» */
+.top-back .skin-label { display: inline; }
+.top-back { padding-left: 13px; padding-right: 12px; }
 .skin-list { top: auto; bottom: calc(100% + 8px); left: 0; right: auto; width: min(360px, calc(100vw - 24px));
   background: var(--panel); border-color: var(--lg-line); border-radius: 10px; }
 .skin-item { border-radius: 8px; color: var(--text); }
@@ -488,7 +494,7 @@ table.visual-check {
   .top-tools { flex-direction: row; margin: 0 0 0 auto; padding: 0; border: 0; }
   .top-tools .skin-menu { width: auto; }
   .skin-button, .settings-link.skin-button { width: auto; min-height: 34px; border-left: 0; }
-  .settings-link .skin-label { display: none; }
+  .settings-link .skin-label, .top-back .skin-label, .dl-badge .skin-label { display: none; }
   .skin-list { top: calc(100% + 6px); bottom: auto; right: 0; left: auto; }
   .tool-head { margin: 0 -10px 12px; padding: 12px 10px; }
   .settings-block .field-row > label:first-child { min-width: 0; flex-basis: 100%; }

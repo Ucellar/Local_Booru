@@ -112,13 +112,20 @@ def good_names(names) -> list:
 @dataclass
 class Clues:
     """What the folder's own files say: ``links`` — [(a link of a site the program knows, where)], ``names`` — [(a
-    name, where)]; ``looked`` — the files looked into («info.json», «ComicInfo.xml в «Том 1.cbz»»…)."""
+    name, where)]; ``looked`` — the files looked into («info.json», «ComicInfo.xml в «Том 1.cbz»»…); (v5.44.125)
+    ``pools`` — [(the number of a pool of e621, where)] (a comic: ``core/parser_manga``)."""
     links: list = field(default_factory=list)
     names: list = field(default_factory=list)
     looked: list = field(default_factory=list)
+    pools: list = field(default_factory=list)
 
     def add_link(self, url: str, where: str) -> None:
         url = str(url or "").strip().rstrip(".,;")
+        pool = e621_pool(url)
+        if pool:
+            if len(self.pools) < LINKS and all(p != pool for p, _w in self.pools):
+                self.pools.append((pool, where))
+            return
         if not url or len(self.links) >= LINKS or any(u == url for u, _w in self.links):
             return
         if known_link(url):
@@ -139,6 +146,15 @@ def known_link(url: str) -> bool:
     if S.source_for(url)[0] is not None:
         return True
     return mangadex_chapter(url) != ""
+
+
+_POOL = re.compile(r"^https?://(?:www\.)?e(?:621|926)\.net/pools/(\d+)(?:[/?#].*)?$", re.I)
+
+
+def e621_pool(url: str) -> int:
+    """(v5.44.125) The number of a pool of e621 in its link (``e621.net/pools/15766``); 0 — not one."""
+    found = _POOL.match(str(url or "").strip())
+    return int(found.group(1)) if found else 0
 
 
 def mangadex_chapter(url: str) -> str:
@@ -279,14 +295,16 @@ def _shortcut(path: Path, found: Clues) -> None:
     text = _text(_small(path))
     if not text:
         return
-    urls = [u.rstrip(".,;") for u in _URL.findall(text) if known_link(u.rstrip(".,;"))]
-    if path.suffix.lower() == ".txt" and len({title_of(u) for u in urls}) != 1:
+    urls = [u.rstrip(".,;") for u in _URL.findall(text)
+            if known_link(u.rstrip(".,;")) or e621_pool(u.rstrip(".,;"))]
+    if path.suffix.lower() == ".txt" and len({title_of(u) if not e621_pool(u) else ("e621", e621_pool(u))
+                                              for u in urls}) != 1:
         return
     where = f"«{path.name}»"
-    before = len(found.links)
+    before = len(found.links) + len(found.pools)
     for url in urls:
         found.add_link(url, where)
-    if len(found.links) > before:
+    if len(found.links) + len(found.pools) > before:
         found.looked.append(where)
 
 

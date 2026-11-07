@@ -161,6 +161,12 @@ def save(update: dict) -> dict:
         clean["sets_box"] = str(update["sets_box"])
     if "content_mode" in update and str(update["content_mode"]) in CONTENT_MODES:
         clean["content_mode"] = str(update["content_mode"])
+    if "phone_content_mode" in update:           # (v5.44.116) the phone's own mode; "" — as on the computer (none kept)
+        value = str(update["phone_content_mode"] or "")
+        if value in CONTENT_MODES:
+            clean["phone_content_mode"] = value
+        elif not value:
+            drop.add("phone_content_mode")
     if "motion" in update and str(update["motion"]) in MOTION:
         clean["motion"] = str(update["motion"])
     if "manhwa_width" in update and str(update["manhwa_width"]) in MANHWA_WIDTHS:

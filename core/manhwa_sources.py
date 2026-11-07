@@ -65,6 +65,7 @@ title only when it is erotic.  A title that depicts minors is neither opened nor
 """
 from __future__ import annotations
 
+import copy
 import html as _html
 import json
 import logging
@@ -500,6 +501,15 @@ class Net:
         self._browser_lock = threading.Lock()    # (v5.44.73) one page of the browser at a time
         self._passes: dict = {}                  # the site → (cookies, agent) the browser got there
         self._browser_only: set = set()          # hosts whose pages only the browser itself gets
+
+    def asked_until(self, stop_check) -> "Net":
+        """(v5.44.117) This net — its sessions (one per host; several threads may share them: ``requests`` sessions
+        take requests from many threads, and each thread here asks its own site), its pace, the browser's passes, what
+        a look keeps (``kept``) — with another stop: the other sites of a title asked at once
+        (``manhwa_download.look``) stop at their common deadline, or when the one asking stops."""
+        twin = copy.copy(self)                   # a shallow copy: the same dictionaries and locks
+        twin.stop_check = stop_check
+        return twin
 
     def session(self, host: str):
         import requests

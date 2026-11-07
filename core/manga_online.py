@@ -50,6 +50,7 @@ TITLES_KEPT = 24
 CHAPTERS_KEPT = 64
 PROGRESS_FILE = "manga_online.json"
 PROGRESS_KEPT = 300                    # titles whose last chapter is kept
+READ_KEPT = 3000                       # (v5.44.119) the chapters read to their end kept of a title
 # (v5.44.82) how a chapter is read — as the friend's reader Yomi does it: a strip (manhwa, manhua: the pages one under
 # another), the pages one at a time right to left (manga) or left to right (western comics); «auto» — by the title's
 # kind, and a strip whenever its pages are tall (their middle height more than :data:`TALL` widths)
@@ -141,31 +142,40 @@ class Online:
     # ── the title ───────────────────────────────────────────────────────────────────────────────────────────────
     def _card(self, key: str):
         """The card's own search, when it found this title (``manhwa_get``'s task «Найти»: the same title — by its
-        link or by the link the owner gave, which may be another site's — and, when one is asked, its branch)."""
+        link or by the link the owner gave, which may be another site's — and, when one is asked, its branch);
+        (v5.44.117) each page has a search of its own: the newest one that found this title."""
         try:
-            from core import page_jobs
-            from webui.pages.manhwa_get import FIND
+            from webui.pages.manhwa_get import found_titles
         except ImportError:
             return None
-        task = page_jobs.current(FIND)
-        result = task.result if task is not None and task.status == "done" else None
-        found = result.get("found") if isinstance(result, dict) else None
-        if found is None:
-            return None
         site_key, branch = key.rsplit(":", 1)
-        mine = []
-        for link in (found.title.url, str(result.get("url") or "")):
-            try:
-                mine.append(key_of(link).rsplit(":", 1)[0])
-            except OnlineError:
+        for found, asked in found_titles():
+            mine = []
+            for link in (found.title.url, asked):
+                try:
+                    mine.append(key_of(link).rsplit(":", 1)[0])
+                except OnlineError:
+                    continue
+            if site_key not in mine:
                 continue
-        if site_key not in mine:
-            return None
-        if branch and (found.branch.id if found.branch else "") != branch:
-            return None
-        return found
+            if branch and (found.branch.id if found.branch else "") != branch:
+                continue
+            return found
+        return None
 
-    def title(self, url: str, settings: dict, branch: str = "") -> Reading:
+    def kept(self, url: str, branch: str = "") -> "Reading | None":
+        """(v5.44.117) The title as it is kept now, None — not kept (nothing is asked)."""
+        try:
+            key = key_of(url, branch)
+        except OnlineError:
+            return None
+        with self._lock:
+            kept = self._titles.get(key)
+        return kept if kept is not None and time.time() - kept.at < TITLE_TTL else None
+
+    def title(self, url: str, settings: dict, branch: str = "", net: "S.Net | None" = None) -> Reading:
+        """The title of ``url`` (kept :data:`TITLE_TTL`); ``net`` — (v5.44.117) how it is asked when it is not kept
+        (the reader of a folder asks with :class:`QuietNet`: never the program window's browser)."""
         key = key_of(url, branch)
         with self._lock:
             kept = self._titles.get(key)
@@ -182,7 +192,7 @@ class Online:
             if found is None:
                 from core import manhwa_download as D
                 try:
-                    found = D.look(url, settings, branch=branch, net=self.net(), cover=False, about=False)
+                    found = D.look(url, settings, branch=branch, net=net or self.net(), cover=False, about=False)
                 except D.DownloadError as exc:
                     raise OnlineError(str(exc)) from exc
             reading = Reading(url=url, branch=branch, found=found, takes=found.takes(True))
@@ -232,6 +242,17 @@ class Online:
                 return reading, pages
             why = why or f"{candidate.source.label}: у главы нет страниц"
         raise OnlineError("Глава не открылась — " + (why or "сайты её не отдали"))
+
+    def pages_known(self, url: str, n: int, branch: str = "") -> int:
+        """(v5.44.119) The pages of chapter ``n`` as kept now (0 — not kept: nothing is asked) — the place read keeps
+        «стр. 12 из 38» with it."""
+        try:
+            ckey = (key_of(url, branch), n)
+        except OnlineError:
+            return 0
+        with self._lock:
+            kept = self._chapters.get(ckey)
+        return len(kept.pictures) if kept is not None else 0
 
     # ── a picture ───────────────────────────────────────────────────────────────────────────────────────────────
     def picture(self, url: str, n: int, p: int, settings: dict, branch: str = "") -> tuple:
@@ -361,19 +382,33 @@ def disk_trim(limit: int = DISK_BYTES) -> int:
 ONLINE = Online()
 
 
+class QuietNet(S.Net):
+    """(v5.44.117) The sites asked without the program window's browser — the reader of a folder asks a downloaded
+    title's site for the chapters it has (``webui/pages/reader.site``): a site that wants its check for robots is said
+    to be closed, no window opens by itself (as ``manhwa_search``'s search by a name)."""
+
+    def _past_check(self, url, closed, options):
+        raise closed
+
+    def _through_browser(self, url, what):
+        raise S.Closed(S.closed_words(what))
+
+
 def auto_of(kind: str, manga: bool, sizes: list) -> str:
     """(v5.44.83) The way a chapter is read when the owner did not choose one — for the titles of the sites and of the
-    folders alike: a strip for tall pages (``sizes`` — [(width, height)]) and for manhwa and manhua, the pages left to
-    right for western comics, right to left for manga (``manga`` — a title of the manga's kind)."""
+    folders alike: a strip for tall pages (``sizes`` — [(width, height)]) and for manhwa and manhua; (v5.44.117; the
+    approved mockup of one reader: «манхва — прокруткой, манга — по страницам») the pages left to right for manga and
+    comics (``manga`` — a title of the manga's kind) — as the reader of «Манга» has always turned them; right to left
+    is the owner's choice, kept for the title."""
     ratios = sorted(h / w for w, h in sizes if w > 0 and h > 0)
     if len(ratios) >= 3 and ratios[len(ratios) // 2] > TALL:
         return "strip"
     kind = str(kind or "").strip().casefold()
     if kind in STRIP_TYPES:
         return "strip"
-    if kind in LTR_TYPES:
+    if kind in LTR_TYPES or manga or kind in ("манга", "manga"):
         return "ltr"
-    return "rtl" if manga or kind in ("манга", "manga") else "strip"
+    return "strip"
 
 
 def auto_mode(reading: Reading, pictures: list) -> str:
@@ -389,7 +424,10 @@ def _date(text: str) -> str:
 
 # ── what was read ──────────────────────────────────────────────────────────────────────────────────────────────────
 class Progress:
-    """``manga_online.json`` in the settings folder: {title key: {url, title, ch, label, page, part, done, at}}."""
+    """``manga_online.json`` in the settings folder: {title key: {url, title, ch, label, page, part, done, at}};
+    (v5.44.119) and ``id`` — the chapter's own id (the place found again when the list of chapters changes: other
+    translators, another site's chapters), ``pages`` — its pages when known, ``read`` — the ids of the chapters read to
+    their end (the title's page marks them «прочитана», as the folder's chapters)."""
 
     def __init__(self, path: "Path | None" = None):
         self._path = path
@@ -406,15 +444,25 @@ class Progress:
         data = read_json_kept(self.file(), dict, what="manga online")
         return data if isinstance(data, dict) else {}
 
-    def put(self, url: str, reading: Reading, n: int, page: int = 0, part: float = 0.0, done: bool = False) -> None:
+    def put(self, url: str, reading: Reading, n: int, page: int = 0, part: float = 0.0, done: bool = False,
+            pages: int = 0) -> None:
         from core.file_safety import write_json_kept
         key = key_of(url).rsplit(":", 1)[0]
+        take = reading.takes[n - 1] if 1 <= n <= len(reading.takes) else None
+        own = str(getattr(take, "id", "") or "")
         with self._lock:
             data = self.read()
             old = data.get(key) if isinstance(data.get(key), dict) else {}
+            read = [str(x) for x in old.get("read") or [] if isinstance(x, (str, int))]
+            if done and own and own not in read:
+                read = (read + [own])[-READ_KEPT:]
+            if not pages and old.get("ch") == n and old.get("id", own) == own:
+                pages = int(old.get("pages") or 0)          # the same chapter: its pages as known before
             data[key] = {"url": reading.title.url, "title": reading.title.title, "ch": n, "label": reading.label(n),
                          "page": max(0, int(page)), "part": max(0.0, min(1.0, float(part))), "done": bool(done),
-                         "at": int(time.time()), **({"mode": old["mode"]} if old.get("mode") in MODES else {})}
+                         "at": int(time.time()), "id": own, **({"pages": int(pages)} if pages else {}),
+                         **({"read": read} if read else {}),
+                         **({"mode": old["mode"]} if old.get("mode") in MODES else {})}
             if len(data) > PROGRESS_KEPT:
                 for gone in sorted(data, key=lambda k: data[k].get("at", 0) if isinstance(data[k], dict) else 0)[
                         :len(data) - PROGRESS_KEPT]:

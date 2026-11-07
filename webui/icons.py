@@ -25,3 +25,4 @@ MUTED = _svg('<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="m16 9.5 5 5"/><
 FULL = _svg('<path d="M4 9V4h5"/><path d="M15 4h5v5"/><path d="M20 15v5h-5"/><path d="M9 20H4v-5"/>', "i-full")
 UNFULL = _svg('<path d="M9 4v5H4"/><path d="M20 9h-5V4"/><path d="M15 20v-5h5"/><path d="M4 15h5v5"/>', "i-unfull")
 NEXT = _svg('<path d="M5 5v14l10-7z"/><path d="M19 5v14"/>', "i-next")
+PREV = _svg('<path d="M19 5v14L9 12z"/><path d="M5 5v14"/>', "i-prev")       # (v5.44.122) the episode before

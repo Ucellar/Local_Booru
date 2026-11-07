@@ -45,7 +45,8 @@
   night) — a page task of its own (``manhwa_download.TASK``: the page «Скачать манхву» shows it, «Остановить» stops it) asks
   the sites and downloads the free chapters the folders have not, the paid ones that became free too; a download the
   person started goes first (the round waits for its end; (v5.44.74) and for the queue of them — ``manhwa_queue``,
-  which goes on after the round).
+  which goes on after the round).  (v5.44.116) «Новые главы манги и манхвы» (both folders); not when «Новые главы —
+  скачивать самой» of «Настройки → Сайты манги» is off; «Остановить» — until the next night.
 - (v5.44.81) every 10 minutes: «Скачать → Из архива» knows a few titles of the manga and manhwa folders by itself
   (``manga_archive.background_round``: the new ones, the ones SauceNAO put off, «не нашлось» again after a week — a
   page task of its own, «Узнаю тайтлы в фоне»; the folders are looked at in a thread of its own, so this one never
@@ -100,10 +101,40 @@ SKIPS_AGAIN = 10                     # seconds to the next round of openings and
 ORIGINALS_AGAIN = 20                 # seconds to the next round of originals when reduced copies still wait
 ORIGINALS_SHARED_AGAIN = 60          # …while the parser or the subscriptions use the sites
 COMIC_MANGA_AGAIN = 20               # seconds to the next round of comics to the manga folder when more wait
+ROUND_LABEL = "Новые главы манги и манхвы"    # (v5.44.116) the nightly round in «Загрузки»: it walks both folders
 TICK = 1.0
 
 _LOCK = threading.Lock()
 _DUTIES: "BackgroundDuties | None" = None
+# (v5.44.120) «Загрузки → Сама программа»: when each duty last ran and what it did — in memory, since the start of the
+# program: duty -> {"start", "end" — time.time() of its last run (no end yet: going now), "said", "said_at" — the last
+# short result of a run that did something}
+_REPORTS: dict = {}
+_REPORTS_LOCK = threading.Lock()
+
+
+def _ran(name: str, *, start: float = 0.0, end: float = 0.0) -> None:
+    with _REPORTS_LOCK:
+        entry = _REPORTS.setdefault(name, {"start": 0.0, "end": 0.0, "said": "", "said_at": 0.0})
+        if start:
+            entry.update(start=start, end=0.0)
+        if end:
+            entry["end"] = end
+
+
+def said(name: str, text: str) -> None:
+    """(v5.44.120) What a run of the duty ``name`` did, in a few words (``reports``)."""
+    if not text:
+        return
+    with _REPORTS_LOCK:
+        entry = _REPORTS.setdefault(name, {"start": 0.0, "end": 0.0, "said": "", "said_at": 0.0})
+        entry.update(said=str(text)[:300], said_at=time.time())
+
+
+def reports() -> dict:
+    """(v5.44.120) {duty: {"start", "end", "said", "said_at"}} as :func:`said` and the runs left them."""
+    with _REPORTS_LOCK:
+        return {name: dict(entry) for name, entry in _REPORTS.items()}
 
 
 class BackgroundDuties:
@@ -168,11 +199,14 @@ class BackgroundDuties:
             if now < due[name]:
                 continue
             due[name] = now + INTERVALS[name]
+            _ran(name, start=time.time())             # (v5.44.120) «Загрузки → Сама программа»: going now
             try:
                 getattr(self, "_" + name)(dict(self._settings() or {}))
                 self.last_runs[name] = time.time()
             except Exception as exc:        # the next run tries again; the thread goes on
                 _LOG.warning("background duty %s failed: %s: %s", name, type(exc).__name__, exc)
+            finally:
+                _ran(name, end=time.time())
             sooner = self._next_in.pop(name, None)
             if sooner is not None:
                 due[name] = now + sooner
@@ -196,6 +230,8 @@ class BackgroundDuties:
         removed = int(purged.get("removed_records", 0) or 0)
         if archived or removed:
             _LOG.info("lifecycle: %d new card(s) archived, %d trash card(s) purged", archived, removed)
+            said("lifecycle", ", ".join(x for x in (f"из «Новых» в архив — {archived}" if archived else "",
+                                                   f"из корзины удалено навсегда — {removed}" if removed else "") if x))
             if self._changed is not None:
                 self._changed()
 
@@ -209,6 +245,7 @@ class BackgroundDuties:
         if job is not None:
             self.started_jobs.append(job.id)
             _LOG.info("subscriptions: automatic check of %d subscription(s) started", len(job.subs))
+            said("subscriptions", f"начата проверка подписок: {len(job.subs)}")
 
     def _checkpoint(self, settings: dict) -> None:
         """At most one passive checkpoint per interval, only when the log has grown and the person is idle."""
@@ -271,6 +308,7 @@ class BackgroundDuties:
         from core import site_posts
         result = site_posts.backfill(settings, stop_check=lambda: self._stopping() or _library_taken())
         if result.get("asked"):
+            said("site_posts", f"спрошено постов — {result['asked']}, записано — {result['written']}")
             _LOG.info("site posts: %d asked, %d card row(s) kept%s%s", result["asked"], result["written"],
                       f", {result['mended']} card(s) got their site's tags back" if result.get("mended") else "",
                       ", more to come" if result.get("more") else "")
@@ -287,6 +325,7 @@ class BackgroundDuties:
         result = reduced_copies.background_round(settings, hold=self._hold,
                                                  stop_check=lambda: self._stopping() or _library_taken())
         if result.get("looked"):
+            said("originals", f"посмотрено карточек — {result['looked']}, получили оригинал — {result['done']}")
             _LOG.info("originals: %d card(s) looked at, %d got the original%s", result["looked"], result["done"],
                       ", more to come" if result.get("more") else "")
             if result.get("done") and self._changed is not None:
@@ -335,8 +374,10 @@ class BackgroundDuties:
 
     def _manhwa(self, settings: dict) -> None:
         """(v5.44.60) The new chapters of the downloaded manhwa, once a day: a page task of its own, so this thread
-        never waits for the sites."""
-        if self._stopping():
+        never waits for the sites.  (v5.44.116) Of the manga too (the round walks both folders): «Новые главы манги и
+        манхвы»; «Настройки → Сайты манги → Новые главы — скачивать самой» off — never; «Остановить» — until the next
+        night (``watch_round`` keeps the round as checked unless the program's closing stopped it)."""
+        if self._stopping() or not settings.get("manhwa_watch_auto", True):
             return
         from core import manhwa_download, manhwa_queue, page_jobs
         if not manhwa_download.due():
@@ -349,12 +390,13 @@ class BackgroundDuties:
         def run(say, stop_check):
             try:
                 return manhwa_download.watch_round(dict(live() or {}), say=say,
-                                                   stop_check=lambda: stop_check() or self._stopping())
+                                                   stop_check=lambda: stop_check() or self._stopping(),
+                                                   closing=self._stopping)
             finally:
                 if not stop_check():                       # (v5.44.74) a download asked meanwhile — now
                     manhwa_queue.next_soon()
         try:
-            page_jobs.start(manhwa_download.TASK, "Новые главы манхвы", run)
+            page_jobs.start(manhwa_download.TASK, ROUND_LABEL, run)
         except page_jobs.TaskBusy:
             return
         _LOG.info("manhwa: the round of new chapters started")
@@ -398,6 +440,7 @@ class BackgroundDuties:
         result = comic_manga.background_round(settings, stop_check=lambda: self._stopping() or _library_taken())
         if result.get("moved") or result.get("copied"):
             _LOG.info("comics and manga to the manga folder: %s", ", ".join(result["moved"] + result["copied"]))
+            said("comic_manga", f"перенесено в папку манги: {len(result['moved']) + len(result['copied'])}")
             if self._changed is not None:
                 self._changed()
         if result.get("more"):

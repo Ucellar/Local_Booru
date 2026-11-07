@@ -20,9 +20,9 @@ An episode watched (:func:`open_stream` → a token):
   (401/403/404/410) asks the player again (:func:`_ask_again`), not more often than :data:`ASK_AGAIN_AFTER`;
 * the player: the window's own (Qt Multimedia — the window's browser has no H.264 and AAC), a browser's ``<video>``
   (hls.js where it does not play HLS itself), the phone's;
-* nothing is written to the disk but where it stopped (:data:`PROGRESS`: ``video_watch.json`` in the settings' folder —
-  the title's last episode and its place, the places of the others, the episodes watched, the voice-over, player and
-  quality chosen).
+* nothing is written to the disk but where it stopped (:data:`PROGRESS` — (v5.44.121) the one memory of the tab
+  «Видео», ``core/video_library.Progress``, ``video_progress.json``; ``video_watch.json`` before: the title's last
+  episode and its place, the places of the others, the episodes watched, the voice-over, player and quality chosen).
 
 (v5.44.109) A title of Hentasis too (``…/1112-dark-summoner-to-dekiteiru.html``, a mirror ``hentasisN.top``; the owner,
 6.11.2026: «я на компе открыл ленту видео и оно опять открывает скачивание») — :data:`PAGE_SITES`.  Its episodes are
@@ -37,7 +37,6 @@ genres and poster (``video_meta.parse_page``), its rating (DLE stars).  Such a s
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import secrets
@@ -66,11 +65,7 @@ PIECE_MAX = 96 * 1024 * 1024  # bytes of one part of a stream
 PLAYLIST_MAX = 4 * 1024 * 1024
 TIMEOUT = (15, 40)
 CHUNK = 256 * 1024
-KEEP_NAME = "video_watch.json"
-KEEP_TITLES = 300
-KEEP_PLACES = 400
-WATCHED_SHARE = 0.9           # an episode played this far is watched…
-WATCHED_TAIL = 120.0          # …or this many seconds before its end (its credits), when it is longer than twice that
+KEEP_NAME = "video_progress.json"   # (v5.44.121) the one memory of the tab «Видео» (``video_watch.json`` before)
 KINDS = (("dub", "Дубляж"), ("voice", "Озвучка"), ("subs", "Субтитры"))
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{16,64}")
 _RANGE = re.compile(r"bytes=\d{0,15}-\d{0,15}")
@@ -1076,97 +1071,6 @@ def stream_public(stream: Stream, progress: dict | None = None) -> dict:
 
 
 # ── where it stopped ───────────────────────────────────────────────────────────────────────────────────────────────
-class Progress:
-    """``video_watch.json`` in the settings' folder: {"titles": {key: {"name", "dub", "player", "quality", "last",
-    "at", "length", "done", "watched": [labels], "places": {label: [at, length]}, "when"}}}."""
-
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._data: dict | None = None
-
-    @staticmethod
-    def _file() -> Path:
-        from core.paths import SETTINGS_DIR
-        return Path(SETTINGS_DIR) / KEEP_NAME
-
-    def _titles(self) -> dict:
-        if self._data is None:
-            from core.file_safety import read_json_kept
-            try:
-                data = read_json_kept(self._file(), dict, what=KEEP_NAME) or {}
-            except OSError as exc:
-                _LOG.warning("%s not read: %s", KEEP_NAME, exc)
-                data = {}
-            titles = data.get("titles")
-            self._data = {"titles": titles if isinstance(titles, dict) else {}}
-        return self._data["titles"]
-
-    def _save(self) -> None:
-        from core.file_safety import write_json_kept
-        try:
-            write_json_kept(self._file(), json.dumps(self._data, ensure_ascii=False, separators=(",", ":")), dict)
-        except OSError as exc:
-            _LOG.warning("%s not written: %s", KEEP_NAME, exc)
-
-    def forget_cache(self) -> None:
-        with self._lock:
-            self._data = None
-
-    def of(self, key: str) -> dict:
-        with self._lock:
-            item = self._titles().get(key)
-            return json.loads(json.dumps(item)) if isinstance(item, dict) else {}
-
-    def _item(self, key: str, name: str) -> dict:
-        titles = self._titles()
-        item = titles.pop(key, None)
-        item = item if isinstance(item, dict) else {}
-        titles[key] = item                        # the latest last
-        while len(titles) > KEEP_TITLES:
-            titles.pop(next(iter(titles)))
-        if name:
-            item["name"] = str(name)[:300]
-        item["when"] = round(time.time())
-        return item
-
-    def choose(self, key: str, *, name: str = "", dub=None, player=None, quality=None) -> dict:
-        with self._lock:
-            item = self._item(key, name)
-            for field_, value in (("dub", dub), ("player", player), ("quality", quality)):
-                if value is not None:
-                    item[field_] = str(value)[:200]
-            self._save()
-            return json.loads(json.dumps(item))
-
-    def record(self, key: str, label: str, at: float, length: float, *, ended: bool = False, name: str = "",
-               dub=None, player=None, quality=None, ending: float = 0.0) -> dict:
-        """The place of an episode (``at`` of ``length`` seconds); played to its end, almost (:data:`WATCHED_SHARE`,
-        :data:`WATCHED_TAIL`), or past the start of its ending — watched."""
-        label = str(label)[:12]
-        at, length, ending = max(0.0, float(at)), max(0.0, float(length)), max(0.0, float(ending or 0))
-        watched = bool(ended) or (length > 0 and (at >= length * WATCHED_SHARE
-                                                  or (length > 2 * WATCHED_TAIL and at >= length - WATCHED_TAIL))) \
-            or (ending > 0 and at >= ending and (not length or ending < length))
-        with self._lock:
-            item = self._item(key, name)
-            for field_, value in (("dub", dub), ("player", player), ("quality", quality)):
-                if value:
-                    item[field_] = str(value)[:200]
-            places = item.get("places") if isinstance(item.get("places"), dict) else {}
-            seen = [str(x) for x in item.get("watched") or []][-2000:]
-            if watched:
-                places.pop(label, None)
-                if label not in seen:
-                    seen.append(label)
-            elif at > 1:
-                places.pop(label, None)
-                places[label] = [round(at, 1), round(length, 1)]
-                while len(places) > KEEP_PLACES:
-                    places.pop(next(iter(places)))
-            item.update(places=places, watched=seen, last=label, at=0.0 if watched else round(at, 1),
-                        length=round(length, 1), done=watched)
-            self._save()
-            return json.loads(json.dumps(item))
-
-
-PROGRESS = Progress()
+# (v5.44.121) the one memory of the tab «Видео» (``core/video_library.Progress``, ``video_progress.json``): an episode
+# watched here and the same episode of the folder are one; ``video_watch.json`` of v5.44.106–5.44.120 is read into it once
+from core.video_library import PROGRESS, Progress  # noqa: E402,F401  (its API is «Смотреть»'s own of before)

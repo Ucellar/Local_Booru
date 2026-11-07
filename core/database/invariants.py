@@ -27,8 +27,10 @@ def _add_issue(issues: list[dict[str, Any]], issue_type: str, *, severity: str =
     })
 
 
-def check(settings: dict, *, sample_limit: int | None = None, persist: bool = True) -> dict[str, Any]:
-    """Return invariant issues without modifying the library."""
+def check(settings: dict, *, sample_limit: int | None = None, persist: bool = True, files: bool = True) -> dict[str, Any]:
+    """Return invariant issues without modifying the library.  ``files`` — also whether each card's file is on the disk
+    ((v5.44.118) «Обслуживание → Проверить целостность базы» checks the rows only: the files are «Диагностика →
+    Проверить файлы», ``core/file_check.py``)."""
     issues: list[dict[str, Any]] = []
     with db(settings, readonly=True) as con:
         sql = "SELECT id, path, deleted FROM images WHERE deleted=0 ORDER BY id"
@@ -38,7 +40,7 @@ def check(settings: dict, *, sample_limit: int | None = None, persist: bool = Tr
         from core.storage_roots import probe_media_path
         root_cache = {}
         offline_roots: dict[tuple[str, str], dict[str, Any]] = {}
-        for pos, r in enumerate(con.execute(sql, args).fetchall(), start=1):
+        for pos, r in enumerate(con.execute(sql, args).fetchall() if files else [], start=1):
             if (pos - 1) % 250 == 0:
                 root_cache = {}
             path = str(r["path"] or "")
@@ -119,7 +121,7 @@ def repair(settings: dict, *, mark_missing_deleted: bool = True) -> dict[str, An
     from .storage import MASS_MISSING_SHARE
     from core.storage_roots import probe_media_path
     with journal.operation(settings, "library_repair", target_type="library"):
-        before = check(settings, persist=True)
+        before = check(settings, persist=True, files=mark_missing_deleted)
         fixed = {"missing_marked_deleted": 0, "orphan_rows_removed": 0, "missing_refused": 0, "moved_left": 0}
         if mark_missing_deleted:
             with db(settings, readonly=True) as con:
@@ -138,29 +140,7 @@ def repair(settings: dict, *, mark_missing_deleted: bool = True) -> dict[str, An
             if len(rows) >= 20 and len(missing) > MASS_MISSING_SHARE * len(rows):
                 fixed["missing_refused"] = len(missing)
                 missing = []
-            for i in range(0, len(missing), 500):
-                part = missing[i:i + 500]
-                with db(settings, write=True) as con:
-                    now = _now()
-                    marks = ",".join("?" for _ in part)
-                    current = {int(r[0]): str(r[1] or "") for r in con.execute(
-                        f"SELECT id, path FROM images WHERE deleted=0 AND id IN ({marks})", [x[0] for x in part])}
-                    ids = [image_id for image_id, path in part if current.get(image_id) == path
-                           and probe_media_path(settings, path).get("status") == "missing"]
-                    if not ids:
-                        continue
-                    # Not a zombie (deleted=1 and seen nowhere): the card shows in Trash as «файл пропал»,
-                    # can be purged there, and a re-parse that meets the same bytes gives it a file again.
-                    ph = ",".join("?" for _ in ids)
-                    con.execute(
-                        f"""INSERT INTO delete_log(path,file_name,reason,tag_or_source,deleted_at)
-                            SELECT path, file_name, 'missing_file', '', ? FROM images WHERE id IN ({ph})""",
-                        [now] + ids)
-                    con.execute(
-                        f"""UPDATE images SET deleted=1, lifecycle='missing', trashed_at=?, inbox_until=0,
-                               original_media_path=CASE WHEN COALESCE(original_media_path,'')='' THEN path ELSE original_media_path END
-                            WHERE id IN ({ph})""", [now] + ids)
-                    fixed["missing_marked_deleted"] += len(ids)
+            fixed["missing_marked_deleted"] = mark_missing(settings, missing)
         with db(settings, write=True) as con:
             now = _now()
             # Manual orphan cleanup with rowcount accounting.
@@ -183,5 +163,41 @@ def repair(settings: dict, *, mark_missing_deleted: bool = True) -> dict[str, An
                 pass
             fixed["orphan_rows_removed"] = removed
             con.execute("UPDATE integrity_issues SET status='repaired', repaired_at=? WHERE status='open'", (now,))
-        after = check(settings, persist=True)
+        after = check(settings, persist=True, files=mark_missing_deleted)
         return {"before": before, "after": after, "fixed": fixed}
+
+
+def mark_missing(settings: dict, items, *, hold=None) -> int:
+    """The cards ``items`` — (card, the path it was probed at) — whose files are gone: into the trash as «файл пропал»
+    (``lifecycle='missing'``, a line of ``delete_log``), in short transactions; each card only if it is still live at
+    that path and its file is still gone.  ``hold(*paths)`` — a context around each portion (the import lock, the
+    files' streams).  How many were marked.  (v5.44.118: :func:`repair` and «Починить файлы», ``core/file_check``.)"""
+    from contextlib import nullcontext
+    from core.storage_roots import probe_media_path
+    marked = 0
+    items = [(int(image_id), str(path or "")) for image_id, path in items or []]
+    for i in range(0, len(items), 500):
+        part = items[i:i + 500]
+        with (hold(*[path for _id, path in part]) if hold is not None else nullcontext()):
+            with db(settings, write=True) as con:
+                now = _now()
+                marks = ",".join("?" for _ in part)
+                current = {int(r[0]): str(r[1] or "") for r in con.execute(
+                    f"SELECT id, path FROM images WHERE deleted=0 AND id IN ({marks})", [x[0] for x in part])}
+                ids = [image_id for image_id, path in part if current.get(image_id) == path
+                       and probe_media_path(settings, path).get("status") == "missing"]
+                if not ids:
+                    continue
+                # Not a zombie (deleted=1 and seen nowhere): the card shows in Trash as «файл пропал»,
+                # can be purged there, and a re-parse that meets the same bytes gives it a file again.
+                ph = ",".join("?" for _ in ids)
+                con.execute(
+                    f"""INSERT INTO delete_log(path,file_name,reason,tag_or_source,deleted_at)
+                        SELECT path, file_name, 'missing_file', '', ? FROM images WHERE id IN ({ph})""",
+                    [now] + ids)
+                con.execute(
+                    f"""UPDATE images SET deleted=1, lifecycle='missing', trashed_at=?, inbox_until=0,
+                           original_media_path=CASE WHEN COALESCE(original_media_path,'')='' THEN path ELSE original_media_path END
+                        WHERE id IN ({ph})""", [now] + ids)
+                marked += len(ids)
+    return marked

@@ -16,8 +16,8 @@ What is a comic of the gallery (:func:`candidates`):
   person made) whose pictures carry a comic's tag (``card_sets._COMIC``) — :data:`COMIC_SHARE` of them at least;
 
 with :data:`MIN_PAGES` live picture cards at least.  The program's rule about minors holds here too: a comic with a
-page that its site does not rate as safe and whose tags speak of minors (``core/filter.depicts_minors`` and e621's own
-words, :data:`MINOR_TAGS`) is never taken — it stays where it is.
+page that its site does not rate as safe and whose tags speak of minors (``core/filter.page_forbidden`` — the whole
+rule is in ``core/filter.py`` since 5.44.128) is never taken — it stays where it is.
 
 How (:func:`move`): the pages are copied — «<name>/001.jpg …» (a pool's by their place in the pool) — first into
 ``<manga folder>/.lb/copying/<key>`` (:func:`_staging`: the library does not see a half-made title; a copy cut short
@@ -26,22 +26,34 @@ e621), the cards' tags by kind; then the folder is renamed into place, and the c
 (``library_lifecycle.move_to_trash``, reason :data:`REASON`): their files with them, «Вернуть» brings a card back (it is
 not taken again: what was moved is kept by its cards), the manga's copy stays.
 
-The manga of the parser's folder (``core/manga_detect``: its titles the parser does not parse — and since this version
-also a folder of :data:`manga_detect.MANY_PAGES` pages by numbers whatever their sizes): the program never moves nor
-removes the parser's files, so a title is copied (:func:`copy_title`): its pictures, its .zip/.cbz/.pdf and the files of
-its description (a chapter deeper than the title's folder — a folder right in the copy: the manga folder reads chapters
-one level down), checked the same way; a manhwa (tall pages) stays for its own folder; then the gallery's cards of the
-same bytes (parsed before the program knew it was a manga) go to the trash with the same reason.  Not when the manga
-folder's disk would keep less than :data:`KEEP_FREE` (said in the log).
+The manga of the parser's folder: (v5.44.125) ``core/parser_manga.py`` — only a manga a site of manga confirms
+(ComicInfo.xml, a link in its files, a title of the same pages, SauceNAO → a site; never e621) is copied, by the
+parser's run and by this duty's rounds (its
+``background_round``), with this module's staging, checked copies, records «root:<id>» and :func:`_place`; a folder
+nothing confirms is the parser's (a сборка of the gallery).  The program never moves, changes nor removes the parser's
+files; the gallery's cards of the same bytes stay.  Not when the manga folder's disk would keep less than
+:data:`KEEP_FREE`.  (Before: v5.44.111 — a folder of 15 numbered pages copied by itself; v5.44.115 — only by
+«Проверить сейчас»; ``copy_title`` — gone with v5.44.125.)
+
+(v5.44.125) The owner: «пулы в e621 бывают напичканы рандомными картинками так что я говорил что бы подтвержденная
+манга была именно с манга сайтов» — a comic of the gallery (a pool of e621 too) goes to the manga folder by itself only
+when a site of manga confirms it (:func:`_site_says` — ``parser_manga.confirm_pages``: its name searched on the sites of
+manga, its first pages compared with the title's by pHash; SauceNAO after), and its copy is linked to that title (its
+description, the chapters it misses — «Загрузки»); else it stays a сборка of the gallery.  What the sites said —
+``comic_manga_checks.json`` in the settings folder (asked again after :data:`AGAIN_DAYS`).  «В мангу» of a сборка's
+block (:func:`of_set`) — the person's word, as before.
 
 What was moved — ``comic_manga.json`` in the settings folder ({key: {folder, title, at, pages, cards, done…}}): a
 pool's pages that come later go into the same folder; a folder the person removed from the manga folder is not made
-again.  The manga is then looked up on the sites of manga by the background of «Из архива» (``manga_archive.entries``
+again.  (v5.44.116) A record left «done: False» (the rename into place cut short) is finished by the next round
+(:func:`_finish_cut_short`), not copied a second time; «В мангу» takes the round's lock too (:func:`round_held`).
+The manga is then looked up on the sites of manga by the background of «Из архива» (``manga_archive.entries``
 takes these folders — :func:`archive_entries`; a copied title of the parser's folder is known by its copy): the name,
 the description, the cover and the missing chapters, as it does the parser's folder's titles.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -53,6 +65,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core import filter as F
+
 _LOG = logging.getLogger("local_booru.card_sets")
 
 MIN_PAGES = 15                  # pictures of a comic at least (the owner: «если 15+ каринок в сборке то в мангу»)
@@ -61,19 +75,20 @@ REASON = "moved_to_manga"       # the trash's reason (``trash_tools.LABELS``)
 KEEP_NAME = "comic_manga.json"
 NAME_MAX = 120
 TAGS_MAX = 60                   # general tags written into info.json (the common ones first)
-# e621's own tags of minors (its «young» — under age; «cub» — the same of a furry): with a page not rated safe — never
-MINOR_TAGS = frozenset({"young", "cub", "child", "toddler", "infant", "preteen", "loli", "shota"})
-SAFE = ("s", "g")               # the sites' ratings of a safe picture (e621 «s», Danbooru «g» and «s»)
+# (v5.44.128) the program's rule about minors — in ``core/filter.py``; its names here for the code that uses them
+MINOR_TAGS = F.SITE_MINOR_TAGS
+SAFE = F.SAFE_RATINGS
 _PICTURES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp", ".jxl"}
-_ARCHIVES = {".zip", ".cbz", ".pdf"}           # what the manga folder reads besides pictures (``manga_library``)
-_DESCRIPTION = {".json", ".xml", ".txt", ".url", ".webloc"}     # a title's own files of its description
 STAGING = "copying"             # <manga folder>/.lb/copying/<key's hash>: a copy not finished yet
 ROUND_SECONDS = 45              # a round of the background works so long at most (the duties share one thread)…
-ROUND_BYTES = 3 * 1024 ** 3     # …and copies so much of the parser's manga at most
 KEEP_FREE = 10 * 1024 ** 3      # the manga folder's disk keeps so much free after a copy
 TASK = "comic_manga"            # (v5.44.113) «Проверить сейчас» — a task of the pages (``core/page_jobs``)
+CHECKS_NAME = "comic_manga_checks.json"     # (v5.44.125) what the sites of manga said of a comic not moved yet
+AGAIN_DAYS = 7                  # …«not one» asked again after so many days
+HAND_WAIT = ROUND_SECONDS + 15  # (v5.44.116) «В мангу» waits so long for a round going, then says so
 _LOCK = threading.Lock()
-_ROUND = threading.Lock()       # (v5.44.113) one round at a time: the duty and «Проверить сейчас» never copy together
+_ROUND = threading.Lock()       # (v5.44.113) one round at a time: the duty and «Проверить сейчас» never copy together;
+#                                 (v5.44.116) «В мангу» too (:func:`round_held`)
 _LOOKING = threading.Lock()     # …and one look at the parser's folder started by this module
 _STATE: dict = {"at": 0, "moved": 0, "copied": 0, "no_room": "", "looked_at": 0}     # the last rounds, for the page
 
@@ -208,13 +223,21 @@ def _comic_marks(con, ids: list) -> set:
     return out
 
 
+def _cards_left(record) -> bool:
+    """(v5.44.116) A comic copied whose cards never went to the trash — its rename into place cut short (finished by
+    :func:`_finish_cut_short`) or the trash refused —, its folder there: taken again, its cards go (the copies in its
+    folder are kept, not made anew)."""
+    return isinstance(record, dict) and not record.get("cards") and record.get("done", True) \
+        and Path(str(record.get("folder") or "")).is_dir()
+
+
 def _sets(con, alive: set, taken: set, done: dict, *, set_id: int = 0, any_kind: bool = False) -> list:
     out: list = []
     where = "WHERE set_id=?" if set_id else "WHERE kind IN ('work', 'series')"
     for sid, kind, title in con.execute(f"SELECT set_id, kind, title FROM card_sets {where}",
                                         (int(set_id),) if set_id else ()).fetchall():
         key = f"set:{int(sid)}"
-        if key in done and not set_id:
+        if key in done and not set_id and not _cards_left(done[key]):
             continue
         if not any_kind and str(kind) not in ("work", "series"):
             continue
@@ -261,8 +284,8 @@ def _set_title(con, ids: list, set_id: int) -> str:
 
 
 def _forbidden(con, comic: Comic) -> bool:
-    """The program's rule: a page its site does not rate as safe, whose tags speak of minors."""
-    from core.filter import depicts_minors
+    """The program's rule (``core/filter.page_forbidden``): a page its site does not rate as safe, whose tags speak of
+    minors — here only what the base says of the comic's pictures (their tags, the sites' ratings)."""
     ids = [i for i, _place in comic.cards]
     tags = _tags_of(con, ids)
     ratings: dict = {}
@@ -272,15 +295,8 @@ def _forbidden(con, comic: Comic) -> bool:
         for image_id, rating in con.execute(f"SELECT image_id, rating FROM site_posts WHERE state='ok' "
                                             f"AND image_id IN ({marks})", part):
             ratings.setdefault(int(image_id), set()).add(str(rating or ""))
-    for image_id in ids:
-        names = [name for name, _category in tags.get(image_id, [])]
-        minor = depicts_minors(names) or any(n.strip().lower() in MINOR_TAGS for n in names)
-        if not minor:
-            continue
-        said = ratings.get(image_id) or {""}
-        if not said <= set(SAFE):                       # not rated, or rated not safe by a site
-            return True
-    return False
+    return any(F.page_forbidden([name for name, _category in tags.get(image_id, [])], ratings.get(image_id) or {""})
+               for image_id in ids)                     # (not rated, or rated not safe by a site)
 
 
 def candidates(settings: dict) -> list:
@@ -442,8 +458,56 @@ def _record(key: str) -> dict:
     return record if isinstance(record, dict) else {}
 
 
+def old_gone(key: str, record, sure: "dict | None" = None) -> bool:
+    """(v5.44.127) A copy the rules before 5.44.125 made — no site of manga confirmed it (a pool of e621 by itself, a
+    сборка, a folder of the parser by its names: ``kind`` «root», no ``confirmed``) — whose folder is not in the manga
+    folder any more.  The owner took the old copies out to parse everything again (7.11.2026: «Я уже удалил все»; «если
+    оно как то записалось что это манга и оно не будет парсить это пиздец я удалял как раз для перепаршивания»): such a
+    record is forgotten, not «the person took it out — never again».  A copy the rule of 5.44.125 made (a site of manga
+    confirmed it: ``confirmed`` / ``kind`` «parser», or ``comic_manga_checks.json`` says «manga») taken out — never
+    again, as before.  A copy cut short (``done`` False, its folder named) — :func:`_finish_cut_short` finishes it."""
+    if not isinstance(record, dict):
+        return False
+    folder = str(record.get("folder") or "")
+    if folder and Path(folder).is_dir():
+        return False
+    if folder and not record.get("done", True):
+        return False
+    if record.get("confirmed") or str(record.get("kind") or "") == "parser":
+        return False
+    sure = checks() if sure is None else sure
+    return (sure.get(key) or {}).get("state") != "manga"
+
+
+def forget(key: str) -> None:
+    """(v5.44.127) A record of ``comic_manga.json`` dropped (:func:`old_gone`)."""
+    from core.file_safety import write_json_kept
+    with _LOCK:
+        data = moved()
+        if data.pop(key, None) is not None:
+            write_json_kept(_keep_file(), json.dumps(data, ensure_ascii=False, indent=1), dict)
+
+
+def forget_old_gone() -> int:
+    """(v5.44.127) The records of the old copies taken out (:func:`old_gone`) dropped — how many: their comics and the
+    folders of the parser are as new (a site of manga confirms them — copied again)."""
+    from core.file_safety import write_json_kept
+    sure = checks()
+    with _LOCK:
+        data = moved()
+        gone = [key for key, record in data.items() if old_gone(key, record, sure)]
+        for key in gone:
+            data.pop(key, None)
+        if gone:
+            write_json_kept(_keep_file(), json.dumps(data, ensure_ascii=False, indent=1), dict)
+    if gone:
+        _LOG.info("comic manga: %d records of old copies taken out of the manga folder forgotten", len(gone))
+    return len(gone)
+
+
 def _place(root: Path, key: str, work: Path, name: str, record: dict) -> Path:
-    """The finished copy renamed into place (remembered first: a copy whose rename was cut short is not made twice)."""
+    """The finished copy renamed into place (remembered first: a copy whose rename was cut short is not made twice —
+    :func:`_finish_cut_short`)."""
     final = _unique(root, name)
     _remember(key, {**record, "folder": str(final), "done": False})
     os.replace(work, final)
@@ -453,6 +517,47 @@ def _place(root: Path, key: str, work: Path, name: str, record: dict) -> Path:
     except OSError:
         pass
     return final
+
+
+def _finish_cut_short(root: Path) -> list:
+    """(v5.44.116) A record left «done: False» — the program closed (or the rename failed) between the note of the
+    copy's place and the note that it is there (the review of 7.11.2026: such a title was copied again as «Имя (2)»,
+    such a сборка never finished): its folder there — the record is done; else its finished copy still in
+    ``.lb/copying`` — renamed into place now.  [(key, the folder's name)] finished (a comic's cards then go to the
+    trash as usual: :func:`_pools`, :func:`_cards_left`).  Under ``_ROUND``."""
+    out: list = []
+    for key, record in moved().items():
+        if not isinstance(record, dict) or record.get("done", True) or not record.get("folder"):
+            continue
+        final = Path(str(record["folder"]))
+        work = _staging(root, key)
+        try:
+            if final.is_dir():
+                _remember(key, {"done": True})
+            elif work.is_dir():
+                final = _place(root, key, work, final.name, record)
+            else:
+                continue                                # neither: the next round copies it anew (its key is not done)
+        except OSError as exc:
+            _LOG.warning("comic %s: its copy not put into place: %s", key, exc)
+            continue
+        _LOG.info("comic %s: the copy cut short finished → %s", key, final)
+        out.append((key, final.name))
+    return out
+
+
+@contextlib.contextmanager
+def round_held(wait: "float | None" = None):
+    """(v5.44.116) «В мангу» on a сборка's block (``webui/pages/post_sets.to_manga``) under the round's own lock: the
+    background and «Проверить сейчас» never copy at the same time with it.  A round going is waited for ``wait``
+    seconds (:data:`HAND_WAIT`), then :class:`ComicError` in words."""
+    if not _ROUND.acquire(timeout=max(0.0, float(HAND_WAIT if wait is None else wait))):
+        raise ComicError("Программа сейчас сама переносит комиксы в папку манги — нажмите «В мангу» ещё раз через "
+                         "минуту")
+    try:
+        yield
+    finally:
+        _ROUND.release()
 
 
 def move(settings: dict, comic: Comic, *, say=None) -> dict:
@@ -506,8 +611,7 @@ def move(settings: dict, comic: Comic, *, say=None) -> dict:
     _write_info(work, info)
     before = [int(i) for i in record.get("cards") or [] if str(i).isdigit()]
     fresh = {"title": comic.title, "at": int(time.time()), "kind": comic.kind, "source_url": comic.source_url,
-             "pages": int(record.get("pages") or 0) + len(copied),
-             "cards": sorted(set(before) | {int(r["id"]) for r in copied})}
+             "pages": max(int(record.get("pages") or 0), len(before) + len(copied))}
     if kept is None:
         folder = _place(root, comic.key, work, comic.title, {**record, **fresh})
     else:
@@ -515,6 +619,10 @@ def move(settings: dict, comic: Comic, *, say=None) -> dict:
         _remember(comic.key, fresh)
     result = move_to_trash(settings, copied, reason=REASON, tag_or_source=folder.name[:200])
     trashed = int(result.get("trashed_records") or 0)
+    if result.get("error"):                         # (v5.44.115) the trash refused (no copy of the base): the cards
+        _LOG.warning("comic %s: cards not trashed: %s", comic.key, result["error"])     # stay, the next round tries
+    else:                                           # again — only the cards it took are «moved» («Вернуть» stays)
+        _remember(comic.key, {"cards": sorted(set(before) | {int(r["id"]) for r in copied})})
     M.LIBRARY.invalidate()
     say(f"«{comic.title}»: {len(copied)} стр. в папке манги «{folder.name}», в корзину — {trashed}"
         + (f", не скопировано — {skipped}" if skipped else ""))
@@ -531,152 +639,6 @@ def page_of(settings: dict, folder) -> str:
     if not root:
         return "/manga"
     return f"/manga/g/{M._id_for(Path(root), Path(str(folder)))}"
-
-
-# ── the manga of the parser's folder ──────────────────────────────────────────────────────────────────────────────
-def _plan(path: Path) -> list:
-    """[(file, its place in the copy)] of a title of the parser's folder: the pictures, archives and PDF the manga
-    folder reads and the files of its description; a chapter deeper than the title's folder — a folder right in the
-    copy («Vol 1/Chapter 3» → «Vol 1 Chapter 3»: the manga folder reads chapters one level down); ``.lb`` — its link
-    («Из архива» linked it where it lies)."""
-    if path.is_file():
-        return [(path, Path(path.name))] if path.suffix.lower() in _ARCHIVES else []
-    plan: list = []
-    for dirpath, dirnames, filenames in os.walk(path):
-        here = Path(dirpath)
-        rel = here.relative_to(path)
-        if rel.parts and rel.parts[0] == ".lb":
-            dirnames[:] = []
-            plan += [(here / n, Path(".lb") / n) for n in sorted(filenames) if n.lower().endswith(".json")]
-            continue
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") or (not rel.parts and d == ".lb"))
-        chapter = " ".join(rel.parts)
-        for name in sorted(filenames):
-            ext = Path(name).suffix.lower()
-            if ext in _PICTURES:
-                plan.append((here / name, Path(chapter) / name if chapter else Path(name)))
-            elif ext in _ARCHIVES:
-                plan.append((here / name, Path(f"{chapter} {name}" if chapter else name)))
-            elif ext in _DESCRIPTION and not chapter:
-                plan.append((here / name, Path(name)))
-    return plan
-
-
-def _manhwa(settings: dict, found) -> bool:
-    from core.manga_archive import _kind_of
-    try:
-        return _kind_of(Path(found.path), settings, found.first) == "manhwa"
-    except Exception:  # noqa: BLE001 - a picture that does not open: not a strip then
-        return False
-
-
-def _root_titles(settings: dict) -> list:
-    """The titles of the parser's folder (``manga_detect.STORE``) to copy: not copied before, not in the manga or
-    manhwa folder already, not a manhwa."""
-    from core import manga_detect as MD, manhwa_download as D
-    root = str((settings or {}).get("root") or "").strip()
-    if not root or not Path(root).is_dir():
-        return []
-    libraries = [os.path.normcase(os.path.abspath(r)) for r in D.roots(settings).values() if r]
-    done = moved()
-    out = []
-    for found in MD.STORE.titles(root):
-        record = done.get(f"root:{found.id}")
-        if isinstance(record, dict) and (record.get("done") or record.get("manhwa") or record.get("skipped") ==
-                                         f"{found.chapters}:{found.pages}"):
-            continue
-        here = os.path.normcase(os.path.abspath(str(found.path)))
-        if any(here == lib or (here + os.sep).startswith(lib + os.sep) or (lib + os.sep).startswith(here + os.sep)
-               for lib in libraries):
-            continue
-        if not Path(found.path).exists():
-            continue
-        if _manhwa(settings, found):                    # (v5.44.113) remembered: its pictures are not opened again
-            _remember(f"root:{found.id}", {"manhwa": True, "source": str(found.path), "at": int(time.time())})
-            continue
-        out.append(found)
-    return out
-
-
-def copy_title(settings: dict, found, *, say=None, stop_check=None, deadline: float = 0.0) -> "dict | None":
-    """A manga of the parser's folder copied into the manga folder (:func:`_plan`, each file read back and checked),
-    then the gallery's cards of its pictures' bytes to the trash: {"folder", "name", "pages", "bytes", "trashed"}; None
-    — cut short (by ``stop_check`` or ``deadline``: the copy goes on next time).  :class:`NoRoom`, :class:`ComicError`."""
-    from core import manga_library as M
-    say = say or (lambda _text: None)
-    stop_check = stop_check or (lambda: False)
-    root = _root_of(settings)
-    path = Path(found.path)
-    key = f"root:{found.id}"
-    plan = _plan(path)
-    shown = [t for _s, t in plan if t.suffix.lower() in _PICTURES | _ARCHIVES and t.parts[0] != ".lb"]
-    if not shown:
-        _remember(key, {"skipped": f"{found.chapters}:{found.pages}", "source": str(path), "at": int(time.time())})
-        raise ComicError(f"«{path.name}»: нет страниц, которые читает папка манги (.cbr и .cb7 — пока нет)")
-    work = _staging(root, key)
-    size = 0
-    for source, target in plan:
-        try:
-            if not (work / target).is_file():
-                size += source.stat().st_size
-        except OSError:
-            continue
-    if size and shutil.disk_usage(root).free - size < KEEP_FREE:
-        raise NoRoom(f"«{path.name}» ({size / 1024 ** 3:.1f} ГБ): на диске папки манги останется меньше "
-                     f"{KEEP_FREE // 1024 ** 3} ГБ — не копирую")
-    pictures, copied = set(), 0
-    for source, target in plan:
-        if stop_check() or (deadline and time.monotonic() > deadline):
-            return None
-        place = work / target
-        md5 = _kept_copy(source, place)
-        if not md5:
-            try:
-                md5 = _copy_checked(source, place)
-                copied += place.stat().st_size
-            except OSError as exc:
-                _LOG.warning("manga %s: %s not copied: %s", path, source, exc)
-                continue
-        if target.suffix.lower() in _PICTURES:
-            pictures.add(md5)
-    if not any((work / t).is_file() for t in shown):
-        shutil.rmtree(work, ignore_errors=True)
-        raise ComicError(f"«{path.name}»: ни один файл не скопировался")
-    name = path.name if path.is_dir() else path.stem
-    record = {"title": name, "at": int(time.time()), "kind": "root", "source": str(path),
-              "pages": int(found.pages or len(pictures)), "chapters": int(found.chapters or 1)}
-    folder = _place(root, key, work, name, record)
-    trashed, cards = _trash_same(settings, pictures, folder.name)
-    if cards:
-        _remember(key, {"cards": cards})
-    M.LIBRARY.invalidate()
-    say(f"Манга из папки парсера «{name}» — в папке манги «{folder.name}»"
-        + (f", её карточки в галерее — в корзину: {trashed}" if trashed else ""))
-    _LOG.info("parser's manga %s → %s: %d files, %.1f MB copied, %d cards trashed", path, folder, len(plan),
-              copied / 1e6, trashed)
-    return {"folder": str(folder), "name": folder.name, "pages": len(pictures), "bytes": copied, "trashed": trashed,
-            "page": page_of(settings, folder)}
-
-
-def _trash_same(settings: dict, md5s: set, folder_name: str) -> tuple:
-    """The gallery's live cards of these bytes (not of a сборка the person made) to the trash: (count, [ids])."""
-    from core.database.connection import db
-    from core.library_lifecycle import move_to_trash
-    wanted = sorted(m.lower() for m in md5s if m)
-    if not wanted:
-        return 0, []
-    rows = []
-    with db(settings, readonly=True) as con:
-        manual = _manual_cards(con)
-        for start in range(0, len(wanted), 800):
-            part = wanted[start:start + 800]
-            marks = ",".join("?" * len(part))
-            rows += [dict(r) for r in con.execute(f"SELECT * FROM images WHERE deleted=0 AND LOWER(hash_md5) "
-                                                  f"IN ({marks})", part) if int(r["id"]) not in manual]
-    if not rows:
-        return 0, []
-    result = move_to_trash(settings, rows, reason=REASON, tag_or_source=folder_name[:200])
-    return int(result.get("trashed_records") or 0), sorted(int(r["id"]) for r in rows)
 
 
 # ── the background ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -703,14 +665,16 @@ def _look_if_due(settings: dict) -> bool:
     return True
 
 
-def background_round(settings: dict, *, stop_check=None, wait: bool = False) -> dict:
+def background_round(settings: dict, *, stop_check=None, wait: bool = False, parser: bool = False,
+                     say=None) -> dict:
     """The comics of the gallery and the manga of the parser's folder to the manga folder (the background duty
-    «comic_manga», :data:`ROUND_SECONDS` and :data:`ROUND_BYTES` at most): {"moved", "copied", "more", "no_room",
-    "busy"}; (v5.44.113) one round at a time (``wait`` — for the one going, else "busy")."""
+    «comic_manga», :data:`ROUND_SECONDS` at most): {"moved", "copied", "more", "no_room",
+    "busy"}; (v5.44.113) one round at a time (``wait`` — for the one going, else "busy"); (v5.44.125) ``say`` — the
+    lines of the parser's manga for a journal («Проверить сейчас»)."""
     if not _ROUND.acquire(blocking=wait):
-        return {"moved": [], "copied": [], "more": False, "no_room": "", "busy": True}
+        return {"moved": [], "copied": [], "more": False, "no_room": "", "wait": 0.0, "busy": True}
     try:
-        out = _round(settings, stop_check=stop_check)
+        out = _round(settings, stop_check=stop_check, parser=parser, say=say)
     finally:
         _ROUND.release()
     _STATE.update({"at": int(time.time()), "moved": _STATE["moved"] + len(out["moved"]),
@@ -718,47 +682,118 @@ def background_round(settings: dict, *, stop_check=None, wait: bool = False) -> 
     return out
 
 
-def _round(settings: dict, *, stop_check=None) -> dict:
+def _round(settings: dict, *, stop_check=None, parser: bool = False, say=None) -> dict:
+    """(v5.44.115) The comics of the gallery; the manga of the parser's folder only when ``parser`` — «Проверить
+    сейчас», never the background: a folder taken for a manga may be an artist's numbered set (the review of
+    7.11.2026), so the person sees the list in the journal; its cards in the gallery are never touched.  (v5.44.125)
+    The manga of the parser's folder — in the background too, now that only a manga a site of manga confirms is copied
+    (``core/parser_manga.py``: ComicInfo.xml, a link, a title of a site whose pages are the folder's — never e621, never
+    a folder of numbers alone); a comic of the gallery — only when a site of manga confirms it (:func:`_site_says`)."""
     stop_check = stop_check or (lambda: False)
     from core import manga_library as M
-    out = {"moved": [], "copied": [], "more": False, "no_room": ""}
+    out = {"moved": [], "copied": [], "more": False, "no_room": "", "wait": 0.0}
     if not enabled(settings) or not M.manga_root(settings):
         return out
-    if _look_if_due(settings):
-        out["more"] = True                              # the folder's titles are being looked at: copied next time
+    finished = _finish_cut_short(Path(M.manga_root(settings)))     # (v5.44.116) a rename cut short — finished first
+    if finished:
+        M.LIBRARY.invalidate()
+        out["copied"] += [name for key, name in finished if key.startswith("root:")]   # a comic's — with its cards
+    forget_old_gone()                                   # (v5.44.127) the old copies the owner took out: as new
+    _look_if_due(settings)                              # the parser's folder kept known (the parser skips its manga)
     deadline = time.monotonic() + ROUND_SECONDS
     for comic in candidates(settings):
         if stop_check() or time.monotonic() > deadline:
             out["more"] = True
             return out
+        said = _site_says(settings, comic, stop_check=stop_check)     # (v5.44.125) a site of manga confirms it
+        if said.get("state") != "manga":
+            continue                                    # a сборка of the gallery it stays
         try:
             got = move(settings, comic)
         except (ComicError, OSError) as exc:
             _LOG.info("comic %s not moved: %s", comic.key, exc)
             continue
         out["moved"].append(got["name"])
-    copied = 0
+        if said.get("url") and not comic.more:          # its copy linked to the title that confirmed it
+            from core import parser_manga
+            parser_manga.link_folder(settings, f"comic:{comic.key}", comic.title, Path(got["folder"]), said["url"],
+                                     how=str(said.get("how") or ""), by=str(said.get("by") or ""),
+                                     stop_check=stop_check)
     if _LOOKING.locked():
-        return out                                      # the parser's folder is being looked at: next time
-    for found in _root_titles(settings):
-        if stop_check() or time.monotonic() > deadline or copied > ROUND_BYTES:
-            out["more"] = True
-            break
-        try:
-            got = copy_title(settings, found, stop_check=stop_check, deadline=deadline)
-        except NoRoom as exc:
-            out["no_room"] = str(exc)
-            _LOG.warning("parser's manga: %s", exc)
-            break
-        except (ComicError, OSError) as exc:
-            _LOG.info("parser's manga %s not copied: %s", found.path, exc)
-            continue
-        if got is None:
-            out["more"] = True
-            break
-        out["copied"].append(got["name"])
-        copied += int(got.get("bytes") or 0)
+        return out                                      # (the parser's folder is being looked at: next time)
+    from core import parser_manga                       # (v5.44.125) only what is confirmed a manga is copied
+    left = deadline - time.monotonic()
+    if left > 1 and not stop_check():
+        got = parser_manga.background_round(settings, stop_check=stop_check, seconds=left, say=say)
+        out["copied"] += list(got.get("copied") or [])
+        out["more"] = out["more"] or bool(got.get("more"))
+        out["wait"] = float(got.get("wait") or 0)
+        if got.get("no_room"):
+            out["no_room"] = str(got["no_room"])
     return out
+
+
+# ── (v5.44.125) what the sites of manga say of a comic of the gallery ─────────────────────────────────────────────
+def _checks_file() -> Path:
+    from core.paths import SETTINGS_DIR
+    return Path(SETTINGS_DIR) / CHECKS_NAME
+
+
+def checks() -> dict:
+    """{a comic's key: {"state": "manga" | "not" | "wait", "url", "title", "by", "how", "at", "later_at"}}."""
+    from core.file_safety import read_json_kept
+    data = read_json_kept(_checks_file(), dict, what="comic manga checks")
+    return data if isinstance(data, dict) else {}
+
+
+def _check_put(key: str, record: dict) -> None:
+    from core.file_safety import write_json_kept
+    with _LOCK:
+        data = checks()
+        data[key] = record
+        write_json_kept(_checks_file(), json.dumps(data, ensure_ascii=False, indent=1), dict)
+
+
+def _card_paths(settings: dict, comic: Comic, count: int) -> list:
+    """The files of the first ``count`` live cards of a comic, in its order."""
+    from core.database.connection import db
+    out = []
+    with db(settings, readonly=True) as con:
+        for image_id, _place in sorted(comic.cards, key=lambda c: c[1]):
+            row = con.execute("SELECT path FROM images WHERE id=? AND deleted=0", (int(image_id),)).fetchone()
+            if row and row[0] and Path(str(row[0])).is_file():
+                out.append(str(row[0]))
+            if len(out) >= count:
+                break
+    return out
+
+
+def _site_says(settings: dict, comic: Comic, *, stop_check=None) -> dict:
+    """(v5.44.125) Whether a site of manga confirms a comic of the gallery (``parser_manga.confirm_pages``: its name
+    searched on the sites, its first pages compared with the title's; SauceNAO after) — {"state": "manga" | "not" |
+    "wait", "url", "title", "by", "how"}, kept: «not» asked again after :data:`AGAIN_DAYS`, «wait» after its time.  A
+    comic moved before (its later pages) — a manga already."""
+    if comic.more:
+        return {"state": "manga"}
+    kept = checks().get(comic.key) or {}
+    now = time.time()
+    if kept.get("state") == "manga" or (kept.get("state") == "not" and now - float(kept.get("at") or 0) <
+                                        AGAIN_DAYS * 86400) or (kept.get("state") == "wait" and
+                                                                float(kept.get("later_at") or 0) > now):
+        return kept
+    from core import parser_manga as PM
+    pages = _card_paths(settings, comic, PM.LOCAL_PAGES)
+    try:
+        verdict = PM.confirm_pages(settings, [comic.title], pages, stop_check=stop_check)
+    except PM.Pace as pace:
+        verdict = PM.paced(pace.wait)
+    if not verdict.state:
+        return {"state": "wait"}                        # stopped half-way: asked again next round
+    record = {"state": verdict.state, "url": verdict.url, "title": verdict.title, "by": verdict.by, "how": verdict.how,
+              "at": int(now), "later_at": int(verdict.later_at or 0)}
+    _check_put(comic.key, record)
+    _LOG.info("comic %s: %s — %s", comic.key, verdict.state, verdict.by)
+    return record
 
 
 # ── (v5.44.113) «Проверить сейчас» and what the settings page says ──────────────────────────────────────────────
@@ -777,18 +812,19 @@ def check_now(settings: dict) -> "object":
         from core import manga_detect as MD
         root = str(settings.get("root") or "").strip()
         if root and Path(root).is_dir():
-            say("Смотрю папку парсера — какие там тайтлы манги…")
+            say("Смотрю папку парсера — какие папки похожи на мангу…")
             with _LOOKING:
                 titles = MD.look(settings, stop_check=stop_check, say=say)
             _STATE["looked_at"] = int(time.time())
             if stop_check():
                 return {"stopped": True}
-            say(f"Манги в папке парсера: {len(titles)}")
+            say(f"Похожих на мангу в папке парсера: {len(titles)} — в папку манги идёт только подтверждённая сайтом "
+                "манги (ComicInfo.xml, ссылка, тайтл с теми же страницами)")
         else:
             say("Папка парсера не выбрана — смотрю только комиксы галереи")
         moved, copied, rounds = [], [], 0
         while not stop_check():
-            got = background_round(settings, stop_check=stop_check, wait=True)
+            got = background_round(settings, stop_check=stop_check, wait=True, parser=True, say=say)
             rounds += 1
             for name in got["moved"]:
                 say(f"Комикс из галереи → «{name}»")
@@ -801,6 +837,10 @@ def check_now(settings: dict) -> "object":
                 break
             if not got["more"] or rounds > 500:
                 break
+            pause = min(30.0, float(got.get("wait") or 0))     # (v5.44.125) the sites' searches of the hour
+            while pause > 0 and not stop_check():
+                time.sleep(min(0.5, pause))
+                pause -= 0.5
         say(f"Готово: комиксов из галереи — {len(moved)}, манги из папки парсера — {len(copied)}"
             + ("" if moved or copied else " (нового нет)"))
         return {"moved": len(moved), "copied": len(copied), "stopped": bool(stop_check())}
@@ -809,23 +849,19 @@ def check_now(settings: dict) -> "object":
 
 def status(settings: dict) -> dict:
     """What the settings page says: comics and manga moved so far, the manga of the parser's folder not copied yet
-    (without looking into their pictures), the last look at the folder, the last «no room»."""
-    from core import manga_detect as MD, manhwa_download as D
+    (without looking into their pictures), the last look at the folder, the last «no room».  (v5.44.125) «not copied
+    yet» — the folders ``core/parser_manga`` still checks or that wait for SauceNAO (a folder found «not a manga» is
+    the parser's: not counted)."""
+    from core import manga_detect as MD, parser_manga
     done = moved()
     comics = sum(1 for k, r in done.items() if isinstance(r, dict) and r.get("folder") and not k.startswith("root:"))
     copies = sum(1 for k, r in done.items() if isinstance(r, dict) and r.get("done") and k.startswith("root:"))
     root = str((settings or {}).get("root") or "").strip()
     waiting, looked = 0, 0
     if root:
-        data = MD.STORE.read()
-        looked = int(data.get("at") or 0)
-        libraries = [os.path.normcase(os.path.abspath(r)) for r in D.roots(settings).values() if r]
-        for found in MD.STORE.titles(root):
-            if isinstance(done.get(f"root:{found.id}"), dict):
-                continue
-            here = os.path.normcase(os.path.abspath(found.path))
-            if not any(here == lib or (here + os.sep).startswith(lib + os.sep) for lib in libraries):
-                waiting += 1
+        looked = int(MD.STORE.read().get("at") or 0)
+        counts = parser_manga.counts(settings)
+        waiting = int(counts.get("check") or 0) + int(counts.get("wait") or 0)
     return {"comics": comics, "copies": copies, "waiting": waiting, "looked_at": looked,
             "due": bool(root) and MD.STORE.due(root), "no_room": _STATE.get("no_room") or ""}
 
@@ -855,14 +891,20 @@ def _first_pages(folder: Path) -> list:
 def archive_entries(settings: dict, library: dict) -> tuple:
     """(``manga_archive.entries``) The manga this module put into the manga folder as the titles «Из архива» looks up:
     (their entries, the keys «root:<id>» of the parser's titles copied — those are looked up as their copies)."""
-    from core import manga_archive as A, manhwa_download as D
+    from core import manga_archive as A, manga_detect as MD, manhwa_download as D
     from core.manhwa_library import Page
     out, copied = [], set()
+    refused = MD.not_manga()
     for key, record in moved().items():
         if not isinstance(record, dict) or not record.get("folder") or not record.get("done", True):
             continue
         if key.startswith("root:"):
             copied.add(key)
+            sources = [str(x) for x in record.get("sources") or [] if x] or \
+                ([str(record["source"])] if record.get("source") else [])
+            if sources and all(MD._under(Path(x), refused) for x in sources):
+                continue                                # (v5.44.116) «Это не манга» on its row: the parser's again
+
         folder = Path(str(record["folder"]))
         lib = library.get(os.path.normcase(os.path.abspath(str(folder))))
         if lib is None or not folder.is_dir():

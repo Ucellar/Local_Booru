@@ -48,15 +48,18 @@ PAGE_WORKERS = 4          # (v5.44.58) of them, the ones that serve only pages (
 # (v5.44.58) Requests for pictures and files: thumbnails made on the spot, covers, pages of manga, frames and files of
 # video, the grabber's and the parser's previews (fetched from sites).  A page waits behind none of them (``_Jobs``).
 MEDIA_PATHS = ("/thumb/", "/media/", "/poster/", "/manga/cover/", "/manga/thumb/", "/manga/page/", "/manhwa/cover/",
-               "/manhwa/page/", "/videos/cover/", "/videos/frame/", "/videos/file/", "/videos/subs/", "/grab/media",
+               "/manhwa/page/", "/manhwa/thumb/", "/videos/cover/", "/videos/frame/", "/videos/file/", "/videos/subs/", "/grab/media",
                "/sets/media", "/api/parser/thumb/", "/api/parser/file/", "/video/live/", "/api/manga/download-cover",
                "/api/manhwa/hit-cover", "/api/manhwa/find-cover", "/api/archive/cover",
                "/api/online/pic",                        # (v5.44.82) a page of a chapter read without downloading
                "/api/online/thumb",                      # (v5.44.110) …small, in the strip of the chapter's pages
                "/api/manhwa/feed-cover",                 # (v5.44.83) a cover of «Лента»
                "/api/archive/folder-cover",              # (v5.44.84) a title of the parser's folder
+               "/api/parser/manga/cover",                # (v5.44.125) «Парсер» → «Манга в исходной папке»
                "/api/manhwa/download-cover",             # (v5.44.87) «Загрузки» of «Скачать → По ссылке»
                "/api/catalog/cover",                     # (v5.44.90) a tile of «Лента» of the tabs
+               "/api/downloads/video-cover",             # (v5.44.120) «Загрузки»: the poster of the video going
+               "/api/covers/pic",                        # (v5.44.123) the menu of covers: a site's cover, whole
                "/watch/s/")                              # (v5.44.106) an episode of «Смотреть»: its picture and sound
 REQUEST_TIMEOUT = 10      # seconds a request may wait for a stalled browser (reading it or sending the answer)
 WATCH_TIMEOUT = 30 * 60   # (v5.44.106) …a player of «Смотреть» on a pause: it reads its stream on when it plays on
@@ -681,7 +684,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
                 return self._send(Response.not_found(), method)
             request = Request(method, path, params or {}, query, dict(self.headers.items()), body, settings, ui, peer)
             from webui import content_mode
-            response = content_mode.guard(request) or handler(request)     # (v5.44.53) «SFW»: the gallery's pages
+            # (v5.44.116) the phone's request — in the phone's own mode «SFW / Всё / NSFW»
+            with content_mode.answering(content_mode.of_phone(request, phone)):
+                response = content_mode.guard(request) or handler(request)     # (v5.44.53) «SFW»: the gallery's pages
             if response.stream is not None:
                 started = None                      # an endless answer: not a slow page
         except (ConnectionError, TimeoutError):    # the browser went away or stopped reading
@@ -720,7 +725,9 @@ class _RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(response.body)))
         self.send_header("Cache-Control", response.headers.pop("Cache-Control", "no-store"))
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        # (v5.44.116; was «no-referrer») a page's address goes to the program itself only — another site still gets
+        # nothing: «назад» of the pages knows the program's page before (document.referrer), the phone's requests too
+        self.send_header("Referrer-Policy", "same-origin")
         if response.content_type.startswith("text/html"):
             self.send_header("Content-Security-Policy", CSP)
         for key, value in response.headers.items():

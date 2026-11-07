@@ -32,6 +32,7 @@ PAGE_KEYS = frozenset({
     "performance_slow_ms", "sqlite_cache_mb", "sqlite_checkpoint_on_exit", "sqlite_idle_checkpoint_enabled",
     "sqlite_idle_checkpoint_threshold_mb", "sqlite_idle_checkpoint_interval_seconds", "derived_cache_external_enabled", "manga_root",
     "manhwa_root", "manga_site_addresses", "manga_language", "manga_archive_auto", "manga_archive_pictures",
+    "manhwa_watch_auto", "parser_skip_manga", "parser_manga_fill",
     "visual_nomatch_classify_enabled", "visual_nomatch_auto_download_model", "visual_nomatch_model",
     "visual_nomatch_min_confidence", "video_root", "video_tab_seconds", "video_source_aniliberty", "aniliberty_url",
     "video_source_dubs", "yummy_api_url", "video_dub_merge",

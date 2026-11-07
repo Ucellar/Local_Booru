@@ -231,9 +231,10 @@ def _number_key(number: str) -> float:
 
 
 def _pictures(folder: Path) -> list[Path]:
+    from core.title_covers import is_aside       # (v5.44.123) a cover put aside («cover.old-…») is no page
     try:
         found = [p for p in folder.iterdir() if p.suffix.lower() in IMG_EXTS and p.is_file()
-                 and not p.name.startswith(".")]
+                 and not p.name.startswith(".") and not is_aside(p.name)]
     except OSError:
         return []
     return sorted(found, key=lambda p: natural_key(p.name))
@@ -485,6 +486,45 @@ def cover_thumb(title: Title, size: int) -> Path | None:
             im.save(tmp, "JPEG", quality=88, optimize=True)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:      # a broken picture: no cover
         _LOG.warning("manhwa cover of %s not made: %s", title.path, exc)
+        tmp.unlink(missing_ok=True)
+        return None
+    return out if swap_in(tmp, out) else None
+
+
+THUMB_WIDTH = 168                              # (v5.44.117) a page small in the reader's «Лента страниц» (84 px shown)
+
+
+def page_thumb(page: Page, width: int = THUMB_WIDTH) -> Path | None:
+    """(v5.44.117) A JPEG of a page ``width`` px wide — the top of it, as tall as 1.5 of its width at most (a slice of a
+    strip is much taller than wide) — made once and kept in the thumbnail cache; None — the picture does not open."""
+    from core.paths import CACHE_DIR
+    try:
+        stamp = Path(page.path).stat().st_mtime_ns
+    except OSError:
+        return None
+    key = hashlib.md5(f"manhwa-page1|{page.path}|{page.member}|{stamp}|{width}".encode("utf-8")).hexdigest()
+    out = Path(CACHE_DIR) / "thumbs" / "manhwa" / f"p{key}.jpg"
+    if out.is_file() and out.stat().st_size > 0:
+        return out
+    import io
+
+    from PIL import Image, ImageOps
+
+    from core.image_safe import swap_in
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_name(f"{out.stem}.{os.getpid()}.{threading.get_ident()}.tmp.jpg")
+    try:
+        with Image.open(io.BytesIO(page.read_bytes())) as im:
+            im.draft("RGB", (width * 2, width * 6))
+            im = ImageOps.exif_transpose(im)
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            w, h = im.size
+            im = im.crop((0, 0, w, min(h, int(w * 1.5))))
+            im.thumbnail((width, int(width * 1.5)), Image.Resampling.LANCZOS)
+            im.save(tmp, "JPEG", quality=85, optimize=True)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:     # a broken picture: no small copy
+        _LOG.info("manhwa page %s %s: no small copy (%s)", page.path, page.member, exc)
         tmp.unlink(missing_ok=True)
         return None
     return out if swap_in(tmp, out) else None

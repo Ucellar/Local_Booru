@@ -7,7 +7,9 @@ The owner (5.11.2026): «И вообще скачивание бы обеден�
 «Скачать», and two parts in its section bar (:data:`PARTS`):
 
 * «По ссылке» — (``/get``, ``get_link.py``) one field for a link or a name: what it is the program says; the card of
-  what was found, «Читать» / «Скачать», and «Загрузки» of every kind on the right;
+  what was found, «Читать» / «Скачать»; (v5.44.120) on the right — a line to «Загрузки»;
+* (v5.44.120) «Загрузки» — (``/get/downloads``, ``downloads.py``) everything that downloads, one queue, «Готово» for 7
+  days, «Сама программа»;
 * «Галерея (booru)» — the grabber (``/grab``, ``grab.py``): booru sites searched by tags, or a post by its link.
 
 The pages of before keep their addresses — «Скачать → Манга» (``/manga/get``), «Манхва» (``/manhwa/get``), «Видео»
@@ -24,7 +26,8 @@ from urllib.parse import quote, urlparse
 from webui.html import page_frame
 from webui.server import Request, Response
 
-PARTS = (("link", "По ссылке", "/get"), ("gallery", "Галерея (booru)", "/grab"))      # (v5.44.87)
+PARTS = (("link", "По ссылке", "/get"), ("downloads", "Загрузки", "/get/downloads"),      # (v5.44.87; v5.44.120
+         ("gallery", "Галерея (booru)", "/grab"))                                         # «Загрузки» — downloads.py)
 # (v5.44.87) the pages of before, out of the bar: on one of them the bar names it (marked) after «По ссылке»
 OLD_PARTS = {"manga": ("Манга", "/manga/get"), "manhwa": ("Манхва", "/manhwa/get"), "video": ("Видео", "/videos/get"),
              "archive": ("Из архива", "/get/archive")}
@@ -37,10 +40,11 @@ VIDEO_HOSTS = ("hentasis", "hentai-xs", "hentaihaven", "hfshare", "yummyani", "y
 
 
 def register(router) -> None:
-    from webui.pages import get_link
+    from webui.pages import downloads, get_link
     router.add("GET", r"/get", get_link.page)          # (v5.44.87) «По ссылке»
     router.add("POST", r"/api/get/route", route_api)
     get_link.register(router)
+    downloads.register(router)                         # (v5.44.120) «Загрузки»: every kind, one queue, «Готово»
 
 
 def shown(part: str, now: str | None = None) -> bool:
@@ -50,7 +54,8 @@ def shown(part: str, now: str | None = None) -> bool:
 
 
 def tabs(current: str, now: str | None = None) -> tuple:
-    """The section bar of «Скачать»: ((label, address, current), …) — «По ссылке», «Галерея (booru)»; on a page of
+    """The section bar of «Скачать»: ((label, address, current), …) — «По ссылке», (v5.44.120) «Загрузки», «Галерея
+    (booru)»; on a page of
     before (its address kept: «Подробно — «Скачать с сайта»», old links) its own name too, marked, after «По ссылке»."""
     out = []
     for key, label, href in PARTS:

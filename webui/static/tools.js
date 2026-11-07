@@ -165,12 +165,25 @@
   function selectBar() { return document.querySelector(".select-bar"); }
 
   LB.refreshSelection = () => refreshSelection();   // after a page script changes the selection
+  // (v5.44.118) a button asking its second press forgets the question (the choice it asked about changed)
+  function unconfirm(el) {
+    if (!el.classList.contains("confirming")) return;
+    clearTimeout(el.confirmTimer);
+    el.classList.remove("confirming");
+    el.textContent = el.dataset.label;
+  }
+
   function refreshSelection() {
     const bar = selectBar();
     if (!bar) return;
     const count = bar.querySelector(".select-count");
     if (count) count.textContent = selected.size + " выбрано";
     bar.querySelectorAll("[data-needs-selection]").forEach((b) => { b.disabled = selected.size === 0; });
+    // (v5.44.118) «В корзину выбранные (N)»
+    bar.querySelectorAll("[data-count-label]").forEach((b) => {
+      unconfirm(b);
+      b.textContent = b.dataset.countLabel + (selected.size ? " (" + selected.size + ")" : "");
+    });
     document.querySelectorAll(".thumbs .thumb").forEach((card) => {
       const on = selected.has(card.dataset.id);
       card.classList.toggle("selected", on);
@@ -263,6 +276,42 @@
       el.disabled = false;
     },
 
+    // (v5.44.118) «В корзину выбранные (N)»: a tile of a сборка is all its files (data-files) — the question says how
+    // many go; the second press within 4 s moves them (a page task: its journal under the bar)
+    async "trash-move"(el) {
+      const tiles = [...selected];
+      if (!tiles.length) return;
+      const files = tiles.reduce((sum, id) => {
+        const card = document.querySelector(`.thumbs .thumb[data-id="${CSS.escape(id)}"]`);
+        return sum + Math.max(1, Number((card && card.dataset.files) || 1));
+      }, 0);
+      const question = tiles.length === 1
+        ? (files > 1 ? `Точно в корзину выбранную сборку (${filesWord(files)})? Нажмите ещё раз`
+          : "Точно в корзину выбранную? Нажмите ещё раз")
+        : `Точно в корзину ${tiles.length} выбранных` + (files > tiles.length ? ` (${filesWord(files)})` : "")
+          + "? Нажмите ещё раз";
+      if (!confirmed(el, question)) return;
+      await startMove(el, { ids: tiles.map(Number), section: el.dataset.section || "all" });
+    },
+
+    // «В корзину все найденные (N)» — the cards of the search in the address (without a search there is no such
+    // button: the whole library never goes by one press)
+    async "trash-move-all"(el) {
+      if (!confirmed(el, el.dataset.ask || "Точно в корзину все найденные? Нажмите ещё раз")) return;
+      await startMove(el, { all: true, tags: el.dataset.tags || "", source: el.dataset.source || "all",
+        section: el.dataset.section || "all" });
+    },
+
+    async "trash-move-stop"(el) {
+      el.disabled = true;
+      try {
+        await postJson("/api/trash/move/stop", {});
+      } catch (err) {
+        say(el, err.message, true);
+      }
+      el.disabled = false;
+    },
+
     async "nomatch-retry"(el) {
       el.disabled = true;
       try {
@@ -308,12 +357,18 @@
       }
     },
 
+    // (v5.44.116) the whole Брак — or, with a search in the address, exactly the cards found (gallery.py: data-tags,
+    // data-source); how many went to the parser is said before «Парсер» opens, and that the rest wait, if some do
     async "nomatch-retry-all"(el) {
-      if (!confirmed(el, "Искать снова весь Брак? Нажмите ещё раз")) return;
+      const narrowed = !!el.dataset.tags || (el.dataset.source || "all") !== "all";
+      if (!confirmed(el, narrowed ? `Искать снова ${el.dataset.count}? Нажмите ещё раз`
+        : "Искать снова весь Брак? Нажмите ещё раз")) return;
       el.disabled = true;
       try {
-        await postJson("/api/parser/retry", { all: true });
-        location.href = "/parser";
+        const r = await postJson("/api/parser/retry", { all: true, tags: el.dataset.tags || "",
+          source: el.dataset.source || "all" });
+        say(el, r.message || "Ищу снова");
+        setTimeout(() => { location.href = "/parser"; }, r.left ? 6000 : 1500);
       } catch (err) {
         say(el, err.message, true);
         el.disabled = false;
@@ -328,6 +383,8 @@
   // ── the parser page ────────────────────────────────────────────────────
   const tool = document.getElementById("parser");
   if (tool) setupParser(tool);
+  const mangaBox = document.getElementById("parser-manga");
+  if (mangaBox) setupParserManga(mangaBox);
   const sitesTool = document.getElementById("sites");
   if (sitesTool) setupSites(sitesTool);
   const brak = document.getElementById("brak");
@@ -335,6 +392,58 @@
   const trashBar = document.getElementById("trash-bar");
   let trashWatcher = null;               // () => the watcher of «Вернуть всё» (made on first use)
   if (trashBar) trashWatcher = setupTrash(trashBar);
+  const moveBox = document.getElementById("trash-move");
+  let moveWatcher = null;                // (v5.44.118) () => the watcher of «В корзину…» (made on first use)
+  if (moveBox) moveWatcher = setupMove(moveBox);
+
+  function filesWord(n) {
+    const d = n % 10, h = n % 100;
+    if (d === 1 && h !== 11) return n + " файл";
+    if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return n + " файла";
+    return n + " файлов";
+  }
+
+  async function startMove(el, body) {
+    el.disabled = true;
+    try {
+      await postJson("/api/trash/move", body);
+      say(el, "Переношу в корзину — журнал ниже");
+      if (moveWatcher) moveWatcher().started();
+    } catch (err) {
+      say(el, err.message, true);
+      el.disabled = !el.hasAttribute("data-needs-selection") ? false : selected.size === 0;
+    }
+  }
+
+  // ── (v5.44.118) the gallery: the journal of «В корзину выбранные / все найденные»; at its end the page shows what
+  // is left (the cards gone into the trash are no longer in it) ──
+  function setupMove(box) {
+    const job = box.querySelector("[data-job]");
+    const stop = box.querySelector('[data-action="trash-move-stop"]');
+    const stateUrl = "/api/trash/move/state";
+    let watcher = null;
+
+    function watch() {
+      watcher = watcher || LB.watchTask(job, stateUrl, {
+        onState(st, busy) {
+          stop.hidden = !busy;
+          document.querySelectorAll('[data-action="trash-move"], [data-action="trash-move-all"]').forEach((b) => {
+            if (busy) b.disabled = true;
+            else b.disabled = b.hasAttribute("data-needs-selection") && selected.size === 0;
+          });
+        },
+        onEnd() { setTimeout(() => location.reload(), 2500); },
+      });
+      return watcher;
+    }
+
+    fetch(stateUrl, { credentials: "same-origin" }).then((r) => r.json())
+      .then((st) => {      // a going task, or one that ended a moment ago (the page reloaded at its end)
+        if (st.id && (taskRunning(st.status) || st.ended_ago < st.show_ended)) watch();
+      })
+      .catch(() => {});
+    return watch;
+  }
 
   // ── the trash: the journal of «Вернуть всё»; at its end the page shows what is left ──
   function setupTrash(bar) {
@@ -552,6 +661,83 @@
     });
   }
 
+  // (v5.44.125) «Манга в исходной папке»: what the folders that look like a manga turned out to be; the server draws
+  // the block (webui/pages/parser_manga.py), the page asks it again — often while the parser runs (its manga are
+  // checked beside the files), seldom else; the filter, «Показать все» and the opened сборки stay as they were
+  function setupParserManga(box) {
+    const inner = box.querySelector(".pm-body");
+    let wanted = "all";
+    let every = false;
+    let timer = 0;
+    let asking = false;
+
+    function opened() {
+      return new Set(Array.from(inner.querySelectorAll("details.pm-open[open]")).map((d) => d.dataset.key));
+    }
+
+    async function load() {
+      if (asking) return;
+      asking = true;
+      clearTimeout(timer);
+      try {
+        const url = `${box.dataset.pmUrl}?state=${encodeURIComponent(wanted)}${every ? "&all=1" : ""}`;
+        const response = await fetch(url, { headers: { Accept: "application/json" } });
+        const data = await response.json();
+        if (data && data.ok && typeof data.html === "string") {
+          const keep = opened();
+          inner.innerHTML = data.html;
+          inner.querySelectorAll("details.pm-open").forEach((d) => { if (keep.has(d.dataset.key)) d.open = true; });
+          box.dataset.live = data.live ? "1" : "";
+        }
+      } catch (_) {
+        /* the program busy for a moment: the next time */
+      } finally {
+        asking = false;
+        timer = setTimeout(load, box.dataset.live ? 4000 : 30000);
+      }
+    }
+
+    box.addEventListener("click", async (event) => {
+      const chip = event.target.closest("[data-pm-filter]");
+      if (chip) {
+        wanted = chip.dataset.pmFilter;
+        every = false;
+        load();
+        return;
+      }
+      const el = event.target.closest("[data-action]");
+      if (!el || !box.contains(el)) return;
+      const act = el.dataset.action;
+      if (act === "pm-all") {
+        every = true;
+        load();
+      } else if (act === "pm-not" || act === "pm-is") {
+        event.preventDefault();
+        el.disabled = true;
+        try {
+          await postJson(`/api/parser/manga/${act === "pm-not" ? "not" : "is"}`, { key: el.dataset.key });
+          load();
+        } catch (err) {
+          say(inner.querySelector(".action-status") || el, err.message, true);
+          el.disabled = false;
+        }
+      }
+    });
+    box.addEventListener("change", async (event) => {
+      const sw = event.target.closest("[data-pm-switch]");
+      if (!sw) return;
+      try {
+        await postJson("/api/parser/manga/switch", { name: sw.dataset.pmSwitch, value: sw.checked });
+        say(inner.querySelector(".action-status"), "Сохранено");
+      } catch (err) {
+        sw.checked = !sw.checked;
+        say(inner.querySelector(".action-status"), err.message, true);
+      }
+    });
+    inner.querySelectorAll("details.pm-open").forEach((d, n) => { if (n === 0) d.open = true; });
+    timer = setTimeout(load, box.dataset.live ? 4000 : 30000);
+  }
+
   function setupParser(section) {
     const job = section.querySelector("[data-job]");
     const idle = section.querySelector("[data-idle]");
@@ -617,13 +803,14 @@
     function channelLabel(ch) {
       if (ch === "all") return "Всё";
       if (ch === "final") return "Итоги файлов";
+      if (ch === "manga") return "Манга";          // (v5.44.125) «МАНГА:», «НЕ МАНГА:», «ЖДЁТ:», «СБОРКА:»
       if (ch === "reverse") return "Обратный поиск";
       if (ch === "main") return "Общее";
       return ch.startsWith("site:") ? ch.slice(5) : ch;
     }
 
     function renderTabs() {
-      const wanted = ["all", "final", ...[...channels].filter((c) => c.startsWith("site:")).sort(), "reverse"]
+      const wanted = ["all", "final", "manga", ...[...channels].filter((c) => c.startsWith("site:")).sort(), "reverse"]
         .filter((c, i, a) => a.indexOf(c) === i && (c === "all" || c === "final" || channels.has(c)));
       if (tabs.childElementCount === wanted.length) return;
       tabs.textContent = "";

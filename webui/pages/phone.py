@@ -29,13 +29,19 @@ TWINS = ((re.compile(r"/"), "/m/", False), (re.compile(r"/posts"), "/m/posts", T
          (re.compile(r"/manga"), "/m/manga", True),                                     # (v5.44.67) the manga
          (re.compile(r"/manga/(g|s)/([0-9a-f]{12})"), r"/m/manga/\1/\2", False),
          (re.compile(r"/manga/r/([0-9a-f]{12})/(\d+)"), r"/m/manga/r/\1?p=\2", False),
+         (re.compile(r"/manga/r/([0-9a-f]{12})"), r"/m/manga/r/\1", True),       # (v5.44.117) the one reader: ?p=N
          (re.compile(r"/manga/(tags|artists|characters|parodies|random)"), r"/m/manga/\1", False),
          (re.compile(r"/videos"), "/m/videos", True),                                   # (v5.44.68) the videos
          (re.compile(r"/videos/s/([0-9a-f]{12})"), "series", False),
          (re.compile(r"/online"), "/m/online", True),                     # (v5.44.82) a chapter read from a site
          (re.compile(r"/(manga|manhwa|videos)/feed"), r"/m/\1/feed", True),           # (v5.44.105) «Лента»
          (re.compile(r"/(manga|manhwa)/title"), r"/m/\1/title", True),               # and the title's page
-         (re.compile(r"/videos/watch"), "/m/videos/watch", True))                     # (v5.44.106) «Смотреть»
+         (re.compile(r"/title"), "/m/title", True),                     # (v5.44.119) any way in to the title's page
+         (re.compile(r"/videos/watch"), "/m/videos/watch", True),                     # (v5.44.106) «Смотреть»
+         # (v5.44.116) «Скачать → По ссылке» — the phone's «Скачать по ссылке»; the pages of before with a link — too
+         (re.compile(r"/get"), "/m/get", True),
+         (re.compile(r"/get/downloads"), "/m/get/downloads", False),          # (v5.44.120) «Скачать → Загрузки»
+         (re.compile(r"/(manga|manhwa|videos)/get"), "get", False))
 NO_STORE_OFF = {"Cache-Control": "private, no-cache"}   # the phone's pages may wait in the browser's memory: «назад»
 #                                                         from a picture finds the gallery as it was left (bfcache)
 ICONS = {
@@ -57,6 +63,9 @@ TICK = '<path d="M5 12.5l4.5 4.5L19 7.5"/>'
 PLAY = '<path d="M7 5l12 7-12 7z"/>'
 SWAP = '<path d="M7 7h13M16 3l4 4-4 4"/><path d="M17 17H4M8 13l-4 4 4 4"/>'
 ROWS = '<rect x="5" y="3" width="14" height="8" rx="1"/><rect x="5" y="13" width="14" height="8" rx="1"/>'
+EYE = '<path d="M2.5 12c1-2 4.5-6 9.5-6s8.5 4 9.5 6c-1 2-4.5 6-9.5 6s-8.5-4-9.5-6z"/><circle cx="12" cy="12" r="3"/>'
+EYE_OFF = ('<path d="M3 3l18 18"/><path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 8.5 4 9.5 6-.4.9-1.2 2.1-2.3 3.2"/>'
+           '<path d="M6.6 6.6C4.6 7.9 3.2 9.8 2.5 12c1 2 4.5 6 9.5 6 1.6 0 3-.4 4.3-1"/>')
 
 
 def register(router) -> None:
@@ -217,18 +226,42 @@ def tab_bar(active: str) -> str:
 
 
 def get_link() -> str:
-    """(v5.44.70) «Скачать по ссылке» in the bar of the lists of manga, manhwa and videos."""
-    return f'<a class="m-icon m-top-tool" href="/m/get" aria-label="Скачать по ссылке">{svg(SAVE, width=2)}</a>'
+    """(v5.44.70) «Скачать по ссылке» in the bar of the lists of manga, manhwa and videos — (v5.44.120) none: the bar of
+    every page has ⬇ «Загрузки» with its number (:func:`phone_frame`), whose «Скачать» has «По ссылке» and «Загрузки»."""
+    return ""
 
 
 def mode_switch() -> str:
-    """«SFW / Всё / NSFW» in the bar of the page (``webui/content_mode.py``): the phone's own list to choose from."""
+    """«SFW / Всё / NSFW» in the bar of the page (``webui/content_mode.py``): the phone's own list to choose from —
+    (v5.44.116) the phone's own mode: «ПК: …» (its default, «как на компьютере») — the computer's, named; short: a
+    list as wide as its longest choice would take the bar's title."""
     from webui import content_mode
-    now = content_mode.mode()
-    options = "".join(f'<option value="{m}"{" selected" if m == now else ""}>{content_mode.LABELS[m]}</option>'
-                      for m in content_mode.MODES)
+    own = content_mode.phone_choice()
+    pc = content_mode.LABELS[content_mode.mode(phone=False)]
+    options = (f'<option value="{content_mode.PHONE_FOLLOWS}"{"" if own else " selected"} title="Как на компьютере — '
+               f'сейчас там «{pc}»">ПК: {pc}</option>'
+               + "".join(f'<option value="{m}"{" selected" if m == own else ""}>{content_mode.LABELS[m]}</option>'
+                         for m in content_mode.MODES))
     return (f'<label class="m-mode"><span class="m-sr">Что показывать</span><select data-mode>{options}</select>'
             f'{svg(DOWN, size=14, width=2)}</label>')
+
+
+def mark_box(kind: str, item_id: str, found) -> str:
+    """(v5.44.122) «Это хентай» / «Это не хентай» of a title of a library on the phone — the computer's button and API
+    (``/api/content-mark``, its action — ``phone.js``): ``kind`` — "manga", "manhwa" or "series", ``found`` — its
+    verdict (``core/content_marks``); beside it what the mode does with the mark, and, as the computer's row «Хентай:
+    да — с nhentai.net», why the program takes it for hentai (the site, the genre, a mark by hand)."""
+    hentai = bool(found.hentai)
+    words = ("в «SFW» — показывать,<br>в «NSFW» — прятать" if hentai else "в «SFW» — прятать,<br>в «NSFW» — показывать")
+    why = ""
+    if found.hentai or found.by_hand:
+        said = ("да" if hentai else "нет") + (f" — {found.reason}" if found.reason else "")
+        why = f'<p class="m-mark-why">Хентай: {esc(said)}</p>'
+    return (f'<div class="m-mark" data-mark><button type="button" class="m-button m-quiet m-mark-btn" '
+            f'data-action="content-mark" data-kind="{esc(kind)}" data-id="{esc(item_id)}" '
+            f'data-value="{"safe" if hentai else "hentai"}">{svg(EYE if hentai else EYE_OFF, size=17, width=2)}'
+            f'<span>{"Это не хентай" if hentai else "Это хентай"}</span></button>'
+            f'<p class="m-mark-words">{words}</p>{why}</div>')
 
 
 def phone_frame(title: str, body: str, *, active: str = "", heading: str = "", back: str = "", tabs: bool = True,
@@ -240,6 +273,9 @@ def phone_frame(title: str, body: str, *, active: str = "", heading: str = "", b
     back_link = (f'<a class="m-icon" href="{esc(back)}" data-back aria-label="Назад">{svg(BACK, width=2)}</a>'
                  if back else '<span class="m-brand" aria-hidden="true">LB</span>')
     title_tag = f'<h1 class="m-title">{esc(heading or title)}</h1>' if heading is not None else ""
+    if not bare:                                   # (v5.44.120) ⬇ «Загрузки» with its number, in every page's bar
+        from webui.pages import downloads
+        top = downloads.phone_badge() + top
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -283,11 +319,21 @@ def twin(path: str, query: str = "") -> str:
         if not found:
             continue
         if target == "series":                         # a series' page with ?ep= — that episode's player
-            from urllib.parse import parse_qs
+            from urllib.parse import parse_qs, quote
             episode = (parse_qs(query).get("ep") or [""])[0]
-            if re.fullmatch(r"[0-9a-f]{12}", episode):
-                return f"/m/videos/e/{episode}"
+            if re.fullmatch(r"[^\s]{1,120}", episode):  # (v5.44.121) its number, or a file of it (before)
+                return f"/m/videos/s/{found.group(1)}?ep={quote(episode, safe='')}&play=1"
             return f"/m/videos/s/{found.group(1)}"
+        if target == "get":                            # (v5.44.116) «Скачать → Манга / Манхва / Видео» of before
+            from urllib.parse import parse_qs, quote
+            asked = parse_qs(query)
+            link = ((asked.get("url") or asked.get("nh") or [""])[0]).strip()
+            if not link:                               # (v5.44.122) a name to search (?q=) — the phone's searches too
+                name = (asked.get("q") or [""])[0].strip()
+                return f"/m/get?q={quote(name, safe='')}" if name else "/m/get"
+            # their link was looked for at once (the videos' — with go=1), so it is on the phone too
+            at_once = found.group(1) != "videos" or (asked.get("go") or [""])[0] == "1"
+            return f"/m/get?url={quote(link, safe='')}" + ("&go=1" if at_once else "")
         return found.expand(target) + (f"?{query}" if keeps and query else "")
     return ""
 

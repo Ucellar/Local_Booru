@@ -11,7 +11,8 @@
   const confirmed = LB.confirmed || (() => true);
   const form = section.querySelector('form[data-form="diag-audit"]');
   const job = section.querySelector("[data-job]");
-  const stop = section.querySelector('[data-action="diag-stop"]');
+  const stops = section.querySelectorAll('[data-action="diag-stop"]');   // (v5.44.118) one by each start button
+  const stop = stops[0] || null;
   const smooth = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   let pressed = null;                 // the button that started the task: its line says how it ended
 
@@ -19,7 +20,8 @@
     onState(st, busy) {
       section.querySelectorAll("[data-needs-idle]").forEach((b) => { b.disabled = busy; });
       // work that has no place to stop half-way keeps «Остановить» off
-      if (stop) stop.disabled = !((st.status === "running" || st.status === "starting") && st.stoppable !== false);
+      const going = (st.status === "running" || st.status === "starting") && st.stoppable !== false;
+      stops.forEach((b) => { b.disabled = !going; });
     },
     onEnd(st) {
       const where = pressed || (form && form.querySelector("[data-audit]")) || stop;
@@ -50,8 +52,19 @@
   if (form) {
     form.addEventListener("submit", (event) => {
       event.preventDefault();
+      const files = form.elements.namedItem("verify_files");     // (v5.44.118) the files — «Проверить файлы»
       begin(form.querySelector("[data-audit]"), "/api/diag/audit",
-            { verify_files: form.elements.namedItem("verify_files").checked }, "Проверяю…");
+            { verify_files: !!(files && files.checked) }, "Проверяю…");
+    });
+  }
+
+  // (v5.44.118) «Файлы библиотеки»: one check of the files (with «и сверить каждый файл по MD5»)
+  const filesForm = section.querySelector('form[data-form="files-check"]');
+  if (filesForm) {
+    filesForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      begin(filesForm.querySelector("[data-files-check]"), "/api/diag/files/check",
+            { md5: filesForm.elements.namedItem("md5").checked }, "Проверяю файлы — журнал вверху");
     });
   }
 
@@ -202,6 +215,11 @@
     async "diag-repair"(el) {
       if (el.dataset.ask && !confirmed(el, el.dataset.ask)) return;
       begin(el, "/api/diag/repair", { action: el.dataset.repair }, "Идёт — журнал вверху");
+    },
+    // (v5.44.118) «Починить файлы (N)»: exactly what the check shown on this page found (its stamp)
+    async "files-repair"(el) {
+      if (el.dataset.ask && !confirmed(el, el.dataset.ask)) return;
+      begin(el, "/api/diag/files/repair", { stamp: el.dataset.stamp }, "Чиню — журнал вверху");
     },
   });
 })();

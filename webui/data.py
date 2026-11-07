@@ -34,6 +34,16 @@ def video_limit(settings: dict | None) -> int:
         return 60
 
 
+def is_long_video(settings: dict | None, item: dict | None) -> bool:
+    """(v5.44.121) A card of a long video (the tab «Видео»: longer than :func:`video_limit`) — played once, its place
+    kept; a short one goes round as a gif does."""
+    limit = video_limit(settings)
+    try:
+        return limit > 0 and float((item or {}).get("duration") or 0) > limit
+    except (TypeError, ValueError):
+        return False
+
+
 def section_filter(section: str, settings: dict | None = None) -> tuple[str, list[str], list]:
     """(bucket for repository search, extra WHERE, its params) for a gallery section.  The gallery leaves out the
     videos longer than ``video_limit`` (they are on the tab «Видео»: section ``videos``), except in the trash and in

@@ -1,10 +1,12 @@
 """The trash in words and in bulk: why each card is there (the codes ``library_lifecycle.move_to_trash`` writes into
 ``delete_log`` — the old page «Удалено» and the section «Корзина» of the new window show the same words), and
-«Вернуть всё» — many cards back in portions, with a journal and a stop between portions."""
+«Вернуть всё» — many cards back in portions, with a journal and a stop between portions; (v5.44.118) «В корзину
+выбранные / все найденные» of the gallery — many cards in, the same way (:func:`trash_many`)."""
 from __future__ import annotations
 
 import contextlib
 import threading
+from pathlib import Path
 from typing import Callable
 
 LABELS = {
@@ -26,7 +28,22 @@ LABELS = {
     "delete_by_buckets": "«Удаление и сброс»: результаты парсера или скачанное",
     "missing_file": "файл пропал с диска",
     "moved_to_manga": "перенесено в мангу",                 # (v5.44.111) a comic of the gallery: core/comic_manga.py
+    # (v5.44.118) «В корзину выбранные» / «В корзину все найденные» of the gallery (:func:`trash_many`): the search the
+    # cards were found by is the reason's «what» (``tag_or_source``)
+    "gallery_selected": "выбрано в галерее",
+    "gallery_found": "все найденные по поиску",
     "unknown": "неизвестно (старая версия программы)",
+}
+# (v5.44.118) a reason in a word or two — the corner of a tile of the phone's «Корзина» (the sketch E: «вручную»,
+# «Дубли», «в мангу»); a reason not here — none
+SHORT = {
+    "gallery_context_delete": "вручную", "post_context_delete": "вручную", "gallery_selected": "вручную",
+    "gallery_found": "по поиску", "duplicate_delete": "«Дубли»", "moved_to_manga": "в мангу",
+    "missing_file": "файл пропал", "delete_by_tag": "по тегу", "delete_by_source": "по сайту",
+    "delete_by_buckets": "сброс", "subscription_visual_duplicate": "подписка", "subscription_session_cleanup": "подписка",
+    "downloader_exact_duplicate": "авто", "downloader_exact_copy": "авто", "downloader_manual_duplicate": "авто",
+    "downloader_blocklist_cleanup": "авто", "reimport_deleted_rejected": "авто", "restore_exact_duplicate_cleanup": "авто",
+    "exact_md5_auto_normalized": "авто",
 }
 
 # SQL (on ``images i``) of why a trashed card is there: the newest line of ``delete_log`` for its file, or
@@ -43,6 +60,28 @@ WORD = "корзина:"            # the search word of a reason: «корзи�
 def label(code) -> str:
     key = str(code or "unknown")
     return LABELS.get(key, key)
+
+
+def short_label(code) -> str:
+    """(v5.44.118) The reason in a word or two (:data:`SHORT`), "" — none to say."""
+    return SHORT.get(str(code or ""), "")
+
+
+def reasons_of(settings: dict, ids) -> dict:
+    """(v5.44.118) {card: its reason code} of the trashed cards among ``ids`` (a page of the phone's «Корзина»)."""
+    from core.database.connection import db
+    wanted = [int(x) for x in ids or []]
+    out: dict = {}
+    if not wanted:
+        return out
+    with db(settings, readonly=True) as con:
+        for start in range(0, len(wanted), 500):
+            part = wanted[start:start + 500]
+            marks = ",".join("?" for _ in part)
+            for row in con.execute(f"SELECT i.id, {REASON_SQL} FROM images i WHERE i.deleted=1 AND i.id IN ({marks})",
+                                   part):
+                out[int(row[0])] = str(row[1] or "unknown")
+    return out
 
 
 def condition(code: str) -> tuple[str, list]:
@@ -76,6 +115,7 @@ def reason_of(con, image_id: int) -> tuple[str, str]:
 # ── «Вернуть всё» ──────────────────────────────────────────────────────────
 PORTION = 200          # cards one write of the base takes: other writers wait for one portion, not the whole trash
 RESTORE_KIND = "trash_restore"         # its page task (core.page_jobs)
+MOVE_KIND = "trash_move"               # (v5.44.118) «В корзину выбранные / все найденные» of the gallery: its page task
 _BULK = threading.Lock()               # «Вернуть всё» or a purge of the trash: one at a time (a purge would take the
                                        # cards the return has not reached yet; a return would race the purge's deletes)
 
@@ -161,3 +201,80 @@ def _restore_many(settings: dict, ids: list, *, hold, progress, stop_check, busy
         say(f"Не тронуто: {sums['protected_source_skipped']} — файл лежит в исходной папке, которую программа не "
             "меняет")
     return {**sums, "cards": len(ids), "stopped": False, "left": 0}
+
+
+# ── (v5.44.118) «В корзину выбранные / все найденные» of the gallery ─────────
+def trash_many(settings: dict, ids: list, *, reason: str, target: str = "", hold=None,
+               progress: Callable[[str], None] | None = None, stop_check: Callable[[], bool] | None = None,
+               busy: Callable[[], str] | None = None) -> dict:
+    """Move the live cards ``ids`` into the trash (``library_lifecycle.move_to_trash``; ``reason`` — a code of
+    :data:`LABELS`, ``target`` — what it was about: the search) in portions: a copy of the base first (none — nothing
+    is moved), then a portion at a time under the import lock with its files held (``hold(*paths)``); ``busy()`` and
+    ``stop_check()`` before each portion, as «Вернуть всё».  A card already in the trash or gone is passed over.
+    Returns the sums and "stopped" (cards left in place); TrashBusy while «Вернуть всё» or a purge of the trash goes
+    on (one bulk operation of the trash at a time: ``bulk``)."""
+    with bulk("«В корзину»"):
+        return _trash_many(settings, ids, reason=reason, target=target, hold=hold, progress=progress,
+                           stop_check=stop_check, busy=busy)
+
+
+def _live_rows(settings: dict, ids: list) -> list:
+    from core.database.connection import db
+    rows: list = []
+    with db(settings, readonly=True) as con:
+        for start in range(0, len(ids), 500):
+            part = ids[start:start + 500]
+            marks = ",".join("?" for _ in part)
+            found = {int(r["id"]): dict(r) for r in con.execute(
+                f"SELECT id, path, deleted, lifecycle FROM images WHERE deleted=0 AND id IN ({marks})", part)}
+            rows += [found[i] for i in part if i in found]
+    return rows
+
+
+def _trash_many(settings: dict, ids: list, *, reason, target, hold, progress, stop_check, busy) -> dict:
+    from core.database.connection import db_path
+    from core.import_pipeline import IMPORT_LOCK
+    from core.library_lifecycle import force_backup_database, move_to_trash
+    say = progress or (lambda _m: None)
+    wanted = list(dict.fromkeys(int(x) for x in ids))
+    rows = _live_rows(settings, wanted)
+    sums = {"trashed": 0, "files": 0, "errors": 0, "skipped": 0, "changed": 0}
+    passed = len(wanted) - len(rows)
+    if passed:
+        say(f"Не тронуто {passed}: этих карточек уже нет в библиотеке (в корзине или удалены)")
+    if not rows:
+        return {**sums, "cards": 0, "stopped": False, "left": 0, "passed": passed, "backup": ""}
+    say("Копирую базу…")
+    backup = force_backup_database(settings, reason, auto=True)
+    if not backup and db_path(settings).exists():
+        raise RuntimeError("Копия базы не создана (места на диске?) — ничего не перенесено")
+    if backup:
+        say(f"Копия базы: {Path(backup).name} (в резервных копиях архива)")      # its name: the journal shows no paths
+    done = 0
+    for start in range(0, len(rows), PORTION):
+        why = busy() if busy is not None else ""
+        if why:
+            say(f"Библиотека занята: {why}")
+        if why or (stop_check is not None and stop_check()):
+            say(f"Остановлено: {done} из {len(rows)} разобрано, остальные {len(rows) - done} — на месте")
+            return {**sums, "cards": len(rows), "stopped": True, "left": len(rows) - done, "passed": passed,
+                    "backup": backup}
+        part = rows[start:start + PORTION]
+        paths = [str(r["path"]) for r in part]
+        with IMPORT_LOCK, (hold(*paths) if hold is not None else contextlib.nullcontext()):
+            result = move_to_trash(settings, part, reason=reason, tag_or_source=target, make_backup=False)
+        sums["trashed"] += int(result.get("trashed_records") or 0)
+        sums["files"] += int(result.get("trashed_files") or 0)
+        sums["errors"] += int(result.get("errors") or 0)
+        sums["skipped"] += int(result.get("protected_source_skipped") or 0)
+        sums["changed"] += int(result.get("changed_meanwhile") or 0)
+        done += len(part)
+        say(f"{done} из {len(rows)}: в корзине {sums['trashed']}")
+    if sums["changed"]:
+        say(f"Не тронуто {sums['changed']}: их перенесли или убрали в корзину, пока шло")
+    if sums["skipped"]:
+        say(f"Не тронуто {sums['skipped']}: это файлы исходной папки или вне папки библиотеки — они не меняются")
+    if sums["errors"]:
+        say(f"Ошибок: {sums['errors']} — эти карточки остались на месте (подробности — в журнале программы)")
+    say("Из корзины всё можно вернуть: «Галерея → Корзина»")
+    return {**sums, "cards": len(rows), "stopped": False, "left": 0, "passed": passed, "backup": backup}

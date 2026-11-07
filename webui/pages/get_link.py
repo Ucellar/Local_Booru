@@ -9,19 +9,23 @@ on the design canvas: «вот теперь отлично делай»).
 
 * a gallery of nhentai (its link or its number) — «Хентай»: downloaded by ``manga_get`` (``/api/manga/download``);
 * a title of a site of manga (``manhwa_sources.source_for``) — «Манга и манхва» («Хентай» — a site of hentai alone):
-  found and downloaded by ``manhwa_get`` (its chapters as tiles, «Читать» without downloading — ``manga_online``);
+  (v5.44.119) its one page opens (``webui/pages/title.py``, ``/title?url=``: found and downloaded there by
+  ``manhwa_get``; ``/get?url=…&go=1`` with a title comes there too);
 * a booru post — «Галерея (booru)»: the grabber (``/grab``) opens it;
 * any other link — «Видео»: found and downloaded by ``video_get`` — the other chat's: its answers are only read, nothing
   of its download changes (its full page, ``/videos/get``, stays: the card links to it);
-* words — a name: the sites of manga searched at once (``manhwa_search``), the titles as covers, one picked — its card.
+* words — a name: the sites of manga searched at once (``manhwa_search``), the titles as covers, one picked — its page
+  (v5.44.119; until then a card here).
 
-The card and «Скачать» are the computer's own machinery by its addresses, as the phone's «Скачать по ссылке» does
-(``static/get-link.js``).  On the right — «Загрузки»: the downloads of the three going and their queues, «Пауза»,
-«Остановить», the ones ended with «Открыть» (the nightly round of new chapters shows there too).  In «SFW» — no nhentai,
-no sites of hentai, no booru (said in words, with «Показать всё»).
+The cards of nhentai and video and their «Скачать» are the computer's own machinery by its addresses, as the phone's
+«Скачать по ссылке» does (``static/get-link.js``).  On the right — (v5.44.120) the way to «Скачать → Загрузки»
+(``downloads.py``: every kind, one queue, «Готово»); until then a column of «Загрузки» of the three kinds was here.
+In «SFW» — no nhentai, no sites of hentai, no booru (said in words, with «Показать всё»).  (v5.44.122) The phone's
+«Скачать → По ссылке» asks the same :func:`classify` (``phone_get.what``): one parse of what was pasted for both.
 """
 from __future__ import annotations
 
+import re
 from urllib.parse import quote
 
 from webui.html import esc
@@ -29,6 +33,7 @@ from webui.server import Request, Response
 
 MAX_TEXT = 4000
 NAME_MAX = 120                       # a name searched (``manhwa_search.MAX_QUERY`` cuts it further)
+_OTHER_LINK = re.compile(r"[a-z][a-z0-9+.-]*://\S*", re.I)       # (v5.44.122) a link, but not to a page (ftp://…)
 LINK_ICON = ('<svg class="gl-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M10 14a5 5 0 0 0 '
              '7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1 1"/><path d="M14 10a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1-1"/>'
              '</svg>')
@@ -40,8 +45,10 @@ def register(router) -> None:
 
 # ── what the text is ───────────────────────────────────────────────────────────────────────────────────────────────
 def classify(text: str, settings: dict, now: str | None = None) -> dict:
-    """{kind: "nhentai", ids} | {kind: "site", url, site, adult} | {kind: "booru", go} | {kind: "video", url} |
-    {kind: "name", q} — each with ``label`` (the mark in the field); or {error} (``sfw`` — refused by the mode)."""
+    """{kind: "nhentai", ids} | {kind: "site", url, site, adult} | {kind: "booru", go, url} | {kind: "video", url} |
+    {kind: "name", q} — each with ``label`` (the mark in the field); or {error} (``sfw`` — refused by the mode).
+    (v5.44.122) The phone's page asks the same (``phone_get.what``: its names of the kinds); a booru post's ``url`` —
+    its own card there (the grabber's machinery: ``/api/grab/…``)."""
     from core import manga_download, manhwa_sources
     from webui import content_mode
     from webui.pages import get_hub
@@ -75,9 +82,12 @@ def classify(text: str, settings: dict, now: str | None = None) -> dict:
             if sfw:
                 return {"error": "Это пост booru-сайта — его скачивает «Галерея (booru)», а она скрыта в режиме "
                                  "«SFW». «Показать всё» — и она есть.", "sfw": True, "label": "Галерея (booru)"}
-            return {"kind": "booru", "go": get_hub.address("gallery", link), "label": "Галерея (booru)"}
+            return {"kind": "booru", "go": get_hub.address("gallery", link), "url": link, "label": "Галерея (booru)"}
         return {"kind": "video", "url": link, "label": "Видео"}
     words = " ".join(text.split())
+    if _OTHER_LINK.fullmatch(words):                # (v5.44.122) ftp://…, magnet-like: not a name to look for
+        return {"error": "Это ссылка не на страницу сайта — нужна ссылка, которая начинается с https:// или http://, "
+                         "или название"}
     if len(words) < 2:
         return {"error": "Напишите название — хотя бы две буквы, или вставьте ссылку"}
     return {"kind": "name", "q": words[:NAME_MAX], "label": "Название — поиск по сайтам"}
@@ -101,10 +111,17 @@ def page(req: Request) -> Response:
     if link and get_hub.kind_of(link, req.settings) == "booru" and get_hub.shown("gallery"):
         return Response.redirect(get_hub.address("gallery", link))
     at_once = bool(asked) and (req.arg("go") == "1" or bool(req.arg("q").strip()))
+    # (v5.44.119) a title of a site looked for at once: its one page (title.py); without «go» it is the field's own
+    # memory (back from that page): the field, not that page again
+    from webui.pages import title as T
+    if at_once and T.is_title_link(link):
+        return Response.redirect(T.address_for(link, req.settings, branch=req.arg("b").strip()))
     adult = content_mode.shows(True)
     merge = bool(req.settings.get("video_dub_merge", True))
+    from webui.pages.manhwa_get import hint_sites
+    sites, adult_sites = hint_sites(adult)           # (v5.44.116) the hints' sites — the server's lists, for the script
     body = (f'<div class="gl" id="get-link" data-autofind="{"1" if at_once else ""}" data-adult="{"1" if adult else ""}"'
-            f' data-merge="{"1" if merge else ""}">'
+            f' data-merge="{"1" if merge else ""}" data-sites="{esc(sites)}" data-adult-sites="{esc(adult_sites)}">'
             f'<div class="gl-main">{_ask(req, asked, adult)}{_hits()}'
             f'<article class="gl-card" hidden aria-live="polite"></article></div>{_side()}</div>')
     return get_hub.frame(req, "Скачать по ссылке", body, part="link", kind="get-link", assets=("getlink",))
@@ -112,7 +129,8 @@ def page(req: Request) -> Response:
 
 def _ask(req: Request, asked: str, adult: bool) -> str:
     from webui.pages import manhwa_get, phone_get
-    sites = ", ".join((*(s.split(" (")[0] for s in manhwa_get.SITES), *(manhwa_get.ADULT_SITES if adult else ())))
+    sites = ", ".join(manhwa_get.site_names())
+    adult_sites = ", ".join(manhwa_get.site_names(adult=True))
     only = " и ".join(manhwa_get.LINK_ONLY)
     kinds = [f'<li><b>Манга и манхва</b> — тайтл на {esc(sites)}; по названию ищется сразу на всех, кроме '
              f'{esc(only)}</li>',
@@ -121,8 +139,8 @@ def _ask(req: Request, asked: str, adult: bool) -> str:
              f'class="gl-vh" type="file" accept=".html,.htm,.mhtml,.mht,.zip" data-saved-page="1"><span '
              f'class="gl-btn quiet small">Выбрать сохранённую страницу</span></label></li>']
     if adult:
-        kinds.append("<li><b>Хентай</b> — галерея nhentai (ссылка или номер, можно несколько) и тайтл Хентай-тян, "
-                     "HentaiLib или AllHentai</li>")
+        kinds.append(f"<li><b>Хентай</b> — галерея nhentai (ссылка или номер, можно несколько) и тайтл на "
+                     f"{esc(adult_sites)}</li>")
         kinds.append('<li><b>Посты booru-сайтов</b> — откроются в «Галерея (booru)»</li>')
     return f"""<section class="gl-ask" aria-labelledby="gl-title">
   <h1 id="gl-title">Скачать по ссылке</h1>
@@ -157,17 +175,9 @@ def _hits() -> str:
 
 
 def _side() -> str:
-    return """<aside class="gl-side" aria-labelledby="gl-side-title">
-  <div class="gl-side-head"><h2 id="gl-side-title">Загрузки</h2><span class="gl-side-count" aria-live="polite"></span></div>
-  <ul class="gl-jobs" aria-label="Скачивание"></ul>
-  <p class="gl-side-empty">Пока ничего не качается. Найдите тайтл, серию или галерею — «Скачать» поставит их сюда.</p>
-  <div class="gl-side-buttons" hidden>
-    <button type="button" class="gl-btn" data-all="pause">Пауза</button>
-    <button type="button" class="gl-btn quiet" data-all="stop" title="Остановить все загрузки и убрать очередь">Остановить</button>
-  </div>
-  <p class="gl-side-note">Всё, что качается — манга, манхва, хентай, видео, — здесь. Новые главы, которые программа
-    скачивает сама ночью, — тоже.</p>
-</aside>"""
+    """(v5.44.120) «Загрузки» are a part of «Скачать» of their own now (``downloads.py``): here — the way there."""
+    from webui.pages import downloads
+    return downloads.link_line()
 
 
 def link_of(url: str) -> str:

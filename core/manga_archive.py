@@ -40,7 +40,8 @@ The owner (5.11.2026), of his friend's reader: «доработать парсе
 * :func:`link` keeps what it put into the folder (``added`` of ``.lb/source.json``: ``info.json`` made or changed —
   the owner's own kept as ``.lb/info.before.json``; the cover written): «Отвязать» (:func:`unlink_folder`) takes it
   back.  The chapters downloaded by «Докачать» stay.
-* :func:`background_round` (``core/background_duties.py``, «Узнавать само» on the page — ``manga_archive_auto``): a
+* :func:`background_round` (``core/background_duties.py``, «Узнавать тайтлы «Из архива» самой, в фоне» —
+  ``manga_archive_auto``; (v5.44.116) a field of «Настройки → Сайты манги», it was on the page «Из архива»): a
   few titles every ten minutes — the new ones first, then the ones whose pictures SauceNAO put off (when that time
   came), then «не нашлось» again after a week (the pictures again only when the folder changed); never the ones to
   choose from (the owner's), not while a download of manga or manhwa goes; SauceNAO not while the parser runs (they
@@ -236,7 +237,9 @@ def entries(settings: dict, *, refresh: bool = False) -> list:
     the last look at the whole folder — ``refresh``: looked at now) — the owner: «я говорил про архив что бы оно сверяло
     именно из архива который использует парсер booru а не из того в котором манга и манхва».  (v5.44.111) And the
     manga ``core/comic_manga`` put into the manga folder: the gallery's comics («comic:<key>») and the parser's titles
-    it copied (their own key «root:<id>», the copy's folder)."""
+    it copied (their own key «root:<id>», the copy's folder).  (v5.44.125) Of the parser's folder — only the titles of
+    the program's own folders of manga and manhwa lying in it: its other folders are «Манга через парсер»'s
+    (``core/parser_manga``: confirmed — copied, and looked up here as the copy; nothing is written where they lie)."""
     from core import comic_manga, manga_detect as MD, manhwa_download as D
     from core.manhwa_library import Page
     root = str(settings.get("root") or "").strip()
@@ -248,8 +251,15 @@ def entries(settings: dict, *, refresh: bool = False) -> list:
     out, copied = comic_manga.archive_entries(settings, library)
     if not root or not Path(root).is_dir():
         return sorted(out, key=lambda e: e.title.lower())
+    # (v5.44.125) of the titles the look at the parser's folder found — only those of the program's own folders of
+    # manga and manhwa lying in it: the parser's own folders are «Манга через парсер»'s (``core/parser_manga``: a
+    # confirmed manga is copied into «Манга» and looked up here as that copy) — never linked, described or downloaded
+    # into where they lie (the program writes nothing into the parser's folder)
+    libraries = {MD._norm(r) for r in D.roots(settings).values() if r}
     for found in MD.STORE.titles(root):
         path = Path(found.path)
+        if not libraries or not MD._under(path, libraries):
+            continue
         if not path.exists() or _nhentai_folder(path) or f"root:{found.id}" in copied:
             continue
         folder = path.is_dir()
@@ -458,7 +468,7 @@ def link(settings: dict, entry: Entry, url: str, *, net=None, say=None) -> dict:
              "linked_at": stored.get("linked_at") or int(time.time())}
     D.write_source(folder, first)                    # look() finds this folder by it
     try:
-        found = D.look(title.url, settings, net=net, where=first["kind"], say=say)
+        found = D.look(title.url, settings, net=net, where=first["kind"], say=say, deadline=D.QUIET_DEADLINE)
     except D.DownloadError as exc:
         _forget(folder, stored)
         raise LinkError(str(exc)) from exc
@@ -864,7 +874,7 @@ def refresh_counts(settings: dict, entry: Entry, *, net=None, say=None) -> dict:
     """The counts of a linked title asked again (its chapters on the sites, what the folder has now)."""
     from core import manhwa_download as D
     found = D.look(entry.linked["url"], settings, net=net, where=entry.kind, say=say, about=False,
-                   branch=str(entry.linked.get("branch") or ""))
+                   branch=str(entry.linked.get("branch") or ""), deadline=D.QUIET_DEADLINE)
     numbers = counts(found)
     STORE.put(entry.key, {**STORE.read().get(entry.key, {}), "state": "linked", "path": entry.path, "counts": numbers})
     return numbers
@@ -893,7 +903,8 @@ def queue_missing(settings: dict, chosen: list, *, say) -> int:
             continue
         record = {"url": entry.linked["url"], "title": entry.linked.get("title") or entry.title,
                   "branch": str(entry.linked.get("branch") or ""), "where": entry.kind, "follow": True,
-                  "helpers": bool(entry.linked.get("helpers_on", True)), "chapters": None}
+                  "helpers": bool(entry.linked.get("helpers_on", True)), "chapters": None,
+                  "hentai": bool(entry.hentai)}          # (v5.44.116) «Загрузки» hide its name in «SFW»
         label = f"Докачать: {record['title']}"
 
         def work(say_, stop_, record=record):

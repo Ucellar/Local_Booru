@@ -1,0 +1,111 @@
+/* (v5.44.120) «Скачать → Загрузки» on the phone (webui/pages/downloads.py phone_page, downloads.js — the computer's
+   board): one column, the phone's colours (phone.css), touch targets of 40–44 px; the mockup C of the phone. */
+.dl { --dl-ok: #7fd18b; --dl-warn: #f0b35a; padding: 0 0 20px; color: var(--text); }
+.dl [hidden] { display: none !important; }
+.dl .dl-head { display: flex; flex-direction: column; gap: 8px; padding: 6px 14px 12px; }
+.dl .dl-count { color: var(--muted); font-size: 13.5px; }
+.dl .dl-head-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.dl .dl-sfw { margin: 0 14px 10px; padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--panel); font-size: 12.5px; }
+.dl .dl-btn { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; min-width: 0;
+  padding: 0 12px; border: 0; border-radius: var(--radius); background: var(--panel); color: var(--strong); font: inherit;
+  font-size: 14px; font-weight: 500; text-decoration: none; cursor: pointer; }
+.dl .dl-btn.danger { color: #ff8a8a; font-weight: 600; }
+.dl .dl-btn.danger.confirming { background: var(--accent-button); color: #fff; font-size: 12.5px; line-height: 1.25; }
+.dl .dl-btn:disabled { opacity: 0.55; }
+.dl .dl-link { min-height: 32px; padding: 0; border: 0; background: none; color: var(--accent-text); font: inherit;
+  font-size: 14px; text-align: left; cursor: pointer; }
+.dl .dl-icon-btn { display: inline-grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0;
+  border-radius: var(--radius); background: var(--panel); color: var(--strong); cursor: pointer; }
+.dl .dl-svg { flex: none; }
+.dl .dl-board, .dl .dl-main, .dl .dl-side { display: block; }
+.dl .dl-panel { margin: 0; padding: 0; }
+.dl .dl-panel > h2 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin: 18px 14px 8px;
+  color: var(--strong); font-size: 16px; }
+.dl .dl-panel > h2 span, .dl .dl-panel > h2 small { color: var(--muted); font-size: 13px; font-weight: 400; }
+.dl .dl-going > h2 { margin-top: 6px; }
+.dl .dl-empty { margin: 0 14px; color: var(--muted); font-size: 14px; }
+.dl :is(.dl-jobs, .dl-queue, .dl-done, .dl-duties) { margin: 0; padding: 0; list-style: none; }
+
+/* a download going: a card */
+.dl .dl-jobs { display: flex; flex-direction: column; gap: 10px; padding: 0 14px; }
+.dl .dl-job { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 7px 10px; padding: 12px; background: var(--panel);
+  border-radius: 6px; }
+.dl .dl-job.hid { background: #262626; }
+.dl .dl-pic { position: relative; display: grid; place-items: center; width: 44px; height: 62px; overflow: hidden;
+  border-radius: var(--radius); background: var(--panel-2); color: var(--muted); }
+.dl .dl-pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.dl .dl-pic.has-picture .dl-letter { visibility: hidden; }
+.dl .dl-letter { font-size: 20px; font-weight: 700; }
+.dl .dl-job.hid .dl-pic { width: 34px; height: 48px; }
+.dl .dl-job.hid .dl-pic::after { content: "18+"; color: var(--muted); font-size: 10px; font-weight: 700; }
+.dl .dl-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dl .dl-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.dl .dl-kind { flex: none; color: var(--accent-text); font-size: 12px; font-weight: 700; }
+.dl .dl-title { min-width: 0; color: var(--strong); overflow-wrap: anywhere; }
+.dl .dl-dest { display: none; }
+.dl .dl-text { margin: 0; color: var(--text); font-size: 13.5px; overflow-wrap: anywhere; }
+.dl .dl-sub { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.dl .dl-bar { display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--panel-2); }
+.dl .dl-bar i { display: block; height: 100%; width: 2%; background: var(--accent); transition: width 0.4s; }
+.dl .dl-job[data-state="paused"] .dl-bar i { background: var(--dl-warn); }
+.dl .dl-job[data-state="paused"] .dl-text { color: var(--muted); }
+.dl .dl-tools { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+.dl .dl-tools .dl-btn { flex: 1 1 120px; background: var(--panel-2); }
+.dl .dl-more-tools { display: flex; flex: 1 1 100%; gap: 4px 18px; }
+.dl .dl-log-box { margin: 4px 0 0; }
+.dl .dl-log { max-height: 220px; margin: 0; overflow: auto; padding: 8px; border-radius: var(--radius); background: var(--bg);
+  color: var(--text); font: 11.5px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dl .dl-log-tools { display: flex; gap: 12px; align-items: baseline; }
+.dl .dl-said { color: var(--muted); font-size: 12px; }
+
+/* the queue, «Готово», «Сама программа»: lines */
+.dl :is(.dl-queue, .dl-done, .dl-duties) { margin: 0 14px; border-top: 1px solid var(--panel); }
+.dl .dl-q { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 4px 8px;
+  min-height: 52px; padding: 6px 0; border-bottom: 1px solid var(--panel); font-size: 14px; }
+.dl .dl-qn, .dl .dl-q > .dl-kind { display: none; }
+.dl .dl-q-main { min-width: 0; display: flex; flex-direction: column; }
+.dl .dl-q-main .dl-kind-in { margin-right: 6px; }
+.dl .dl-q-main b { color: var(--strong); font-weight: 600; overflow-wrap: anywhere; }
+.dl .dl-q-what { color: var(--muted); font-size: 12px; }
+.dl .dl-move { display: inline-flex; gap: 6px; }
+.dl .dl-off { visibility: hidden; }
+.dl .dl-res { display: flex; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--panel); }
+.dl .dl-sign { flex: none; display: grid; place-items: center; width: 24px; height: 24px; margin-top: 1px; border-radius: 50%;
+  background: var(--panel-2); color: var(--muted); }
+.dl .dl-res.ok .dl-sign { background: rgba(127, 209, 139, 0.18); color: var(--dl-ok); }
+.dl .dl-res:is(.part, .fail) .dl-sign { background: rgba(240, 179, 90, 0.18); color: var(--dl-warn); }
+.dl .dl-res-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; }
+.dl .dl-res-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.dl .dl-res-top b { color: var(--strong); font-weight: 600; overflow-wrap: anywhere; }
+.dl .dl-res-top time { flex-basis: 100%; color: var(--muted); font-size: 12px; }
+.dl .dl-res p { margin: 0; }
+.dl .dl-res ul { margin: 0; padding-left: 16px; font-size: 12.5px; }
+.dl .dl-res { flex-wrap: wrap; }
+.dl .dl-res-tools { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding-left: 34px; }
+.dl .dl-more { margin: 4px 14px 0; }
+.dl .dl-lead { margin: -2px 14px 6px; color: var(--muted); font-size: 12.5px; }
+.dl .dl-duty { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 12px 0; border-bottom: 1px solid var(--panel); }
+.dl .dl-duty-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.dl .dl-duty b { color: var(--strong); font-weight: 600; font-size: 14.5px; }
+.dl .dl-duty p { display: none; }      /* the phone: the name and what it did — as the mockup (the words — on the computer) */
+.dl .dl-duty[data-state="off"] b { color: var(--muted); }
+.dl .dl-state { display: flex; align-items: flex-start; gap: 7px; font-size: 13px; }
+.dl .dl-dot { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: #9a9a9a; }
+.dl .dl-duty[data-state="running"] .dl-dot { background: var(--accent); }
+.dl .dl-duty[data-state="done"] .dl-dot { background: var(--dl-ok); }
+.dl .dl-duty .dl-bar { margin-top: 3px; }
+.dl .dl-duty .dl-link { align-self: flex-start; min-height: 30px; }
+.dl .dl-sw-none { display: none; }
+/* a switch: still a checkbox, drawn as the toggle of the mockup */
+.dl input[type="checkbox"].switch { appearance: none; -webkit-appearance: none; position: relative; flex: none; width: 44px;
+  height: 26px; margin: 1px 0 0; border: 0; border-radius: 999px; background: var(--panel-2); cursor: pointer; }
+.dl input[type="checkbox"].switch::before { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+  border-radius: 50%; background: #9a9a9a; transition: left 0.15s; }
+.dl input[type="checkbox"].switch:checked { background: var(--accent-button); }
+.dl input[type="checkbox"].switch:checked::before { left: 21px; background: #fff; }
+.dl .dl-select { flex: 1 1 100%; order: 2; min-height: 40px; padding: 0 8px; border: 1px solid #4a4a4a; border-radius: var(--radius);
+  background: var(--panel); color: var(--text); font: inherit; font-size: 14px; }
+.dl .dl-foot { margin: 10px 14px 0; color: var(--muted); font-size: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .dl .dl-bar i, .dl input[type="checkbox"].switch::before { transition: none; }
+}

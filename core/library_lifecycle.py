@@ -1134,7 +1134,9 @@ def _update_path_column_by_mapping(con, table: str, column: str, mapping: dict[s
     return changed
 
 
-def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, apply: bool = False) -> dict:
+def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, apply: bool = False,
+                                   only: Iterable[int] | None = None, make_backup: bool = True,
+                                   all_matches: bool = False) -> dict:
     """Relocate managed gallery paths after moving Local_Booru_Archive.
 
     Earlier versions only rewrote rows whose old path was missing.  That failed
@@ -1147,6 +1149,10 @@ def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, ap
     It creates nothing: a folder that is not an existing library (its output/ branch) is refused.  Creating
     an empty output/ where the configured one was missing turned every card «offline» into «missing» —
     the index and the integrity repair then deleted or trashed them all.
+
+    (v5.44.118, «Диагностика → Починить файлы»: exactly the cards its check showed) ``only`` — these cards and no
+    others; ``make_backup`` — False when the caller has made its copy of the base; ``all_matches`` — every match in
+    the answer (else the first 50).
     """
     new_base = existing_output_base(new_output)
     if new_base is None:
@@ -1156,9 +1162,12 @@ def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, ap
     matches: list[tuple[int, str, str]] = []
     already_ok = missing_target = no_relative = 0
     old_roots: dict[str, int] = {}
+    wanted = None if only is None else {int(x) for x in only}
 
     with db(settings, readonly=True) as con:
         rows = [dict(r) for r in con.execute("SELECT id,path FROM images WHERE deleted=0 ORDER BY id").fetchall()]
+    if wanted is not None:
+        rows = [row for row in rows if int(row["id"]) in wanted]
 
     for row in rows:
         old_s = str(row.get("path") or "")
@@ -1192,8 +1201,8 @@ def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, ap
         duplicates = sum(1 for _image_id, _old, new in matches
                          if con.execute("SELECT 1 FROM images WHERE path=? LIMIT 1", (new,)).fetchone())
     if apply and matches:
-        backup = force_backup_database(settings, "relocate_library_paths")
-        if not backup:
+        backup = force_backup_database(settings, "relocate_library_paths") if make_backup else ""
+        if make_backup and not backup:
             return {
                 "old_base": "",
                 "new_base": str(new_base),
@@ -1251,7 +1260,7 @@ def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, ap
         "no_relative": no_relative,
         "backup": backup,
         "table_updates": table_updates,
-        "matches": matches[:50],
+        "matches": matches if all_matches else matches[:50],
     }
 
 

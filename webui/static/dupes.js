@@ -98,9 +98,18 @@
     async "dupe-relation"(el) {
       const pair = el.closest(".dupe");
       try {
-        await postJson("/api/dupes/relation", { ids: pair.dataset.ids.split(" ").map(Number), relation: el.dataset.relationKind });
-        pair.remove();
-        countLeft();
+        const r = await postJson("/api/dupes/relation", { ids: pair.dataset.ids.split(" ").map(Number), relation: el.dataset.relationKind });
+        // (v5.44.116) «Альтернативная версия» — the two cards in one сборка: said for a moment before the pair goes
+        const said = r.set_error ? "Запомнено, но в сборку не собрано: " + r.set_error
+          : r.set ? "Запомнено; обе в одной сборке" + (r.cards ? ` (карточек в ней: ${r.cards})` : "") : "";
+        if (!said) {
+          pair.remove();
+          countLeft();
+          return;
+        }
+        say(el, said, !!r.set_error);
+        el.closest(".tool-actions").querySelectorAll("button").forEach((b) => { b.disabled = true; });
+        setTimeout(() => { pair.remove(); countLeft(); }, r.set_error ? 5000 : 1500);
       } catch (err) {
         say(el, err.message, true);
       }

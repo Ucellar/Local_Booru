@@ -11,15 +11,25 @@ The owner (4.11.2026): the switch is there to see less of it, not to lock it awa
 the background (subscriptions, the grabber, downloads) goes on in every mode.  The mode is the viewer's choice, kept
 with the looks (``webui_prefs.json``: ``content_mode``) — the same in the program window and in a browser.  Only pages
 are hidden: the pictures and files themselves are served as before (a page of another part may show them).
+
+(v5.44.116; the review: the mode switched on the phone changed the program's window at home) The phone has a mode of
+its own (``phone_content_mode``; none — «ПК: …», «как на компьютере», its default: the computer's mode, as before).
+A request is the phone's (:func:`of_phone`) when it comes from the owner's phone, or is a page of the phone (``/m/…``)
+or a request of one; ``server._dispatch`` answers it inside :func:`answering`, and :func:`mode` gives the phone's mode
+there.
 """
 from __future__ import annotations
 
+import contextlib
 import re
+import threading
 from urllib.parse import parse_qs, urlparse
 
 from webui.html import esc
 
 MODES = ("sfw", "all", "nsfw")
+PHONE_FOLLOWS = "pc"            # (v5.44.116) the phone's choice «ПК: …»: the computer's mode (the phone's default)
+_ANSWERING = threading.local()  # (v5.44.116) is the request this thread answers the phone's (:func:`answering`)
 LABELS = {"sfw": "SFW", "all": "Всё", "nsfw": "NSFW"}
 TITLES = {"sfw": "SFW — без хентая: галерея и всё, что с ней связано, скрыты",
           "all": "Всё — показывать всё",
@@ -35,11 +45,56 @@ _NAMES = (("/grab", "Скачивание в галерею", "get"), ("/parser"
           ("/tags", "Теги галереи", "tags"))
 
 
-def mode() -> str:
-    """The mode now: "sfw", "all" or "nsfw"."""
+def mode(phone: bool | None = None) -> str:
+    """The mode now: "sfw", "all" or "nsfw" — (v5.44.116) of the phone for a request of the phone (:func:`answering`;
+    ``phone`` — asked for it or for the computer's whatever the request): its own choice, else the computer's."""
     from webui import prefs
-    value = str(prefs.load().get("content_mode") or "all")
+    stored = prefs.load()
+    if getattr(_ANSWERING, "phone", False) if phone is None else phone:
+        own = str(stored.get("phone_content_mode") or "")
+        if own in MODES:
+            return own
+    value = str(stored.get("content_mode") or "all")
     return value if value in MODES else "all"
+
+
+def phone_choice() -> str:
+    """(v5.44.116) The phone's own choice: "sfw", "all", "nsfw" — or "" («ПК: …» — the computer's mode)."""
+    from webui import prefs
+    own = str(prefs.load().get("phone_content_mode") or "")
+    return own if own in MODES else ""
+
+
+def _phone_path(path: str) -> bool:
+    return path == "/m" or path.startswith("/m/")
+
+
+def of_phone(req, admitted: "str | None" = None) -> bool:
+    """(v5.44.116) Is the request the phone's: the owner's phone (``phone_access.admit`` said «ok» — every request of
+    it), a page of the phone (``/m/…`` — opened on the computer too) or a request of such a page — its pictures and
+    questions (their Referer: the program's pages tell their address to the program itself — ``server``:
+    «Referrer-Policy: same-origin»), not a page of the computer opened from it."""
+    if admitted == "ok" or _phone_path(str(getattr(req, "path", "") or "")):
+        return True
+    headers = getattr(req, "headers", None) or {}
+    named = {str(k).lower(): str(v) for k, v in headers.items()
+             if str(k).lower() in ("referer", "host", "sec-fetch-mode")}
+    if named.get("sec-fetch-mode", "").strip().lower() == "navigate":
+        return False
+    came = urlparse(named.get("referer", ""))
+    return bool(came.netloc) and came.netloc.lower() == named.get("host", "").lower() and _phone_path(came.path)
+
+
+@contextlib.contextmanager
+def answering(phone: bool):
+    """(v5.44.116) The request this thread answers (``server._dispatch``) is the phone's or not: :func:`mode` inside
+    gives its mode."""
+    before = getattr(_ANSWERING, "phone", False)
+    _ANSWERING.phone = bool(phone)
+    try:
+        yield
+    finally:
+        _ANSWERING.phone = before
 
 
 def home(now: str | None = None) -> str:
@@ -191,18 +246,28 @@ def after_switch(address: str, now: str, settings: dict) -> str:
 
 
 def switch_mode(req):
+    """{mode, path — the page's address}: the computer's mode — (v5.44.116) or, switched on the phone (its request, a
+    page of the phone), the phone's own; «pc» there — «ПК: …», as on the computer (the phone's choice forgotten)."""
     from webui import prefs
     from webui.server import Response
     body = req.json()
     now = str(body.get("mode") or "")
-    if now not in MODES:
+    address = str(body.get("path") or "/")
+    phone = bool(getattr(_ANSWERING, "phone", False)) or _phone_path(urlparse(address).path or "/")
+    if phone and now == PHONE_FOLLOWS:
+        prefs.save({"phone_content_mode": ""})
+        now = mode(phone=True)                        # the computer's: where the page goes is by it
+    elif now not in MODES:
         return Response.json({"ok": False, "error": "Нет такого режима"}, 400)
-    prefs.save({"content_mode": now})
-    return Response.json({"ok": True, "mode": now, "go": after_switch(str(body.get("path") or "/"), now, req.settings)})
+    else:
+        prefs.save({"phone_content_mode": now} if phone else {"content_mode": now})
+    return Response.json({"ok": True, "mode": now, "go": after_switch(address, now, req.settings)})
 
 
 def set_mark(req):
-    """«Это хентай» / «Это не хентай» on a title's page: {kind: "manga" | "series" | "manhwa", id, hentai}."""
+    """«Это хентай» / «Это не хентай» on a title's page: {kind: "manga" | "series" | "manhwa", id, hentai}; ``go`` —
+    the list the title is hidden from in the mode now ((v5.44.122) the phone's mark — in the phone's mode, the phone's
+    list: ``phone.mark_box``)."""
     from core import content_marks as CM
     from webui.server import Response
     body = req.json()
@@ -224,6 +289,8 @@ def set_mark(req):
         back = "/videos"
     if item is None:
         return Response.json({"ok": False, "error": "Такого тайтла нет — возможно, папку переименовали"}, 404)
+    if getattr(_ANSWERING, "phone", False):
+        back = "/m" + back
     found = CM.mark(kind, item, bool(body.get("hentai")))
     return Response.json({"ok": True, "hentai": found.hentai, "by_hand": found.by_hand,
                           "go": "" if shows(found.hentai) else back})

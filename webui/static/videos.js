@@ -328,7 +328,7 @@
 
   // the title's ratings as YummyAnime has them now (its own people's first): «Оценки» of the series written then
   function showRatings(list) {
-    const facts = document.querySelector(".vhero .vfacts");
+    const facts = document.querySelector(".vhero .vfacts, .sv-hero .vfacts");      // (v5.44.121) the one page too
     if (!facts || !list.length) return;
     let dd = null;
     for (const dt of facts.querySelectorAll("dt")) if (dt.textContent.trim() === "Оценки") dd = dt.nextElementSibling;

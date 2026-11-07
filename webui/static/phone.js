@@ -44,13 +44,31 @@
     }, function () { throw new Error("Нет связи с компьютером"); });
   }
 
+  // (v5.44.116) the program's page that opened this one (the program tells its addresses only to itself —
+  // «Referrer-Policy: same-origin»), null — none
+  function pageBefore() {
+    try {
+      var from = new URL(document.referrer);
+      return from.origin === location.origin ? from : null;
+    } catch (e) { return null; }
+  }
+
+  // (v5.44.116) the page before this one in the history is the program's own (as booru.js on the computer)
+  function programBefore() {
+    if (history.length < 2) { return false; }
+    var nav = window.navigation;
+    if (nav && typeof nav.canGoBack === "boolean") { return nav.canGoBack; }
+    return !!pageBefore();
+  }
+
   // ── (v5.44.66) the computer's scripts on the phone's pages (manhwa.js): what booru.js gives them there ────────────
   if (!window.LocalBooru) {
     var actions = {};
     window.LocalBooru = {
       actions: actions,
       postJson: function (address, body) { return send(address, body); },
-      say: function (_el, text) { say(text); }
+      say: function (_el, text) { say(text); },
+      programBefore: programBefore                    // (v5.44.116) title.js, watch.js: «назад» of the bar
     };
     document.addEventListener("click", function (event) {
       var el = event.target.closest("[data-action]");
@@ -58,6 +76,18 @@
       event.preventDefault();
       actions[el.getAttribute("data-action")](el, event);
     });
+    // (v5.44.122) «Это хентай» / «Это не хентай» of a title (phone.mark_box; the computer's API): the page anew — or,
+    // hidden in the phone's mode now, its list
+    actions["content-mark"] = function (el) {
+      el.disabled = true;
+      send("/api/content-mark", {kind: el.getAttribute("data-kind"), id: el.getAttribute("data-id"),
+                                 hentai: el.getAttribute("data-value") === "hentai"}).then(function (data) {
+        if (data.go) { location.replace(data.go); } else { location.reload(); }
+      }, function (err) {
+        el.disabled = false;
+        say(err.message);
+      });
+    };
   }
 
   // the tabs of a title: a tool of one tab (the order of the chapters) only beside it
@@ -69,25 +99,32 @@
     });
   });
 
-  // the strip of the manhwa: the line of how much of the chapter at the top of the screen is read
-  var readLine = document.querySelector("[data-chapter-read]");
-  if (readLine) {
-    var drawn = false;
-    var measure = function () {
-      drawn = false;
-      var chapters = document.querySelectorAll(".mh-chapter[data-chapter]");
-      for (var i = 0; i < chapters.length; i += 1) {
-        var box = chapters[i].getBoundingClientRect();
-        if (box.bottom <= 0) { continue; }
-        var length = Math.max(1, box.height - window.innerHeight);
-        readLine.style.width = Math.max(0, Math.min(100, -box.top / length * 100)).toFixed(1) + "%";
-        return;
-      }
+  // ── (v5.44.120) ⬇ «Загрузки» of the bar: its number asked every few seconds while the page is seen (the page
+  // «Загрузки» itself sets it from its own state) ───────────────────────────────────────────────────────────────────
+  var badge = document.querySelector(".m-top [data-dl-badge]");
+  if (badge && !document.getElementById("downloads")) {
+    var badgeTimer = 0;
+    var badgeAsking = false;             // one question at a time: the page shown again while one is on its way
+    var badgeTick = function () {
+      clearTimeout(badgeTimer);
+      if (document.hidden || badgeAsking) { return; }
+      badgeAsking = true;
+      fetch("/api/downloads/count", {credentials: "same-origin", cache: "no-store"}).then(function (r) {
+        return r.ok ? r.json() : null;
+      }).then(function (data) {
+        if (!data) { return; }
+        var n = Number(data.count) || 0;
+        document.querySelectorAll("[data-dl-n]").forEach(function (pill) {
+          pill.textContent = n ? String(n) : "";
+          pill.hidden = !n;
+        });
+      }).catch(function () { /* the computer asleep: asked again */ }).then(function () {
+        badgeAsking = false;
+        if (!document.hidden) { badgeTimer = setTimeout(badgeTick, 6000); }
+      });
     };
-    window.addEventListener("scroll", function () {
-      if (!drawn) { drawn = true; requestAnimationFrame(measure); }
-    }, {passive: true});
-    window.addEventListener("load", measure);
+    badgeTimer = setTimeout(badgeTick, 6000);
+    document.addEventListener("visibilitychange", function () { if (!document.hidden) { badgeTick(); } });
   }
 
   // ── «SFW / Всё / NSFW» ────────────────────────────────────────────────────────────────────────────────────────
@@ -361,183 +398,6 @@
     });
   });
 
-  // ── (v5.44.67) the reader of the manga: a page over the whole screen, or the pages one under another ──────────
-  var reader = document.querySelector("[data-manga-reader]");
-  if (reader) {
-    var mangaId = reader.getAttribute("data-id");
-    var total = Number(reader.getAttribute("data-total")) || 1;
-    var at = Number(reader.getAttribute("data-page")) || 1;
-    var picture = reader.querySelector("[data-mr-img]");
-    var paged = reader.querySelector("[data-mr-stage]");
-    var strip = reader.querySelector("[data-mr-strip]");
-    var line = reader.querySelector("[data-mr-range]");
-    var atText = reader.querySelector("[data-mr-at]");
-    var ending = reader.querySelector("[data-mr-end]");
-    var rtlButton = reader.querySelector("[data-mr-rtl]");
-    var stripButton = reader.querySelector("[data-mr-strip-mode]");
-    var named = document.title.split(" — ").slice(1).join(" — ");
-    var local = function (key, value) {
-      try {
-        if (value === undefined) { return localStorage.getItem(key); }
-        localStorage.setItem(key, value);
-      } catch (e) { /* a private window: not remembered */ }
-      return null;
-    };
-    var rtl = local("m-manga-rtl") === "1";
-    var lined = false;
-    var keepTimer = 0;
-    var pageUrl = function (n) { return "/manga/page/" + mangaId + "/" + n; };
-    var keep = function (n) {
-      clearTimeout(keepTimer);
-      keepTimer = setTimeout(function () {
-        send("/api/manga/progress", {id: mangaId, page: n}).catch(function () { /* the next turn tries again */ });
-      }, 500);
-    };
-    var mark = function (n) {
-      at = n;
-      atText.textContent = String(n);
-      line.value = String(n);
-      document.title = n + "/" + total + (named ? " — " + named : "");
-      history.replaceState(history.state, "", "/m/manga/r/" + mangaId + (n > 1 ? "?p=" + n : ""));
-      keep(n);
-    };
-    var preload = function (n) {
-      if (n >= 1 && n <= total) { new Image().src = pageUrl(n); }
-    };
-    var show = function (n) {
-      if (n < 1) { return; }
-      if (n > total) {                                    // past the last page: the next chapter or the title
-        ending.hidden = false;
-        reader.classList.remove("m-mr-bare");
-        return;
-      }
-      ending.hidden = true;
-      if (lined) {
-        var target = strip.querySelector('[data-n="' + n + '"]');
-        if (target) { target.scrollIntoView(); }
-        mark(n);
-        return;
-      }
-      picture.src = pageUrl(n);
-      picture.alt = "Страница " + n;
-      mark(n);
-      preload(n + 1);
-      preload(n + 2);
-      preload(n - 1);
-    };
-    var turn = function (forward) {
-      reader.classList.add("m-mr-bare");
-      show(at + (forward ? 1 : -1));
-    };
-    var paint = function () {
-      rtlButton.setAttribute("aria-pressed", rtl ? "true" : "false");
-      reader.classList.toggle("m-mr-rtl", rtl);
-      reader.querySelector('[data-mr-zone="left"]').setAttribute("aria-label",
-        rtl ? "Следующая страница" : "Предыдущая страница");
-      reader.querySelector('[data-mr-zone="right"]').setAttribute("aria-label",
-        rtl ? "Предыдущая страница" : "Следующая страница");
-    };
-
-    reader.addEventListener("click", function (event) {
-      var zone = event.target.closest("[data-mr-zone]");
-      if (zone) {
-        event.preventDefault();
-        turn((zone.getAttribute("data-mr-zone") === "right") !== rtl);
-        return;
-      }
-      if (event.target.closest("[data-mr-back]")) {
-        ending.hidden = true;
-        return;
-      }
-      if (event.target === picture || event.target === paged || event.target.closest("[data-mr-strip]")) {
-        reader.classList.toggle("m-mr-bare");
-      }
-    });
-    document.addEventListener("keydown", function (event) {
-      if (event.target.closest("input, select, textarea") || event.altKey || event.ctrlKey || event.metaKey) { return; }
-      if (event.key === "ArrowRight") { turn(!rtl); }
-      if (event.key === "ArrowLeft") { turn(rtl); }
-    });
-    line.addEventListener("input", function () { atText.textContent = line.value; });
-    line.addEventListener("change", function () { show(Number(line.value)); });
-    rtlButton.addEventListener("click", function () {
-      rtl = !rtl;
-      local("m-manga-rtl", rtl ? "1" : "0");
-      paint();
-    });
-
-    // a swipe: in the reading direction — the next page
-    var swipe = null;
-    paged.addEventListener("touchstart", function (event) {
-      swipe = null;
-      if (event.touches.length !== 1 || (window.visualViewport && window.visualViewport.scale > 1.02)) { return; }
-      swipe = {x: event.touches[0].clientX, y: event.touches[0].clientY, dx: 0, sideways: null};
-    }, {passive: true});
-    paged.addEventListener("touchmove", function (event) {
-      if (!swipe) { return; }
-      var dx = event.touches[0].clientX - swipe.x;
-      var dy = event.touches[0].clientY - swipe.y;
-      if (swipe.sideways === null && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
-        swipe.sideways = Math.abs(dx) > Math.abs(dy) * 1.2;
-      }
-      if (swipe.sideways) {
-        swipe.dx = dx;
-        if (!reduced) { picture.style.transform = "translateX(" + dx / 2 + "px)"; }
-      }
-    }, {passive: true});
-    paged.addEventListener("touchend", function () {
-      var was = swipe;
-      swipe = null;
-      picture.style.transform = "";
-      if (!was || !was.sideways || Math.abs(was.dx) < 60) { return; }
-      turn((was.dx < 0) !== rtl);
-    });
-    paged.addEventListener("touchcancel", function () { swipe = null; picture.style.transform = ""; });
-
-    // «Лентой»: the pages one under another; the page at the top of the screen is the page open
-    var watcher = null;
-    var fillStrip = function () {
-      if (strip.childElementCount) { return; }
-      for (var n = 1; n <= total; n += 1) {
-        var img = document.createElement("img");
-        img.src = pageUrl(n);
-        img.alt = "Страница " + n;
-        img.loading = n < at - 1 || n > at + 2 ? "lazy" : "eager";
-        img.decoding = "async";
-        img.setAttribute("data-n", String(n));
-        strip.appendChild(img);
-      }
-    };
-    var setLined = function (on) {
-      lined = on;
-      local("m-manga-strip", on ? "1" : "0");
-      stripButton.setAttribute("aria-pressed", on ? "true" : "false");
-      reader.classList.toggle("m-mr-lined", on);
-      paged.hidden = on;
-      strip.hidden = !on;
-      if (on) {
-        fillStrip();
-        var target = strip.querySelector('[data-n="' + at + '"]');
-        if (target) { target.scrollIntoView(); }
-        if (!watcher && "IntersectionObserver" in window) {
-          watcher = new IntersectionObserver(function (entries) {
-            entries.forEach(function (entry) {
-              if (entry.isIntersecting && lined) { mark(Number(entry.target.getAttribute("data-n"))); }
-            });
-          }, {rootMargin: "0px 0px -70% 0px"});
-          strip.querySelectorAll("img").forEach(function (img) { watcher.observe(img); });
-        }
-      } else {
-        window.scrollTo(0, 0);
-        show(at);
-      }
-    };
-    stripButton.addEventListener("click", function () { setLined(!lined); });
-
-    paint();
-    preload(at + 1);
-    if (local("m-manga-strip") === "1") { setLined(true); }
-  }
   // ── (v5.44.68) the episodes of a series: its groups (voice-overs, seasons) as tabs ───────────────────────────────
   document.addEventListener("click", function (event) {
     var tab = event.target.closest("[data-ep-group]");
@@ -878,4 +738,25 @@
       };
     });
   }
+
+  // ── (v5.44.116) «назад» of the bar (the review: on a title's or a series' page it led to the start of the section —
+  // the list's search and place lost): the page before of the same section (the list as it was searched, a series, a
+  // title) — back in the history, the phone keeps it as it was left; else — the link.  The gallery's picture, the
+  // title's page and the series' page of «Лента» go back their own ways first (their handlers: defaultPrevented).
+  function sectionOf(path) {
+    var found = /^\/m\/([a-z]+)/.exec(path || "");
+    return found ? (found[1] === "post" ? "posts" : found[1]) : "";
+  }
+
+  document.addEventListener("click", function (event) {
+    var back = event.target.closest("a[data-back]");
+    if (!back || event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey ||
+        event.altKey || history.length < 2) { return; }
+    var from = pageBefore();
+    var to = new URL(back.getAttribute("href") || "/m/", location.href);
+    if (from && sectionOf(from.pathname) && sectionOf(from.pathname) === sectionOf(to.pathname)) {
+      event.preventDefault();
+      history.back();
+    }
+  });
 }());

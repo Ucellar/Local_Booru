@@ -142,7 +142,8 @@ def family(settings: dict, site: str, parent: int, *, children_only: bool = Fals
     the children only is asked again whole when the whole is wanted)."""
     from core.grabber.search import searchable_sites
     if site not in {host for host, _label in searchable_sites(settings)}:
-        raise FamilyError(f"{site} не в таблице сайтов граббера или выключен — недостающие части не спрашиваются")
+        raise FamilyError(f"{site} нет среди сайтов «Галереи (booru)» или он выключен — недостающие части не "
+                          "спрашиваются")
     key = family_key(site, parent)
     now = time.time()
     with _LOCK:
@@ -370,7 +371,7 @@ class SetParts:
         from core import set_seek
         data = self.plan["data"]
         if not self.site:
-            self.error = "у карточек сборки нет постов на сайтах, которые ищет граббер, — спрашивать нечего"
+            self.error = "у карточек сборки нет постов на сайтах, где ищет «Галерея (booru)», — спрашивать нечего"
             return
         own = {p.id: p for p in data["posts"] if p.site == self.site}       # the сборка's own posts on the site
         asc, no_video = _ASC.get(self.engine, ""), _NO_VIDEO.get(self.engine, "")
@@ -391,7 +392,8 @@ class SetParts:
             family = Family(self.settings, self.site, self.parent)
             self._families.append(family)
         elif self.kind == "parent" and self.plan.get("root"):
-            self.notes.append(f"{self.plan['root'][0]} не в таблице сайтов граббера или выключен — семья не спрашивается")
+            self.notes.append(f"{self.plan['root'][0]} нет среди сайтов «Галереи (booru)» или он выключен — семья не "
+                              "спрашивается")
         lanes = list(walk_lanes.values()) + [lane for _key, lane in work_lanes]
         try:
             with ThreadPoolExecutor(max_workers=6, thread_name_prefix="set-parts") as pool:

@@ -1,0 +1,161 @@
+/* Local Booru «Скачать → Загрузки» (v5.44.120, webui/pages/downloads.py, downloads.js): every download in one place —
+   «Идёт сейчас», «Очередь», «Готово», «Сама программа» — as the owner's approved mockup C has it.  Every look gets its
+   colours from its own tokens (--panel, --accent, --text…); every rule starts with .dl: the looks style button, input
+   and a:hover by their tags, a class alone would lose to «button:hover». */
+.dl {
+  --dl-ok: var(--tag-character, #3f9d4a);
+  --dl-warn: var(--warn, #c98a1b);
+  --dl-line: color-mix(in srgb, var(--text) 14%, transparent);
+  max-width: 1320px; margin: 0 auto; padding: 22px 24px 48px; box-sizing: border-box; color: var(--text);
+}
+.dl [hidden] { display: none !important; }
+.dl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 24px; margin: 0 0 18px; }
+.dl .dl-head-text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; min-width: 0; }
+.dl .dl-head h1 { margin: 0; font: 800 28px/1.2 var(--font-head, inherit); color: var(--text); }
+.dl .dl-count { color: var(--muted); font-size: 14px; }
+.dl .dl-head-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-left: auto; }
+
+/* buttons */
+.dl .dl-btn { display: inline-flex; align-items: center; justify-content: flex-start; gap: 7px; min-height: 34px;
+  padding: 6px 14px; box-sizing: border-box; border: 1px solid var(--border); border-radius: calc(var(--radius) + 5px);
+  background: var(--panel); color: var(--text); font: inherit; font-size: 13px; font-weight: 600; line-height: 1.2;
+  white-space: nowrap; text-decoration: none; cursor: pointer; box-shadow: none; }
+.dl .dl-btn:hover { border-color: var(--accent); background: var(--panel); color: var(--text); text-decoration: none; }
+.dl .dl-btn.big { min-height: 40px; padding: 8px 18px; font-size: 14px; }
+.dl .dl-btn.danger { color: var(--danger); }
+.dl .dl-btn.danger:hover { color: var(--danger); }
+.dl .dl-btn.danger.confirming, .dl .dl-btn.danger.confirming:hover { border-color: var(--danger); background: var(--danger);
+  color: #ffffff; white-space: normal; }
+.dl .dl-btn:disabled { opacity: 0.55; cursor: default; }
+.dl .dl-link { display: inline; min-height: 0; padding: 0; border: 0; background: none; box-shadow: none;
+  color: var(--accent-text, var(--accent)); font: inherit; font-size: 13px; cursor: pointer; text-decoration: none; }
+.dl .dl-link:hover { background: none; color: var(--accent-text, var(--accent)); text-decoration: underline; }
+.dl .dl-icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px;
+  min-height: 0; padding: 0; border: 1px solid var(--border); border-radius: calc(var(--radius) + 3px);
+  background: transparent; box-shadow: none; color: var(--text); cursor: pointer; }
+.dl .dl-icon-btn:hover { border-color: var(--accent); background: transparent; color: var(--text); }
+.dl .dl-svg { flex: none; }
+
+/* the board: the main column, «Сама программа» beside it */
+.dl .dl-board { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 390px); gap: 18px; align-items: start; }
+.dl .dl-main, .dl .dl-side { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.dl .dl-panel { min-width: 0; padding: 16px 18px 18px; border: 1px solid var(--border); border-radius: calc(var(--radius) + 9px);
+  background: var(--panel); }
+.dl .dl-panel > h2 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 12px;
+  color: var(--text); font: bold 17px/1.3 var(--font-head, inherit); }
+.dl .dl-panel > h2 span { color: var(--muted); font-weight: 500; }
+.dl .dl-panel > h2 small { color: var(--muted); font-size: 12.5px; font-weight: 400; }
+.dl .dl-empty { margin: 0; color: var(--muted); font-size: 13px; }
+.dl .dl-sfw { margin: 0 0 14px; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--panel); color: var(--text);
+  font-size: 13px; }
+.dl :is(.dl-jobs, .dl-queue, .dl-done, .dl-duties) { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+
+/* a download going */
+.dl .dl-job { display: grid; grid-template-columns: 54px minmax(0, 1fr) 200px; gap: 14px; padding: 14px 0;
+  border-top: 1px solid var(--dl-line); }
+.dl .dl-job:first-child { border-top: 0; padding-top: 2px; }
+.dl .dl-pic { position: relative; display: grid; place-items: center; width: 54px; height: 78px; overflow: hidden;
+  border-radius: calc(var(--radius) + 3px); background: var(--panel-2); color: var(--muted); }
+.dl .dl-pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.dl .dl-letter { font: bold 22px/1 var(--font-head, inherit); }
+.dl .dl-pic.has-picture .dl-letter { visibility: hidden; }
+.dl .dl-job.hid .dl-pic { width: 40px; height: 56px; background: repeating-linear-gradient(135deg, var(--panel-2) 0 6px,
+  color-mix(in srgb, var(--panel-2) 60%, var(--panel)) 6px 12px); }
+.dl .dl-job.hid .dl-pic::after { content: "18+"; color: var(--muted); font-size: 10.5px; font-weight: 700; }
+.dl .dl-body { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.dl .dl-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; }
+.dl .dl-kind { flex: none; padding: 0 7px; border-radius: calc(var(--radius) + 1px); background: var(--panel-2); color: var(--text);
+  font-size: 11.5px; font-weight: 700; line-height: 19px; }
+.dl .dl-title { min-width: 0; max-width: 100%; overflow: hidden; color: var(--text); font-size: 15px; white-space: nowrap;
+  text-overflow: ellipsis; }
+.dl .dl-dest { color: var(--muted); font-size: 12px; }
+.dl .dl-text { margin: 0; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dl .dl-sub { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.dl .dl-bar { display: block; height: 6px; overflow: hidden; border-radius: 3px; background: color-mix(in srgb, var(--text) 13%, transparent); }
+.dl .dl-bar i { display: block; height: 100%; width: 2%; background: var(--accent); transition: width 0.4s; }
+.dl .dl-job[data-state="paused"] .dl-bar i { background: var(--dl-warn); }
+.dl .dl-job[data-state="paused"] .dl-text, .dl .dl-job[data-state="restoring"] .dl-text { color: var(--muted); }
+.dl .dl-tools { display: flex; flex-direction: column; align-items: stretch; gap: 6px; min-width: 0; }
+.dl .dl-tools .dl-btn { width: 100%; }
+.dl .dl-more-tools { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 2px 0 0 2px; }
+.dl .dl-log-box { margin: 6px 0 0; }
+.dl .dl-log { max-height: 260px; margin: 0; overflow: auto; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 3px); background: var(--field-bg, var(--bg)); color: var(--text);
+  font: 12px/1.5 Consolas, "DejaVu Sans Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dl .dl-log-tools { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 0; font-size: 12px; }
+.dl .dl-said { color: var(--muted); font-size: 12px; }
+
+/* the queue */
+.dl .dl-q { display: grid; grid-template-columns: 24px auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px;
+  padding: 9px 0; border-top: 1px solid var(--dl-line); font-size: 13.5px; }
+.dl .dl-q:first-child { border-top: 0; padding-top: 0; }
+.dl .dl-qn { color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+.dl .dl-q-main { min-width: 0; overflow-wrap: anywhere; }
+.dl .dl-q-main b { color: var(--text); }
+.dl .dl-q-main .dl-kind-in { display: none; margin-right: 8px; }
+.dl .dl-q-what { color: var(--muted); font-size: 12.5px; }
+.dl .dl-move { display: inline-flex; gap: 4px; }
+.dl .dl-off { visibility: hidden; }
+
+/* «Готово» */
+.dl .dl-res { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 4px 12px; padding: 12px 0;
+  border-top: 1px solid var(--dl-line); }
+.dl .dl-res:first-child { border-top: 0; padding-top: 0; }
+.dl .dl-sign { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--panel-2);
+  color: var(--muted); }
+.dl .dl-res.ok .dl-sign { background: color-mix(in srgb, var(--dl-ok) 20%, transparent); color: var(--dl-ok); }
+.dl .dl-res:is(.part, .fail) .dl-sign { background: color-mix(in srgb, var(--dl-warn) 20%, transparent); color: var(--dl-warn); }
+.dl .dl-res-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.dl .dl-res-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.dl .dl-res-top b { color: var(--text); overflow-wrap: anywhere; }
+.dl .dl-res-top time { color: var(--muted); font-size: 12px; }
+.dl .dl-res p { margin: 0; font-size: 13px; }
+.dl .dl-res ul { margin: 2px 0 0; padding-left: 18px; color: var(--text); font-size: 12.5px; }
+.dl .dl-res-tools { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; gap: 8px 14px;
+  max-width: 300px; }
+.dl .dl-more { margin-top: 12px; }
+
+/* «Сама программа» */
+.dl .dl-lead { margin: -4px 0 12px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.dl .dl-duty { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px; padding: 12px 0; border-top: 1px solid var(--dl-line); }
+.dl .dl-duty:first-child { border-top: 0; padding-top: 0; }
+.dl .dl-duty input.switch { margin-top: 2px; }
+.dl .dl-duty .dl-select { grid-column: 1 / -1; justify-self: start; max-width: 100%; order: 2; font: inherit; font-size: 13px;
+  padding: 3px 6px; color: var(--text); background: var(--field-bg, var(--bg)); border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px); }
+.dl .dl-duty-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dl .dl-duty:has(.dl-select) .dl-duty-body, .dl .dl-duty:has(.dl-sw-none) .dl-duty-body { grid-column: 1 / -1; }
+.dl .dl-duty b { color: var(--text); font-size: 14px; }
+.dl .dl-duty p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.dl .dl-state { display: flex; align-items: flex-start; gap: 7px; margin-top: 4px; color: var(--text); font-size: 12.5px; }
+.dl .dl-dot { flex: none; width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--muted); }
+.dl .dl-duty[data-state="running"] .dl-dot { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+.dl .dl-duty[data-state="done"] .dl-dot { background: var(--dl-ok); }
+.dl .dl-duty[data-state="off"] .dl-state, .dl .dl-duty[data-state="off"] b { color: var(--muted); }
+.dl .dl-duty .dl-bar { height: 4px; margin-top: 6px; }
+.dl .dl-duty .dl-link { align-self: flex-start; margin-top: 4px; }
+.dl .dl-sw-none { display: none; }
+.dl .dl-foot { margin: 12px 0 0; padding-top: 12px; border-top: 1px solid var(--dl-line); color: var(--muted); font-size: 12px;
+  line-height: 1.45; }
+
+/* «Win98»: raised windows and square corners, as the tool pages (tools.css) */
+:root[data-skin="win98"] .dl .dl-panel { border: 0; border-radius: 0; box-shadow: var(--raised); }
+:root[data-skin="win98"] .dl :is(.dl-btn, .dl-icon-btn, .dl-pic, .dl-kind, .dl-log, .dl-select) { border-radius: 0; }
+
+@media (max-width: 1100px) {
+  .dl .dl-board { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .dl { padding: 16px 12px 40px; }
+  .dl .dl-head-tools { margin-left: 0; }
+  .dl .dl-job { grid-template-columns: 44px minmax(0, 1fr); }
+  .dl .dl-pic { width: 44px; height: 62px; }
+  .dl .dl-tools { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
+  .dl .dl-tools .dl-btn { width: auto; }
+  .dl .dl-q { grid-template-columns: 20px minmax(0, 1fr) auto auto; }
+  .dl .dl-q > .dl-kind { display: none; }
+  .dl .dl-q-main .dl-kind-in { display: inline; }
+  .dl .dl-res { grid-template-columns: 26px minmax(0, 1fr); }
+  .dl .dl-res-tools { grid-column: 2; justify-content: flex-start; max-width: none; }
+}
+@media (prefers-reduced-motion: reduce) { .dl .dl-bar i { transition: none; } }

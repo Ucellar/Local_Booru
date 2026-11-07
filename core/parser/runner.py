@@ -74,6 +74,10 @@ class ParserRunner:
         self._engine: ParserEngine | None = None      # the run going now (``site_again``)
         self._http: HttpClient | None = None
         self._again_lock = threading.Lock()
+        self._manga = None                    # (v5.44.125) the manga of the folder (core/parser_manga.RunWatch)
+        self._total = 0                       # files of the run (a folder found «not a manga» adds its pages)
+        self._next_index = 0
+        self._late_filter = None              # what ``collect`` leaves out, for the files that join the run later
 
     # ── control (called from the UI thread) ─────────────────────────────────
     def stop(self) -> None:
@@ -103,22 +107,46 @@ class ParserRunner:
     # ── input ───────────────────────────────────────────────────────────────
     def _without_manga(self, root: Path, files: list) -> list:
         """(v5.44.84) The folders of manga and manhwa in the parser's folder (``core/manga_detect.py``: pages named by
-        numbers, chapters, ComicInfo.xml) are not sent to the booru sites — «Скачать → Из архива» finds out what they
-        are (the owner: «парсер должен проверить эта папка манга если да то пытаться найти что это за манга а если нет
-        то просто пропарсить через обычные боору»)."""
-        from core import manga_detect
+        numbers, chapters, ComicInfo.xml) are not sent to the booru sites as they are.  (v5.44.125) «Манга через
+        парсер» (``core/parser_manga.py``): a folder confirmed a manga — to «Манга», never to the sites; one found «not a
+        manga» — parsed as before (and one сборка of the gallery); one not looked at yet — held back and checked beside
+        the run (``RunWatch``: its pages join the run when it is found «not a manga»); one waiting for SauceNAO —
+        held back, the run does not wait for it."""
+        from core import parser_manga
         from core.manhwa_download import roots
-        libraries = tuple(roots(self.settings).values())          # the program's own manga and manhwa
+        libraries = tuple(r for r in (*roots(self.settings).values(), str(self.settings.get("video_root") or ""))
+                          if r)                                   # the program's own manga, manhwa, videos
         try:
-            kept, titles = manga_detect.split(root, files, libraries)
+            watch = parser_manga.for_run(self.settings, root, files, libraries, log=self.log)
         except OSError as exc:                        # a folder that went away while it was looked at: all parsed
             self.log(f"  манга в папке не проверена: {exc}")
             return files
-        if len(kept) < len(files):
-            names = ", ".join(f"«{Path(t.path).name}»" for t in list(titles.values())[:5])
-            self.log(f"МАНГА И МАНХВА: {len(files) - len(kept)} страниц не на booru-сайты — тайтлы узнаёт «Скачать → "
-                     f"Из архива»" + (f" ({names}{' …' if len(titles) > 5 else ''})" if names else ""))
-        return kept
+        self._manga = watch
+        return watch.kept
+
+    def _late_jobs(self) -> list:
+        """(v5.44.125) The pages of a folder the manga watch found «not a manga» meanwhile — jobs of this run."""
+        watch = self._manga
+        if watch is None:
+            return []
+        paths = watch.take()
+        if not paths:
+            return []
+        keep = self._late_filter or (lambda p: True)
+        jobs = []
+        for p in sorted(set(paths), key=lambda x: str(x).lower()):
+            if not keep(Path(p)):
+                continue
+            self._next_index += 1
+            jobs.append(FileJob(path=Path(p), index=self._next_index, original_path=str(p)))
+        if jobs:
+            self._total += len(jobs)
+            self.progress(self._done, self._total)
+        return jobs
+
+    def _manga_busy(self) -> bool:
+        watch = self._manga
+        return watch is not None and watch.busy() and not self.stopped()
 
     def collect(self) -> list:
         s = self.settings
@@ -154,11 +182,18 @@ class ParserRunner:
             files = [p for p in files if out_base not in p.resolve().parents]
             if before - len(files):
                 self.log(f"  пропущено файлов из рабочей библиотеки (output): {before - len(files)}")
-        if s.get("skip_copy_suffix_files", True):
+        copy_suffix = bool(s.get("skip_copy_suffix_files", True))
+        if copy_suffix:
             before = len(files)
             files = [p for p in files if not has_copy_suffix(p)]
             if before - len(files):
                 self.log(f"  пропущено копий вида «имя (1).jpg»: {before - len(files)}")
+
+        def keep(p: Path) -> bool:                    # (v5.44.125) the same for the pages that join the run later
+            if not scanning_output and not manifest and out_base in p.resolve().parents:
+                return False
+            return not (copy_suffix and has_copy_suffix(p))
+        self._late_filter = keep
         limit = int(s.get("limit_files") or 0)
         if limit > 0:
             files = files[:limit]
@@ -168,6 +203,7 @@ class ParserRunner:
             jobs.append(FileJob(path=p, index=i,
                                 original_path=str(entry.get("original_path") or p),
                                 existing_media=str(entry.get("media_path") or "")))
+        self._next_index = len(jobs)
         return self._adding_order(jobs)
 
     def _adding_order(self, jobs: list) -> list:
@@ -207,7 +243,8 @@ class ParserRunner:
         if not self._wait_for_database():
             return {"stopped": True}
         jobs = self.collect()
-        if not jobs:
+        watch = self._manga
+        if not jobs and not (watch is not None and (watch.todo or watch.places)):
             self.log("НЕЧЕГО ПАРСИТЬ")
             return {"total": 0}
         if not self._disk_ok():
@@ -243,7 +280,10 @@ class ParserRunner:
         self.counts = counts                # read by pages that show the run (core/parser/jobs.py)
         self._done = 0
         total = len(jobs)
+        self._total = total
         self.progress(0, total)
+        if watch is not None:               # (v5.44.125) the manga of the folder, checked beside the files
+            watch.start(engine, http, runner_stopped=self.stopped)
         try:
             # reading and writing on ``workers`` threads, the reads first (core/parser/pool.py); the stages after the
             # sites ask the sites again — on threads of their own, so that waiting for a site holds no read or write
@@ -259,12 +299,20 @@ class ParserRunner:
                     counts["deferred"] += 1
                     self._count(total)
         finally:
+            if watch is not None:           # the checks it has not got to — the background goes on
+                watch.stop()
+                watch.join(30.0)
             self._engine = None
             site_pool.shutdown(wait=True, cancel_futures=True)
             http.close_all()
-        summary = dict(counts, total=total, seconds=int(time.time() - started), stopped=self.stopped())
+        summary = dict(counts, total=self._total, seconds=int(time.time() - started), stopped=self.stopped())
         self._log_summary(summary)
         self._log_switched_off(list(sites) + list(services), sent_to_nomatch=counts.get("nomatch", 0))
+        if watch is not None and not self.stopped():
+            try:
+                watch.finish()              # the folders found «not a manga»: their сборки of the gallery
+            except Exception as exc:        # the сборки are built by the background as well
+                self.log(f"  сборки папок не собраны: {type(exc).__name__}: {exc}")
         return summary
 
     def _pass(self, engine: ParserEngine, jobs: list, pools: tuple, workers: int, counts: Counter,
@@ -405,6 +453,17 @@ class ParserRunner:
                        and not self.stopped() and not self._pause.is_set()):
                     job = next(todo, None)
                     if job is None:
+                        late = self._late_jobs()      # (v5.44.125) a folder found «not a manga» joins the run
+                        if late:
+                            todo = iter(late)
+                            flow["unread"] += len(late)
+                            files.unread = flow["unread"]
+                            total = self._total
+                            continue
+                        if self._manga_busy():        # its manga are still being checked: more may come
+                            if not reading and not open_files and not tasks:
+                                self._manga.files_done()      # (the run's own files are done: said once)
+                            break
                         exhausted = True
                         break
                     reading += 1
@@ -666,7 +725,7 @@ class ParserRunner:
 
     def _count(self, total: int) -> None:
         self._done += 1
-        self.progress(self._done, total)
+        self.progress(self._done, max(int(total), self._total))
 
     def _tell(self, job: FileJob, result: FileResult) -> None:
         """A file's answer to whoever shows the run; a fault there never stops the run."""

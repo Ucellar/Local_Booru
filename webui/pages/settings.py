@@ -104,9 +104,11 @@ GALLERY = Section("gallery", "Галерея", fields=(
           "загрузившего и комиксы; сборки, которые вы меняли или собрали сами, она не трогает",
           default=True),
     Field("comic_manga_auto", "bool", "Комиксы и манга — в папку манги",
-          "комикс галереи от 15 страниц (пул e621 или сборка комикса) и манга из папки парсера копируются в папку "
-          "манги, карточки — в корзину («перенесено в мангу», оттуда их можно вернуть); файлы папки парсера остаются "
-          "на месте", default=True),
+          "только то, что подтвердил сайт манги (тайтл с теми же страницами, ComicInfo.xml или ссылка): комикс "
+          "галереи от 15 страниц (пул e621 или сборка комикса) — копией в папку манги, его карточки — в корзину "
+          "(«перенесено в мангу», оттуда их можно вернуть); манга из папки парсера — копией, её файлы и карточки "
+          "остаются на месте (блок «Манга в исходной папке» на странице «Парсер»); что не подтвердилось — остаётся "
+          "сборкой галереи. Пул e621 сам по себе мангу не подтверждает", default=True),
     Field("card_sets_ask_sites", "bool", "Узнать у сайтов про уже скачанное",
           "один раз, в фоне, пачками: кто залил пост и его родитель — для карточек, скачанных до версии 5.21; "
           "ответ запоминается навсегда", default=True),
@@ -155,14 +157,15 @@ THUMBS = Section("thumbs", "Превью", fields=(
 
 DOWNLOAD = Section("download", "Скачивание", fields=(
     Field("session_media_downloads_default", "bool", "Скачивать новые файлы",
-          "подписки, граббер, расширение; выключено — программа работает только с тем, что уже есть", default=True),
+          "подписки, «Галерея (booru)», расширение; выключено — программа работает только с тем, что уже есть",
+          default=True),
     Field("session_media_downloads_prompt", "bool", "Спрашивать об этом при каждом запуске",
           "вопрос «Разрешить скачивание новых медиа в этой сессии?»", default=False),
     Field("large_download_warning_count", "int", "Спрашивать, если за раз больше", default=1000, lo=1, hi=1_000_000,
-          suffix="файлов", hint="подписки и граббер"),
+          suffix="файлов", hint="подписки и «Галерея (booru)»"),
     Field("disk_free_reserve_gb", "float", "Оставлять свободными на диске", default=2.0, lo=0, hi=1000,
           suffix="ГБ", hint="загрузка и копии не займут последнее место; 0 — без запаса"),
-    Field("grabber_cache_limit_mb", "int", "Кэш картинок граббера", default=200, lo=0, hi=10_000, suffix="МБ",
+    Field("grabber_cache_limit_mb", "int", "Кэш картинок «Галереи (booru)»", default=200, lo=0, hi=10_000, suffix="МБ",
           hint="0 — по умолчанию, 200 МБ"),
     Field("automatic_quality_upgrade_enabled", "bool", "Ставить оригинал вместо уменьшенной копии",
           "файл карточки — уменьшенная копия с сайта (sample_…, thumbnail_…): программа сама, в фоне, скачивает "
@@ -216,7 +219,24 @@ DEVELOPER = Section("dev", "Для разработчика", fields=(
           hint="«Медленные операции» на странице «Диагностика»"),
 ))
 
-SECTIONS = (WINDOW, GALLERY, VIDEOS, LIBRARY, TAGS, BACKUP, THUMBS, DOWNLOAD, COMPANION, VISUAL, DATABASE, DEVELOPER)
+# (v5.44.116) What the program does with manga and manhwa by itself — normal fields of «Сайты манги» (the owner's
+# review): the nightly round of new chapters, and «Из архива»'s switches (they were on its page alone)
+MANGA_AUTO = Section("manga_auto", "Что программа делает сама", fields=(
+    Field("manhwa_watch_auto", "bool", "Новые главы — скачивать самой",
+          "раз в сутки, ночью (компьютер был выключен ночью — после запуска): новые бесплатные главы тайтлов манги и "
+          "манхвы, которые скачала программа; у каждого тайтла — ещё и своя галочка на его странице. «Остановить» в "
+          "«Загрузках» — до следующей ночи", default=True),
+    Field("manga_archive_auto", "bool", "Узнавать тайтлы «Из архива» самой, в фоне",
+          "тайтлы папок манги и манхвы программы в папке парсера и копии манги из папки парсера: по ссылке на сайт в "
+          "файлах папки, по названию из файлов, по имени папки; узнанный тайтл получает обложку, описание и главы, "
+          "которых в папке нет", default=True),
+    Field("manga_archive_pictures", "bool", "…и по картинкам (SauceNAO)",
+          "когда не помогли файлы и названия; поисков по картинкам — не больше 40 в день, вместе с проверкой манги "
+          "из папки парсера", default=True),
+))
+
+SECTIONS = (WINDOW, GALLERY, VIDEOS, LIBRARY, TAGS, BACKUP, THUMBS, DOWNLOAD, COMPANION, MANGA_AUTO, VISUAL, DATABASE,
+            DEVELOPER)
 BY_ID = {s.id: s for s in SECTIONS}
 
 
@@ -360,14 +380,18 @@ def _comic_extra(settings: dict) -> str:
         st = {"comics": 0, "copies": 0, "waiting": 0, "looked_at": 0, "due": False, "no_room": ""}
     parts = [f"в папке манги комиксов из галереи — {st['comics']}, манги из папки парсера — {st['copies']}"]
     if st["waiting"]:
-        parts.append(f"ждут копирования: {st['waiting']}")
+        parts.append(f"в папке парсера ждут проверки: {st['waiting']}")       # (v5.44.125) or the sites of manga
     if st["due"]:
         parts.append("папку парсера программа пересмотрит в ближайшие минуты")
     elif st["looked_at"]:
         parts.append(f"папка парсера просмотрена {_day(st['looked_at'])}")
     room = f'<p class="hint warn">{esc(st["no_room"])}</p>' if st["no_room"] else ""
-    return (f'<p class="hint">Комиксы и манга: {esc("; ".join(parts))}. Программа проверяет сама, раз в несколько '
-            f'минут; «Проверить сейчас» — сразу: заново смотрит папку парсера и переносит всё, что нашла.</p>{room}'
+    return (f'<p class="hint">Комиксы и манга: {esc("; ".join(parts))}. Комиксы галереи программа переносит сама, '
+            f'раз в несколько минут, — те, что подтвердил сайт манги (тайтл с теми же страницами); «Проверить '
+            f'сейчас» — заново смотрит папку парсера и копирует в папку манги '
+            f'подтверждённую там сайтом манги мангу — ComicInfo.xml, ссылка или тайтл с теми же страницами (каждая — '
+            f'строкой в журнале; '
+            f'что не подтвердилось — парсер берёт как обычно), потом переносит комиксы.</p>{room}'
             '<div class="tool-actions"><button type="button" data-action="settings-act" data-act="comic_manga_check">'
             'Проверить сейчас</button><span class="action-status" role="status"></span></div>'
             '<div class="job" data-job data-comic-job hidden><div class="job-head"><b class="job-title"></b> '
@@ -398,8 +422,23 @@ def _download_extra(settings: dict) -> str:
     return f'<p class="hint">Уменьшенные копии: {esc("; ".join(parts))}.</p>'
 
 
+def _manga_auto_extra(settings: dict) -> str:
+    """(v5.44.116) What SauceNAO needs for the pictures (as «Из архива» said it beside its switches), and the list of
+    the parser's folder's titles — «Скачать → Из архива»."""
+    from core import manga_pictures as P
+    if not P.key_of(settings):
+        note = "Ключа SauceNAO нет (Настройки → Парсер) — по картинкам программа не ищет."
+    elif not settings.get("enable_saucenao", True):
+        note = "SauceNAO выключен в настройках парсера — по картинкам программа не ищет."
+    else:
+        note = (f"По картинкам — не больше {P.PER_TITLE} поисков SauceNAO на тайтл и {P.per_day(settings)} в день, "
+                "в фоне — только когда не работает парсер.")
+    return (f'<p class="hint">{esc(note)}</p>'
+            '<p class="hint"><a href="/get/archive">Тайтлы в папке парсера — что программа считает мангой</a></p>')
+
+
 EXTRAS = {"backup": _backup_extra, "thumbs": _thumbs_extra, "companion": _companion_extra, "visual": _visual_extra,
-          "gallery": _gallery_extra, "download": _download_extra}
+          "gallery": _gallery_extra, "download": _download_extra, "manga_auto": _manga_auto_extra}
 
 
 def _move_html() -> str:
@@ -585,9 +624,10 @@ TABS = (
      "тегов, превью.", ("window", "looks", "gallery", "videos", "tags", "thumbs")),
     ("library", "Библиотека", "Где лежат данные, что делается с новыми и удалёнными файлами, резервные копии.",
      ("folders", "library", "backup")),
-    ("download", "Скачивание и браузер", "Граббер, подписки и расширение браузера.", ("download", "companion")),
-    ("manga", "Сайты манги", "Сайты манги и манхвы: новые адреса, когда сайт переехал, и вход на них (v5.44.78).",
-     ("manga_sites",)),
+    ("download", "Скачивание и браузер", "Скачивание в галерею, подписки и расширение браузера.",
+     ("download", "companion")),
+    ("manga", "Сайты манги", "Что программа делает с мангой и манхвой сама (v5.44.116); сайты манги и манхвы: новые "
+     "адреса, когда сайт переехал, и вход на них (v5.44.78).", ("manga_auto", "manga_sites")),
     ("phone", "Телефон", "Библиотека на телефоне вне дома — через ваш сервер (v5.44.71) или через Tailscale "
                          "(v5.44.64).", ("phone",)),
     ("visual", "Брак: фото или рисунок", "Модель, которая отличает фото от рисунка в Браке.", ("visual",)),
@@ -675,6 +715,9 @@ def settings_save(req: Request) -> Response:
         return Response.json({"ok": False, "error": str(exc), "field": exc.field.key}, 400)
     if not settings_store.save(changes):
         return Response.json({"ok": False, "error": "Окно программы не ответило — не сохранено"}, 503)
+    if section.id == MANGA_AUTO.id and changes.get("manga_archive_auto") is False:
+        from webui.pages import manga_archive           # (v5.44.116) switched off: a round of the background stops
+        manga_archive.stop_background()
     return Response.json({"ok": True, "message": "Сохранено"})
 
 

@@ -72,10 +72,22 @@ def _chips(names: list, *, empty: str) -> str:
     return f'<ul class="plan-chips">{"".join(out)}</ul>'
 
 
+def manga_plan(settings: dict) -> list:
+    """(v5.44.125) How the manga of the folder is confirmed (``core/parser_manga``), by name: [] — switched off."""
+    if not settings.get("parser_skip_manga", True):
+        return []
+    out = ["ComicInfo.xml", "ссылка в файлах", "тайтл на сайтах манги — по имени и страницам"]
+    if settings.get("enable_saucenao", True) and str(settings.get("saucenao_api_key") or "").strip():
+        out.append("SauceNAO → сайт манги")
+    return out
+
+
 def parser_page(req: Request) -> Response:
     """The page «Парсер»: what to press on top (the folder, «Запустить / Пауза / Остановить»), what the run
     will ask under it, then the run: its progress by answers, the pictures in work (each with the sites asking
-    about it), the last answers and the journal.  A picture opens large in the viewer (tools.js)."""
+    about it), the last answers and the journal.  A picture opens large in the viewer (tools.js).  (v5.44.125) Under
+    the plan — «Манга в исходной папке» (``webui/pages/parser_manga.py``, макет G1)."""
+    from webui.pages import parser_manga
     s = req.settings
     root = str(s.get("root") or "")
     exists = bool(root) and Path(root).is_dir()
@@ -100,7 +112,8 @@ def parser_page(req: Request) -> Response:
   <header class="tool-head">
     <h1>Парсер</h1>
     <p class="tool-lead">Ищет теги для картинок из папки: точный MD5 на booru-сайтах, потом обратный поиск.
-    Найденное попадает в галерею, ненайденное — в «Брак».</p>
+    Найденное попадает в галерею, ненайденное — в «Брак». Манга из папки — в «Мангу», когда подтверждено, что это
+    манга.</p>
   </header>
   <div class="parser-top">
     <div class="parser-controls" role="group" aria-label="Запуск">
@@ -121,9 +134,11 @@ def parser_page(req: Request) -> Response:
     <dl class="parser-plan" aria-label="Где ищет">
       <div><dt>По MD5</dt><dd>{_chips(sites, empty="нет включённых сайтов")}</dd></div>
       <div><dt>Обратный поиск</dt><dd>{_chips(reverse, empty="выключен")}</dd></div>
+      <div><dt>Манга</dt><dd>{_chips(manga_plan(s), empty="выключено — все папки как обычно")}</dd></div>
       <div class="plan-edit"><dt></dt><dd><a href="/sites">Сайты и ключи</a></dd></div>
     </dl>
   </div>
+  {parser_manga.block(s)}
   <p class="parser-idle muted" data-idle>Здесь будут картинки, которые парсер разбирает: нажмите «Запустить».</p>
   <div class="job parser-run" data-job hidden>
     <div class="run-head"><b class="job-title"></b> <span class="job-status run-status"></span>
@@ -357,16 +372,58 @@ def _rows(settings: dict, ids: list, where: str = "1=1") -> list:
     return out
 
 
+def retry_button(ctx: dict, total: int) -> str:
+    """(v5.44.116) «Искать снова» of the whole section «Брак» (its select bar): the whole Брак, or — a search or a
+    filter in the address (``брак:фото``…) — exactly the cards found, as the trash's «Вернуть все найденные (N)»
+    (the review: «Искать снова весь Брак» sent the whole Брак whatever filter was chosen)."""
+    narrowed = bool(ctx["tags"]) or ctx["source"] != "all"
+    text = f"Искать снова найденные ({total})" if narrowed else "Искать снова весь Брак"
+    return (f'<button type="button" data-action="nomatch-retry-all" data-tags="{esc(ctx["tags"])}" '
+            f'data-source="{esc(ctx["source"])}" data-count="{total}" '
+            f'title="Ещё раз через парсер {"все карточки Брака этого поиска" if narrowed else "весь Брак"}: сайты по '
+            f'MD5 и обратный поиск">{esc(text)}</button>')
+
+
+def _retry_said(queued: int, skipped: int, left: int) -> str:
+    """(v5.44.116) What «Искать снова» of the whole Брак (or of the cards found) says when it has started."""
+    from webui.pages.post_sets import FILES, plural
+    text = f"Ищу снова: {plural(queued, FILES)}"
+    if skipped:
+        text += f" (ещё {plural(skipped, FILES)} нет на диске)"
+    if left:
+        text += (f"; остальные {left} ждут — нажмите «Искать снова» ещё раз, когда этот поиск закончится "
+                 f"(за раз — не больше {RETRY_LIMIT})")
+    return text
+
+
 def parser_retry(req: Request) -> Response:
-    """«Брак → Искать снова» for the chosen cards (or the whole Брак): a parser run over them."""
+    """«Брак → Искать снова» for the chosen cards (or the whole Брак, or (v5.44.116) the Брак cards of the search
+    ``tags`` / ``source`` of the page — exactly those): a parser run over them."""
     from core import nomatch_retry
     from core.nomatch_db import list_nomatches
     from core.parser import jobs
     body = req.json()
     s = dict(req.settings)
+    left = 0
     if body.get("all"):
-        items = list_nomatches(None, settings=s)[:RETRY_LIMIT]
-        label = "весь Брак"
+        tags = str(body.get("tags") or "").strip()
+        source = str(body.get("source") or "all").strip() or "all"
+        if tags or source != "all":           # (v5.44.116) the cards found by the page's search, as the trash does
+            ids = data.result_ids(s, tags, section="no_match", source=source)
+            rows = _rows(s, ids, "bucket='no_match' AND deleted=0")
+            found = nomatch_retry.items_for_media(s, [r["path"] for r in rows])
+            label, none = "найденные в Браке", "В Браке нет таких карточек"
+        else:
+            found = list_nomatches(None, settings=s)
+            label, none = "весь Брак", "Брак пуст"
+        if not found:
+            return Response.json({"ok": False, "error": none}, 400)
+        # (v5.44.116) more than one run takes: the ones waiting longest first — a file searched again and still in
+        # Брак is written anew (its time is now), so the next press takes the rest instead of the same files again
+        found.sort(key=lambda item: float(item.get("ts") or 0))
+        items = found[:RETRY_LIMIT]
+        left = len(found) - len(items)
+        label += f" ({len(items)} из {len(found)})" if left else f" ({len(items)})"
     else:
         ids = _ids(body)
         if not ids:
@@ -387,7 +444,8 @@ def parser_retry(req: Request) -> Response:
         job = jobs.start(run, label=f"Повторный поиск: {label}", kind="retry")
     except jobs.ParserBusy as exc:
         return _busy(exc)
-    return Response.json({"ok": True, "id": job.id, "queued": queued, "skipped": len(skipped)})
+    return Response.json({"ok": True, "id": job.id, "queued": queued, "skipped": len(skipped), "left": left,
+                          "message": _retry_said(queued, len(skipped), left)})
 
 
 def trash_restore(req: Request) -> Response:

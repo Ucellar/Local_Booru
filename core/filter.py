@@ -19,6 +19,10 @@ What the mode «SFW / Всё / NSFW» shows (``core/content_mode``) is a switch,
    * :data:`NHENTAI_NEVER_TAGS`, :data:`NHENTAI_NEVER_IDS` — nhentai's tags of that kind (names and numbers, asked
      6.11.2026): left out of every search (``nhentai.search_words``), a gallery with one is not shown
      (:func:`nhentai_forbidden`).
+   * :data:`SITE_MINOR_TAGS`, :data:`SAFE_RATINGS`, :func:`tags_speak_of_minors`, :func:`page_forbidden` (v5.44.111 /
+     v5.44.125, here since v5.44.128) — a page of a booru site whose tags speak of minors and that no site rates safe is
+     never taken into «Манга»: the comics of the gallery (``comic_manga._forbidden``), the manga of the parser's folder
+     (``parser_manga.forbidden`` — e621's posts of its pages).
 
 2. **What is downloaded already is not in «Лента»** (v5.44.93, the owner: «оно не должно показывать то что уже
    скачано») — :func:`downloaded`, :class:`Have`: the titles of the program's folders; a tile of one of them is left out
@@ -69,6 +73,29 @@ def depicts_minors(tags) -> bool:
             if word and (word in MINOR_WORDS or word.startswith(MINOR_STEMS)):
                 return True
     return False
+
+
+# (v5.44.111 in ``comic_manga``, v5.44.125 in ``parser_manga`` — here since v5.44.128, the owner: «Да сделай все в
+# фильтр») The pages of booru sites taken into «Манга» — the comics of the gallery (``comic_manga``) and the manga of
+# the parser's folder (``parser_manga``): a page whose tags speak of minors and that no site rates safe — never.
+SITE_MINOR_TAGS = frozenset({"young", "cub", "child", "toddler", "infant", "preteen", "loli", "shota"})  # e621's own
+SAFE_RATINGS = ("s", "g")       # the sites' ratings of a safe picture (e621 «s», Danbooru «g» and «s»)
+
+
+def tags_speak_of_minors(names) -> bool:
+    """A picture's tags speak of minors: :func:`depicts_minors`, or a booru site's own tag of that kind
+    (:data:`SITE_MINOR_TAGS`)."""
+    names = [str(n) for n in names or () if n]
+    return depicts_minors(names) or any(n.strip().lower() in SITE_MINOR_TAGS for n in names)
+
+
+def page_forbidden(names, ratings) -> bool:
+    """A page never taken into «Манга»: its tags speak of minors (:func:`tags_speak_of_minors`) and the sites did not
+    rate it safe — ``ratings``: what they said of it (:data:`SAFE_RATINGS`; none said — not rated, not safe)."""
+    if not tags_speak_of_minors(names):
+        return False
+    said = {str(r or "") for r in ratings or ()} or {""}
+    return not said <= set(SAFE_RATINGS)
 
 
 # «Лента»: the tag never offered and always left out at Remanga and MangaLib (its numbers there — ``catalog.NEVER_IDS``)
