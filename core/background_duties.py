@@ -36,6 +36,9 @@
 - every 3 minutes: the openings and endings of the series of the tab «Видео» whose episodes are new
   (``video_skips.background_round``: their sound and key frames compared episode to episode), 45 seconds at most a
   round, the rest 10 seconds later; not while a video plays in the window (it would stutter);
+  (v5.44.151) and, as «фото или рисунок», only while nobody is at the computer — no key and no mouse for
+  ``QUIET_AFTER`` seconds (``maintenance_coordinator.person_idle_seconds``), stopped the moment the person is back,
+  tried again ``HEAVY_AGAIN`` seconds later: the owner — «при открытии сериалов скачаных проц долбится в 100%»;
 - every minute: the tags' categories by what most sites say (``tag_consensus``, v5.44.49): once after the upgrade
   every tag (the library had kept the first category anyone gave a tag — «female» a character on every card), then the
   tags whose sites' answers may have changed it (8 seconds at most a round); not while «Обслуживание» has the library,
@@ -47,6 +50,13 @@
   person started goes first (the round waits for its end; (v5.44.74) and for the queue of them — ``manhwa_queue``,
   which goes on after the round).  (v5.44.116) «Новые главы манги и манхвы» (both folders); not when «Новые главы —
   скачивать самой» of «Настройки → Сайты манги» is off; «Остановить» — until the next night.
+  (v5.44.163) As the openings and «фото или рисунок» — only while nobody is at the computer (:func:`person_busy`: no
+  key and no mouse for ``QUIET_AFTER`` seconds, no video playing in the window): the round asks a dozen sites of
+  every title at once, some of them in pages of the window's browser — the owner's Task Manager, 12.11.2026: the
+  program at 84 % of sixteen processors and 5.9 GB while he looked at «Видео».  It begins when he has left
+  (asked again every ``HEAVY_AGAIN`` seconds), and waits before its next title and its next chapter when he is back
+  (``manhwa_run.wait_away``); «Продолжить» of its row in «Загрузки» and «Проверить сейчас» of «Сама программа»
+  (:func:`start_round` ``asked``) — at once, whoever is there.
 - (v5.44.81) every 10 minutes: «Скачать → Из архива» knows a few titles of the manga and manhwa folders by itself
   (``manga_archive.background_round``: the new ones, the ones SauceNAO put off, «не нашлось» again after a week — a
   page task of its own, «Узнаю тайтлы в фоне»; the folders are looked at in a thread of its own, so this one never
@@ -55,6 +65,14 @@
   and the manga of the parser's folder — to the manga folder (``comic_manga.background_round``: copied and checked,
   the cards to the trash «перенесено в мангу»; 45 seconds a round, again in 20 when more waits); not while
   «Обслуживание» has the library, nor while the base is read-only.
+
+- (v5.44.151) once, 12 seconds after the start: the folders of manga, manhwa and video are read (their libraries
+  keep what they read: ``LIBRARY.items``) — in a thread of its own; the first opening of «Манга», «Манхва», «Видео»
+  waited for that reading (thousands of folders on a disk just woken — the owner: «некоторые страницы открываются
+  по десять лет»), now it is done, or well under way, by the time the page is asked.
+- (v5.44.152) once, 2 seconds after the start: the base's file is read through in a row (``core/base_warm.py``) —
+  in a thread of its own; the pages and the check of the base behind the window then read the base from the
+  system's memory.  That check reads it through itself before it begins: this duty is for where it does not run.
 
 One daemon thread, so none of this waits in the window's thread (the old window's timers wrote to the base from
 it, and a VACUUM of «Обслуживание» froze the window for the base's busy time).  It ends with the program: the exit
@@ -88,11 +106,15 @@ INTERVALS = {                        # seconds between the runs of each duty
     "phone": 10 * 60,
     "manga_archive": 10 * 60,
     "comic_manga": 5 * 60,
+    "favorites": 60,
+    "libraries": 10 ** 9,            # (v5.44.151) once a run of the program: its first time only
+    "base": 10 ** 9,                 # (v5.44.152) once a run too: the base's file read through
 }
 FIRST_RUN = {"lifecycle": 1.5, "subscriptions": 60, "checkpoint": 30, "stalls": 60, "visual": 45,
              "durations": 20, "site_posts": 75, "card_sets": 25, "originals": 150,
              "skips": 90, "e621_export": 60, "tag_categories": 15, "manhwa": 120,
-             "phone": 8, "manga_archive": 240, "comic_manga": 200}              # seconds after the start
+             "phone": 8, "manga_archive": 240, "comic_manga": 200, "favorites": 90,
+             "libraries": 12, "base": 2}        # seconds after the start
 VISUAL_AGAIN = 30                    # seconds to the next round of «фото или рисунок» when the last one was cut short
 DURATIONS_AGAIN = 5                  # seconds to the next round of video lengths when cards are still waiting
 SITE_POSTS_AGAIN = 15                # seconds to the next round of questions to the sites when posts are still waiting
@@ -101,6 +123,8 @@ SKIPS_AGAIN = 10                     # seconds to the next round of openings and
 ORIGINALS_AGAIN = 20                 # seconds to the next round of originals when reduced copies still wait
 ORIGINALS_SHARED_AGAIN = 60          # …while the parser or the subscriptions use the sites
 COMIC_MANGA_AGAIN = 20               # seconds to the next round of comics to the manga folder when more wait
+QUIET_AFTER = 20.0                   # (v5.44.151) seconds without the person's keys and mouse before a heavy duty works
+HEAVY_AGAIN = 20                     # seconds to its next try when the person was at the computer
 ROUND_LABEL = "Новые главы манги и манхвы"    # (v5.44.116) the nightly round in «Загрузки»: it walks both folders
 TICK = 1.0
 
@@ -111,6 +135,7 @@ _DUTIES: "BackgroundDuties | None" = None
 # short result of a run that did something}
 _REPORTS: dict = {}
 _REPORTS_LOCK = threading.Lock()
+_WAITS: set = set()                  # (v5.44.163) the duties whose time has come and that wait for the person to leave
 
 
 def _ran(name: str, *, start: float = 0.0, end: float = 0.0) -> None:
@@ -135,6 +160,18 @@ def reports() -> dict:
     """(v5.44.120) {duty: {"start", "end", "said", "said_at"}} as :func:`said` and the runs left them."""
     with _REPORTS_LOCK:
         return {name: dict(entry) for name, entry in _REPORTS.items()}
+
+
+def _waiting(name: str, waits_now: bool) -> None:
+    with _REPORTS_LOCK:
+        (_WAITS.add if waits_now else _WAITS.discard)(name)
+
+
+def waits(name: str) -> bool:
+    """(v5.44.163) The duty's time has come, and it waits for the person to leave the computer («Загрузки → Сама
+    программа» says so)."""
+    with _REPORTS_LOCK:
+        return name in _WAITS
 
 
 class BackgroundDuties:
@@ -235,6 +272,16 @@ class BackgroundDuties:
             if self._changed is not None:
                 self._changed()
 
+    def _favorites(self, settings: dict) -> None:
+        """(v5.44.141) An account's favorites (core/favorites.py): a download that waited for the subscriptions, the
+        files that wait for the parser, a run of the parser cut short by a restart — when the way is free."""
+        from core import favorites
+        from core.database.connection import writes_blocked
+        if self._stopping() or writes_blocked() or _library_taken():
+            return
+        favorites.register()
+        favorites.background_round(settings)
+
     def _subscriptions(self, settings: dict) -> None:
         from core import subscription_jobs
         from core.database.connection import writes_blocked
@@ -281,8 +328,12 @@ class BackgroundDuties:
         from core.database.connection import writes_blocked
         if self._stopping() or writes_blocked() or _library_taken():
             return
+        if _person_here():                          # (v5.44.151) the model takes several processors: not now
+            self._next_in["visual"] = HEAVY_AGAIN
+            return
         from core import visual_work
-        result = visual_work.background_round(settings, stop_check=lambda: self._stopping() or _library_taken())
+        result = visual_work.background_round(
+            settings, stop_check=lambda: self._stopping() or _library_taken() or _person_here())
         if result and result.get("more"):           # cut short by its time: the rest soon, in slices
             self._next_in["visual"] = VISUAL_AGAIN
 
@@ -335,11 +386,16 @@ class BackgroundDuties:
 
     def _skips(self, settings: dict) -> None:
         """The openings and endings of series' new episodes, by their sound and pictures (``core/video_skips``); not
-        while a video plays in the window or a download writes the series folders, stopped at the exit."""
+        while a video plays in the window or a download writes the series folders, stopped at the exit;
+        (v5.44.151) nor while the person is at the computer — stopped the moment a key or the mouse is touched."""
         if self._stopping() or _watching() or _downloading():
             return
+        if _person_here():
+            self._next_in["skips"] = HEAVY_AGAIN
+            return
         from core import video_skips
-        result = video_skips.background_round(settings, stop=lambda: self._stopping() or _watching() or _downloading())
+        result = video_skips.background_round(
+            settings, stop=lambda: self._stopping() or _watching() or _downloading() or _person_here())
         if result.get("done"):
             _LOG.info("openings and endings: %d episode(s) looked at%s", result["done"],
                       ", more to come" if result.get("more") else "")
@@ -376,30 +432,29 @@ class BackgroundDuties:
         """(v5.44.60) The new chapters of the downloaded manhwa, once a day: a page task of its own, so this thread
         never waits for the sites.  (v5.44.116) Of the manga too (the round walks both folders): «Новые главы манги и
         манхвы»; «Настройки → Сайты манги → Новые главы — скачивать самой» off — never; «Остановить» — until the next
-        night (``watch_round`` keeps the round as checked unless the program's closing stopped it)."""
-        if self._stopping() or not settings.get("manhwa_watch_auto", True):
-            return
-        from core import manhwa_download, manhwa_queue, page_jobs
-        if not manhwa_download.due():
-            return
-        current = page_jobs.current(manhwa_download.TASK)
-        if current is not None and current.running or manhwa_queue.waiting():
-            return                                         # a download of the person's: the round waits for it
-        live = self._settings
-
-        def run(say, stop_check):
-            try:
-                return manhwa_download.watch_round(dict(live() or {}), say=say,
-                                                   stop_check=lambda: stop_check() or self._stopping(),
-                                                   closing=self._stopping)
-            finally:
-                if not stop_check():                       # (v5.44.74) a download asked meanwhile — now
-                    manhwa_queue.next_soon()
+        night (``watch_round`` keeps the round as checked unless the program's closing stopped it).  (v5.44.163) Not
+        while the person is at the computer (:func:`person_busy`): asked again ``HEAVY_AGAIN`` seconds later."""
+        waits_now = False
         try:
-            page_jobs.start(manhwa_download.TASK, ROUND_LABEL, run)
-        except page_jobs.TaskBusy:
-            return
-        _LOG.info("manhwa: the round of new chapters started")
+            if self._stopping() or not settings.get("manhwa_watch_auto", True):
+                return
+            from core import manhwa_download, manhwa_queue, page_jobs
+            if not manhwa_download.due():
+                return
+            current = page_jobs.current(manhwa_download.TASK)
+            if current is not None and current.running or manhwa_queue.waiting():
+                return                                     # a download of the person's: the round waits for it
+            if person_busy():                              # (v5.44.163) it takes several processors: when he has left
+                waits_now = True
+                self._next_in["manhwa"] = HEAVY_AGAIN
+                return
+            try:
+                start_round(self._settings, stopping=self._stopping)
+            except page_jobs.TaskBusy:
+                return
+            _LOG.info("manhwa: the round of new chapters started")
+        finally:
+            _waiting("manhwa", waits_now)
 
     def _manga_archive(self, settings: dict) -> None:
         """(v5.44.81) «Из архива» by itself: a round of a few titles, as a page task of its own."""
@@ -446,6 +501,24 @@ class BackgroundDuties:
         if result.get("more"):
             self._next_in["comic_manga"] = COMIC_MANGA_AGAIN
 
+    def _libraries(self, settings: dict) -> None:
+        """(v5.44.151) The folders of manga, manhwa and video read once, soon after the start — in a thread of its
+        own (the other duties do not wait for a disk): their pages open on what is read already."""
+        if self._stopping():
+            return
+        threading.Thread(target=read_libraries, args=(dict(settings), self._stopping), name="libraries-first-read",
+                         daemon=True).start()
+
+    def _base(self, settings: dict) -> None:
+        """(v5.44.152) The base's file read through in a row once, right after the start, in a thread of its own
+        (``core/base_warm.py``): the first pages read the base from the system's memory, not from the disk.  The
+        check of the base behind the window does the same before it begins — whoever is first reads, the other waits."""
+        if self._stopping():
+            return
+        from core import base_warm
+        threading.Thread(target=base_warm.read_base, args=(dict(settings), self._stopping), name="base-first-read",
+                         daemon=True).start()
+
     def _card_sets(self, settings: dict) -> None:
         """The сборки put together again when the library changed since the last time."""
         if self._stopping() or _library_taken():
@@ -473,6 +546,37 @@ class BackgroundDuties:
                          row.get("detail", ""))
 
 
+def read_libraries(settings: dict, stop: Callable[[], bool] | None = None) -> dict:
+    """The folders of video, manga and manhwa read into their libraries (what a first opening of their pages waits
+    for): {"video" | "manga" | "manhwa": seconds it took} — a folder not set or not there is not read, one that fails
+    is said in the log and does not stop the others."""
+    from core import manga_library, manhwa_library, video_library
+    took: dict = {}
+    for name, library, root_of in (("video", video_library.LIBRARY, video_library.video_root),
+                                   ("manga", manga_library.LIBRARY, manga_library.manga_root),
+                                   ("manhwa", manhwa_library.LIBRARY, manhwa_library.manhwa_root)):
+        if stop is not None and stop():
+            break
+        try:
+            root = str(root_of(settings) or "")
+            if not root:
+                continue
+            began = time.monotonic()
+            found = library.items(root)
+            took[name] = round(time.monotonic() - began, 2)
+            _LOG.info("the folder of %s read at the start: %d title(s) in %.1f s", name, len(found), took[name])
+        except Exception as exc:  # noqa: BLE001 - a disk that is not there: its page says so when it is opened
+            _LOG.info("the folder of %s not read at the start: %s: %s", name, type(exc).__name__, exc)
+    return took
+
+
+def _person_here() -> bool:
+    """(v5.44.151) The person is at the computer: a key or the mouse was touched less than ``QUIET_AFTER`` seconds
+    ago (anywhere on it — Windows —, in the program's window, a page of it opened)."""
+    from core.maintenance_coordinator import person_idle_seconds
+    return person_idle_seconds() < QUIET_AFTER
+
+
 def _watching() -> bool:
     """A video plays in the window now: in the page (its frames go to it) or full size."""
     try:
@@ -480,6 +584,36 @@ def _watching() -> bool:
     except ImportError:
         return False
     return RELAY.playing()
+
+
+def person_busy() -> bool:
+    """(v5.44.163) The person is at the computer (:func:`_person_here`) or watches a video in the window
+    (:func:`_watching` — no key is touched then): what the round of new chapters waits out."""
+    return _person_here() or _watching()
+
+
+def start_round(live: Callable[[], dict], *, stopping: Callable[[], bool] | None = None, asked: bool = False):
+    """(v5.44.163) The round of new chapters as a page task of its own (``manhwa_download.TASK``, :data:`ROUND_LABEL`):
+    the duty's (:meth:`BackgroundDuties._manhwa`) — it waits before each title and each chapter while the person is at
+    the computer (:func:`person_busy`), and gives way — ends, to be begun again by the duty — when he puts a download
+    in the queue while it waits (``manhwa_queue.waiting``: his «Скачать» would wait until he has left); ``asked`` —
+    the person's own («Проверить сейчас» of «Загрузки → Сама программа»): it waits for nobody.  ``live()`` — the
+    program's settings as they are when it begins;
+    ``stopping()`` — the program is closing.  -> the task; ``page_jobs.TaskBusy`` — a download goes already."""
+    from core import manhwa_download, manhwa_queue, page_jobs
+    from core.shutdown import is_shutting_down
+    stopping = stopping or is_shutting_down
+
+    def run(say, stop_check):
+        try:
+            return manhwa_download.watch_round(dict(live() or {}), say=say,
+                                               stop_check=lambda: stop_check() or stopping(),
+                                               closing=stopping, here=None if asked else person_busy,
+                                               give_way=None if asked else manhwa_queue.waiting)
+        finally:
+            if not stop_check():                           # (v5.44.74) a download asked meanwhile — now
+                manhwa_queue.next_soon()
+    return page_jobs.start(manhwa_download.TASK, ROUND_LABEL, run)
 
 
 def _downloading() -> bool:

@@ -275,9 +275,44 @@
     });
   });
 
-  function chips(names, cls) {
+  // (v5.44.129; the owner: «при открытии страницы с интернета (в ленте) теги и все плитки связанные с каким либо
+  // поиском не кликабельны») a genre or tag — a search: «Лента» of this tab with it chosen (the server says which —
+  // ``title.chips_of``: g, tg), a gallery's tag — nhentai's galleries of it in «Лента» (``href``); a name the program
+  // makes no search of (``never``) — no search, words only
+  const FEED = (phone ? "/m/" : "/") + box.dataset.kind + "/feed";
+  // (v5.44.148; the owner: «с некоторых сайтов теги кликабельны но отправляют в библиотеку а не в ленте смотреть») a
+  // title of a site — always «Лента»: its filter when the feed has one of that name (or of another name of it), else
+  // the feed's search by the word (until then a word the feed had no filter for went to the tab's folder)
+  // (v5.44.149) an author — the feed's list of their titles: the person as MangaLib numbers them (``sg``), or the
+  // feed's «Найти тег» filled with the name — it picks the person of exactly that name itself (``find``)
+  function chipHref(c) {
+    if (c.href) return c.href;
+    if (c.g) return FEED + "?g=" + encodeURIComponent(c.g);
+    if (c.tg) return FEED + "?tg=" + encodeURIComponent(c.tg);
+    if (c.sg) return FEED + "?sg=" + encodeURIComponent(c.sg);
+    if (c.never) return "";
+    if (c.find) return FEED + "?find=" + encodeURIComponent(c.find) + "&pick=lib";
+    return FEED + "?q=" + encodeURIComponent(c.name.trim());
+  }
+
+  function chips(items, cls) {
     const list = el("ul", "tt-chips" + (cls ? " " + cls : ""));
-    names.forEach((name) => list.append(el("li", "", name)));
+    items.forEach((item) => {
+      const c = typeof item === "string" ? { name: item } : item;
+      const li = el("li", c.tag ? "tt-chip-tag" : "");
+      const href = chipHref(c);
+      if (href) {
+        const a = el("a", "", c.name);
+        a.href = href;
+        a.title = c.sg || c.find ? "Его тайтлы в «Ленте»"
+          : c.href || c.g || c.tg ? "Найти в «Ленте»" : "Искать в «Ленте» по слову";
+        li.classList.add("tt-chip-go");
+        li.append(a);
+      } else {
+        li.textContent = c.name;
+      }
+      list.append(li);
+    });
     return list;
   }
 
@@ -473,6 +508,12 @@
     (f.notes || []).forEach((note) => extra.append(el("p", "tt-note warn", note)));
     // (v5.44.117) the other sites, asked at once: their chapters and the description come as they answer
     if ((f.asking || []).length) extra.append(el("p", "tt-note tt-asking", "Ищу на других сайтах: " + f.asking.join(", ") + "…"));
+    // (v5.44.146) the sites that did not answer in time: said (it was only in the search's journal), and what follows
+    else if ((f.late || []).length) {
+      extra.append(el("p", "tt-note tt-late", "Не успели ответить: " + f.late.join(", ")
+        + ". Если какой-то главы не окажется на остальных сайтах, при скачивании программа спросит "
+        + (f.late.length > 1 ? "их" : "его") + " ещё раз."));
+    }
     extra.append(el("div", "tt-actions"));
     extra.append(getBlock(f, choices));          // (v5.44.119) «Скачивание» — the card of «По ссылке» of before
     if (f.about) extra.append(about(f.about));
@@ -480,7 +521,14 @@
     if (f.about && f.about_site && f.about_site !== f.site_label) {
       extra.append(el("p", "tt-desc-from", `Описание — с ${f.about_site}, главы — с ${f.site_label}`));
     }
-    if ((f.genres || []).length) extra.append(chips(f.genres));
+    if ((f.people || []).length) {                // (v5.44.149) the authors, each the feed's list of their titles
+      const line = el("div", "tt-tags tt-people");
+      line.append(el("span", "tt-label", f.people.length > 1 ? "Авторы" : "Автор"));
+      line.append(chips(f.people));
+      extra.append(line);
+    }
+    const tagged = f.chips || f.genres || [];     // (v5.44.129) the genres and tags, each a search
+    if (tagged.length) extra.append(chips(tagged));
     holder.append(extra);
     showList(f);
     if (tickedBefore) {
@@ -646,7 +694,7 @@
       pick.setAttribute("aria-pressed", value === whereNow ? "true" : "false");
       if (value === "manga" && !rootsOk) {
         pick.disabled = true;
-        pick.title = "Папка манги не выбрана — «Настройки → Папки»";
+        pick.title = "Папка манги не выбрана — «Настройки → Хранение и копии»";
       }
       pick.addEventListener("click", () => {
         if (whereNow === value) return;
@@ -970,7 +1018,7 @@
     if (nightSum) {
       let words = "";
       if (shelfData && !shelfData.watch) {
-        words = "Сама программа сейчас новые главы не проверяет — это включается в «Настройки → Сайты манги»";
+        words = "Сама программа сейчас новые главы не проверяет — это включается в «Настройки → Манга и манхва»";
       } else if (shelfData && shelfData.night) {
         words = "Последняя проверка — " + shelfData.night.at + ": " + shelfData.night.got;
       } else if (shelfData && shelfData.downloaded) {
@@ -1027,17 +1075,21 @@
 
   function paintItems(items) {
     items.forEach((x) => {
+      // (v5.44.146) the chapter the other sites are asked once more for (the bar of the download says so)
+      if (x.state === "retry" && x.seek) seekId = String(x.id);
+      else if (seekId === String(x.id)) seekId = "";
       const r = rows.get(String(x.id));
       if (!r) return;
       let text = WORDS[x.state] || "";
       if (x.state === "going" && x.pages) text = "качается " + x.got + "/" + x.pages;
       if (x.state === "retry" && x.again) text = "повтор через " + x.again + " с";
+      if (x.state === "retry" && x.seek) text = "ищу на других сайтах";
       if (x.state === "failed" && x.why) text = "не пришла: " + x.why;
       if (x.state === "failed") missed.set(String(x.id), text);
       else missed.delete(String(x.id));
       r.queuedMark = false;
       // (v5.44.119) why it did not come, and which try comes (the card of «По ссылке» said it on its tile)
-      const why = (x.state === "failed" || x.state === "retry") && x.why
+      const why = (x.state === "failed" || x.state === "retry") && x.why && !x.seek
         ? "Не скачалась: " + x.why + (x.tries ? " (повтор " + x.tries + " из 3)" : "") : "";
       r.dl = { text, cls: x.state === "done" ? "have" : x.state === "failed" ? "bad" : "going", why };
       if (x.state === "done") {
@@ -1150,6 +1202,7 @@
     if (sawOurs) refresh();
   }
 
+  let seekId = "";             // (v5.44.146) the chapter the download asks the other sites for now
   let endSaid = "";            // the download whose end is said
   let ourTask = "";            // the download seen going as this title's (its task's number)
   function ended(st) {
@@ -1161,6 +1214,7 @@
         + (got ? "скачано " + plural(got, CHAPTERS) : "новых глав не скачано");
     if (st.status !== "failed" && failed) text += ", не скачались: " + failed;
     if (st.status !== "failed" && r.gave_up) text += ". " + r.gave_up;
+    if (st.status !== "failed" && failed && r.looked) text += ". " + r.looked;   // (v5.44.146) where it looked
     say($(".tt-status"), text, st.status === "failed" || (!!failed && !got) || !!r.gave_up);
   }
 
@@ -1180,6 +1234,9 @@
     if (!st.found || st.id !== findId) return;
     findMark = st.mark || findMark;
     shown = st.found;
+    // (v5.44.146) the sites that had not answered in time have, meanwhile (the download asked them once more)
+    const lateNote = $(".tt-late");
+    if (lateNote && !(shown.late || []).length) lateNote.remove();
     showList(shown);
     paintCounts();
     paintActions();
@@ -1195,18 +1252,25 @@
     bar.textContent = "";
     const now = meter.now;
     const parts = whereNow === "manga" ? ["страницы", "страниц", "страниц"] : ["полосы", "полос", "полос"];
-    let doing = st.paused ? "Пауза" : "Качается";
+    // (v5.44.163) the round of new chapters waits for the person to leave the computer: «Продолжить» lets it go on
+    const held = !!st.held && !st.paused;
+    let doing = st.paused ? "Пауза"
+      : held ? "Ждёт, пока вы отойдёте от компьютера, — чтобы не занимать процессор" : "Качается";
     if (now) {
       doing = (st.paused ? "Пауза — " : "Качается: ") + now.label + (now.from ? " (с " + now.from + ")" : "")
         + (now.pages ? ": " + now.got + " из " + now.pages + " " + word(now.pages, parts) : "");
     }
     if (meter.speed && !st.paused) doing += " · " + size(meter.speed) + "/с";
     if (meter.eta && !st.paused) doing += " · осталось ≈ " + clock(meter.eta);
+    if (seekId && !now) doing = "Ищу главу на других сайтах";   // (v5.44.146) the other sites asked once more
+    const again = (meter.retrying || 0) - (seekId ? 1 : 0);
     const words = el("span", "tt-running-words", doing + ". Всего: " + (meter.done || 0) + " из " + (meter.total || 0)
-      + (meter.retrying ? ", ждут повтора: " + meter.retrying : "") + (meter.failed ? ", не скачались: " + meter.failed : ""));
-    const pause = button("tt-link", st.paused ? "Продолжить" : "Пауза");
+      + (again > 0 ? ", ждут повтора: " + again : "") + (meter.failed ? ", не скачались: " + meter.failed : ""));
+    const pause = button("tt-link", st.paused || held ? "Продолжить" : "Пауза");
     pause.addEventListener("click", async () => {
-      try { await postJson("/api/manhwa/download/pause", { pause: !st.paused }); } catch (err) { say(bar, err.message, true); }
+      try {
+        await postJson("/api/manhwa/download/pause", { pause: !(st.paused || held) });
+      } catch (err) { say(bar, err.message, true); }
     });
     const stop = button("tt-link", "Остановить");
     stop.addEventListener("click", async () => {
@@ -1291,6 +1355,7 @@
       : button("tt-btn primary", missing > 0 ? "Докачать " + plural(missing, ["страницу", "страницы", "страниц"])
         : "Скачать", ICON.down);
     get.disabled = missing === 0;
+    get.dataset.ttGet = "";                          // (v5.44.148) «Скачать» by its own mark: «Читать» may be the main one
     const status = el("p", "tt-status action-status");
     status.setAttribute("role", "status");
     get.addEventListener("click", async () => {
@@ -1306,6 +1371,22 @@
       }
       get.disabled = false;
     });
+    // (v5.44.148; the owner: «на nhentai прочтение через программу не работает там просто не кликабельные картинки»)
+    // «Читать» — the gallery in the program's reader without downloading it; where it was left — «Продолжить»
+    const reader = g.reader ? (phone ? "/m" : "") + g.reader : "";
+    if (reader) {
+      const left = g.read && !g.read.done && g.read.page > 1 ? g.read : null;
+      const read = link("tt-btn" + (missing === 0 ? "" : " primary"),
+        left ? "Продолжить: стр. " + left.page + " из " + left.pages : "Читать", reader + (left ? "" : "&p=1"));
+      read.dataset.ttRead = "";
+      if (missing !== 0) get.classList.remove("primary");     // one main button: reading, when it is not in the folder
+      actions.prepend(read);
+      if (g.read && (g.read.done || left)) {
+        const again = link("tt-btn", "Читать с начала", reader + "&p=1");
+        again.dataset.ttReadStart = "";
+        actions.append(again);
+      }
+    }
     actions.append(get);
     if (g.have && g.have.open) actions.append(link("tt-btn", "Открыть в программе", g.have.open));
     extra.append(actions, status);
@@ -1316,7 +1397,10 @@
     (g.tags || []).forEach((group) => {
       const line = el("div", "tt-tags");
       line.append(el("span", "tt-label", group.kind));
-      line.append(chips(group.names.slice(0, 40)));
+      // (v5.44.129) a click — nhentai's galleries of that artist, tag… in «Лента»; (v5.44.148) as its own tag
+      // chosen there («sg=nhentai:artist:name» — a chip with ×, more can be added), not words in the search field
+      line.append(chips(group.names.slice(0, 40).map((name) => ({ name, href: group.type
+        ? FEED + "?sg=" + encodeURIComponent("nhentai:" + group.type + ":" + name.toLowerCase()) : "" }))));
       extra.append(line);
     });
     $("[data-tt-about]").append(extra);
@@ -1337,7 +1421,16 @@
       img.loading = "lazy";
       img.decoding = "async";
       img.src = "/api/catalog/cover?c=" + encodeURIComponent(c);
-      cell.append(img, el("span", "", String(k + 1)));
+      if (reader) {                                  // (v5.44.148) a page — the reader at that page
+        const open = el("a");
+        open.href = reader + "&p=" + (k + 1);
+        open.title = "Читать со страницы " + (k + 1);
+        open.append(img, el("span", "", String(k + 1)));
+        if (g.read && !g.read.done && g.read.page === k + 1) cell.classList.add("here");
+        cell.append(open);
+      } else {
+        cell.append(img, el("span", "", String(k + 1)));
+      }
       grid.append(cell);
     });
     section.append(head, grid);

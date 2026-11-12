@@ -164,7 +164,8 @@ class Title:
     def words(self) -> str:
         """Everything a search on the tab looks in."""
         parts = [self.title, self.folder_title, *self.alt_titles]
-        for key in ("genres", "tags", "type", "status", "year", "author", "artist"):
+        # (v5.44.135) «authors» — as «Скачать» writes a site's authors (they were not found)
+        for key in ("genres", "tags", "type", "status", "year", "author", "authors", "artist"):
             value = self.info.get(key)
             parts += value if isinstance(value, list) else [value or ""]
         return " ".join(str(p) for p in parts).lower().replace("ё", "е")
@@ -230,21 +231,84 @@ def _number_key(number: str) -> float:
         return float("inf")
 
 
-def _pictures(folder: Path) -> list[Path]:
-    from core.title_covers import is_aside       # (v5.44.123) a cover put aside («cover.old-…») is no page
+def _listing(folder: Path) -> tuple[list, list] | None:
+    """(the folders, the files — ``os.DirEntry``) right in ``folder``, read once; None — it cannot be read.
+
+    (v5.44.151) The folder was read name by name and the disk asked of every one of them what it is: a library of
+    150 titles — 60 thousand questions at every reading of it (once a minute while its pages are open, and before
+    the first of them after a start; the owner: «некоторые страницы открываются по десять лет»).  An entry of a
+    folder's own listing says what it is without another question."""
+    dirs, files = [], []
     try:
-        found = [p for p in folder.iterdir() if p.suffix.lower() in IMG_EXTS and p.is_file()
-                 and not p.name.startswith(".") and not is_aside(p.name)]
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    (dirs if entry.is_dir() else files if entry.is_file() else []).append(entry)
+                except OSError:                       # an entry that cannot be asked: as if it were not there
+                    continue
     except OSError:
-        return []
+        return None
+    return dirs, files
+
+
+_INFOS: dict = {}            # a chapter.json's path -> ((its size, its time), what it says)
+_INFOS_LOCK = threading.Lock()
+INFOS_KEPT = 60000
+
+
+def _kept_info(entry) -> dict:
+    """What a chapter's ``chapter.json`` says — read once while the file stays as it is (its size and time, which
+    the folder's listing gives): the folder is read again every minute, and every chapter's file was opened each
+    time — 6.7 thousand for 150 titles.  The answer is shared by the readings: nobody changes it."""
+    try:
+        stat = entry.stat()
+        mark = (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return {}
+    with _INFOS_LOCK:
+        kept = _INFOS.get(entry.path)
+    if kept is not None and kept[0] == mark:
+        return kept[1]
+    info = _read_json(Path(entry.path))
+    with _INFOS_LOCK:
+        while len(_INFOS) >= INFOS_KEPT:
+            _INFOS.pop(next(iter(_INFOS)))
+        _INFOS[entry.path] = (mark, info)
+    return info
+
+
+def _names(files: list) -> dict:
+    """{a file's name without the case: its entry} of a folder's files."""
+    return {entry.name.lower(): entry for entry in files}
+
+
+def _pictures(folder: Path, files: list | None = None) -> list[Path]:
+    """The pictures right in a folder, in the order of their names (``files`` — its files when they are read)."""
+    from core.title_covers import is_aside       # (v5.44.123) a cover put aside («cover.old-…») is no page
+    if files is None:
+        listed = _listing(folder)
+        if listed is None:
+            return []
+        files = listed[1]
+    found = [Path(entry.path) for entry in files
+             if os.path.splitext(entry.name)[1].lower() in IMG_EXTS and not entry.name.startswith(".")
+             and not is_aside(entry.name)]
     return sorted(found, key=lambda p: natural_key(p.name))
 
 
-def _chapter_from_folder(root: Path, title_id: str, folder: Path, tome: int = 0) -> Chapter | None:
-    pages = [p for p in _pictures(folder)]
+def _chapter_from_folder(root: Path, title_id: str, folder: Path, tome: int = 0,
+                         listed: tuple | None = None) -> Chapter | None:
+    """A chapter of the pictures right in ``folder`` (``listed`` — its listing when it is read already)."""
+    if listed is None:
+        listed = _listing(folder)
+        if listed is None:
+            return None
+    files = listed[1]
+    pages = _pictures(folder, files)
     if not pages:
         return None
-    info = _read_json(folder / CHAPTER_INFO)
+    described = _names(files).get(CHAPTER_INFO)
+    info = _kept_info(described) if described is not None else {}
     t, number, own = parse_name(folder.name)
     sizes = {}
     for item in info.get("pages") or []:
@@ -318,7 +382,17 @@ def _apply_chapter_info(chapter: Chapter) -> None:
         chapter.name = info["name"].strip()
 
 
-def _find_cover(folder: Path) -> str:
+def _find_cover(folder: Path, files: list | None = None) -> str:
+    """The title's cover — «cover», «poster», «folder» with a picture's ending (``files`` — the folder's files when
+    they are read: no question to the disk)."""
+    if files is not None:
+        names = _names(files)
+        for name in COVER_NAMES:
+            for ext in (".jpg", ".jpeg", ".png", ".webp", ".avif"):
+                found = names.get(name + ext)
+                if found is not None:
+                    return str(Path(found.path))
+        return ""
     for name in COVER_NAMES:
         for ext in (".jpg", ".jpeg", ".png", ".webp", ".avif"):
             candidate = folder / (name + ext)
@@ -329,46 +403,56 @@ def _find_cover(folder: Path) -> str:
 
 def read_title(root: Path, folder: Path) -> Title | None:
     title_id = _id_for(root, folder)
+    listed = _listing(folder)
+    if listed is None:
+        _LOG.warning("manhwa title %s unreadable", folder)
+        return None
+    dirs, files = listed
+    names = _names(files)
     info = {}
     for name in INFO_NAMES:
-        info = _read_json(folder / name)
+        if name in names:
+            info = _read_json(Path(names[name].path))
         if info:
             break
     chapters: list[Chapter] = []
-    try:
-        entries = sorted(folder.iterdir(), key=lambda p: natural_key(p.name))
-    except OSError as exc:
-        _LOG.warning("manhwa title %s unreadable: %s", folder, exc)
-        return None
-    cover = _find_cover(folder)
-    for entry in entries:
+    cover = _find_cover(folder, files)
+    entries = sorted([(entry, True) for entry in dirs] + [(entry, False) for entry in files],
+                     key=lambda item: natural_key(item[0].name))
+    for entry, is_dir in entries:
         if entry.name.startswith(".") or entry.name.lower() in _SKIP_DIRS:
             continue
+        place = Path(entry.path)
         try:
-            if entry.is_dir():
-                chapter = _chapter_from_folder(root, title_id, entry)
+            if is_dir:
+                inside = _listing(place)
+                if inside is None:
+                    raise OSError(f"{place.name} cannot be read")
+                chapter = _chapter_from_folder(root, title_id, place, listed=inside)
                 if chapter is not None:
                     chapters.append(chapter)
                     continue
                 tome, _n, _own = parse_name(entry.name)
-                for sub in sorted(entry.iterdir(), key=lambda p: natural_key(p.name)):     # a tome of chapters
-                    if sub.is_dir():
-                        found = _chapter_from_folder(root, title_id, sub, tome)
-                    elif sub.suffix.lower() in ARCHIVE_EXTS:
-                        found = _chapter_from_archive(root, title_id, sub, tome)
+                subs = sorted([(sub, True) for sub in inside[0]] + [(sub, False) for sub in inside[1]],
+                              key=lambda item: natural_key(item[0].name))
+                for sub, sub_is_dir in subs:                                             # a tome of chapters
+                    if sub_is_dir:
+                        found = _chapter_from_folder(root, title_id, Path(sub.path), tome)
+                    elif os.path.splitext(sub.name)[1].lower() in ARCHIVE_EXTS:
+                        found = _chapter_from_archive(root, title_id, Path(sub.path), tome)
                     else:
                         found = None
                     if found is not None:
                         chapters.append(found)
-            elif entry.suffix.lower() in ARCHIVE_EXTS:
-                chapter = _chapter_from_archive(root, title_id, entry)
+            elif os.path.splitext(entry.name)[1].lower() in ARCHIVE_EXTS:
+                chapter = _chapter_from_archive(root, title_id, place)
                 if chapter is not None:
                     chapters.append(chapter)
         except OSError as exc:            # one unreadable chapter must not hide the title
-            _LOG.warning("manhwa entry %s skipped: %s", entry, exc)
-    loose = [p for p in _pictures(folder) if str(p) != cover]
+            _LOG.warning("manhwa entry %s skipped: %s", place, exc)
+    loose = [p for p in _pictures(folder, files) if str(p) != cover]
     if loose and not chapters:            # pictures right in the title's folder: one chapter
-        one = _chapter_from_folder(root, title_id, folder)
+        one = _chapter_from_folder(root, title_id, folder, listed=listed)
         if one is not None:
             one.pages = [p for p in one.pages if p.path != cover]
             one.id = _id_for(root, folder, "manhwa-loose")     # not the title's own id
@@ -393,21 +477,19 @@ def scan(root) -> list[Title]:
     if not str(root) or not root.is_dir():
         return []
     out = []
-    try:
-        entries = sorted(root.iterdir(), key=lambda p: natural_key(p.name))
-    except OSError as exc:
-        _LOG.warning("manhwa folder %s unreadable: %s", root, exc)
+    listed = _listing(root)
+    if listed is None:
+        _LOG.warning("manhwa folder %s unreadable", root)
         return []
-    for entry in entries:
+    for entry in sorted(listed[0], key=lambda e: natural_key(e.name)):
         if entry.name.startswith(".") or entry.name.lower() in _SKIP_DIRS:
             continue
         try:
-            if entry.is_dir():
-                title = read_title(root, entry)
-                if title is not None:
-                    out.append(title)
+            title = read_title(root, Path(entry.path))
+            if title is not None:
+                out.append(title)
         except OSError as exc:            # one unreadable title must not hide the folder
-            _LOG.warning("manhwa entry %s skipped: %s", entry, exc)
+            _LOG.warning("manhwa entry %s skipped: %s", entry.path, exc)
     return out
 
 

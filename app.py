@@ -277,7 +277,7 @@ def _finish_archive_move(settings: dict) -> bool:
         return True
     QMessageBox.warning(None, "Перенос архива", f"Перенос не закончен: {result.get('error') or 'неизвестно почему'}\n\n"
                         "Программа откроется со старым архивом, в нём ничего не изменилось. При следующем запуске "
-                        "программа спросит о переносе снова; отменить его можно в «Настройках» → «Папки».")
+                        "программа спросит о переносе снова; отменить его можно в «Настройки → Хранение и копии».")
     return False
 
 
@@ -309,7 +309,7 @@ def _finish_archive_create(settings: dict) -> bool:
     said = archive_create.answer(order, "yes" if clicked is go else ("cancel" if clicked is drop else "later"))
     if said == "cancel":
         QMessageBox.information(None, "Создание архива", "Архив не создаётся: программа работает с папкой в "
-                                "«Документах», как раньше. Создать его можно в «Настройках» → «Папки».")
+                                "«Документах», как раньше. Создать его можно в «Настройки → Хранение и копии».")
         return False
     if said != "yes":
         return False
@@ -335,7 +335,7 @@ def _finish_archive_create(settings: dict) -> bool:
         return True
     QMessageBox.warning(None, "Создание архива", f"Архив не создан: {result.get('error') or 'неизвестно почему'}\n\n"
                         "Программа откроется как раньше, с папкой в «Документах», в ней ничего не изменилось. При "
-                        "следующем запуске программа спросит снова; отменить можно в «Настройках» → «Папки».")
+                        "следующем запуске программа спросит снова; отменить можно в «Настройки → Хранение и копии».")
     return False
 
 
@@ -391,7 +391,7 @@ def main() -> int:
         if apply_browser_flags():
             _startup_log("встроенный браузер рисует без видеокарты ("
                          + ("в прошлый раз окно не показало ни одной страницы)" if gpu_turned_off()
-                            else "«Настройки» → «Окно программы»)"))
+                            else "«Настройки → Внешний вид → Окно программы»)"))
             _applog.info("Built-in browser: drawing without the graphics card (webview_gpu=off)")
     except Exception as _flags_error:
         _startup_log(f"режим отрисовки встроенного браузера не прочитан: {_flags_error}")
@@ -405,6 +405,20 @@ def main() -> int:
     _startup_log("создание QApplication")
     app = QApplication(sys.argv)
     _startup_log("QApplication создан")
+    # (v5.44.147) The program's gates: every one of them must have its keeper (``core/gates.py``) — else no start.
+    try:
+        from core import gates as _gates
+        _gates.ready()
+    except Exception as _gates_error:
+        _startup_log(f"программа не запускается: {_gates_error}")
+        _applog.error("The program is not whole: %s", _gates_error)
+        try:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "Local Booru", str(_gates_error))
+        except Exception:
+            pass
+        _STARTUP_DONE = True
+        return 4
     if not _workspace_available_or_restart():
         _STARTUP_DONE = True
         return 3
@@ -802,7 +816,7 @@ def main() -> int:
                 w,
                 "SQLite: безопасный режим",
                 "Проверка рабочей базы не пройдена. Запись в SQLite заблокирована.\n\n"
-                "Основной архив не затронут. Открой «Диагностика» и либо создай копию базы, "
+                "Основной архив не затронут. Открой «Настройки → Проверка и починка» и либо создай копию базы, "
                 "либо удали/пересобери рабочую библиотеку.\n\n"
                 + str(_db_startup_results.get("db_integrity", "")),
             )
@@ -931,6 +945,11 @@ def _selfcheck() -> int:
         av.codec.Codec("aac", "w")
     except Exception as exc:
         failed.append(f"av (PyAV): {type(exc).__name__}: {exc}")
+    try:                                     # (v5.44.147) the program's gates: each has its keeper in this build
+        from core import gates
+        gates.ready()
+    except Exception as exc:
+        failed.append(f"gates: {type(exc).__name__}: {exc}")
     text = f"modules: {len(set(names))}, failed: {len(failed)}\n" + "\n".join(failed)
     out = os.environ.get("LOCAL_BOORU_SELFCHECK_OUT", "").strip()
     if out:

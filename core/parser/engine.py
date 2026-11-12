@@ -158,6 +158,7 @@ class _State:
     deferred_until: float = 0.0
     problems: list = field(default_factory=list)      # (source, reason): temporary trouble — the miss is not trustworthy
     source_only: list = field(default_factory=list)
+    manga: list = field(default_factory=list)       # (v5.44.164) the manga SauceNAO's answer names (``ReverseOutcome``)
     searched_md5: set = field(default_factory=set)
     journal: dict = field(default_factory=dict)     # site -> (outcome, md5, url): definite answers only
     adding: list = field(default_factory=list)      # «добор»: the sites added since the file was processed
@@ -478,6 +479,7 @@ class ParserEngine:
             return []
         service.note_success()
         state.source_only += outcome.source_only
+        state.manga += list(getattr(outcome, "manga", None) or [])
         if outcome.source_only:
             ticket.sourced.add(service.name)
         missed = "source_only" if service.name in ticket.sourced else "done_miss"
@@ -678,7 +680,10 @@ class ParserEngine:
             with STEPS.timed(AFTER_RELAY):
                 matches += self._relay(matches, state)
             return self._finish_found(job, state, matches)
-        if self._usable([s for s in self.services if s.enabled()], state):
+        # (v5.44.141) a run over cards of the library (an account's favorites, core/favorites.py): its files are the
+        # sites' originals — the sites asked by MD5 are all; no reverse search spends its searches on them
+        reverse = not self.ctx.flag("parser_library_cards", False)
+        if reverse and self._usable([s for s in self.services if s.enabled()], state):
             return ReverseTicket(job, state)
         return self._finish_miss(job, state)
 
@@ -1138,7 +1143,8 @@ class ParserEngine:
             return queue
 
     def _local_visual(self, state: _State) -> list:
-        if not self.ctx.flag("parser_local_visual_match", True):
+        # (v5.44.141) a run over cards of the library (core/favorites.py): the gallery's look-alike is the card itself
+        if not self.ctx.flag("parser_local_visual_match", True) or self.ctx.flag("parser_library_cards", False):
             return []
         from core.tagger.local_phash_match import find_local_phash_match, load_local_match_bundle
         try:
@@ -1394,7 +1400,12 @@ class ParserEngine:
             # (v5.44.35) the files a service's rest defers end alike: said for the first, counted for the rest (the
             # owner's journal of 2.11.2026: 385 of its 999 lines «ФИНАЛ ⏸ отложен до … — SauceNAO: пауза (сбой сервера 3)»)
             self._say_rev_first(state, f"ФИНАЛ ⏸ отложен{when} — {reason}")
+            self._loose_page(job, state, put_off=True)
             return FileResult(job.path, "deferred", reason, retry_at=float(state.deferred_until or 0.0))
+        if self.ctx.flag("parser_library_cards", False):
+            # (v5.44.141) a card of the library no site has by MD5: it stays the card it is — never Брак
+            self._say_rev(state, "ФИНАЛ — на других сайтах не найден, карточка осталась как была")
+            return FileResult(job.path, "skip", "на других сайтах не найден — карточка как была", md5=state.md5)
         best = max(state.source_only, key=lambda x: float(x.get("similarity") or 0), default=None)
         saved = persist.save_nomatch(self.ctx.settings, job.path, original_path=job.original_path,
                                      existing_media=job.existing_media, source_only=best, log=self.ctx.log)
@@ -1403,7 +1414,30 @@ class ParserEngine:
             return FileResult(job.path, str(saved.get("status") or "error"), str(saved.get("reason")))
         extra = f" (есть источник без тегов: {best.get('url')})" if best and best.get("url") else ""
         self._say_rev(state, f"ФИНАЛ ✖ не найдено → Брак{extra}")
+        self._loose_page(job, state)
         return FileResult(job.path, "nomatch", "не найдено", md5=state.md5)
+
+    def _loose_page(self, job: FileJob, state: _State, *, put_off: bool = False) -> None:
+        """(v5.44.164) A picture no booru site has, and SauceNAO's answer names a manga: it may be a page of that manga
+        lying loose among the pictures — noted for the sites of manga to confirm (``core/parser_loose.py``: in the
+        background; confirmed — the manga goes to «Манга», the picture leaves Брак).  The owner (12.11.2026): «у меня
+        есть картинки без папки но мангой и один хуй все проходит проверку snao».  ``put_off`` — the picture is not in
+        Брак yet («отложен»): what SauceNAO named is kept for its end — a later run does not ask SauceNAO again
+        (``reverse_journal``), and comes here with no answer of its own."""
+        path = job.original_path or str(job.path)
+        try:
+            from core import parser_loose
+            if put_off:
+                if state.manga:
+                    parser_loose.hold(self.ctx.settings, path, state.manga)
+                return
+            copy = job.existing_media or (str(job.path) if str(job.path) != str(job.original_path or "") else "")
+            text = parser_loose.seen(self.ctx.settings, path, state.md5, state.manga, media=copy)
+        except Exception as exc:  # noqa: BLE001 — the picture is in Брак all the same
+            self.ctx.log(f"  страница манги не записана для проверки: {type(exc).__name__}: {exc}")
+            return
+        if text:
+            self.ctx.log(text)
 
 
 def tags_ru(n: int) -> str:

@@ -101,7 +101,10 @@
       if (byKey.has(c.key)) return;
       byKey.set(c.key, c);
       cards.push(c);
-      frag.appendChild(cardEl(c));
+      const card = cardEl(c);
+      // (v5.44.158) the cards added come one after another from the first of them (booru.css: --m-i)
+      card.style.setProperty("--m-i", String(Math.min(frag.childElementCount, 16)));
+      frag.appendChild(card);
     });
     results.appendChild(frag);
   }

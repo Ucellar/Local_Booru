@@ -1,0 +1,83 @@
+/* «Справка» (webui/pages/help.py, v5.44.153): a page to read.  The list of sections stays beside the text, the text
+   keeps a line a person reads without losing it (about 70 letters).  Colours — the look's tokens only: the page
+   wears every look of the program. */
+
+.page-help .layout { padding: 16px 24px 64px; }
+.hp { --hp-top: 12px; max-width: 1080px; margin: 0 auto; font-size: calc(var(--font-size, 14px) + 1px);
+  line-height: 1.6; }
+
+.hp-head { margin: 4px 0 28px; }
+.hp-head h1 { margin: 0; font: bold 28px/1.15 var(--font-head, var(--font)); letter-spacing: -0.01em; }
+.hp-lead { margin: 6px 0 18px; color: var(--muted); max-width: 60ch; }
+.hp-find { display: flex; flex-direction: column; gap: 4px; max-width: 460px; }
+.hp-find label { font-size: 13px; color: var(--muted); }
+.hp-find input { width: 100%; padding: 8px 10px; font-size: 15px; }
+.hp-none { margin: 14px 0 0; color: var(--muted); }
+
+.hp-cols { display: grid; grid-template-columns: 232px minmax(0, 1fr); column-gap: 48px; align-items: start; }
+
+/* the sections: where one is, said by the list itself */
+.hp-contents { position: sticky; top: var(--hp-top); max-height: calc(100vh - var(--hp-top) - 16px); overflow-y: auto;
+  font-size: 14px; line-height: 1.35; }
+.hp-contents ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
+.hp-contents li[hidden] { display: none; }
+.hp-contents a { display: block; margin-left: -1px; padding: 6px 0 6px 14px; border-left: 2px solid transparent;
+  color: var(--muted); text-decoration: none; }
+.hp-contents a:hover { color: var(--text); text-decoration: none; }
+.hp-contents a[aria-current="true"] { border-left-color: var(--accent); color: var(--text); font-weight: bold; }
+
+.hp-text { min-width: 0; max-width: 72ch; }
+.hp-section { padding: 0 0 36px; margin: 0 0 36px; border-bottom: 1px solid var(--border);
+  scroll-margin-top: var(--hp-top); }
+.hp-section:last-child { border-bottom: 0; margin-bottom: 0; }
+.hp-section[hidden] { display: none; }
+.hp-section h2 { margin: 0 0 14px; font: bold 21px/1.25 var(--font-head, var(--font)); }
+.hp-section h3 { margin: 26px 0 8px; font: bold 15px/1.35 var(--font-head, var(--font)); }
+.hp-section p { margin: 0 0 12px; }
+.hp-section ul, .hp-section ol { margin: 0 0 12px; padding-left: 22px; }
+.hp-section li { margin: 0 0 7px; padding-left: 2px; }
+.hp-section li::marker { color: var(--muted); }
+.hp-section ol.hp-steps { list-style: none; padding-left: 0; counter-reset: hp-step; }
+.hp-section ol.hp-steps > li { position: relative; padding-left: 34px; margin-bottom: 10px;
+  counter-increment: hp-step; }
+.hp-section ol.hp-steps > li::before { content: counter(hp-step); position: absolute; left: 0; top: 0.1em; width: 22px;
+  height: 22px; border: 1px solid var(--border); border-radius: 50%; background: var(--panel); color: var(--text);
+  font: bold 12px/20px var(--font); text-align: center; }
+
+/* a name as the program writes it; a link to its page */
+.hp-name { font-weight: bold; }
+a.hp-name, a.hp-to { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a.hp-to { white-space: normal; }
+
+.hp-note { padding: 10px 14px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0;
+  background: var(--panel); }
+.hp-section p.hp-note { margin: 16px 0; }
+
+.hp kbd { display: inline-block; min-width: 22px; padding: 0 6px; border: 1px solid var(--border);
+  border-bottom-width: 2px; border-radius: 4px; background: var(--panel); color: var(--text);
+  font: 12px/20px var(--font); text-align: center; white-space: nowrap; vertical-align: 1px; }
+.hp code { padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel);
+  color: var(--text); font: 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+  overflow-wrap: anywhere; }
+
+.hp-keys { border-collapse: collapse; margin: 0 0 12px; }
+.hp-keys th, .hp-keys td { padding: 5px 0; vertical-align: baseline; text-align: left; font-weight: normal;
+  border-bottom: 1px solid var(--border); }
+.hp-keys tr:last-child th, .hp-keys tr:last-child td { border-bottom: 0; }
+.hp-keys th { padding-right: 24px; white-space: nowrap; }
+
+/* the words that were looked for */
+.hp-hit { background: var(--panel); box-shadow: -8px 0 0 var(--panel), 8px 0 0 var(--panel); border-radius: 2px; }
+
+@media (max-width: 900px) {
+  .page-help .layout { padding: 12px 14px 48px; }
+  .hp-cols { grid-template-columns: minmax(0, 1fr); row-gap: 24px; }
+  .hp-contents { position: static; max-height: none; }
+  .hp-contents ol { columns: 2; column-gap: 20px; }
+  .hp-contents li { break-inside: avoid; }
+  .hp-head h1 { font-size: 24px; }
+  .hp-keys th { white-space: normal; padding-right: 14px; }
+}
+@media (max-width: 520px) {
+  .hp-contents ol { columns: 1; }
+}

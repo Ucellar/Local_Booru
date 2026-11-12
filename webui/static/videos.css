@@ -453,6 +453,8 @@
   font-size: 12px; }
 .vfound-voices .voice { padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; }
 .vfound-voices .voice.here { border-color: var(--ok); color: var(--text); }
+/* (v5.44.152) by player: why nothing is downloaded from it, and the way to the site */
+.vfound-voices .vfound-voices-go { color: var(--accent-text, var(--accent)); text-decoration: underline; white-space: nowrap; }
 .vfound-where { margin: 14px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .vfound-notes p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 
@@ -738,16 +740,3 @@ details.vgroup[open] > summary.vgroup-head { margin-bottom: 10px; }
 .vdub:hover, .vdub:focus-visible { background: color-mix(in srgb, var(--text) 9%, transparent); outline: none; }
 .vdub[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #fff); font-weight: bold; }
 
-/* «Порядок просмотра» on a series' page (a title from YummyAnime) — a button under the description, the list under it */
-.vorder { margin: 14px 0 0; }
-.vorder-toggle { display: inline-flex; align-items: center; gap: 10px; }
-.vorder-toggle[aria-expanded="true"] .vorder-arrow { transform: rotate(180deg); }
-.vorder-arrow { display: inline-block; transition: transform 0.15s; }
-.vorder-list { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px 0 0; padding: 10px 14px 10px 34px;
-  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); font-size: 14px; }
-.vorder-list li { line-height: 1.4; }
-.vorder-list li.soon { color: var(--muted); }
-.vorder-list a.vorder-name { color: var(--accent-text, var(--accent)); }
-.vorder-mark { float: right; margin-left: 12px; color: var(--muted); font-size: 12px; }
-.vorder-list li.have .vorder-mark, .vorder-list li.here .vorder-mark { color: var(--tag-character, #3f9d4a); }
-.vorder-mark a { color: var(--accent-text, var(--accent)); }

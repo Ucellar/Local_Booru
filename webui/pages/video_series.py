@@ -21,17 +21,25 @@ What was watched — the one memory (``video_library.PROGRESS``): an episode wat
 The page gets everything from :func:`model` (inline, then ``/api/series`` while the site is read) and draws it
 (``static/series.js``, ``series.css``); the phone — the same page and player in its frame (``/m/videos/s/<id>``,
 ``/m/videos/watch``; an episode — ``?ep=<number>&play=1``).
+
+(v5.44.142; the owner of the list of episodes: «этот список мне в видео не нравится а так же нельзя выбрать несколько
+озвучек для скачивания», the mockup «Видео: серии плитками и скачивание озвучек» — «да отлично») The episodes are
+tiles over the player (``.sv-tiles``: in the folder / only on the site / watched / new / where it stopped; the voice-over
+of the series — one choice over them), and «Скачать серии…» (``model["get"]`` — the page it finds them on: a title of a
+site — its own, a series of the folder — the page its description came from) turns them into the choice of «Скачать» as
+the page of before had it: «Дубляж / Озвучка / Субтитры», several studios at once, «Качество», «Собрать озвучки серии в
+один файл», the weight — the machinery of «Скачать с сайта» (``/api/videos/find``, ``…/measure``, ``…/download``).
+What downloads for the series now (``/api/series/getting`` ← ``video_get.going_for``) is on its tiles.
 """
 from __future__ import annotations
 
 import json
 import logging
 import re
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 from core import video_library as V
 from webui.html import esc
@@ -53,6 +61,7 @@ def register(router) -> None:
     router.add("POST", r"/api/series/choose", choose_json)
     router.add("POST", r"/api/series/progress", progress_json)
     router.add("POST", r"/api/series/play", play_json)
+    router.add("GET", r"/api/series/getting", getting_json)
 
 
 # ── which series ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -129,6 +138,37 @@ def site_title(req: Request, ref: Ref, wait: float = 0.0):
         return None, "", str(exc)
 
 
+def get_address(req: Request, ref: Ref) -> str:
+    """(v5.44.142) The page «Скачать серии…» finds the series' episodes on ("" — none): a title of a site — its own; a
+    series of the folder — the page its description came from (``info.json`` "source_url": «Скачать» puts the
+    episodes into the folder that came from that page — ``video_download.target_folder``), when the program downloads
+    from such a page (a page of another site's player only when it is YummyAnime's, its voice-overs switched on —
+    as «Скачать с сайта» of before)."""
+    if ref.series is None:
+        return ref.url if ref.url.startswith(("http://", "https://")) else ""
+    if ref.series.single:
+        return ""
+    source = str(ref.series.info.get("source_url") or "").strip()
+    if not source.startswith(("http://", "https://")):
+        return ""
+    from core.video_download import is_frame_site
+    from webui.pages import videos as VD
+    if is_frame_site(source) and not VD._yummy(req, source):
+        return ""
+    return source
+
+
+def _get_model(req: Request, ref: Ref) -> dict:
+    """What «Скачать серии…» needs before it asks the site: its page, the site's name, the setting «Собирать озвучки
+    серии в один файл»."""
+    from core import video_watch as W
+    address = get_address(req, ref)
+    site = ""
+    if address:
+        site = W.site_of(address) or (urlparse(address).hostname or "").removeprefix("www.")
+    return {"url": address, "site": site, "merge": bool(req.settings.get("video_dub_merge", True))}
+
+
 def _hidden_title(title) -> str:
     """The mode's word about a title of a site: "" — shown; «sfw» / «nsfw» — hidden."""
     from webui import content_mode
@@ -143,28 +183,16 @@ def _hidden_title(title) -> str:
 
 
 # ── the episodes ─────────────────────────────────────────────────────────────────────────────────────────────────
-_TRACKS: dict = {}              # (path, size, time) -> the titles of a file's sound tracks
-_TRACKS_LOCK = threading.Lock()
-
-
 def tracks_of(episode: V.Episode) -> list:
-    """The titles of the sound tracks of an episode's file (read once a file: ``video_merge.tracks_in``)."""
-    key = (episode.path, episode.size, episode.mtime)
-    with _TRACKS_LOCK:
-        if key in _TRACKS:
-            return list(_TRACKS[key])
-    titles: list = []
+    """The titles of the sound tracks of an episode's file, read from it now (the page of a series takes them from
+    the folder's kept facts — ``core/video_facts``: a file is opened once in its life)."""
     try:
         from core import video_merge
         if video_merge.available() and Path(episode.path).is_file():
-            titles = [str(t or "").strip() for t in video_merge.tracks_in(Path(episode.path))]
+            return [str(t or "").strip() for t in video_merge.tracks_in(Path(episode.path))]
     except Exception as exc:  # noqa: BLE001 - a file PyAV does not read: one variant, the file itself
         _LOG.debug("tracks of %s not read: %s", episode.path, exc)
-    with _TRACKS_LOCK:
-        _TRACKS[key] = titles
-        while len(_TRACKS) > 2000:
-            _TRACKS.pop(next(iter(_TRACKS)))
-    return list(titles)
+    return []
 
 
 def kind_word(name: str) -> str:
@@ -178,13 +206,14 @@ def _key(name: str) -> str:
     return dub_key(name)
 
 
-def disk_variants(episode: V.Episode, tracks: bool = True) -> list:
+def disk_variants(episode: V.Episode, tracks: bool = True, titles: list | None = None) -> list:
     """The variants a file of an episode gives: its sound tracks (a voice-over each — the MKV «Скачать» puts them
     together in), else the file itself — named by its sub-folder («Озвучка Лунный голос» — «Лунный голос»).
     ``tracks`` False — a browser of the computer: it plays a file's first track only (the program's window and the
-    phone switch them), so the file is one variant there, as the page of before offered no choice in it."""
+    phone switch them), so the file is one variant there, as the page of before offered no choice in it.
+    ``titles`` — the titles of the file's sound tracks when they are known (the folder's kept facts)."""
     from core import video_watch as W
-    titles = tracks_of(episode)
+    titles = tracks_of(episode) if titles is None else list(titles)
     word = kind_word(episode.group)
     # «voice» — what the series keeps when it is chosen (its key is the variant's: ``dub_key`` keeps «Субтитры»)
     if len(titles) >= 2 and tracks:
@@ -231,12 +260,6 @@ def ranges(labels: list) -> str:
         start = prev = value
     parts.append(said(start, prev))
     return ", ".join(parts)
-
-
-def _length_of(episode: V.Episode) -> float:
-    from core import video_probe
-    info = video_probe.probe(episode.path)
-    return float(info.duration) if info is not None and info.duration > 0 else 0.0
 
 
 @dataclass
@@ -300,6 +323,7 @@ def build(req: Request, ref: Ref, *, wait: float = 0.0) -> Built:
                    error=error, hidden=hidden)
     model["dub"] = dubs[default_dub]["name"] if dubs and default_dub >= 0 else ""
     model["voice_key"] = voice_key                     # the voice-over chosen, as the variants' keys say it
+    model["get"] = _get_model(req, ref)                # (v5.44.142) «Скачать серии…»
     return Built(model=model, ref=ref, title=title if site_shown else None, hidden=hidden if series is None else "")
 
 
@@ -312,13 +336,18 @@ def _entries(series, item: dict, dubs: list, public: dict | None, *, tracks: boo
     out: list = []
     own: dict = {}
     if series is not None:
+        # (v5.44.151) what the files say of themselves — from the folder's kept facts: the page asked every file of
+        # the series at every start of the program (a stream «Серия 01.ts» — 0.76 s each on the owner's computer)
+        from core import video_facts
+        facts = video_facts.of(series)
         for unit in series.units():
-            disk = [v for f in unit.files for v in disk_variants(f, tracks)]
+            disk = [v for f in unit.files for v in disk_variants(f, tracks, (facts.get(f.id) or {}).get("tracks"))]
             entry = {"key": unit.key, "label": unit.label, "group": unit.group, "name": unit.name,
                      "title": next((f.site_title for f in unit.files if f.site_title and not
                                     re.fullmatch(r"(?:файл|серия)\s*\d+", f.site_title.strip(), re.I)), ""),
                      "note": next((f.note for f in unit.files if f.note), ""),
-                     "disk": disk, "site": [], "length": next((x for x in (_length_of(f) for f in unit.files[:1]) if x), 0.0),
+                     "disk": disk, "site": [],
+                     "length": float((facts.get(unit.files[0].id) or {}).get("length") or 0.0) if unit.files else 0.0,
                      "fresh": any(now - f.mtime < NEW_FOR for f in unit.files)}
             out.append(entry)
             if not unit.group:
@@ -488,6 +517,7 @@ def _model(req, ref, series, item, online, title, public, dubs, entries, voice, 
         "rating": rating.replace(".", ","),
         "facts": _facts(info, public), "about": _about(info, public), "about_from": _about_from(info, public),
         "genres": _genres(info, public), "alt": _alt(series, public),
+        "chips": genre_chips(_genres(info, public)),     # (v5.44.129) each genre — a search (``chip_href``)
         "poster": (f"/videos/cover/{series.id}?size=l" if series is not None else
                    (f"/api/catalog/cover?c={quote(_poster_of(ref, public), safe='')}" if _poster_of(ref, public)
                     else "")),
@@ -582,6 +612,38 @@ def _genres(info: dict, public: dict | None) -> list:
     if isinstance(genres, list) and genres:
         return [str(g) for g in genres[:12]]
     return list((public or {}).get("genres") or [])[:12]
+
+
+def genre_chips(genres: list) -> list:
+    """(v5.44.129; the owner, of the genres of a series of a site leading to the folder's search: «ты блять серьезно
+    додуматься не мог что оно должно быть?» — as the title's page of manga and manhwa) The genres of a series, each
+    with the filter of «Видео → Лента» that shows such series: [{name, g}] (``core.catalog.feed_filter``), [{name}] —
+    the feed has none, [{name, never}] — a name the page makes no search of (``gates.chip``)."""
+    from core import catalog as C
+    out = []
+    for name in genres:
+        field, value = C.feed_filter("video", name)
+        chip = {"name": name}
+        if field == "never":
+            chip["never"] = True
+        elif field:
+            chip[field] = value
+        out.append(chip)
+    return out
+
+
+def chip_href(chip: dict, *, from_feed: bool, phone: bool) -> str:
+    """Where a genre of the page leads (``series.js`` — the same): a title of a site (``/videos/watch`` — opened from
+    «Лента» or by its link) — «Лента» of «Видео» with the genre chosen, (v5.44.148) a genre the feed has not — the
+    feed's search by the word (it went to the folder: the owner — «отправляют в библиотеку а не в ленте смотреть»); a
+    series of the folder (``/videos/s/<id>``) — the folder's series by it (as since 5.44.121); a name marked
+    ``never`` — nowhere."""
+    if chip.get("never"):
+        return ""
+    if from_feed:
+        words = {"g": chip["g"]} if chip.get("g") else {"q": chip["name"]}
+        return ("/m" if phone else "") + "/videos/feed?" + urlencode(words, quote_via=quote)
+    return ("/m" if phone else "") + "/videos?" + urlencode({"q" if phone else "tags": chip["name"]})
 
 
 def _alt(series, public: dict | None) -> list:
@@ -877,6 +939,19 @@ def play_json(req: Request) -> Response:
     return Response.json(out)
 
 
+def getting_json(req: Request) -> Response:
+    """(v5.44.142) ``/api/series/getting?series=<id>|url=<address>`` — what the downloads do for this series now, for
+    its tiles and the line over them (``video_get.going_for`` by the page «Скачать серии…» finds it on): the download
+    going (each episode — how far, the file now, «Пауза»), its place in the queue, another title's going."""
+    ref = _ref_of(req)
+    if ref is None:
+        return Response.json({"ok": False, "error": "Такого сериала нет"}, 404)
+    if _folder_hidden(ref):
+        return Response.json({"ok": False, "hidden": _folder_hidden(ref), "error": "Скрыто режимом"}, 409)
+    from webui.pages import video_get as G
+    return Response.json({"ok": True, **G.going_for(get_address(req, ref))})
+
+
 def chosen_variant(model: dict, entry: dict, asked: dict | None) -> dict:
     """The variant asked at the episode (one of its own), else the one the series' voice-over gives."""
     if asked:
@@ -1106,12 +1181,7 @@ def _hero(req: Request, ref: Ref, model: dict, tile: dict, *, phone: bool) -> st
         side.append(f'<a class="sv-link" href="{esc(source)}" target="_blank" rel="noopener noreferrer" '
                     f'data-sv-site-link>{esc(site)} ↗</a>')
     if series is not None:
-        if source.startswith(("http://", "https://")) and not series.single:
-            from core.video_download import is_frame_site
-            if not is_frame_site(source) or VD._yummy(req, source):
-                from webui.pages.get_link import link_of
-                side.append(f'<a class="sv-link sv-get" href="{esc(link_of(source))}" title="Скачать серии с этой '
-                            f'страницы сайта (те, которых ещё нет)">Скачать с сайта</a>')
+        # (v5.44.142) «Скачать с сайта» of before (the card «По ссылке») — «Скачать серии…» of this page (series.js)
         if not phone:
             side.append('<button type="button" class="sv-link" data-action="vid-meta-open" aria-controls="vid-meta">'
                         'Описание с сайта</button>')
@@ -1121,10 +1191,7 @@ def _hero(req: Request, ref: Ref, model: dict, tile: dict, *, phone: bool) -> st
             mark = P.mark_box("series", series.id, CM.series_verdict(series))
         else:
             side.append(VD._mark_button(series, CM.series_verdict(series)).replace('class="vbutton"', 'class="sv-link"'))
-    elif ref.url:
-        side.append(f'<a class="sv-link sv-get" href="{"/m/get" if phone else "/get"}?url='
-                    f'{esc(quote(ref.url, safe=""))}&amp;go=1">Скачать…</a>')
-    rating = VD._rating_box(series) if series is not None and not phone else ""
+    rating =VD._rating_box(series) if series is not None and not phone else ""
     if model["site"]["pending"]:                       # its site is read meanwhile (series.js: it says what comes)
         rating += (f'<p class="sv-wait-line" data-sv-waiting role="status">Читаю тайтл с '
                    f'{esc(model["site"]["name"])}…</p>')
@@ -1136,12 +1203,19 @@ def _hero(req: Request, ref: Ref, model: dict, tile: dict, *, phone: bool) -> st
         about = '<div class="sv-desc" data-sv-desc hidden></div>'
     about_from = (f'<p class="sv-desc-from" data-sv-from{"" if model["about_from"] else " hidden"}>'
                   f'{esc(model["about_from"])}</p>')
-    chips = ('<ul class="sv-chips" data-sv-chips>' + "".join(
-        f'<li><a href="{esc(("/m" if phone else "") + "/videos?" + urlencode({"q" if phone else "tags": g}))}">'
-        f'{esc(g)}</a></li>' for g in model["genres"]) + "</ul>")
+    from_feed = req.path.rstrip("/").endswith("/videos/watch")       # (v5.44.129) a title of a site: «Лента»
+
+    def chip(c: dict) -> str:
+        href = chip_href(c, from_feed=from_feed, phone=phone)
+        if not href:
+            return f'<li class="sv-chip-words">{esc(c["name"])}</li>'
+        tip = ("Найти в «Ленте»" if c.get("g") else "Искать в «Ленте» по слову") if from_feed else "Искать в папке видео"
+        return f'<li><a href="{esc(href)}" title="{tip}">{esc(c["name"])}</a></li>'
+    chips = '<ul class="sv-chips" data-sv-chips>' + "".join(chip(c) for c in model["chips"]) + "</ul>"
     order = ""
-    if series is not None and not phone and VD._yummy(req, source):
-        order = f'<div class="vorder" data-order="{series.id}" hidden></div>'
+    if VD._yummy(req, source):          # (v5.44.145) a title of a site too, and on the phone (series.js draws it)
+        order = (f'<div class="vorder" data-order="{series.id}" hidden></div>' if series is not None else
+                 f'<div class="vorder" data-order-url="{esc(source)}" hidden></div>')
     return (f'<section class="sv-hero" aria-labelledby="sv-name">'
             f'<div class="sv-cover" data-sv-cover>{cover}</div><div class="sv-about">'
             f'<p class="sv-facts" data-sv-facts>{esc(model["facts"])}</p>'
@@ -1150,7 +1224,6 @@ def _hero(req: Request, ref: Ref, model: dict, tile: dict, *, phone: bool) -> st
             f'<div class="sv-numbers" data-sv-numbers></div>{rating}'
             f'<div class="sv-actions" data-sv-actions></div>'
             f'<div class="sv-side">{"".join(side)}<span class="action-status" role="status"></span></div>{mark}'
-            f'<section class="sv-src" data-sv-src aria-label="Откуда серии"></section>'
             f'{about}{about_from}{chips}{_fields(series)}{order}</div></section>')
 
 
@@ -1205,26 +1278,70 @@ def _value(key: str, value) -> str:
     return esc(value)
 
 
-def _strip(ref: Ref, model: dict, current: str) -> str:
-    """The episodes as numbers over the player — the tabs of the episode the player shows (the row of numbers of the
-    page of before, ``.vepisodes`` / ``.vep``: «Скачать с сайта» leads here and its checks find it); ``series.js``
-    draws it again as the page changes."""
-    if model["single"] or not model["episodes"]:
-        return ""
-    tabs = []
-    for e in model["episodes"]:
-        on = e["key"] == current
-        cls = "sv-ep vep" + (" now" if on else " done" if e["done"] else " site" if not e["disk"] else "")
-        playable = bool(e["disk"] or e["site"])
-        title = e["name"] + (f" — «{e['title']}»" if e["title"] else "") + (", досмотрена" if e["done"] else "") + \
-            (", с сайта" if not e["disk"] else "")
-        href = f' href="{esc(address(ref, ep=e["key"], play=True) + "#player")}"' if playable else ""
-        state = ' aria-selected="true" aria-current="true"' if on else ' aria-selected="false"'
-        tabs.append(f'<a class="{cls}{"" if playable else " off"}" role="tab"{state}{href} data-ep="{esc(e["key"])}" '
-                    f'title="{esc(title)}">{esc(e["label"])}</a>')
-    legend = "✓ досмотрена" + ('<span class="sv-site-word"> • с сайта, онлайн</span>' if model["counts"]["site"] else "")
-    return (f'<span class="sv-strip-label">Серии</span><div class="sv-eptabs vepisodes" role="tablist" '
-            f'aria-label="Серии">{"".join(tabs)}</div><span class="sv-strip-legend">{legend}</span>')
+PAGE = 100                      # (v5.44.142) a long series: its tiles a hundred at a time (series.js PAGE — the same)
+
+
+def tile_words(e: dict) -> str:
+    """What an episode's tile says to a screen reader and in its tip: «Серия 5 — «Название», вы остановились на 12:34,
+    в папке» (``series.js tileWords`` — the same)."""
+    words = [e["name"] + (f" — «{e['title']}»" if e["title"] else "")]
+    if e["here"] and e["place"]:
+        words.append(f"вы остановились на {human(e['place'][0]) or '0:00'}")
+    elif e["done"]:
+        words.append("досмотрена")
+    if e["new"]:
+        words.append("новая")
+    words.append("в папке" if e["disk"] else "на сайте, онлайн" if e["site"] else "нет ни в папке, ни на сайте")
+    return ", ".join(words)
+
+
+def _tile(ref: Ref, e: dict, current: str, *, phone: bool) -> str:
+    """(v5.44.142) One episode's tile (``series.js tile`` draws it the same, and again as the page changes): its
+    number; ✓ watched / ● new in the corner; under it «▶ 12:34» where it stopped, «досмотрена», «новая», «в папке»;
+    the episode in the player framed.  The classes ``.vepisodes`` / ``.vep`` of the row of numbers of before stay on
+    the tiles: «Скачать с сайта» leads here and its checks find them."""
+    where = "disk" if e["disk"] else "site" if e["site"] else "off"
+    marks = (("done", e["done"]), ("here", e["here"]), ("new", e["new"]), ("now", e["key"] == current))
+    cls = " ".join(["sv-tile", "vep", where] + [name for name, on in marks if on])
+    corner = "✓" if e["done"] else "●" if e["new"] else ""
+    if e["here"] and e["place"]:
+        sub = "▶ " + (human(e["place"][0]) or "0:00")
+    elif e["done"]:
+        sub = "досмотрена"
+    elif e["new"]:
+        sub = "новая"
+    else:
+        sub = "в папке" if e["disk"] else ""
+    bar = ""
+    if e["place"] and e["place"][1] and not e["done"]:
+        part = max(0, min(100, round(100 * e["place"][0] / e["place"][1])))
+        bar = f'<span class="sv-tile-bar" style="width: {part}%" aria-hidden="true"></span>'
+    link = address(ref, ep=e["key"], play=True, phone=phone) + ("" if phone else "#player")
+    href = f' href="{esc(link)}"' if where != "off" else ' aria-disabled="true"'
+    now = ' aria-current="true"' if e["key"] == current else ""
+    words = esc(tile_words(e))
+    return (f'<a class="{cls}"{href}{now} data-ep="{esc(e["key"])}" title="{words}" aria-label="{words}">'
+            f'<span class="sv-tile-top"><span class="sv-tile-n">{esc(e["label"])}</span>'
+            f'<span class="sv-tile-mark" aria-hidden="true">{corner}</span></span>'
+            f'<span class="sv-tile-sub">{esc(sub)}</span>{bar}</a>')
+
+
+def _card(ref: Ref, model: dict, current: str, *, phone: bool) -> str:
+    """(v5.44.142) «Серии» over the player: the tiles as the server has them (``series.js`` draws the card again — its
+    head with the legend and the voice-over of the series, what downloads now, «Откуда серии» under the tiles, and
+    «Скачать серии…» in it)."""
+    if model["single"]:
+        return '<section class="sv-list" data-sv-list aria-label="Серии" hidden></section>'
+    count = model["counts"]["total"]
+    shown = model["episodes"]
+    if len(shown) > PAGE + PAGE // 5:          # a long series: the hundred of the episode in the player (series.js parts)
+        at = next((n for n, e in enumerate(shown) if e["key"] == current), 0)
+        shown = shown[at // PAGE * PAGE:at // PAGE * PAGE + PAGE]
+    tiles = "".join(_tile(ref, e, current, phone=phone) for e in shown)
+    return (f'<section class="sv-list" data-sv-list aria-labelledby="sv-eps-h"><div class="sv-eps" data-sv-eps>'
+            f'<div class="sv-list-head"><h2 id="sv-eps-h">Серии'
+            + (f' <span class="sv-count">{count}</span>' if count else "") + '</h2></div>'
+            f'<div class="sv-tiles vepisodes">{tiles}</div></div></section>')
 
 
 def _hidden_template(phone: bool, back: str) -> str:
@@ -1281,14 +1398,14 @@ def render(req: Request, ref: Ref, *, phone: bool = False, tile: dict | None = N
                       f'data-action="vid-play" aria-hidden="true"></div>'
                       if variant.get("file") and variant.get("where") == "disk" and not play else "")
             stage = own_player(phone=False, poster=poster, slides=slides, skips=not model["single"])
+        # (v5.44.142) no row of numbers over the player: the tiles of «Серии» are right over it
         player = (f'<section class="sv-player" id="player" data-sv-player aria-label="Плеер">'
                   f'<div class="sv-head" data-sv-head></div>'
-                  f'<div class="sv-strip" data-sv-strip>{_strip(ref, model, entry["key"] if entry else "")}</div>'
                   f'<div class="sv-stage vstage">{stage}</div><div class="sv-under" data-sv-under></div></section>')
     meta = VD._meta_box(req, ref.series) if ref.series is not None and not phone else ""
+    card = _card(ref, model, entry["key"] if entry else "", phone=phone)
     body = (f'<div class="sv{" sv-phone" if phone else ""}" id="series-page"{data}>{_json_tag(model)}{head}'
-            f'{_hero(req, ref, model, tile, phone=phone)}'
-            f'<section class="sv-list" data-sv-list aria-label="Серии"></section>{player}{meta}</div>{hidden}')
+            f'{_hero(req, ref, model, tile, phone=phone)}{card}{player}{meta}</div>{hidden}')
     title = model["title"] or tile.get("name") or "Сериал"
     if phone:
         from webui.pages import phone as P

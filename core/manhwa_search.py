@@ -34,8 +34,10 @@ from core import manhwa_sources as S
 _LOG = logging.getLogger("local_booru.manhwa")
 
 TASK = "manhwa_search"                 # the page task
-ASKED = ("remanga", "recomics", "mangalib", "mangabuff", "readmanga", "desu", "hentailib", "allhentai",
-         "hentaichan")                                     # (v5.44.99) AllHentai
+# (v5.44.99) AllHentai; (v5.44.132) not Nude-Moon: it lets in nothing but the browser itself, and a search by a name
+# never opens the window's browser — its search is in «Лента» (``catalog.nudemoon_url``), its titles by a link
+ASKED = ("remanga", "recomics", "mangalib", "mangabuff", "readmanga", "desu", "onelove", "hentailib", "allhentai",
+         "hentaichan")                         # (v5.44.143) Manga One Love
 MAX_QUERY = 120
 MAX_TILES = 80
 DEADLINE = 30.0                        # seconds the search waits for the slowest site
@@ -43,11 +45,15 @@ COVER_HOSTS = ("remanga.org", "recomics.org", "imglib.info", "mangalib.me", "man
                "lib.social", "mangabuff.ru",
                "one-way.work", "zazaza.me", "readmanga.live", "readmanga.io", "desu.uno", "desu.me",   # (v5.44.77)
                "mangadex.org",                                                                        # (v5.44.79)
+               "mangaonelove.space",                                                                  # (v5.44.143)
                "imgschan.xyz", "hentaichan.live", "h-chan.me", "henchan.pro",                        # (v5.44.85)
                "yani.tv",                     # (v5.44.90) the posters of YummyAnime («Видео → Лента», core/catalog.py)
                "hentasis1.top",               # (v5.44.93) …of Hentasis
                "nhentai.net",                 # (v5.44.97) the thumbnails of nhentai (t1…t4.nhentai.net)
-               "aaa200.one", "allhen.online")  # (v5.44.99) AllHentai's covers (staticahen2.aaa200.one)
+               "aaa200.one", "allhen.online",  # (v5.44.99) AllHentai's covers (staticahen2.aaa200.one)
+               "nude-moon.org", "nude-moon.net", "nude-moon.fun",    # (v5.44.131) Nude-Moon's (/images/thumb/…)
+               "hentaihaven.xxx",                                   # (v5.44.138) HentaiHaven's (img.hentaihaven.xxx)
+               "hentai-xs.com", "hfshare.me")                       # (v5.44.139) Hentai-XS's, HFShare's (v2.hfshare.me)
 COVER_LIMIT = 4 * 1024 * 1024
 COVER_TIMEOUT = (6, 15)                # (v5.44.95) a cover: (connect, read) seconds, asked once
 COVER_FAILED_FOR = 5 * 60              # …one that did not come is not asked again this long
@@ -64,6 +70,27 @@ class _QuietNet(S.Net):
 
     def _through_browser(self, url, what):
         raise S.Closed(S.closed_words(what))
+
+
+class _CoverNet(_QuietNet):
+    """(v5.44.134) The covers' net (:func:`_cover_net`: «Лента», the menu of covers, «Из архива»): a cover a site gives
+    to nothing but the window's browser itself — the browser's own request (``Net._browser_bytes``: a ``fetch`` of the
+    browser, it opens no page; then every cover of that host so).  Nude-Moon: its Cloudflare refuses the program's own
+    requests even with the browser's pass and agent — the 26 covers of its «Лента» did not come (the owner's journal,
+    8.11.2026).  A page is never opened for a cover: the browser has no pass there (or it has ended) — the cover does not
+    come this time («Лента» opens the site's page first, and that passes the check); no window's browser — the same."""
+
+    def _past_check(self, url, closed, options):
+        from core import site_browser
+        if options.get("method", "GET") != "GET" or self._page_like("GET", options.get("headers")) \
+                or not site_browser.available():
+            raise closed
+        with self._lock:
+            self._bytes_only.add((urlparse(url).hostname or "").lower())
+        return self._browser_bytes(url, closed, options)
+
+    def _open(self, url, closed, what):
+        raise closed
 
 
 @dataclass
@@ -196,7 +223,7 @@ def _fetch_cover(net, address: str, referer: str) -> tuple:
 def _cover_net():
     with _LOCK:
         if not _COVER_NET:
-            _COVER_NET.append(_QuietNet())
+            _COVER_NET.append(_CoverNet())
         return _COVER_NET[0]
 
 
@@ -216,7 +243,7 @@ def ask_all(query: str, asked: list, put, stop_check, *, net=None, said=None, de
         if stop_check():
             return
         try:
-            hits = source.search(quiet, query)
+            hits = S.checked_hits(source.search(quiet, query))  # (v5.44.143) past the program's gate
         except S.Closed as exc:
             put(source, None, f"не пускает программу ({exc})"[:200])
             return

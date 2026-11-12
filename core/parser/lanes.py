@@ -541,10 +541,13 @@ class ReverseLane:
             self.asking = ""
 
 
-def estimate(site_lanes: list, reverse_lanes: list, *, unread: int, at_sites: int, to_reverse: float,
-             read_share: float, files: "Files | None" = None, stages: tuple = (),
-             now: float | None = None) -> tuple[int | None, str]:
-    """(seconds the run still takes, the stage that decides) — (None, the stage that has work and no pace yet).
+def breakdown(site_lanes: list, reverse_lanes: list, *, unread: int, at_sites: int, to_reverse: float,
+              read_share: float, files: "Files | None" = None, stages: tuple = (),
+              now: float | None = None) -> list:
+    """(v5.44.160) [(the stage or queue, seconds its work still takes)] in the order of the run: the reading, the
+    stages, the MD5 sites, reverse search — 0.0: nothing to do, or it keeps up with what comes to it; None: it has
+    work and no pace yet.  What ``estimate`` decides by, and what the page «Парсер» says of every queue («Осталось»:
+    with the files not read yet — not only those waiting for it now).
 
     ``unread`` — files not read yet, ``at_sites`` — files some site has not answered yet, ``to_reverse`` — of the
     files that left the sites lately, the share that went on to reverse search, ``read_share`` — of the files read
@@ -552,30 +555,27 @@ def estimate(site_lanes: list, reverse_lanes: list, *, unread: int, at_sites: in
     is not over): the writing, the stages after the sites.  The reading's work: the unread files; a stage's: what
     waits and what its files will still bring; an MD5 site's: what waits for it and its share of the unread files;
     reverse search gets the files still at the sites and to be read in the share that went on to it lately, each
-    service those its predecessor did not find.  The stages work side by side: the run ends with the slowest.  One
-    with nothing waiting and no pace yet keeps up with what comes to it — it holds nothing up and is not waited for
-    (a fast site that gets a file now and then never had the ten seconds of work in five minutes a pace needs, and a
-    run had no estimate at all)."""
+    service those its predecessor did not find.  One with nothing waiting and no pace yet keeps up with what comes to
+    it — it holds nothing up and is not waited for (a fast site that gets a file now and then never had the ten
+    seconds of work in five minutes a pace needs, and a run had no estimate at all)."""
     now = time.monotonic() if now is None else now
-    finish, slowest = 0.0, ""
-    if files is not None and unread >= 1:
-        rate = files.pace.per_second(now)
-        if rate <= 0:
-            return None, files.name
-        finish, slowest = unread / rate, files.name
+    out = []
+    if files is not None:
+        if unread >= 1:
+            rate = files.pace.per_second(now)
+            out.append((files, unread / rate if rate > 0 else None))
+        else:
+            out.append((files, 0.0))
     for stage, to_come in stages:
         work = stage.work(to_come)
         if work < 1:
+            out.append((stage, 0.0))
             continue
         rate = stage.pace.per_second(now)
         if rate > 0:
-            seconds = work / rate
-        elif stage.waiting == 0:
-            continue
+            out.append((stage, work / rate))
         else:
-            return None, stage.name
-        if seconds > finish:
-            finish, slowest = seconds, stage.name
+            out.append((stage, 0.0 if stage.waiting == 0 else None))
 
     def lane_time(lane, work: float):
         """Seconds of ``lane``'s work at its pace; 0 — nothing to do or keeping up; None — not known yet."""
@@ -587,18 +587,25 @@ def estimate(site_lanes: list, reverse_lanes: list, *, unread: int, at_sites: in
         return 0.0 if lane.waiting() == 0 else None
 
     for lane in site_lanes:
-        seconds = lane_time(lane, lane.waiting() + unread * lane.share.fraction(1.0))
-        if seconds is None:
-            return None, lane.name
-        if seconds > finish:
-            finish, slowest = seconds, lane.name
+        out.append((lane, lane_time(lane, lane.waiting() + unread * lane.share.fraction(1.0))))
     coming = (at_sites + unread * read_share) * to_reverse
     for lane in reverse_lanes:
         work = lane.waiting() + coming
-        seconds = lane_time(lane, work)
-        if seconds is None:
-            return None, lane.name
-        if seconds > finish:
-            finish, slowest = seconds, lane.name
+        out.append((lane, lane_time(lane, work)))
         coming = work * lane.passed.fraction(1.0)
+    return out
+
+
+def estimate(site_lanes: list, reverse_lanes: list, *, unread: int, at_sites: int, to_reverse: float,
+             read_share: float, files: "Files | None" = None, stages: tuple = (),
+             now: float | None = None) -> tuple[int | None, str]:
+    """(seconds the run still takes, the stage that decides) — (None, the stage that has work and no pace yet).
+    The stages work side by side: the run ends with the slowest (``breakdown`` — what each of them still takes)."""
+    finish, slowest = 0.0, ""
+    for part, seconds in breakdown(site_lanes, reverse_lanes, unread=unread, at_sites=at_sites, to_reverse=to_reverse,
+                                   read_share=read_share, files=files, stages=stages, now=now):
+        if seconds is None:
+            return None, part.name
+        if seconds > finish:
+            finish, slowest = seconds, part.name
     return int(finish), slowest

@@ -7,8 +7,8 @@
   (its ``window._gallery`` carries the same description — (v5.44.97) the page of 2026 has it among the answers its
   scripts were given, ``<script data-sveltekit-fetched>``; failing that its page thumbnails and tags are read);
   (v5.44.97) the API of 2026 (``core/nhentai.py``): ``/api/v2/galleries/<n>`` — the old ``/api/gallery/<n>`` answers
-  403 «Use new API»; the pages by their paths on the servers ``/api/v2/cdn`` names; the program's rule about minors —
-  such a gallery is neither described nor downloaded (:class:`Forbidden`);
+  403 «Use new API»; the pages by their paths on the servers ``/api/v2/cdn`` names; a gallery the program's gate
+  closes is neither described nor downloaded (:class:`Forbidden`);
 * :func:`download` — the galleries one after another into the manga folder, each as ``nhentai-<number> - <title>``
   with pages ``001.jpg`` … and the description as ``meta.json`` (``core/manga_library.py`` reads it: the titles, the
   tags by kind, the link back).  A page already there (a download stopped or broken off) is not asked again; a
@@ -27,6 +27,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from core import gates as G
 
 _LOG = logging.getLogger("local_booru.manga")
 
@@ -68,7 +70,7 @@ class MangaError(Exception):
 
 
 class Forbidden(MangaError):
-    """(v5.44.97) A gallery the program's rule leaves out: it depicts minors (``core/nhentai.py``)."""
+    """(v5.44.97) A gallery a gate of the program closes (``gates.title`` — the words are the gate's)."""
 
 
 # ── what was pasted ─────────────────────────────────────────────────────────────────
@@ -115,7 +117,7 @@ class Gallery:
 def gallery_of(data, number: int, servers=None) -> Gallery:
     """The gallery a description (the API's JSON) tells of — checked: its number, its pictures' number, its pages.
     (v5.44.97) The API v2's description too (``pages`` — their paths; ``servers`` — the picture servers the API names);
-    a gallery the program's rule leaves out — :class:`Forbidden`."""
+    a gallery a gate closes — :class:`Forbidden`."""
     from core import nhentai as N
     if not isinstance(data, dict):
         raise MangaError("Описание галереи непонятное")
@@ -128,8 +130,9 @@ def gallery_of(data, number: int, servers=None) -> Gallery:
     media = str(data.get("media_id") or "").strip()
     if not re.fullmatch(r"[0-9]{1,12}", media):           # it goes into the pictures' addresses
         raise MangaError("В описании галереи нет номера её картинок")
-    if N.forbidden_gallery(data):
-        raise Forbidden(N.EXCLUDED)
+    why = G.title("nhentai", what="gallery", **N.gallery_facts(data))
+    if why:
+        raise Forbidden(why)                         # a gate closed it
     paths: list = []
     if isinstance(data.get("pages"), list):               # (v5.44.97) the API v2: each page's path
         for page in data["pages"][:MAX_PAGES]:
@@ -374,7 +377,7 @@ DESCRIBED_KEPT = 64
 def describe(number: int) -> Gallery:
     """(v5.44.97) A gallery's description for its card — the API (no window's browser: the card does not wait for
     one; its thumbnails are on ``nhentai.THUMB_SERVERS``, its servers of pages are not asked), kept
-    :data:`DESCRIBED_TTL`; :class:`MangaError` with words (:class:`Forbidden` — the program's rule)."""
+    :data:`DESCRIBED_TTL`; :class:`MangaError` with words (:class:`Forbidden` — a gate closed it)."""
     number = int(number)
     with _DESCRIBED_LOCK:
         kept = _DESCRIBED.get(number)
@@ -423,19 +426,26 @@ def _guard(status: int, body: bytes, ctype: str) -> str:
 
 
 def _ask(session, address: str, referer: str) -> tuple[int, bytes, str]:
-    """(status, body, content type) — status 0: no answer (the server unknown, the line cut)."""
+    """(status, body, content type) — status 0: no answer (the server unknown, the line cut).  (v5.44.162) A server
+    whose name the computer does not find — asked once more by the address a public resolver gives
+    (``core/name_lookup``)."""
     import requests
-    try:
-        with session.get(address, timeout=TIMEOUT, stream=True, headers={"Referer": referer}) as answer:
-            body = bytearray()
-            for chunk in answer.iter_content(256 * 1024):
-                body += chunk
-                if len(body) > MAX_PICTURE:
-                    return 413, b"", ""
-            return answer.status_code, bytes(body), str(answer.headers.get("Content-Type") or "")
-    except requests.RequestException as exc:
-        _LOG.debug("nhentai page %s: %s", address, exc)
-        return 0, b"", ""
+    from core import name_lookup
+    for again in (True, False):
+        try:
+            with session.get(address, timeout=TIMEOUT, stream=True, headers={"Referer": referer}) as answer:
+                body = bytearray()
+                for chunk in answer.iter_content(256 * 1024):
+                    body += chunk
+                    if len(body) > MAX_PICTURE:
+                        return 413, b"", ""
+                return answer.status_code, bytes(body), str(answer.headers.get("Content-Type") or "")
+        except requests.RequestException as exc:
+            if again and isinstance(exc, requests.ConnectionError) and name_lookup.retry_for(exc, address):
+                continue
+            _LOG.debug("nhentai page %s: %s", address, exc)
+            return 0, b"", ""
+    return 0, b"", ""
 
 
 def _tries_of(gallery: Gallery, n: int) -> list:

@@ -4,7 +4,7 @@
 // is a page task, its journal under «Подробности».  Rows are kept by their key: a refresh while one is typed into does
 // not take the text away.  (v5.44.81) How each was known, what was tried for one not found; a round of the background
 // leaves the buttons free (they stop it).  (v5.44.116) «Узнавать само, в фоне» and «…и по картинкам» — fields of
-// «Настройки → Сайты манги» now (the page says so in a line).
+// «Настройки → Манга и манхва» now (the page says so in a line).
 (() => {
   "use strict";
   const LB = window.LocalBooru || {};
@@ -116,7 +116,7 @@
     });
     empty.hidden = !!shown.length;
     empty.textContent = entries.length ? "" : "В папках манги и манхвы тайтлов нет — или папки не выбраны (вкладки " +
-      "«Манга» и «Манхва», «Настройки → Папки»).";
+      "«Манга» и «Манхва», «Настройки → Хранение и копии»).";
   }
 
   function row(e) {
@@ -243,8 +243,9 @@
   }
 
   const SITES = { remanga: "Remanga", recomics: "ReComics", mangalib: "MangaLib", mangabuff: "MangaBuff",
-    readmanga: "ReadManga", desu: "Desu", comx: "com-x.life", mangadex: "MangaDex", hentaichan: "Хентай-тян",
-    hentailib: "HentaiLib", allhentai: "AllHentai" };
+    readmanga: "ReadManga", desu: "Desu", comx: "com-x.life", onelove: "Manga One Love", mangadex: "MangaDex",
+    hentaichan: "Хентай-тян",
+    hentailib: "HentaiLib", allhentai: "AllHentai", nudemoon: "Nude-Moon" };
   const siteLabel = (name) => SITES[name] || name;
 
   function candidateCard(e, c) {

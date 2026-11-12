@@ -109,7 +109,8 @@ def _nothing(req: Request, query: str, every: list) -> str:
         return (f'<div class="m-empty"><h2>Здесь пусто</h2><p>В режиме «{content_mode.LABELS[now]}» {why}.</p>'
                 f'<p><button type="button" class="m-button" data-mode-set="all">Показать всё</button></p></div>')
     return ('<div class="m-empty"><h2>Манхвы пока нет</h2><p>Скачайте её по ссылке на тайтл — Remanga, ReComics, '
-            'MangaLib, MangaBuff, ReadManga, Desu. Папку манхвы выбирают на компьютере: «Настройки → Папки».</p>'
+            'MangaLib, MangaBuff, ReadManga, Desu, Manga One Love. Папку манхвы выбирают на компьютере: «Настройки → '
+            'Хранение и копии».</p>'
             '<p><a class="m-button" href="/m/get">Скачать по ссылке</a></p></div>')
 
 
@@ -240,8 +241,7 @@ def title_page(req: Request) -> Response:
     desc = "".join(f"<p>{esc(p)}</p>" for p in text.split("\n\n") if p.strip()) or '<p class="m-muted">Описания нет.</p>'
     chip_links = "".join(f'<a class="m-tag" href="{esc(url("/m/manhwa", q=v))}">{esc(v)}</a>'
                          for v in (title.list_of("genres") + title.list_of("tags"))[:40])
-    facts = "".join(f'<dt>{esc(name)}</dt><dd>{esc(", ".join(title.list_of(key)) if isinstance(title.info.get(key), list) else title.info.get(key))}</dd>'
-                    for key, name in MH.FACTS if title.info.get(key))
+    facts = MH.facts_html(title, "/m/manhwa")
     facts += from_site(title.path)
     facts += f"<dt>Глав</dt><dd>{total}</dd>"
     tab = "main" if req.arg("tab") == "main" else "chapters"

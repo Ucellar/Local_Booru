@@ -271,83 +271,8 @@
   }
   setupDubs();
 
-  // ── «Порядок просмотра» on a series' page (a title from YummyAnime): its seasons, films and extras — the ones in
-  // the library open there, the others are found and downloaded on «Скачать с сайта» (/api/videos/order/<id>) ──
-  function setupOrder(box) {
-    fetch("/api/videos/order/" + encodeURIComponent(box.dataset.order), { credentials: "same-origin" })
-      .then((r) => r.json()).then((reply) => {
-        showRatings((reply && reply.ratings) || []);
-        const order = (reply && reply.order) || [];
-        if (order.length < 2) return;
-        const toggle = document.createElement("button");
-        toggle.type = "button";
-        toggle.className = "vbutton primary vorder-toggle";
-        toggle.setAttribute("aria-expanded", "false");
-        toggle.innerHTML = '<span>Порядок просмотра</span><span class="vorder-arrow" aria-hidden="true">▾</span>';
-        const list = document.createElement("ol");
-        list.className = "vorder-list";
-        list.hidden = true;
-        for (const o of order) {
-          const li = document.createElement("li");
-          li.className = o.here ? "here" : o.series ? "have" : o.soon ? "soon" : "";
-          let name;
-          if (o.series && !o.here) {
-            name = document.createElement("a");
-            name.href = "/videos/s/" + encodeURIComponent(o.series);
-          } else {
-            name = document.createElement(o.here ? "b" : "span");
-          }
-          name.className = "vorder-name";
-          name.textContent = o.title;
-          li.append(name);
-          const about = [o.type, o.kind, o.year].filter(Boolean).join(", ");
-          if (about) li.append(document.createTextNode(" — " + about));
-          const mark = document.createElement("span");
-          mark.className = "vorder-mark";
-          if (o.here) mark.textContent = "это";
-          else if (o.series) mark.textContent = "есть" + (o.episodes ? ": " + o.episodes + " " + (o.episodes % 10 === 1 && o.episodes % 100 !== 11 ? "серия" : [2, 3, 4].includes(o.episodes % 10) && ![12, 13, 14].includes(o.episodes % 100) ? "серии" : "серий") : "");
-          else if (o.soon) mark.textContent = "анонс";
-          else if (o.get) {
-            const get = document.createElement("a");
-            get.href = o.get;
-            get.textContent = "найти и скачать";
-            mark.append(get);
-          }
-          li.append(mark);
-          list.append(li);
-        }
-        toggle.addEventListener("click", () => {
-          list.hidden = !list.hidden;
-          toggle.setAttribute("aria-expanded", String(!list.hidden));
-        });
-        box.append(toggle, list);
-        box.hidden = false;
-      }).catch(() => {});
-  }
-  document.querySelectorAll(".vorder[data-order]").forEach(setupOrder);
-
-  // the title's ratings as YummyAnime has them now (its own people's first): «Оценки» of the series written then
-  function showRatings(list) {
-    const facts = document.querySelector(".vhero .vfacts, .sv-hero .vfacts");      // (v5.44.121) the one page too
-    if (!facts || !list.length) return;
-    let dd = null;
-    for (const dt of facts.querySelectorAll("dt")) if (dt.textContent.trim() === "Оценки") dd = dt.nextElementSibling;
-    if (!dd) {
-      const dt = document.createElement("dt");
-      dt.textContent = "Оценки";
-      dd = document.createElement("dd");
-      const files = [...facts.querySelectorAll("dt")].find((x) => x.textContent.trim() === "Файлов");
-      if (files) { facts.insertBefore(dt, files); facts.insertBefore(dd, files); } else facts.append(dt, dd);
-    }
-    dd.textContent = "";
-    list.forEach(([name, value], n) => {
-      if (n) dd.append(" · ");
-      dd.append(name + " ");
-      const b = document.createElement("b");
-      b.textContent = value;
-      dd.append(b);
-    });
-  }
+  // («Порядок просмотра» of a series' page and its fresh ratings — series.js since v5.44.145: one place for the
+  // series of the folder, the title of a site, the computer and the phone)
 
   function setupSkips(holder) {
     let skips = {};
@@ -763,10 +688,21 @@
       }
       const voices = found.voices || [];
       if (manyDubs() && voices.length) {
-        const line = element("p", "vfound-voices");
-        line.append(element("span", "vfound-voices-label", "Только в плеерах, из которых программа не скачивает:"));
-        for (const v of voices) line.append(element("span", "voice", v.name + (v.players && v.players.length ? " (" + v.players.join(", ") + ")" : "")));
-        sourceBox.append(line);
+        // (v5.44.152) by player: why nothing is downloaded from it, and where its voice-overs can be watched
+        for (const c of found.closed || []) {
+          const line = element("p", "vfound-voices");
+          line.append(element("span", "vfound-voices-label", "Только в плеере " + c.player + ":"));
+          for (const name of c.names) line.append(element("span", "voice", name));
+          line.append(element("span", "vfound-voices-rest", c.why + "."));
+          if (/^https?:\/\//.test(found.page_url || "")) {
+            const go = element("a", "vfound-voices-go", "Смотреть на сайте");
+            go.href = found.page_url;
+            go.target = "_blank";
+            go.rel = "noopener noreferrer";
+            line.append(" ", go);
+          }
+          sourceBox.append(line);
+        }
       } else if (sources.length && voices.length) {
         const line = element("p", "vfound-voices");
         line.append(element("span", "vfound-voices-label", "Озвучки на странице:"));

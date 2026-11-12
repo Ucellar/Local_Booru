@@ -25,7 +25,7 @@ _LOG = logging.getLogger("local_booru.webui")
 ACTIONS = ("choose_manga_folder", "choose_parser_folder", "choose_path", "open_settings", "play_video", "copy_file",
            "drag_file", "tag_color", "export_results", "fullscreen", "save_settings", "import_profile",
            "choose_archive", "video", "choose_video_folder", "fetch_page", "video_screen", "open_card",
-           "choose_move_target", "restart_app")
+           "choose_move_target", "restart_app", "fetch_bytes", "share_cookies", "look")
 # Settings the pages may change (webui/settings_store.py; /api/app/save-settings from a page is refused).
 from webui.settings_store import PAGE_KEYS as SETTINGS_FROM_PAGES, PATH_KEYS
 from webui.service import begin_call
@@ -75,6 +75,13 @@ class AppBridge(QObject):
         page = self._page_of(payload)
         return self.mw if page is self.page else page.window()
 
+    def _do_look(self, payload) -> None:
+        """(v5.44.159) A page's look was changed: a tab of the window of tabs asks the page its colours again — its
+        strip is the page's (``ui/web_tabs.py``).  The main window has no strip: nothing to do."""
+        read = getattr(self._page_of(payload), "read_look", None)
+        if callable(read):
+            read()
+
     def _do_choose_manga_folder(self, payload) -> None:
         from PySide6.QtWidgets import QFileDialog
         current = str(self.mw.settings.get("manga_root") or "")
@@ -118,6 +125,38 @@ class AppBridge(QObject):
                           guard=guard if callable(guard) else None, cookies=bool(payload.get("cookies")),
                           visible=bool(payload.get("visible")))
         fetch.start()
+
+    def _do_fetch_bytes(self, payload) -> None:
+        """(v5.44.132) The browser's own request of a page or a picture of a site whose check lets in nothing but the
+        browser itself (``core/site_browser.fetch_bytes`` → ``ui/page_fetch.BytesFetch``): the answer's status, type and
+        bytes go to the waiting task (``payload["box"]``)."""
+        if not begin_call(payload):               # the task stopped waiting
+            return
+        from ui.page_fetch import BytesFetch
+        profile = getattr(self.page, "_profile", None)
+        if profile is None:
+            payload["box"]["error"] = "Окно программы без встроенного браузера"
+            payload["done"].set()
+            return
+        fetch = BytesFetch(profile, str(payload.get("url") or ""), payload["box"], payload["done"], parent=self,
+                           referer=str(payload.get("referer") or ""), limit=int(payload.get("limit") or 0))
+        fetch.start()
+
+    def _do_share_cookies(self, payload) -> None:
+        """(v5.44.132) The owner's sign-in on a site given to the window's browser (``payload["forget"]`` — taken away):
+        a site whose pages and pictures only the browser itself gets (``core/site_browser.share_cookies``)."""
+        if not begin_call(payload):
+            return
+        try:
+            profile = getattr(self.page, "_profile", None)
+            if profile is None:
+                payload["box"]["error"] = "Окно программы без встроенного браузера"
+                return
+            from ui.page_fetch import share_cookies
+            payload["box"]["count"] = share_cookies(profile, str(payload.get("origin") or ""),
+                                                    list(payload.get("cookies") or []), forget=bool(payload.get("forget")))
+        finally:
+            payload["done"].set()
 
     def _do_choose_parser_folder(self, payload) -> None:
         from PySide6.QtWidgets import QFileDialog

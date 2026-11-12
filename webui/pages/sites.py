@@ -1,19 +1,23 @@
-"""The page «Сайты и ключи»: where the parser asks for exact MD5 (the site table: on/off, order,
+"""«Сайты и ключи»: where the parser asks for exact MD5 (the site table: on/off, order,
 logins and API keys, own sites, a connection check, cookies), the reverse-search services and
-their thresholds, and the parser's own options."""
+their thresholds, and the parser's own options.
+
+(v5.44.161, the mockups «Настройки» and «Меню») Not a page of the menu any more: the section «Парсер и сайты» of
+«Настройки» (:func:`settings_part`); the address /sites opens «Настройки» at it.  The services and the parser's
+options are rows of settings saved by the page's one «Сохранить» (their forms say where: ``data-save``)."""
 from __future__ import annotations
 
 import re
 import time
 from pathlib import Path
 
-from webui.html import esc, page_frame
+from webui.html import esc
 from webui.server import Request, Response
 
 SAUCENAO_KEY_PAGE = "https://saucenao.com/user.php?page=search-api"
 _SERVICES = (("enable_fluffle", "Fluffle", True, "e621, FurAffinity, Twitter, Bluesky, Inkbunny — за секунды"),
              ("enable_e621_iqdb", "e621 IQDB", True,
-              "поиск похожих на самом e621: без логина — раз в минуту, с логином и ключом e621 — раз в 6 секунд"),
+              "на самом e621: без логина — раз в минуту, с логином и ключом e621 — раз в 6 секунд"),
              ("enable_atf_iqdb", "ATF IQDB", True,
               "поиск похожих на самом ATF (All The Fallen) — нужны логин и API-ключ ATF в таблице сайтов"),
              ("enable_iqdb", "IQDB", True, "iqdb.org: Danbooru, Gelbooru, Yande.re и другие — полминуты и дольше"),
@@ -37,12 +41,6 @@ def register(router) -> None:
     router.add("POST", r"/api/sites/cookies", save_cookies)
     router.add("POST", r"/api/sites/services", save_services)
     router.add("POST", r"/api/sites/options", save_options)
-
-
-def _prefs() -> dict:
-    from webui import prefs
-    stored = prefs.load()
-    return {"thumbs": stored.get("thumbs", "m")}         # the look is the page's own (page_frame)
 
 
 def _save(changes: dict) -> Response | None:
@@ -138,29 +136,77 @@ def _saucenao_state(settings: dict) -> str:
 
 
 def sites_page(req: Request) -> Response:
+    """/sites — «Настройки» opened at «Парсер и сайты» (the address of the page before; links and bookmarks live)."""
+    from webui.pages import settings
+    return settings.settings_page(req, "sites")
+
+
+def settings_part(req: Request) -> str:
+    """The section «Парсер и сайты» of «Настройки»: the table of the sites, «Обратный поиск» and «Парсер» as rows."""
     import json
     from core.site_table import ENGINE_TYPES
+    from webui.settings_form import row_html
     s = req.settings
     entries, order, deleted = _table(req)
     rows = [entries[k] for k in order if k in entries]
     table = "".join(_site_row(cfg, i == 0, i == len(rows) - 1) for i, cfg in enumerate(rows))
     restore = (f'<button type="button" data-action="site-restore">Вернуть стандартные ({len(deleted)})</button>'
                if deleted else "")
-    services = "".join(
-        f'<label class="check service"><input type="checkbox" class="switch" name="{key}"'
-        f'{" checked" if s.get(key, default) else ""}> <span><b>{esc(label)}</b> <small>{esc(note)}</small></span></label>'
-        for key, label, default, note in _SERVICES)
-    sauce_on = " checked" if s.get("enable_saucenao", True) else ""
+
+    def switch(key: str, on: bool, label: str, note: str, note_html: str = "", more: str = "") -> str:
+        return row_html(label, note, f'<input type="checkbox" class="switch" id="sv-{key}" name="{key}"'
+                                     f'{" checked" if on else ""}>', fid=f"sv-{key}", key=key, hint_html=note_html,
+                        more=more)
+
+    def number(key: str, label: str, note: str, value, lo: int, hi: int, more: str = "") -> str:
+        return row_html(label, note, f'<input type="number" id="sv-{key}" name="{key}" min="{lo}" max="{hi}" '
+                                     f'value="{esc(value)}">', fid=f"sv-{key}", key=key, more=more)
+    services = "".join(switch(key, bool(s.get(key, default)), label, note) for key, label, default, note in _SERVICES)
+    services += switch("enable_saucenao", bool(s.get("enable_saucenao", True)), "SauceNAO",
+                       "лучший для артов с pixiv и Twitter; нужен свой ключ (бесплатный)")
     has_key = bool(str(s.get("saucenao_api_key") or "").strip())
-    options = "".join(
-        f'<label class="num"><span>{esc(label)}</span><input type="number" name="{key}" min="{lo}" max="{hi}" '
-        f'value="{esc(_int(s.get(key), default, lo, hi))}"></label>' for key, label, default, lo, hi in _OPTIONS)
-    batch_on = " checked" if s.get("parser_md5_batch_enabled", True) else ""
-    skip_on = " checked" if s.get("skip_existing", True) else ""
-    remember_on = " checked" if s.get("parser_reverse_remember", True) else ""
+    first = bool(s.get("reverse_saucenao_first", False))
+    services += row_html(
+        "Ключ SauceNAO", "", '<input type="password" id="saucenao-key" name="saucenao_api_key" autocomplete="off" '
+        f'spellcheck="false" placeholder="{"ключ сохранён — оставьте пустым, чтобы не менять" if has_key else "вставьте ключ"}">',
+        fid="saucenao-key", key="saucenao_api_key",
+        hint_html=f'{esc(_saucenao_state(s))} · <a href="{SAUCENAO_KEY_PAGE}" target="_blank" rel="noopener">где взять ключ</a>')
+    services += row_html(
+        "Порядок сервисов", "файл идёт от сервиса к сервису по очереди, пока какой-нибудь его не найдёт",
+        '<select id="reverse-order" name="reverse_order">'
+        f'<option value="iqdb"{"" if first else " selected"}>IQDB первым — бережёт лимит SauceNAO</option>'
+        f'<option value="saucenao"{" selected" if first else ""}>SauceNAO первым — быстрее, пока хватает лимита</option>'
+        '</select>', fid="reverse-order", key="reverse_order",
+        more="Сначала быстрые (Fluffle, e621 IQDB — секунды), потом IQDB (полминуты и дольше). При «IQDB первым» "
+             "SauceNAO ищет только то, что не нашли остальные: поисков на сутки у него не больше лимита аккаунта.")
+    services += number("saucenao_spread_hours", "Растянуть суточный лимит SauceNAO на, ч",
+                       "1 — как можно быстрее; 24 — поровну на весь день, медленно", _spread_hours(s), 1, 24,
+                       more="1 — с той скоростью, что разрешает ваш аккаунт за 30 секунд, оставляя на сутки запас в "
+                            f"{_int(s.get('saucenao_quota_reserve'), 10, 0, 10000)} поисков.")
+    services += number("min_similarity", "Порог похожести, %", "SauceNAO, Ascii2D, Danbooru IQDB",
+                       _int(s.get("min_similarity"), 85, 50, 99), 50, 99)
+    services += number("iqdb_min_similarity", "Порог IQDB, %", "IQDB и e621 IQDB",
+                       _int(s.get("iqdb_min_similarity"), 75, 50, 99), 50, 99)
     from core import e621_export
-    export_on = " checked" if s.get("e621_export_enabled", False) else ""
-    export_now = esc(e621_export.status(s)["text"])
+    options = switch("skip_existing", bool(s.get("skip_existing", True)), "Пропускать разобранные",
+                     "файлы, которые парсер уже разобрал, не открываются снова")
+    options += switch("parser_md5_batch_enabled", bool(s.get("parser_md5_batch_enabled", True)), "Пакетные MD5-запросы",
+                      "несколько файлов одним запросом — на сайтах, которые отвечают на него правильно",
+                      more="Только на сайтах, которые проверенно отвечают правильно: проверка — по найденному раньше "
+                           "или по новым постам сайта.")
+    options += switch("parser_reverse_remember", bool(s.get("parser_reverse_remember", True)),
+                      "Помнить ответы обратного поиска",
+                      "сервис, который уже искал файл, о нём больше не спрашивается",
+                      more="Нашёл он или нет: «Искать снова» Брака спрашивает только тех, кто файл ещё не искал "
+                           "(новые, выключенные, со сбоем). Выключите, чтобы спросить всех заново.")
+    options += switch("e621_export_enabled", bool(s.get("e621_export_enabled", False)), "MD5 на e621 — по его выгрузке",
+                      "e621 просит не искать десятки тысяч MD5 через API, а брать его ежедневную выгрузку",
+                      note_html=f'Сейчас: <span data-e621-export>{esc(e621_export.status(s)["text"])}</span>',
+                      more="Программа скачает её (около 2 ГБ, на диск с архивом, раз в 30 дней) и будет знать, какие "
+                           "файлы есть на e621, сама — сайт спрашивается только о найденных и о новых постах (раз в "
+                           "час).")
+    options += "".join(number(key, label, "", _int(s.get(key), default, lo, hi), lo, hi)
+                       for key, label, default, lo, hi in _OPTIONS)
     engines = "".join(f'<option value="{esc(label)}">{esc(label if label != "Свой" else "Свой — определить по сайту")}</option>'
                       for label in ENGINE_TYPES)
     data = {e["_id"]: _site_json(e) for e in rows}
@@ -168,90 +214,25 @@ def sites_page(req: Request) -> Response:
     finder = ('<input type="search" class="row-filter" data-row-filter="#sites-rows" placeholder="Найти сайт" '
               'aria-label="Найти сайт" autocomplete="off" spellcheck="false">') if len(rows) >= 6 else ""
     on = sum(1 for cfg in rows if cfg.get("enabled", True))
-    body = f"""
-<section class="tool tool-wide settings" id="sites">
-  <header class="tool-head">
-    <h1>Сайты и ключи</h1>
-    <p class="tool-lead">Где парсер ищет точный MD5 — сайты спрашиваются сверху вниз — и чем ищет похожие картинки,
-    когда MD5 не нашёлся. Ключи хранятся только в настройках программы.</p>
-  </header>
-  <div class="tool-board">
-    <div class="board-main">
-      <section class="panel" aria-labelledby="sites-title">
-        <div class="panel-head"><h2 id="sites-title">Сайты для поиска по MD5</h2>
-          <span class="muted">включено {on} из {len(rows)} · сверху вниз</span>{finder}</div>
-        <table class="sites-table rows" id="sites-rows">
-          <thead><tr><th><span class="sr-only">Вкл</span></th><th>Сайт</th><th>Движок</th><th>Вход</th><th>Проверка</th><th></th></tr></thead>
-          <tbody>{table}</tbody>
-        </table>
-        <div class="tool-actions">
-          <button type="button" data-action="site-add">Добавить сайт</button>
-          <button type="button" data-action="site-check-all">Проверить включённые</button>
-          {restore}
-          <span class="action-status" role="status"></span>
-        </div>
-      </section>
+    hidden_save = ('<button type="submit" class="form-submit" hidden tabindex="-1">Сохранить</button>'
+                   '<p class="form-error" role="alert" hidden></p>')
+    return f"""
+<section class="settings-block sx-block sx-sites" id="sites" data-title="Сайты для поиска по MD5">
+  <h3 class="sx-title" id="sites-title">Сайты для поиска по MD5 <small>включено {on} из {len(rows)} · спрашиваются сверху вниз</small></h3>
+  <p class="sx-lead">Где парсер ищет точный MD5 и чем ищет похожие картинки, когда MD5 не нашёлся. Ключи хранятся
+    только в настройках программы.</p>
+  <div class="sx-group sx-box">
+    {finder}
+    <table class="sites-table rows" id="sites-rows" aria-labelledby="sites-title">
+      <thead><tr><th><span class="sr-only">Вкл</span></th><th>Сайт</th><th>Движок</th><th>Вход</th><th>Проверка</th><th></th></tr></thead>
+      <tbody>{table}</tbody>
+    </table>
+    <div class="tool-actions">
+      <button type="button" data-action="site-add">Добавить сайт</button>
+      <button type="button" data-action="site-check-all">Проверить включённые</button>
+      {restore}
+      <span class="action-status" role="status"></span>
     </div>
-
-    <aside class="board-side">
-      <section class="panel" aria-labelledby="services-title">
-        <h2 id="services-title">Обратный поиск</h2>
-        <form class="settings-form" data-form="services">
-          <div class="services">{services}
-            <label class="check service"><input type="checkbox" class="switch" name="enable_saucenao"{sauce_on}> <span><b>SauceNAO</b>
-              <small>лучший для артов с pixiv и Twitter; нужен свой ключ (бесплатный)</small></span></label>
-          </div>
-          <div class="field-row stacked"><label for="saucenao-key">Ключ SauceNAO</label>
-            <input type="password" id="saucenao-key" name="saucenao_api_key" autocomplete="off" spellcheck="false"
-              placeholder="{"ключ сохранён — оставьте пустым, чтобы не менять" if has_key else "вставьте ключ"}">
-            <small>{esc(_saucenao_state(s))} · <a href="{SAUCENAO_KEY_PAGE}" target="_blank" rel="noopener">где взять ключ</a></small></div>
-          <div class="field-row stacked"><label for="reverse-order">Порядок</label>
-            <select id="reverse-order" name="reverse_order">
-              <option value="iqdb"{"" if s.get("reverse_saucenao_first", False) else " selected"}>IQDB первым, SauceNAO последним — бережёт лимит SauceNAO</option>
-              <option value="saucenao"{" selected" if s.get("reverse_saucenao_first", False) else ""}>SauceNAO первым, IQDB последним — быстрее, пока хватает лимита</option>
-            </select>
-            <small>файл идёт от сервиса к сервису по очереди, пока какой-нибудь его не найдёт: сначала быстрые
-            (Fluffle, e621 IQDB — секунды), потом IQDB (полминуты и дольше); при «IQDB первым» SauceNAO ищет только
-            то, что не нашли остальные: поисков на сутки у него не больше лимита аккаунта</small></div>
-          <div class="field-row"><label for="sauce-spread">Растянуть суточный лимит SauceNAO на, ч</label>
-            <input type="number" id="sauce-spread" name="saucenao_spread_hours" min="1" max="24"
-              value="{_spread_hours(s)}">
-            <small>1 — как можно быстрее: с той скоростью, что разрешает ваш аккаунт за 30 секунд, оставляя на сутки
-            запас в {_int(s.get("saucenao_quota_reserve"), 10, 0, 10000)} поисков; 24 — поровну на весь день, медленно</small></div>
-          <div class="field-row"><label for="min-sim">Порог похожести, %</label>
-            <input type="number" id="min-sim" name="min_similarity" min="50" max="99" value="{esc(_int(s.get('min_similarity'), 85, 50, 99))}">
-            <small>SauceNAO, Ascii2D, Danbooru IQDB</small></div>
-          <div class="field-row"><label for="iqdb-sim">Порог IQDB, %</label>
-            <input type="number" id="iqdb-sim" name="iqdb_min_similarity" min="50" max="99" value="{esc(_int(s.get('iqdb_min_similarity'), 75, 50, 99))}">
-            <small>IQDB и e621 IQDB</small></div>
-          <div class="tool-actions"><button type="submit" class="primary">Сохранить</button><span class="action-status" role="status"></span></div>
-        </form>
-      </section>
-
-      <section class="panel" aria-labelledby="options-title">
-        <h2 id="options-title">Парсер</h2>
-        <form class="settings-form" data-form="options">
-          <div class="services">
-            <label class="check service"><input type="checkbox" class="switch" name="skip_existing"{skip_on}>
-              <span><b>Пропускать разобранные</b> <small>файлы, которые парсер уже разобрал, не открываются снова</small></span></label>
-            <label class="check service"><input type="checkbox" class="switch" name="parser_md5_batch_enabled"{batch_on}>
-              <span><b>Пакетные MD5-запросы</b> <small>несколько файлов одним запросом — только на сайтах, которые проверенно
-              отвечают правильно (проверка — по найденному раньше или по новым постам сайта)</small></span></label>
-            <label class="check service"><input type="checkbox" class="switch" name="parser_reverse_remember"{remember_on}>
-              <span><b>Помнить ответы обратного поиска</b> <small>сервис, который уже искал файл — нашёл или нет, —
-              о нём больше не спрашивается: «Искать снова» Брака спрашивает только тех, кто его ещё не искал (новые,
-              выключенные, со сбоем). Выключите, чтобы спросить всех заново</small></span></label>
-            <label class="check service"><input type="checkbox" class="switch" name="e621_export_enabled"{export_on}>
-              <span><b>MD5 на e621 — по его выгрузке</b> <small>e621 просит не искать десятки тысяч MD5 через API, а брать
-              его ежедневную выгрузку: программа скачает её (около 2 ГБ, на диск с архивом, раз в 30 дней) и будет
-              знать, какие файлы есть на e621, сама — сайт спрашивается только о найденных и о новых постах (раз в
-              час). Сейчас: <span data-e621-export>{export_now}</span></small></span></label>
-          </div>
-          <div class="numbers">{options}</div>
-          <div class="tool-actions"><button type="submit" class="primary">Сохранить</button><span class="action-status" role="status"></span></div>
-        </form>
-      </section>
-    </aside>
   </div>
 
   <dialog class="site-dialog" aria-labelledby="site-dialog-title">
@@ -283,9 +264,19 @@ def sites_page(req: Request) -> Response:
     </form>
   </dialog>
   <script type="application/json" id="sites-data">{data_json}</script>
+</section>
+<section class="settings-block sx-block" id="set-services" data-title="Обратный поиск">
+  <h3 class="sx-title" id="services-title">Обратный поиск</h3>
+  <form class="settings-form" data-form="services" data-save="/api/sites/services">
+    <div class="sx-group">{services}</div>{hidden_save}
+  </form>
+</section>
+<section class="settings-block sx-block" id="set-parser" data-title="Парсер">
+  <h3 class="sx-title" id="options-title">Парсер</h3>
+  <form class="settings-form" data-form="options" data-save="/api/sites/options">
+    <div class="sx-group">{options}</div>{hidden_save}
+  </form>
 </section>"""
-    return Response.html(page_frame("Сайты и ключи", body, active="sites", subnav=False, kind="tool",
-                                    body_data={"tool": "sites"}, **_prefs()))
 
 
 def _int(value, default: int, lo: int, hi: int) -> int:

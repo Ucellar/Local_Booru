@@ -325,6 +325,24 @@ async function subscriptionCall(path, url) {
   }
 }
 
+// (0.11.0) «Скачать избранное»: what the program knows of an account's favorites; the post numbers the page collected on
+// the site (the program downloads what the library lacks and parses it).  The question is quiet: a program before 5.44.141
+// lacks it, and an account's page must not leave a failure on the extension's badge.
+async function favoritesCall(path, message) {
+  const payload = { site: String(message.site || '').slice(0, 100), account: String(message.account || '').slice(0, 40) };
+  if (path === '/extension/favorites') {
+    payload.name = String(message.name || '').slice(0, 200);
+    payload.ids = (Array.isArray(message.ids) ? message.ids : []).map(Number).filter(n => Number.isInteger(n) && n > 0).slice(0, 200000);
+    payload.mode = message.mode === 'new' ? 'new' : 'all';
+  }
+  try {
+    return await apiFetch(path, payload, { quiet: path !== '/extension/favorites' });
+  } catch (err) {
+    if (isOfflineError(err)) return { ok: false, offline: true, error: 'offline' };
+    return { ok: false, ...(err && err.payload || {}), error: String(err && err.message || err) };
+  }
+}
+
 
 
 browser.runtime.onInstalled.addListener(async () => {
@@ -1312,11 +1330,15 @@ async function mangaCollect(site, tabId = 0) {
         expirationDate: c.session ? 0 : Number(c.expirationDate || 0), session: !!c.session });
     }
   }
-  return { cookies, token: site.token ? await mangaTokenOf(tabId, site.token) : '', missing };
+  // (0.10.1) this browser's User-Agent: a pass through a check for browsers (Cloudflare's cf_clearance — Nude-Moon) is
+  // good only with the agent of the browser that got it
+  return { cookies, token: site.token ? await mangaTokenOf(tabId, site.token) : '', missing,
+    agent: String(navigator.userAgent || '').slice(0, 500) };
 }
 
 async function mangaDigest(got) {
-  const text = JSON.stringify([got.cookies.map(c => [c.domain, c.path, c.name, c.value]).sort(), got.token || '']);
+  const text = JSON.stringify([got.cookies.map(c => [c.domain, c.path, c.name, c.value]).sort(), got.token || '',
+    got.agent || '']);
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return Array.from(new Uint8Array(bytes)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -1327,7 +1349,7 @@ async function mangaSend(site, got, asked = 0) {
   const { mangaSigninSent } = await STORAGE.get({ mangaSigninSent: {} });
   if (!asked && mangaSigninSent[site.site] === digest) return { ok: true, same: true };
   const r = await apiFetch('/extension/manga/signin', { site: site.site, cookies: got.cookies, token: got.token,
-    missing: got.missing, asked, version: browser.runtime.getManifest().version });
+    missing: got.missing, asked, agent: got.agent || '', version: browser.runtime.getManifest().version });
   mangaSigninSent[site.site] = digest;
   await STORAGE.set({ mangaSigninSent });
   return r;
@@ -1511,6 +1533,8 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     if (message.type === 'LB_SUB_STATE') return await subscriptionCall('/extension/subscription', message.url);
     if (message.type === 'LB_SUBSCRIBE') return await subscriptionCall('/extension/subscribe', message.url);
+    if (message.type === 'LB_FAV_STATE') return await favoritesCall('/extension/favorites/state', message);
+    if (message.type === 'LB_FAV_TAKE') return await favoritesCall('/extension/favorites', message);
     if (message.type === 'LB_CHECK_ITEMS') {
       const options = await getOptions();
       if (!options.enabled) return { ok: true, disabled: true, items: [] };

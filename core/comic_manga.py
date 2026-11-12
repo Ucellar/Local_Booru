@@ -15,9 +15,9 @@ What is a comic of the gallery (:func:`candidates`):
 * a сборка of the program's of the kinds «work» and «series» (not «parent» — the versions of one picture — nor one the
   person made) whose pictures carry a comic's tag (``card_sets._COMIC``) — :data:`COMIC_SHARE` of them at least;
 
-with :data:`MIN_PAGES` live picture cards at least.  The program's rule about minors holds here too: a comic with a
-page that its site does not rate as safe and whose tags speak of minors (``core/filter.page_forbidden`` — the whole
-rule is in ``core/filter.py`` since 5.44.128) is never taken — it stays where it is.
+with :data:`MIN_PAGES` live picture cards at least.  The program's gate holds here too: a comic ``gates.pages`` closes
+by what the base says of its pages (:func:`_pages_said`: their tags, the sites' ratings) is never taken — it stays
+where it is.
 
 How (:func:`move`): the pages are copied — «<name>/001.jpg …» (a pool's by their place in the pool) — first into
 ``<manga folder>/.lb/copying/<key>`` (:func:`_staging`: the library does not see a half-made title; a copy cut short
@@ -65,7 +65,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core import filter as F
+from core import gates as G
 
 _LOG = logging.getLogger("local_booru.card_sets")
 
@@ -75,9 +75,6 @@ REASON = "moved_to_manga"       # the trash's reason (``trash_tools.LABELS``)
 KEEP_NAME = "comic_manga.json"
 NAME_MAX = 120
 TAGS_MAX = 60                   # general tags written into info.json (the common ones first)
-# (v5.44.128) the program's rule about minors — in ``core/filter.py``; its names here for the code that uses them
-MINOR_TAGS = F.SITE_MINOR_TAGS
-SAFE = F.SAFE_RATINGS
 _PICTURES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".bmp", ".jxl"}
 STAGING = "copying"             # <manga folder>/.lb/copying/<key's hash>: a copy not finished yet
 ROUND_SECONDS = 45              # a round of the background works so long at most (the duties share one thread)…
@@ -283,9 +280,9 @@ def _set_title(con, ids: list, set_id: int) -> str:
     return " — ".join(words) if words else f"Сборка {set_id}"
 
 
-def _forbidden(con, comic: Comic) -> bool:
-    """The program's rule (``core/filter.page_forbidden``): a page its site does not rate as safe, whose tags speak of
-    minors — here only what the base says of the comic's pictures (their tags, the sites' ratings)."""
+def _pages_said(con, comic: Comic) -> list:
+    """What the base says of a comic's pages, for the program's gate (``gates.pages``): (the tags' names, the sites'
+    ratings) of each picture — not rated by a site: {""}."""
     ids = [i for i, _place in comic.cards]
     tags = _tags_of(con, ids)
     ratings: dict = {}
@@ -295,8 +292,7 @@ def _forbidden(con, comic: Comic) -> bool:
         for image_id, rating in con.execute(f"SELECT image_id, rating FROM site_posts WHERE state='ok' "
                                             f"AND image_id IN ({marks})", part):
             ratings.setdefault(int(image_id), set()).add(str(rating or ""))
-    return any(F.page_forbidden([name for name, _category in tags.get(image_id, [])], ratings.get(image_id) or {""})
-               for image_id in ids)                     # (not rated, or rated not safe by a site)
+    return [([name for name, _category in tags.get(image_id, [])], ratings.get(image_id) or {""}) for image_id in ids]
 
 
 def candidates(settings: dict) -> list:
@@ -309,7 +305,7 @@ def candidates(settings: dict) -> list:
         out = _pools(con, alive, manual, done)
         taken = {i for c in out for i, _place in c.cards}
         out += _sets(con, alive, taken, done)
-        return [c for c in out if not _forbidden(con, c)]
+        return [c for c in out if not G.pages(_pages_said(con, c))]
 
 
 def of_set(settings: dict, set_id: int) -> Comic:
@@ -330,8 +326,9 @@ def of_set(settings: dict, set_id: int) -> Comic:
                 pool.set_ids = [int(set_id)]
                 comic = pool
                 break
-        if _forbidden(con, comic):
-            raise ComicError("Эту сборку программа в мангу не переносит: на её страницах изображены несовершеннолетние")
+        why = G.pages(_pages_said(con, comic))
+        if why:
+            raise ComicError(why)                     # a gate closed it
     return comic
 
 
@@ -447,7 +444,7 @@ def _root_of(settings: dict) -> Path:
     from core import manga_library as M
     text = M.manga_root(settings)
     if not text:
-        raise ComicError("Не выбрана папка манги («Настройки → Папки → Папка манги»)")
+        raise ComicError("Не выбрана папка манги («Настройки → Хранение и копии → Папка манги»)")
     root = Path(text)
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -719,6 +716,17 @@ def _round(settings: dict, *, stop_check=None, parser: bool = False, say=None) -
             parser_manga.link_folder(settings, f"comic:{comic.key}", comic.title, Path(got["folder"]), said["url"],
                                      how=str(said.get("how") or ""), by=str(said.get("by") or ""),
                                      stop_check=stop_check)
+    from core import parser_loose                       # (v5.44.164) the pages of manga among the loose pictures:
+    left = deadline - time.monotonic()                  # a short part of the round (it works only when it has what)
+    if left > 1 and not stop_check():
+        try:
+            got = parser_loose.background_round(settings, stop_check=stop_check, say=say,
+                                                seconds=min(float(parser_loose.ROUND_SECONDS), left))
+        except Exception as exc:  # noqa: BLE001 - its trouble does not stop the folders' round
+            _LOG.warning("the loose pictures' round failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+            got = {}
+        out["more"] = out["more"] or bool(got.get("more"))
+        out["wait"] = float(got.get("wait") or 0)
     if _LOOKING.locked():
         return out                                      # (the parser's folder is being looked at: next time)
     from core import parser_manga                       # (v5.44.125) only what is confirmed a manga is copied
@@ -727,7 +735,7 @@ def _round(settings: dict, *, stop_check=None, parser: bool = False, say=None) -
         got = parser_manga.background_round(settings, stop_check=stop_check, seconds=left, say=say)
         out["copied"] += list(got.get("copied") or [])
         out["more"] = out["more"] or bool(got.get("more"))
-        out["wait"] = float(got.get("wait") or 0)
+        out["wait"] = max(out["wait"], float(got.get("wait") or 0))
         if got.get("no_room"):
             out["no_room"] = str(got["no_room"])
     return out
@@ -803,7 +811,7 @@ def check_now(settings: dict) -> "object":
     with its journal; :class:`ComicError` when there is nothing to do it with."""
     from core import manga_library as M, page_jobs
     if not M.manga_root(settings):
-        raise ComicError("Не выбрана папка манги («Настройки → Папки → Папка манги»)")
+        raise ComicError("Не выбрана папка манги («Настройки → Хранение и копии → Папка манги»)")
     if not enabled(settings):
         raise ComicError("«Комиксы и манга — в папку манги» выключено")
     settings = dict(settings)

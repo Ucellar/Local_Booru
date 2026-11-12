@@ -238,20 +238,29 @@ def _session(url: str):
 
 
 def _get(session, url: str, limit: int, *, referer: str = "") -> tuple[int, bytes, str, str]:
-    """(status, body, final address, content type) — at most ``limit`` bytes."""
+    """(status, body, final address, content type) — at most ``limit`` bytes.  (v5.44.162) A site whose name the
+    computer does not find — asked once more by the address a public resolver gives (``core/name_lookup``)."""
     import requests
+    from core import name_lookup
     headers = {"Referer": referer} if referer else {}
-    try:
-        with session.get(url, timeout=TIMEOUT, stream=True, headers=headers, allow_redirects=True) as answer:
-            body = bytearray()
-            for chunk in answer.iter_content(64 * 1024):
-                body += chunk
-                if len(body) > limit:
-                    raise MetaImportError(f"Ответ больше {limit // (1024 * 1024)} МБ")
-            return answer.status_code, bytes(body), answer.url, str(answer.headers.get("Content-Type") or "")
-    except requests.RequestException as exc:
-        from core.redaction import sanitize_text
-        raise MetaImportError(f"Сайт не ответил: {sanitize_text(str(exc))[:300]}") from exc
+    name_lookup.expect(url)
+    for again in (True, False):
+        try:
+            with session.get(url, timeout=TIMEOUT, stream=True, headers=headers, allow_redirects=True) as answer:
+                body = bytearray()
+                for chunk in answer.iter_content(64 * 1024):
+                    body += chunk
+                    if len(body) > limit:
+                        raise MetaImportError(f"Ответ больше {limit // (1024 * 1024)} МБ")
+                return answer.status_code, bytes(body), answer.url, str(answer.headers.get("Content-Type") or "")
+        except requests.RequestException as exc:
+            if again and isinstance(exc, requests.ConnectionError) and name_lookup.retry_for(exc, url):
+                continue
+            from core.redaction import sanitize_text
+            if name_lookup.not_found(exc):
+                raise MetaImportError(name_lookup.WORDS[0].upper() + name_lookup.WORDS[1:]) from exc
+            raise MetaImportError(f"Сайт не ответил: {sanitize_text(str(exc))[:300]}") from exc
+    raise MetaImportError("Сайт не ответил")          # (not reached: the second pass returns or raises)
 
 
 def page_from_url(url: str, *, progress=None, window_fetch=None) -> SavedPage:

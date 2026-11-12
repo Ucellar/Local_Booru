@@ -159,6 +159,8 @@ body { padding-bottom: 44px; }
 .skin-list {
   top: auto;
   bottom: calc(100% + 6px);
+  transform-origin: bottom right;      /* (v5.44.158) it opens upwards from the taskbar */
+  --m-menu-dir: -1;
   border: 0;
   border-radius: 0;
   padding: 2px;

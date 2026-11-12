@@ -206,8 +206,24 @@ a:hover { text-decoration: none; }
 /* (v5.44.116) «← Назад» — a row of the side menu's foot, as «Настройки» */
 .top-back .skin-label { display: inline; }
 .top-back { padding-left: 13px; padding-right: 12px; }
+/* (v5.44.153) «? Справка» — the same */
+.help-link .skin-label { display: inline; }
+.help-link { padding-left: 13px; padding-right: 12px; }
+.help-link.active {
+  background: linear-gradient(90deg, var(--lg-soft), color-mix(in srgb, var(--lg-soft) 40%, transparent));
+  color: var(--lg-selected-ink);
+  border-left-color: var(--lg-a2);
+  font-weight: 700;
+}
+/* …and in a low window the foot's rows stand closer: with one row more the menu above them would lose an item from
+   sight (it scrolls then) */
+@media (max-height: 820px) and (min-width: 761px) {
+  .top-tools { gap: 2px; padding-top: 8px; margin-top: 8px; }
+  .settings-link.skin-button, .skin-button { min-height: 32px; padding-top: 5px; padding-bottom: 5px; }
+}
 .skin-list { top: auto; bottom: calc(100% + 8px); left: 0; right: auto; width: min(360px, calc(100vw - 24px));
-  background: var(--panel); border-color: var(--lg-line); border-radius: 10px; }
+  background: var(--panel); border-color: var(--lg-line); border-radius: 10px;
+  transform-origin: bottom left; --m-menu-dir: -1; }      /* (v5.44.158) it opens upwards, from its lower left corner */
 .skin-item { border-radius: 8px; color: var(--text); }
 .skin-item:hover { background: var(--lg-soft); }
 .skin-item.active { background: var(--lg-selected); border-color: var(--lg-ring); color: var(--lg-selected-ink); }
@@ -494,8 +510,8 @@ table.visual-check {
   .top-tools { flex-direction: row; margin: 0 0 0 auto; padding: 0; border: 0; }
   .top-tools .skin-menu { width: auto; }
   .skin-button, .settings-link.skin-button { width: auto; min-height: 34px; border-left: 0; }
-  .settings-link .skin-label, .top-back .skin-label, .dl-badge .skin-label { display: none; }
-  .skin-list { top: calc(100% + 6px); bottom: auto; right: 0; left: auto; }
+  .settings-link .skin-label, .top-back .skin-label, .dl-badge .skin-label, .help-link .skin-label { display: none; }
+  .skin-list { top: calc(100% + 6px); bottom: auto; right: 0; left: auto; transform-origin: top right; --m-menu-dir: 1; }
   .tool-head { margin: 0 -10px 12px; padding: 12px 10px; }
   .settings-block .field-row > label:first-child { min-width: 0; flex-basis: 100%; }
   .page-tool .layout { padding: 0 10px 40px; }

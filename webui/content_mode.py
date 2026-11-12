@@ -41,7 +41,7 @@ GALLERY_PAGES = ("posts", "tags", "grab", "parser", "subs", "sites", "dupes")
 _GALLERY_PATH = re.compile(r"/(?:posts|post/\d+|post/remote|tags|random|grab|parser|subs|sites|dupes)")
 _PHONE_GALLERY = re.compile(r"/m/(?:posts|post/\d+)")     # (v5.44.65) the gallery of the phone
 _NAMES = (("/grab", "Скачивание в галерею", "get"), ("/parser", "Парсер", "parser"),
-          ("/subs", "Подписки", "subs"), ("/sites", "Сайты", "sites"), ("/dupes", "Дубли", "dupes"),
+          ("/subs", "Подписки", "subs"), ("/sites", "Парсер и сайты", "sites"), ("/dupes", "Дубли", "dupes"),
           ("/tags", "Теги галереи", "tags"))
 
 

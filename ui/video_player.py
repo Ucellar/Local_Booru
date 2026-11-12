@@ -57,7 +57,9 @@ class _QtBackend:
         self.widget.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatio)
         self.player = QMediaPlayer(owner)
         self.audio = QAudioOutput(owner)
-        self.player.setAudioOutput(self.audio)
+        from ui.video_inline import silent
+        if not silent():                         # (v5.44.145) a check's player is not joined to the speakers
+            self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.widget)
         self.player.setLoops(QMediaPlayer.Loops.Infinite)
         self.player.errorOccurred.connect(lambda _e, text: owner.show_error(text))
@@ -170,8 +172,10 @@ class _MpvBackend:
         self.widget.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
         self.widget.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         self.widget.setStyleSheet("background:#000;")
+        from ui.video_inline import silent
+        quiet = {"ao": "null"} if silent() else {}       # (v5.44.145) a check's player: no sound device
         self.player = _mpv.MPV(wid=int(self.widget.winId()), vo="gpu", hwdec="auto", loop="inf",
-                               keep_open=True, keepaspect=True, msg_level="all=no")
+                               keep_open=True, keepaspect=True, msg_level="all=no", **quiet)
 
     def load(self, path: str, loop: bool = True) -> None:
         self.player.loop_file = "inf" if loop else "no"

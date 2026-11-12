@@ -389,8 +389,8 @@ def _long_section(req: Request, tags: str, order: str, source: str, page: int) -
     limit = data.video_limit(req.settings)
     if limit <= 0:
         return ('<section class="vlong"><div class="vhead"><h2>Длинные видео</h2></div><p class="hint">Все видео '
-                'библиотеки остаются в галерее: так выбрано в «<a href="/settings#set-videos">Настройки → Вкладка '
-                '«Видео»</a>».</p></section>')
+                'библиотеки остаются в галерее: так выбрано в «<a href="/settings#set-videos">Настройки → '
+                'Видео</a>».</p></section>')
     per_page = long_per_page(req)
     items, total, _files_total = data.search_page(req.settings, tags, section=data.VIDEO_SECTION, source=source,
                                                   order=order, page=page, per_page=per_page)

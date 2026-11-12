@@ -110,6 +110,9 @@ def new_page(profile, parent, settings_provider):
         page.settings().setAttribute(QWebEngineSettings.WebAttribute.PlaybackRequiresUserGesture, False)
     except (ImportError, AttributeError) as exc:
         _LOG.debug("autoplay of the window's pages not allowed: %s", exc)
+    from ui.video_inline import silent
+    if silent():                                   # (v5.44.145) a check: the videos of its pages are not heard
+        page.setAudioMuted(True)
     return page
 
 

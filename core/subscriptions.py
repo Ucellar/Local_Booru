@@ -520,6 +520,8 @@ def run_subscription(sub: dict, settings: dict,
     max_pages = int(sub.get("max_pages", 3))
     max_posts = int(sub.get("max_posts", 0) or 0)       # «Скачать тег»: at most this many posts per site
     given = sub.get("given_posts") if isinstance(sub.get("given_posts"), dict) else None   # {site: [post]}
+    # (v5.44.141) an account's favorites (core/favorites.py): {site: [post numbers]} — the site is asked for the posts
+    given_ids = sub.get("given_ids") if isinstance(sub.get("given_ids"), dict) else None
     global_blacklist = normalize_blacklist_tags((settings or {}).get("grabber_subscriptions_blocklist") or (settings or {}).get("downloader_blocklist") or [])
     local_blacklist = normalize_blacklist_tags(sub.get("blacklist_tags") or [])
     blacklist = list(dict.fromkeys(global_blacklist + local_blacklist))
@@ -566,6 +568,14 @@ def run_subscription(sub: dict, settings: dict,
                 posts = [p for p in given.get(site) or [] if isinstance(p, dict)]
                 highest = max((_post_id_from(p) for p in posts), default=0)
                 fetch_status["pages_ok"] = 1
+            elif given_ids is not None:       # (v5.44.141) an account's favorites: these posts, asked by their numbers
+                from core import favorites
+                posts = favorites.posts_of(
+                    settings, site, given_ids.get(site) or [], log=log,
+                    stop=lambda: bool(stop_flag and getattr(stop_flag, "_stop_requested", False)),
+                    key=str((sub.get("favorites") or {}).get("key") or ""))
+                highest = max((_post_id_from(p) for p in posts), default=0)
+                fetch_status["pages_ok"] = 1
             else:
                 posts, highest = fetch_posts_for_query(
                     site=site,
@@ -581,6 +591,8 @@ def run_subscription(sub: dict, settings: dict,
                 )
         except Exception as e:
             log(f"  SCAN [{site}] ERROR: {e}")
+            if given_ids is not None:         # (v5.44.141) an account's favorites: the reason is the run's error
+                raise
             scan_failed[site] = str(e)
             continue
         if fetch_status.get("error") and not fetch_status.get("pages_ok"):

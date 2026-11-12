@@ -246,7 +246,7 @@ def _no_titles(req: Request, root: str, query: str, items: list) -> str:
              else f'<p>В папке манхвы пока ничего нет: <code>{esc(root)}</code>.</p>')
     return (f'<div class="mh-empty">{where}<p><a class="mh-btn primary" href="/get">Скачать манхву</a>'
             f'</p>{rules}<p class="hint">Другую папку можно выбрать в '
-            f'<a href="/settings#set-folders">Настройки → Папки</a>.</p></div>')
+            f'<a href="/settings#set-folders">Настройки → Хранение и копии</a>.</p></div>')
 
 
 def index(req: Request) -> Response:
@@ -292,7 +292,27 @@ def feed_cover(req: Request) -> Response:
 
 # ── /manhwa/t/<id> ──────────────────────────────────────────────────────────────────────────────────────────────
 FACTS = (("type", "Тип"), ("status", "Статус"), ("year", "Выпуск"), ("age", "Возраст"), ("author", "Автор"),
-         ("artist", "Художник"), ("publisher", "Издатель"), ("translator", "Переводчик"))
+         ("authors", "Автор"), ("artist", "Художник"), ("publisher", "Издатель"), ("translator", "Переводчик"))
+PEOPLE = ("author", "authors", "artist")        # (v5.44.135) a name there — a search of the folder by it
+
+
+def facts_html(title: H.Title, home: str = "/manhwa") -> str:
+    """The facts of a title's description: one row of a name (``author``, else ``authors`` — as «Скачать» writes a
+    site's authors); (v5.44.135) a person's name — a search of the folder by it (``home`` — the computer's list or the
+    phone's)."""
+    rows, said = [], set()
+    for key, name in FACTS:
+        value = title.info.get(key)
+        if not value or name in said:
+            continue
+        said.add(name)
+        values = title.list_of(key) if isinstance(value, list) else [str(value)]
+        if key in PEOPLE:
+            shown = ", ".join(f'<a href="{esc(url(home, q=v))}">{esc(v)}</a>' for v in values)
+        else:
+            shown = esc(", ".join(values))
+        rows.append(f'<dt>{esc(name)}</dt><dd>{shown}</dd>')
+    return "".join(rows)
 
 
 def _chips(values: list, cls: str) -> str:
@@ -459,8 +479,7 @@ def title_page(req: Request) -> Response:
             f'{progress}{_source_line(title)}</div></section>')
     text = str(title.info.get("description") or "").strip()
     desc = "".join(f"<p>{esc(p)}</p>" for p in text.split("\n\n") if p.strip()) or '<p class="muted">Описания нет.</p>'
-    facts = "".join(f'<dt>{esc(name)}</dt><dd>{esc(", ".join(title.list_of(key)) if isinstance(title.info.get(key), list) else title.info.get(key))}</dd>'
-                    for key, name in FACTS if title.info.get(key))
+    facts = facts_html(title)
     if found.hentai or found.by_hand:
         facts += f'<dt>Хентай</dt><dd class="content-row">{esc(("да" if found.hentai else "нет") + (" — " + found.reason if found.reason else ""))}</dd>'
     facts += f'<dt>Глав</dt><dd>{total}</dd>'

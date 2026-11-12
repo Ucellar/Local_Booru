@@ -54,8 +54,10 @@ OPENING_IN = 0.45            # the opening begins in this share of the episode
 ENDING_FROM = 0.55           # the ending begins after this share
 SMOOTH = 32                  # prints in the bit error average (~2 s)
 CHUNK = 2048                 # looks put through the FFT at once (~2 min of sound, ~35 MB)
-THREADS = 4                  # the decoder's threads at most: the work goes on in the background, the computer is the
-                             # person's (all of them took 83 % of a 16-thread processor on the owner's computer)
+THREADS = 1                  # the decoder's threads: the work goes on in the background, the computer is the
+                             # person's.  (v5.44.151; was 4) Measured on the owner's computer, three episodes of 12
+                             # minutes: 45.5 s and 1.25 processors with four, 51.9 s and 1.06 with one — the making of
+                             # prints, not the decoder, takes the time; one more thread bought nothing
 SAME_SHIFT = 2.0             # seconds two stretches of one peer may be apart in shift and still be one song
 VERSION = 1
 NOTE = "skips.json"
@@ -122,7 +124,7 @@ def sound_prints(path: Path, *, stop=None, cache: Path | None = None):
         stream = box.streams.audio[0]
         resampler = av.AudioResampler(format="flt", layout="mono", rate=RATE)
         for n, frame in enumerate(box.decode(stream)):
-            if stop is not None and n % 2000 == 0 and stop():
+            if stop is not None and n % 500 == 0 and stop():      # ten seconds of sound: asked several times a second
                 raise InterruptedError
             if start is None and frame.time is not None:
                 start = float(frame.time)
@@ -491,13 +493,16 @@ def waiting(series) -> list:
     return out
 
 
-def find_series(series, *, stop=None, deadline: float | None = None) -> int:
+def find_series(series, *, stop=None, deadline: float | None = None, first: str = "") -> int:
     """Look at the episodes of a series that wait (``waiting``): their openings and endings by their sound, kept.
-    The number looked at — less when ``deadline`` (``time.monotonic()``) came or ``stop()``."""
+    The number looked at — less when ``deadline`` (``time.monotonic()``) came or ``stop()``.  ``first`` — the number
+    of the episode the person stopped at: the ones from it on are looked at before the ones watched already."""
     import numpy as np
     folder = Path(series.path)
     episodes = list(series.episodes)
     todo = {id(e) for e in waiting(series)}
+    begin = next((k for k, e in enumerate(episodes) if first and e.label == str(first)), 0)
+    order = list(range(begin, len(episodes))) + list(range(begin))
     prints: dict = {}
 
     pictures: dict = {}
@@ -522,7 +527,8 @@ def find_series(series, *, stop=None, deadline: float | None = None) -> int:
                 pictures[k] = None
         return pictures[k]
     done = 0
-    for n, episode in enumerate(episodes):
+    for n in order:
+        episode = episodes[n]
         if id(episode) not in todo:
             continue
         if (stop is not None and stop()) or (deadline is not None and time.monotonic() >= deadline):
@@ -685,6 +691,26 @@ def _origin(path: Path) -> float:
         return 0.0
 
 
+def _in_order(every: list) -> list:
+    """(v5.44.151) [(series, the episode it was stopped at — "" when never watched)] — the series watched last
+    first, then the ones whose files are the newest: with one thread a long series takes an hour, and the marks are
+    wanted where the person watches."""
+    from core import video_library as V
+    out = []
+    for series in every:
+        at, last = 0, ""
+        try:
+            keys = V.memory_keys(series)
+            at = int(V.PROGRESS.last_at(keys) or 0)
+            last = str((V.PROGRESS.view(keys) or {}).get("last") or "") if at else ""
+        except Exception as exc:  # noqa: BLE001 - the memory of what was watched is not read: the folder's order
+            _LOG.debug("skips: what was watched of %s not read: %s", series.path, exc)
+        if "/" in last:                                  # an episode of a season's sub-folder: by the series' order
+            last = ""
+        out.append((-at, -float(series.mtime or 0.0), len(out), series, last))
+    return [(series, last) for _at, _mtime, _n, series, last in sorted(out, key=lambda row: row[:3])]
+
+
 def background_round(settings: dict, *, stop=None, seconds: float = 45.0) -> dict:
     """The background duty: the series of the video folder whose episodes wait, looked at for ``seconds`` at most.
     {"done": episodes looked at, "more": bool}."""
@@ -696,7 +722,7 @@ def background_round(settings: dict, *, stop=None, seconds: float = 45.0) -> dic
         return {"done": 0, "more": False}
     deadline = time.monotonic() + seconds
     done, more = 0, False
-    for series in video_library.LIBRARY.items(str(root)):
+    for series, last in _in_order(video_library.LIBRARY.items(str(root))):
         if stop is not None and stop():
             return {"done": done, "more": True}
         failed_at = _UNWRITABLE.get(str(series.path))
@@ -708,7 +734,7 @@ def background_round(settings: dict, *, stop=None, seconds: float = 45.0) -> dic
             if time.monotonic() >= deadline:
                 more = True
                 break
-            done += find_series(series, stop=stop, deadline=deadline)
+            done += find_series(series, stop=stop, deadline=deadline, first=last)
             more = more or (bool(waiting(series)) and str(series.path) not in _UNWRITABLE)
         except Exception as exc:   # noqa: BLE001 - one series that fails does not hold the others up
             _LOG.warning("skips of %s: %s: %s", series.path, type(exc).__name__, exc)

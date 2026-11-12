@@ -16,6 +16,10 @@ The queue and the download going are kept in ``video_queue.json`` (the owner, 03
 the files there are had, a begun one goes on from its «.part»; a pause stays a pause; «Остановить» keeps nothing.
 Until then the page says what goes on soon (``restoring`` of the state), and with no list found on it the download
 going is shown on its own (the owner, 04.11.2026: it was going, unseen, till another title was found).
+
+(v5.44.142) Each download says which page it is of and which episode each of its files is (``_shown_of``: the
+download going — ``_CURRENT["shown"]``, one in the queue — its entry's): the page of a series shows on its tiles what
+downloads for it (``going_for`` ← ``/api/series/getting``), whichever page began it, after a reload and after a restart.
 """
 from __future__ import annotations
 
@@ -37,7 +41,9 @@ GET = "video_download"                 # the page task «Скачать»
 _QUEUE: list = []                      # downloads asked while one went: {"id", "find", "title", "chosen", "label", "run"}
 _QUEUE_LOCK = threading.Lock()
 _QUEUE_IDS = itertools.count(1)
-_CURRENT: dict = {"saved": None}       # the download going: what it is, to begin it again after a restart
+_CURRENT: dict = {"saved": None,       # the download going: what it is, to begin it again after a restart;
+                  "shown": None}       # (v5.44.142) its page and its files' episodes (``_shown_of``)
+_LAST: dict = {}                       # (v5.44.142) the download that ended last: its page, when, how it ended
 _USER_STOP = threading.Event()         # «Остановить»: what it stops is not begun again
 _RESTORED = threading.Event()          # the downloads of the last run read (once a run of the program)
 _PENDING: dict = {"titles": [], "at": 0.0}   # those downloads before they are begun again: for the page
@@ -61,6 +67,7 @@ def register(router) -> None:
     router.add("POST", r"/api/videos/download/unqueue", download_unqueue)
     router.add("POST", r"/api/videos/download/pause", download_pause)
     router.add("GET", r"/api/videos/order/(?P<id>[0-9a-f]{12})", series_order)
+    router.add("GET", r"/api/videos/order", title_order)             # (v5.44.145) a title of a site, by its address
     if _await_restore():                             # the downloads the program was busy with when it closed
         threading.Thread(target=_restore_later, name="video-download-restore", daemon=True).start()
 
@@ -71,7 +78,7 @@ def _root(req: Request) -> tuple[Path | None, str]:
     root = Path(V.video_root(req.settings))
     if root.is_dir() or not str(req.settings.get("video_root") or "").strip():
         return root, ""
-    return None, f"Папки видео нет на месте: {root}. Подключите её диск или выберите другую в «Настройки → Папки»"
+    return None, f"Папки видео нет на месте: {root}. Подключите её диск или выберите другую в «Настройки → Хранение и копии»"
 
 
 # ── the page ──────────────────────────────────────────────────────────────────────
@@ -100,11 +107,11 @@ def page(req: Request) -> Response:
         frames = ("У YummyAnime видео в чужом плеере (Kodik) — сейчас программа его не трогает, а серии этого тайтла ищет на "
                   "AniLiberty по номерам Shikimori и MyAnimeList: это будет тот же тайтл и тот же сезон, а описание и "
                   "постер останутся с YummyAnime. Ссылка прямо на релиз AniLiberty тоже подходит."
-                  + (" Все озвучки из Kodik и CVH — это включается в «Настройки → Вкладка «Видео»»." if can_dubs else ""))
+                  + (" Все озвучки из Kodik и CVH — это включается в «Настройки → Видео»." if can_dubs else ""))
     else:
         frames = ("С YummyAnime и других сайтов с плеером Kodik и подобными программа сейчас не скачивает. "
                   + ("Все озвучки YummyAnime или серии с AniLiberty" if can_dubs else "Серии с AniLiberty")
-                  + " — это включается в «Настройки → Вкладка «Видео»».")
+                  + " — это включается в «Настройки → Видео».")
     chips = "".join(f'<li>{esc(site)}</li>' for site in sites) + ('<li class="vget-any">и другие — пробуйте любую ссылку</li>'
                                                                  if embeds else "")
     embeds_help = ("""      <p>Если видео на странице — в плеере другого сайта (как на hfshare: несколько плееров, в каждом все серии),
@@ -257,6 +264,10 @@ def _find_with(address: str, get_page, root: Path, settings: dict, window, say, 
             got = get_page(say)
         except I.MetaImportError as exc:
             return {"failed": str(exc)}
+        from core import video_watch             # (v5.44.139) a site of hentai: the program's gate, as «Смотреть»
+        closed = video_watch.page_closed(address, getattr(got, "html", ""), getattr(got, "url", "") or address)
+        if closed:
+            return {"failed": closed}
 
         def fetch(address: str):                 # the pages of the series' episodes, its own page
             return I.page_from_url(address, progress=lambda _text: None, window_fetch=window)
@@ -333,7 +344,7 @@ def _nothing(found, elsewhere: str = "", *, off: bool = False) -> str:
         text += f" {elsewhere}."
     elif off and (found.frame_site or found.frames):  # a title another site's player shows: AniLiberty may have it
         text += (" Серии такого тайтла программа может найти на AniLiberty — это включается в «Настройки → "
-                 "Вкладка «Видео»».")
+                 "Видео».")
     return text + " Описание и постер можно взять: «Описание с сайта» на странице сериала"
 
 
@@ -381,6 +392,11 @@ def find_state(req: Request) -> Response:
     kept = _found_of(task)
     if kept is not None:
         state["found"] = kept["found"].public(Path(kept["root"]))
+        # (v5.44.142) the address asked and how long ago the list came: «Скачать серии…» of a series' page takes a
+        # list of its own page found a moment ago as it is (what is in the folder is looked at anew above)
+        state["address"] = str(kept.get("address") or "")
+    if task.finished_at:
+        state["age"] = int(max(0.0, time.time() - task.finished_at))
     return Response.json(state)
 
 
@@ -407,20 +423,31 @@ def download(req: Request) -> Response:
     if kept is None or str(body.get("find") or "") != str(task.id):
         return Response.json({"ok": False, "error": "Список файлов устарел — нажмите «Найти видео» ещё раз"}, 409)
     chosen = body.get("files")
-    if not isinstance(chosen, list) or not chosen or not all(isinstance(n, int) for n in chosen):
-        return Response.json({"ok": False, "error": "Отметьте файлы, которые скачать"}, 400)
     quality = str(body.get("quality") or "")
     merge = bool(body.get("merge")) and found_merges(kept)
+    # (v5.44.150) «Заменить картинку у серий в папке»: with the voice-overs into one file — the episodes there get
+    # the title's best picture too; nothing need be ticked then
+    repicture = bool(body.get("repicture")) and merge
+    if not isinstance(chosen, list) or not all(isinstance(n, int) for n in chosen) or not (chosen or repicture):
+        return Response.json({"ok": False, "error": "Отметьте файлы, которые скачать"}, 400)
     if quality and quality not in video_dubs.QUALITIES:
         return Response.json({"ok": False, "error": "Непонятное качество"}, 400)
     root, why = _root(req)
     if root is None:
         return Response.json({"ok": False, "error": why}, 409)
     found = kept["found"]
-    saved = _saved_of(str(kept.get("address") or ""), found, chosen, quality, merge)
+    saved = _saved_of(str(kept.get("address") or ""), found, chosen, quality, merge, repicture)
+    shown = _shown_of(str(kept.get("address") or ""), found, chosen, quality, merge)
+    address = str(kept.get("address") or "")
+
+    def planned(places: list) -> None:           # (v5.44.150) the lent pictures joined: the series' page shows them
+        with _QUEUE_LOCK:
+            if _CURRENT.get("shown"):
+                _CURRENT["shown"] = _shown_of(address, found, places, quality, merge)
     run = _job(saved, lambda say, stop_check: video_download.download(found, chosen, root, say=say,
                                                                       stop_check=stop_check, quality=quality,
-                                                                      merge=merge))
+                                                                      merge=merge, repicture=repicture,
+                                                                      planned=planned), shown)
     title = found.title or found.folder.name
     label = f"Скачать с сайта: «{title}»"
     try:
@@ -431,7 +458,7 @@ def download(req: Request) -> Response:
             if entry is None:
                 entry = {"id": next(_QUEUE_IDS), "find": task.id}
                 _QUEUE.append(entry)
-            entry.update(title=title, chosen=list(chosen), label=label, run=run, saved=saved)
+            entry.update(title=title, chosen=list(chosen), label=label, run=run, saved=saved, shown=shown)
             entry.pop("count", None)
             place = _QUEUE.index(entry) + 1
         _persist()
@@ -448,15 +475,125 @@ def _keep_file() -> Path:
     return Path(SETTINGS_DIR) / KEEP_NAME
 
 
-def _saved_of(address: str, found, chosen: list, quality: str, merge: bool) -> dict | None:
+def _saved_of(address: str, found, chosen: list, quality: str, merge: bool, repicture: bool = False) -> dict | None:
     """What a download is, to begin it again after a restart: its page's address and its files by their sub-folder
-    and title (the file's extension is its player's — it may be another then); None for a saved page (no address)."""
+    and title (the file's extension is its player's — it may be another then); None for a saved page (no address).
+    (v5.44.150) ``repicture`` — the episodes of the folder get the title's best picture too."""
     if not address.startswith(("http://", "https://")):
         return None
     files = [[found.files[n].group or "", found.files[n].title or found.files[n].name]
              for n in chosen if 0 <= n < len(found.files)]
     return {"address": address, "title": found.title or found.folder.name, "files": files, "quality": quality,
-            "merge": bool(merge)}
+            "merge": bool(merge), "repicture": bool(repicture)}
+
+
+def _shown_of(address: str, found, chosen: list, quality: str, merge: bool) -> dict:
+    """(v5.44.142) What a download is for the page of its series: its page's address, its title, each video file's
+    episode and sub-folder by its place in the list (``tiles``: {"3": ["2", "Озвучка AniLibria"]} — the numbers of
+    its tiles, ``video_download.tile_labels``), its sub-folders in order, «Качество», «в один файл»."""
+    from core import video_download
+    labels = video_download.tile_labels(found.files)
+    places = [n for n in chosen if isinstance(n, int) and 0 <= n < len(found.files)]
+    tiles = {str(n): [labels[n], found.files[n].group or ""] for n in places if found.files[n].kind != "audio"}
+    groups: list = []
+    for n in places:
+        if (found.files[n].group or "") not in groups:
+            groups.append(found.files[n].group or "")
+    return {"address": address, "title": found.title or found.folder.name, "tiles": tiles, "groups": groups,
+            "quality": quality, "merge": bool(merge), "count": len(places)}
+
+
+GONE = ("done", "whole", "other", "failed", "dead")      # how a file of a download ends (``video_download.download``)
+KEEP_LAST = 180.0                                       # seconds the end of a download is told to its series' page
+
+
+def going_for(address: str) -> dict:
+    """(v5.44.142) What the downloads do for the title of the page ``address`` (a series' page — ``/api/series/getting``):
+    {"going": the download going for it (``_going_public``) | None, "queued": its place in the queue | None,
+    "other": the title of another one going ("" — none), "ended": how the last one of it ended a moment ago}."""
+    from core import page_jobs, video_download
+    out: dict = {"going": None, "queued": None, "other": "", "ended": None}
+    task = page_jobs.current(GET)
+    running = task is not None and task.running
+    with _QUEUE_LOCK:
+        shown = dict(_CURRENT.get("shown") or {})
+        queue = [{"id": q["id"], "title": str(q.get("title") or ""), "shown": dict(q.get("shown") or {}),
+                  "saved": dict(q.get("saved") or {}), "count": q.get("count", len(q.get("chosen") or []))}
+                 for q in _QUEUE]
+        last = dict(_LAST)
+    mine = bool(address) and running and bool(shown) and video_download._same_page(shown.get("address"), address)
+    if mine:
+        out["going"] = _going_public(shown, video_download.meter(), task)
+    elif running:
+        out["other"] = str(shown.get("title") or task.label.replace("Скачать с сайта: ", "").strip("«»"))
+    if not address:
+        return out
+    before = out["other"] if running else ""
+    for place, entry in enumerate(queue, 1):
+        where = entry["shown"].get("address") or entry["saved"].get("address")
+        if video_download._same_page(where, address):
+            tiles = entry["shown"].get("tiles") or {}
+            out["queued"] = {"id": entry["id"], "place": place, "files": entry["count"], "before": before,
+                             "labels": sorted({str(t[0]) for t in tiles.values()}, key=V.natural_key)}
+            break
+        before = entry["title"]
+    if not mine and last and video_download._same_page(last.get("address"), address) \
+            and time.time() - float(last.get("at") or 0) < KEEP_LAST:
+        out["ended"] = {k: last.get(k) for k in ("at", "done", "whole", "failed", "stopped", "merged", "error")}
+    return out
+
+
+def _going_public(shown: dict, meter: dict, task) -> dict:
+    """The download going, episode by episode, for the tiles of its series: {"labels": {episode: {"state": active /
+    paused / queued / done / failed / stopped, "part": 0…1 of its files, "files"}}, "pairs": [{label, group,
+    state}], "now": the file going {label, group, part}, "count", "ended", "paused", "merging", "eta" (seconds,
+    0 — not known yet), its sub-folders, «Качество», «в один файл», its title}."""
+    from core import video_download
+    states = {str(k): str(v) for k, v in (meter.get("states") or {}).items()}
+    tiles = shown.get("tiles") or {}
+    now = str(meter.get("file")) if meter.get("file") is not None and not meter.get("merging") else ""
+    total = float(meter.get("total") or 0)
+    part_now = max(0.0, min(1.0, float(meter.get("done") or 0) / total)) if total > 0 else 0.0
+    labels: dict = {}
+    pairs: list = []
+    ended = downloaded = 0
+    for place, (label, group) in tiles.items():
+        state = states.get(place) or "queued"
+        slot = labels.setdefault(str(label), {"files": 0, "ended": 0, "part": 0.0, "of": []})
+        slot["files"] += 1
+        slot["of"].append(state)
+        if state in GONE:
+            slot["ended"] += 1
+            ended += 1
+        downloaded += state == "done"
+        if place == now and state in ("active", "paused"):
+            slot["part"] += part_now
+        pairs.append({"label": str(label), "group": str(group), "state": state})
+    for slot in labels.values():
+        of = slot.pop("of")
+        if "paused" in of:
+            slot["state"] = "paused"
+        elif "active" in of:
+            slot["state"] = "active"
+        elif all(s in ("done", "whole", "other") for s in of):
+            slot["state"] = "done"
+        elif "queued" in of:
+            slot["state"] = "queued"
+        elif "stopped" in of:
+            slot["state"] = "stopped"
+        else:
+            slot["state"] = "failed"
+        slot["part"] = round((slot["ended"] + slot["part"]) / max(1, slot["files"]), 3)
+    current = None
+    if now in tiles:
+        current = {"label": str(tiles[now][0]), "group": str(tiles[now][1]), "part": round(part_now, 3)}
+    elapsed = max(0.0, time.time() - float(getattr(task, "started_at", 0) or time.time()))
+    left = len(tiles) - ended
+    eta = int(elapsed / downloaded * left) if downloaded >= 2 and left > 0 else 0
+    return {"labels": labels, "pairs": pairs, "now": current, "count": len(tiles), "ended": ended,
+            "paused": video_download.paused(), "merging": bool(meter.get("merging")), "eta": eta,
+            "groups": list(shown.get("groups") or []), "quality": str(shown.get("quality") or ""),
+            "merge": bool(shown.get("merge")), "title": str(shown.get("title") or "")}
 
 
 def _persist() -> None:
@@ -470,21 +607,35 @@ def _persist() -> None:
         _LOG.warning("the queue of downloads not kept: %s", exc)
 
 
-def _job(saved: dict | None, work):
+def _job(saved: dict | None, work, shown: dict | None = None):
     """A download as a page task: kept as the one going while it goes; when it ends, the next of the queue starts.
-    Ended by the program closing (its stop, not «Остановить») — kept, to be begun again at the next start."""
+    Ended by the program closing (its stop, not «Остановить») — kept, to be begun again at the next start.
+    ``shown`` — what it is for the page of its series (``_shown_of``; a download of the last run sets it itself once
+    its page is found again)."""
     def run(say, stop_check):
         _USER_STOP.clear()
         with _QUEUE_LOCK:
             _CURRENT["saved"] = dict(saved) if saved is not None else None
+            _CURRENT["shown"] = dict(shown) if shown else None
         _persist()
+        result = None
         try:
-            return work(say, stop_check)
+            result = work(say, stop_check)
+            return result
         finally:
             leaving = stop_check() and not _USER_STOP.is_set()
             with _QUEUE_LOCK:
                 if not leaving:
                     _CURRENT["saved"] = None
+                ended = _CURRENT.get("shown") or {}
+                _CURRENT["shown"] = None
+                if ended.get("address"):                 # (v5.44.142) for its series' page: how it ended
+                    done = result if isinstance(result, dict) else {}
+                    _LAST.clear()
+                    _LAST.update(address=ended["address"], at=time.time(), done=int(done.get("done") or 0),
+                                 whole=int(done.get("whole") or 0), failed=int(done.get("failed_files") or 0),
+                                 stopped=bool(done.get("stopped") or stop_check()), merged=int(done.get("merged") or 0),
+                                 error=str(done.get("failed") or ""))
             _persist()
             if not stop_check():                     # the next one in the queue, when this one has ended
                 threading.Thread(target=_next, name="video-download-queue", daemon=True).start()
@@ -585,6 +736,8 @@ def restore(settings: dict) -> int:
                               if _pair_key(f.group or "", f.title or f.name) in wanted]
                 if chosen or got.get("stopped") or stop_check() or attempt == FIND_TRIES:
                     break
+                if got.get("found") is not None and not wanted and record.get("repicture"):
+                    break                            # (v5.44.150) nothing ticked: the pictures of the folder alone
                 why = got.get("failed") or ("серий из очереди на странице нет" if got.get("found") is not None
                                             else "серии не нашлись")
                 say(f"Не нашлось ({why}) — пробую ещё раз через {int(FIND_AGAIN)} с ({attempt + 1}/{FIND_TRIES})")
@@ -593,7 +746,8 @@ def restore(settings: dict) -> int:
             if got.get("found") is None:
                 return got if got.get("failed") or got.get("stopped") else {"failed": "Серии не нашлись"}
             found = got["found"]
-            if not chosen:
+            again = bool(record.get("repicture")) and bool(record.get("merge")) and found.after is not None
+            if not chosen and not again:
                 return {"failed": "Серий из очереди на странице больше нет"}
             missing = len(wanted) - len({_pair_key(found.files[n].group or "", found.files[n].title or found.files[n].name)
                                          for n in chosen})
@@ -607,9 +761,17 @@ def restore(settings: dict) -> int:
                     + ", ".join(f"{group} — {count}" for group, count in gone.items()))
             quality = str(record.get("quality") or "")
             quality = quality if quality in ("", *getattr(video_dubs, "QUALITIES", ())) else ""
+            merge = bool(record.get("merge")) and found.after is not None
+            with _QUEUE_LOCK:                        # (v5.44.142) its series' page: which episode each file is
+                _CURRENT["shown"] = _shown_of(str(record["address"]), found, chosen, quality, merge)
+
+            def planned(places: list) -> None:       # (v5.44.150) …and the lent pictures that joined
+                with _QUEUE_LOCK:
+                    if _CURRENT.get("shown"):
+                        _CURRENT["shown"] = _shown_of(str(record["address"]), found, places, quality, merge)
             return video_download.download(found, chosen, root, say=say, stop_check=stop_check, quality=quality,
-                                           merge=bool(record.get("merge")) and found.after is not None,
-                                           start_paused=bool(record.get("paused")))
+                                           merge=merge, start_paused=bool(record.get("paused")), repicture=again,
+                                           planned=planned)
         return work
     with _QUEUE_LOCK:
         for n, record in enumerate(records):
@@ -657,8 +819,12 @@ def queue_public() -> list:
 
 def measure(req: Request) -> Response:
     """What an episode of the title found weighs in each quality (every voice-over of a YummyAnime title: one episode
-    asked of CVH — ``video_dubs.Resolver.measure``), for the estimate beside «Скачать»."""
-    from core import page_jobs
+    asked of CVH — ``video_dubs.Resolver.measure``), for the estimate beside «Скачать».  (v5.44.150) And what the
+    title's releases really give (``releases``: each one's real height, whether its cut is the original's —
+    ``Resolver.look_over``), which of them the picture comes from when the voice-overs ``g`` go into one file within
+    ``quality`` (``picture``: one not among them lends it), and how many episodes of the folder have a lower one
+    (``lower`` — «Заменить картинку у серий в папке»)."""
+    from core import page_jobs, video_dubs
     from core.video_meta_import import _session
     task = page_jobs.current(FIND)
     kept = _found_of(task)
@@ -667,12 +833,25 @@ def measure(req: Request) -> Response:
     resolver = kept["found"].resolve
     if resolver is None or not hasattr(resolver, "measure"):
         return Response.json({"ok": True, "measured": {}})
+    reply = {"ok": True, "measured": {}}
+    session = _session(kept["found"].page.url or "https://site.yummyani.me/")
+    quality = req.arg("quality") if req.arg("quality") in getattr(video_dubs, "QUALITIES", ()) else ""
+    groups = [str(g) for g in req.query.get("g") or [] if str(g).strip()]
     try:
-        measured = resolver.measure(_session(kept["found"].page.url or "https://site.yummyani.me/"))
+        if hasattr(resolver, "release_facts"):
+            with _LOOK_LOCK:                         # two pages at once: the releases are looked over once
+                resolver.look_over(session)
+            reply["releases"] = resolver.release_facts()
+            reply["picture"] = resolver.picture_for(groups, quality) if groups and found_merges(kept) else {}
+            reply["lower"] = (resolver.lower_in_folder(int(reply["picture"].get("height") or 0))
+                              if reply["picture"] else {"episodes": 0, "height": 0})
+        reply["measured"] = resolver.measure(session)
     except Exception as exc:   # noqa: BLE001 - an estimate that does not come: the page goes without it
         _LOG.info("measure: %s: %s", type(exc).__name__, exc)
-        measured = {}
-    return Response.json({"ok": True, "measured": measured})
+    return Response.json(reply)
+
+
+_LOOK_LOCK = threading.Lock()
 
 
 def found_merges(kept: dict) -> bool:
@@ -732,12 +911,25 @@ def series_order(req: Request) -> Response:
     the seasons, films and extras, each with the series of the library that is it (by the same YummyAnime page), or
     the address to find and download it; and its ratings as they are now (its own people's first — the page puts
     them in «Оценки»).  [] for a series from elsewhere (and in the public copy)."""
-    from core import video_dubs
     root = V.video_root(req.settings)
     series = V.LIBRARY.get(root, req.params["id"]) if Path(root).is_dir() else None
     if series is None:
         return Response.json({"ok": False, "error": "Такого сериала нет"}, 404)
-    source = str(series.info.get("source_url") or "")
+    return _order_answer(req, str(series.info.get("source_url") or ""), series.id)
+
+
+def title_order(req: Request) -> Response:
+    """(v5.44.145) The same for a title of a site that has no folder yet (``?url=`` — its page on YummyAnime): the one
+    page of a series (5.44.121) drew «Порядок просмотра» only for a series of the folder — the page «Смотреть» of
+    before had it for every title (the owner, 10.11.2026: «и почему пропал порядок просмотра?»)."""
+    return _order_answer(req, req.arg("url").strip(), "")
+
+
+def _order_answer(req: Request, source: str, here_id: str) -> Response:
+    from urllib.parse import quote
+
+    from core import video_dubs
+    root = V.video_root(req.settings)
     yummy = getattr(video_dubs, "is_yummy", None)
     if not getattr(video_dubs, "AVAILABLE", True) or yummy is None or not yummy(source) \
             or not video_dubs.alias_of(source):
@@ -757,18 +949,22 @@ def series_order(req: Request) -> Response:
         with _ORDERS_LOCK:
             _ORDERS[alias] = kept
     mine = {}                                        # the library's series by the YummyAnime page they came from
-    for other in V.LIBRARY.items(root):
-        page = str(other.info.get("source_url") or "")
-        if yummy(page) and video_dubs.alias_of(page):
-            mine.setdefault(video_dubs.alias_of(page), other)
+    if Path(root).is_dir():
+        for other in V.LIBRARY.items(root):
+            page = str(other.info.get("source_url") or "")
+            if yummy(page) and video_dubs.alias_of(page):
+                mine.setdefault(video_dubs.alias_of(page), other)
     order = []
     for item in kept[1]:
         have = mine.get(item.get("alias") or "")
-        order.append(dict(item, here=have is not None and have.id == series.id or bool(item.get("here")),
+        address = str(item.get("address") or "")
+        order.append(dict(item, here=bool(here_id) and have is not None and have.id == here_id or bool(item.get("here")),
                           series=have.id if have is not None else "",
                           episodes=len(have.episodes) if have is not None and not have.single else 0,
                           # (v5.44.89, the owner: no page of before) «найти и скачать» — the card of «Скачать»
-                          get=_card_of(item.get("address") or "") if item.get("address") else ""))
+                          get=_card_of(address) if address else "",
+                          # (v5.44.145) the part's own page in the program: watched there, downloaded there
+                          watch=f"/videos/watch?url={quote(address, safe='')}" if address else ""))
     return Response.json({"ok": True, "order": order, "ratings": kept[2]})
 
 

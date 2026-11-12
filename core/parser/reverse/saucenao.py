@@ -113,7 +113,7 @@ class SauceNao(ReverseService):
         }
         dbs = [int(x) for x in self.ctx.settings.get("saucenao_dbs") or [] if str(x).isdigit()]
         if dbs:
-            params["dbs[]"] = dbs
+            params["dbs[]"] = dbs + self._manga_indexes(dbs)
         elif str(self.ctx.settings.get("saucenao_dbmask") or "").strip():
             params["dbmask"] = str(self.ctx.settings.get("saucenao_dbmask")).strip()
         else:
@@ -175,7 +175,33 @@ class SauceNao(ReverseService):
         outcome = ReverseOutcome("complete")
         for result in data.get("results") or []:
             self._collect(result, min_sim, outcome)
+        outcome.manga = self._manga(data)
         return outcome
+
+    def _manga_on(self) -> bool:
+        """(v5.44.164) «Проверять папки и класть мангу в «Мангу»» of the page «Парсер»: a picture is asked whether it
+        is a page of a manga too."""
+        return bool(self.ctx.settings.get("parser_skip_manga", True))
+
+    def _manga_indexes(self, dbs: list) -> list:
+        """(v5.44.164) SauceNAO's indexes of manga, added to the ones the person chose («saucenao_dbs»): the same one
+        search then says whether the picture is a page of a manga.  Every index asked (the default) has them already."""
+        if not self._manga_on():
+            return []
+        from core.manga_pictures import INDEXES
+        return [index for index in INDEXES if index not in dbs]
+
+    def _manga(self, data: dict) -> list:
+        """(v5.44.164) The manga the answer names (``manga_pictures.manga_hits``); said in the journal with the other
+        answers (:meth:`_collect`), kept for the file's end (``engine._finish_miss`` → ``core/parser_loose.py``)."""
+        if not self._manga_on():
+            return []
+        try:
+            from core.manga_pictures import manga_hits
+            return manga_hits(data)
+        except Exception as exc:  # noqa: BLE001 — the file's own search is done all the same
+            self.ctx.log(f"  SauceNAO: ответ о манге не разобран: {type(exc).__name__}")
+            return []
 
     def _limited(self, response, upload_path, serial: int, again: bool) -> ReverseOutcome:
         """HTTP 429.  The daily limit: a long pause (the file deferred to the next run).  The 30-second one (another

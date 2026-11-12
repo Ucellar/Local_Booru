@@ -134,7 +134,7 @@ def dupes_page(req: Request) -> Response:
   <div class="dupes-list">{pairs}</div>
   {more}
 </section>"""
-    return Response.html(page_frame("Дубли", body, active="dupes", subnav=False, kind="tool",
+    return Response.html(page_frame("Дубли", body, active="dupes", subnav=True, kind="tool",
                                     body_data={"tool": "dupes"}, **_prefs()))
 
 

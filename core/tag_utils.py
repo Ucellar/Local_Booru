@@ -1,3 +1,4 @@
+import functools
 import html
 import re
 import unicodedata
@@ -19,6 +20,14 @@ def ascii_fold(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 def normalize_tag(tag) -> str:
+    """A tag as the library keeps it: without its category's prefix, spaces as «_», accents folded; "" — not a tag.
+    (v5.44.151) The answers are kept: a page of the gallery asked it seven thousand times — a tenth of a second of
+    its 0.25 —, and the same few thousand tags every time."""
+    return _normalized(tag if isinstance(tag, str) else str(tag or ""))
+
+
+@functools.lru_cache(maxsize=100000)
+def _normalized(tag: str) -> str:
     t = strip_tag_prefix(tag)
     t = html.unescape(t).strip()
     # Bare separators sometimes leak in from scraped sidebars and are not tags.

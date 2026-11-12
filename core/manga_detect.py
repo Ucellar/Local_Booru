@@ -683,7 +683,7 @@ def look(settings: dict, *, stop_check=None, say=None) -> list:
     root = str(settings.get("root") or "").strip()
     if not root or not Path(root).is_dir():
         if say is not None:
-            say("Папка, из которой парсер берёт файлы, не найдена — её выбирают в «Настройки → Папки»")
+            say("Папка, из которой парсер берёт файлы, не найдена — её выбирают на странице «Парсер»")
         return []
     with _LOOK_LOCK:                                 # (v5.44.113) one look at a time (the background of «Из архива»,
         started = time.time()                        # the comics' duty, «Проверить сейчас»); never another's answer:

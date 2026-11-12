@@ -3,19 +3,25 @@ saved on its own (``webui/settings_form``), changed only through ``settings_stor
 the sections, nothing else).  Actions next to the settings they belong to: a light copy now, the
 thumbnail cache, the browser extension's pairing code, the settings profile.
 
-Checks and repairs of the library are on «Диагностика»; the source folder is chosen on «Парсер»,
-sites and keys on «Сайты».
+(v5.44.161; the owner: «настройки полный пиздец блять»; the mockup «Настройки» approved 11.11.2026) The sections are
+on the left (:data:`PANES`) with a search of every setting, a setting is a row — its name, one line of explanation,
+the control on the right; a long explanation is behind «Подробнее».  «Сайты и ключи» is a section of this page
+(«Парсер и сайты»: ``webui/pages/sites.py`` gives its part, the address /sites opens the page at it); «Диагностика»
+— its own pages inside the same frame (:func:`frame`: «Проверка и починка»).  The source folder is chosen on
+«Парсер».
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
 
 from webui.html import esc, human_size, page_frame
 from webui.server import Request, Response
-from webui.settings_form import Field, FieldError, Section, clean, render
+from webui.settings_form import Field, FieldError, Section, clean
 
 _LOG = logging.getLogger("local_booru.webui")
 
@@ -62,7 +68,8 @@ LIBRARY = Section("library", "Новые файлы и корзина", fields=(
           choices=(("skip", "не брать — корзина его держит"), ("return_inbox", "вернуть в «Новые»"))),
     Field("trash_auto_purge_days", "choice", "Очищать корзину", default=0,
           choices=((0, "только вручную"), (7, "через 7 дней"), (30, "через 30 дней")),
-          hint="что лежит в корзине дольше, удаляется навсегда — при запуске программы и раз в 5 минут, пока она открыта"),
+          hint="что лежит в корзине дольше, удаляется навсегда",
+          more="Проверяется при запуске программы и раз в 5 минут, пока она открыта."),
 ))
 
 TAGS = Section("tags", "Теги в списках",
@@ -90,60 +97,55 @@ BACKUP = Section("backup", "Резервные копии",
           placeholder="пусто — папка резервных копий архива"),
 ))
 
+# (v5.44.161) A setting's ``hint`` is the one line of its row; what is longer is its ``more`` («Подробнее»).
 GALLERY = Section("gallery", "Галерея", fields=(
     Field("webui_posts_per_page", "choice", "Картинок на странице", default=0,
           choices=((0, "сколько помещается в окно"), (20, "20"), (42, "42"), (60, "60"), (100, "100"), (200, "200")),
-          hint="«сколько помещается в окно» — ряды превью до низа окна без прокрутки; «мелкие / средние / крупные» "
-               "меняют и число"),
+          hint="«сколько помещается в окно» — ряды превью до низа окна, без прокрутки",
+          more="Размер превью («мелкие / средние / крупные» над плитками) меняет и число картинок."),
     Field("card_sets_tiles", "bool", "Сборка в галерее — одной плиткой",
           "все её карточки листаются на странице карточки; в корзине и Браке карточки всегда по одной", default=True),
     Field("post_sets_enabled", "bool", "Сборка над картинкой карточки",
           "зелёной плашкой, как на Danbooru: превью всей сборки по порядку; там же «изменить»", default=True),
     Field("card_sets_auto", "bool", "Собирать сборки самой",
-          "из скачанного: родитель и дочерние посты, страницы одной работы (pixiv, твит, Patreon…), серии одного "
-          "загрузившего и комиксы; сборки, которые вы меняли или собрали сами, она не трогает",
-          default=True),
-    Field("comic_manga_auto", "bool", "Комиксы и манга — в папку манги",
-          "только то, что подтвердил сайт манги (тайтл с теми же страницами, ComicInfo.xml или ссылка): комикс "
-          "галереи от 15 страниц (пул e621 или сборка комикса) — копией в папку манги, его карточки — в корзину "
-          "(«перенесено в мангу», оттуда их можно вернуть); манга из папки парсера — копией, её файлы и карточки "
-          "остаются на месте (блок «Манга в исходной папке» на странице «Парсер»); что не подтвердилось — остаётся "
-          "сборкой галереи. Пул e621 сам по себе мангу не подтверждает", default=True),
+          "из скачанного: посты с родителем, страницы одной работы, серии одного автора, комиксы", default=True,
+          more="Родитель и дочерние посты, страницы одной работы (pixiv, твит, Patreon…), серии одного загрузившего "
+               "и комиксы. Сборки, которые вы меняли или собрали сами, программа не трогает."),
     Field("card_sets_ask_sites", "bool", "Узнать у сайтов про уже скачанное",
-          "один раз, в фоне, пачками: кто залил пост и его родитель — для карточек, скачанных до версии 5.21; "
-          "ответ запоминается навсегда", default=True),
+          "кто залил пост и кто его родитель — один раз, в фоне", default=True,
+          more="Для карточек, скачанных до версии 5.21: без этого их не собрать в сборки. Сайты спрашиваются пачками, "
+               "ответ запоминается навсегда."),
     Field("card_sets_remote", "bool", "Недостающие части сборки — с сайта",
-          "у сборок «родитель и дочерние», «одна работа» и «серия»: части, которых нет в библиотеке, — превью с "
-          "сайта с пометкой «api» (серию программа ищет среди постов того же загрузившего, работу — по ссылке на "
-          "источник); на странице такой части — «Скачать». У карточки, которая в библиотеке одна, — родитель и "
-          "дочерние её поста на сайте (страница карточки спрашивает сайт)", default=True),
+          "части, которых нет в библиотеке, — превью с сайта с пометкой «api»", default=True,
+          more="У сборок «родитель и дочерние», «одна работа» и «серия»: серию программа ищет среди постов того же "
+               "загрузившего, работу — по ссылке на источник; на странице такой части — «Скачать». У карточки, "
+               "которая в библиотеке одна, — родитель и дочерние её поста на сайте (страница карточки спрашивает "
+               "сайт)."),
 ))
 
-VIDEOS = Section("videos", "Вкладка «Видео»",
+VIDEOS = Section("videos", "Видео",
                  lead="Длинные видео библиотеки показываются на вкладке «Видео», а не в галерее (в корзине и Браке "
                       "видны все). Сериалы на ней — из папки видео: одна папка — один сериал, файлы в ней — серии.",
                  fields=(
     Field("video_tab_seconds", "choice", "Видео длиннее", default=60,
           choices=((0, "не переносить — все видео в галерее"), (30, "30 секунд"), (60, "1 минуты"),
                    (120, "2 минут"), (300, "5 минут"), (600, "10 минут")),
-          hint="такие видео — на вкладке «Видео»; длину видео из библиотеки программа узнаёт сама, в фоне"),
+          hint="такие видео — на вкладке «Видео»; длину программа узнаёт сама, в фоне"),
     Field("video_source_dubs", "bool", "Все озвучки тайтлов с YummyAnime",
-          "«Скачать с сайта»: озвучки и субтитры тайтла из плееров Kodik (до 720p) и CVH (до 1080p) — каждая своей "
-          "вкладкой сериала; ссылки на видео программа берёт перед скачиванием каждой серии. Выключено — серии с "
-          "AniLiberty (строка ниже)",
-          default=True),
+          "«Скачать с сайта»: озвучки и субтитры из плееров Kodik (до 720p) и CVH (до 1080p)", default=True,
+          more="Каждая озвучка — своей вкладкой сериала; ссылки на видео программа берёт перед скачиванием каждой "
+               "серии. Выключено — серии берутся с AniLiberty (строка ниже)."),
     Field("video_dub_merge", "bool", "Собирать озвучки серии в один файл",
-          "после «Скачать» озвучки каждой серии становятся дорожками звука одного MKV: картинка одна, озвучки "
-          "переключаются в плеере; сдвиги и вставки студий программа находит по кадрам. Отдельные файлы озвучек "
-          "удаляются, когда общий файл проверен. Галочка на странице «Скачать с сайта» — для одного скачивания",
-          default=True),
+          "картинка одна, озвучки — дорожками звука одного MKV: переключаются в плеере", default=True,
+          more="После «Скачать» озвучки каждой серии становятся дорожками одного файла; сдвиги и вставки студий "
+               "программа находит по кадрам. Отдельные файлы озвучек удаляются, когда общий файл проверен. Галочка "
+               "на странице «Скачать с сайта» — для одного скачивания."),
     Field("yummy_api_url", "text", "Адрес API YummyAnime", default="https://api.yani.tv",
           placeholder="https://api.yani.tv", hint="если сайт переедет, впишите новый адрес его API"),
     Field("video_source_aniliberty", "bool", "Серии тайтлов с YummyAnime — с AniLiberty",
-          "«Скачать с сайта»: тот же тайтл программа найдёт на AniLiberty по номерам Shikimori и MyAnimeList (одна "
-          "озвучка — AniLiberty), а описание и постер возьмёт с YummyAnime. Работает, когда озвучки выше выключены "
-          "или YummyAnime их не отдал",
-          default=True),
+          "когда озвучки выше выключены или YummyAnime их не отдал", default=True,
+          more="«Скачать с сайта»: тот же тайтл программа находит на AniLiberty по номерам Shikimori и MyAnimeList "
+               "(озвучка одна — AniLiberty), а описание и постер берёт с YummyAnime."),
     Field("aniliberty_url", "text", "Адрес AniLiberty", default="https://aniliberty.top",
           placeholder="https://aniliberty.top",
           hint="если сайт переедет, впишите новый адрес; anilibria.top — его зеркало"),
@@ -157,8 +159,7 @@ THUMBS = Section("thumbs", "Превью", fields=(
 
 DOWNLOAD = Section("download", "Скачивание", fields=(
     Field("session_media_downloads_default", "bool", "Скачивать новые файлы",
-          "подписки, «Галерея (booru)», расширение; выключено — программа работает только с тем, что уже есть",
-          default=True),
+          "подписки, «Галерея (booru)», расширение; выключено — только то, что уже есть", default=True),
     Field("session_media_downloads_prompt", "bool", "Спрашивать об этом при каждом запуске",
           "вопрос «Разрешить скачивание новых медиа в этой сессии?»", default=False),
     Field("large_download_warning_count", "int", "Спрашивать, если за раз больше", default=1000, lo=1, hi=1_000_000,
@@ -168,10 +169,10 @@ DOWNLOAD = Section("download", "Скачивание", fields=(
     Field("grabber_cache_limit_mb", "int", "Кэш картинок «Галереи (booru)»", default=200, lo=0, hi=10_000, suffix="МБ",
           hint="0 — по умолчанию, 200 МБ"),
     Field("automatic_quality_upgrade_enabled", "bool", "Ставить оригинал вместо уменьшенной копии",
-          "файл карточки — уменьшенная копия с сайта (sample_…, thumbnail_…): программа сама, в фоне, скачивает "
-          "оригинал её поста, сверяет, что это та же картинка и она больше, и ставит его на место копии — теги, "
-          "источники и сборка карточки остаются, файл получает имя оригинала. Так же — лучшая копия, которую "
-          "приносит расширение", default=True),
+          "уменьшенную копию с сайта (sample_…, thumbnail_…) программа сама заменяет оригиналом", default=True,
+          more="В фоне: скачивает оригинал поста карточки, сверяет, что это та же картинка и она больше, и ставит его "
+               "на место копии — теги, источники и сборка карточки остаются, файл получает имя оригинала. Так же — "
+               "лучшая копия, которую приносит расширение."),
 ))
 
 COMPANION = Section("companion", "Браузер и расширение",
@@ -185,11 +186,11 @@ COMPANION = Section("companion", "Браузер и расширение",
 ))
 
 DATABASE = Section("db", "База",
-                   lead="Как программа обращается со своей базой SQLite. Копии, проверка и обслуживание базы — на "
-                        "«Диагностике».",
+                   lead="Как программа обращается со своей базой SQLite. Копии, проверка и обслуживание базы — в "
+                        "разделе «Проверка и починка».",
                    fields=(
     Field("sqlite_cache_mb", "int", "Кэш SQLite", default=40, lo=8, hi=512, suffix="МБ",
-          hint="на каждое соединение с базой: больше — быстрее большие запросы, но больше памяти; после перезапуска"),
+          hint="на каждое соединение: больше — быстрее большие запросы, но больше памяти; после перезапуска"),
     Field("sqlite_checkpoint_on_exit", "bool", "При закрытии переносить журнал WAL в базу",
           "файл журнала рядом с базой не растёт от запуска к запуску", default=True),
     Field("sqlite_idle_checkpoint_enabled", "bool", "Переносить журнал WAL и в простое",
@@ -199,7 +200,7 @@ DATABASE = Section("db", "База",
           choices=((60, "раза в минуту"), (120, "раза в 2 минуты"), (300, "раза в 5 минут"), (600, "раза в 10 минут"),
                    (900, "раза в 15 минут"), (1800, "раза в 30 минут"), (3600, "раза в час"))),
     Field("derived_cache_external_enabled", "bool", "Дерево похожих и категории тегов — в отдельном файле",
-          "рядом с базой, а не в ней; после смены пересоберите оба на «Диагностика → Обслуживание»", default=False),
+          "рядом с базой, а не в ней; после смены пересоберите оба в «Проверка и починка → Обслуживание»", default=False),
 ))
 
 def _visual_section() -> Section:
@@ -216,23 +217,32 @@ VISUAL = _visual_section()
 
 DEVELOPER = Section("dev", "Для разработчика", fields=(
     Field("performance_slow_ms", "int", "Записывать операции дольше", default=100, lo=25, hi=10_000, suffix="мс",
-          hint="«Медленные операции» на странице «Диагностика»"),
+          hint="«Медленные операции» в разделе «Проверка и починка»"),
 ))
 
 # (v5.44.116) What the program does with manga and manhwa by itself — normal fields of «Сайты манги» (the owner's
 # review): the nightly round of new chapters, and «Из архива»'s switches (they were on its page alone)
 MANGA_AUTO = Section("manga_auto", "Что программа делает сама", fields=(
     Field("manhwa_watch_auto", "bool", "Новые главы — скачивать самой",
-          "раз в сутки, ночью (компьютер был выключен ночью — после запуска): новые бесплатные главы тайтлов манги и "
-          "манхвы, которые скачала программа; у каждого тайтла — ещё и своя галочка на его странице. «Остановить» в "
-          "«Загрузках» — до следующей ночи", default=True),
+          "раз в сутки, ночью: новые бесплатные главы тайтлов, которые скачала программа", default=True,
+          more="Тайтлы манги и манхвы; у каждого — ещё и своя галочка на его странице. Компьютер был выключен ночью — "
+               "после запуска. Проверка идёт, только пока за компьютером никого нет (она заняла бы процессор); "
+               "«Продолжить» в «Загрузках» пускает её сразу. «Остановить» там же — до следующей ночи."),
     Field("manga_archive_auto", "bool", "Узнавать тайтлы «Из архива» самой, в фоне",
-          "тайтлы папок манги и манхвы программы в папке парсера и копии манги из папки парсера: по ссылке на сайт в "
-          "файлах папки, по названию из файлов, по имени папки; узнанный тайтл получает обложку, описание и главы, "
-          "которых в папке нет", default=True),
+          "по файлам и названию: обложка, описание и главы, которых в папке нет", default=True,
+          more="Тайтлы папок манги и манхвы программы в папке парсера и копии манги из папки парсера — по ссылке на "
+               "сайт в файлах папки, по названию из файлов, по имени папки."),
     Field("manga_archive_pictures", "bool", "…и по картинкам (SauceNAO)",
-          "когда не помогли файлы и названия; поисков по картинкам — не больше 40 в день, вместе с проверкой манги "
-          "из папки парсера", default=True),
+          "когда не помогли файлы и названия; не больше 40 поисков в день", default=True,
+          more="Эти 40 поисков — вместе с проверкой манги из папки парсера."),
+    # (v5.44.161) here, not among the gallery's (the mockup): it is about what gets into «Манга»
+    Field("comic_manga_auto", "bool", "Комиксы и манга — в папку манги",
+          "только то, что подтвердил сайт манги; остальное остаётся в галерее", default=True,
+          more="Подтверждение — тайтл сайта манги с теми же страницами, ComicInfo.xml или ссылка. Комикс галереи от 15 "
+               "страниц (пул e621 или сборка комикса) — копией в папку манги, его карточки — в корзину («перенесено "
+               "в мангу», оттуда их можно вернуть). Манга из папки парсера — копией, её файлы и карточки остаются на "
+               "месте (вкладка «Манга из папки» страницы «Парсер»). Что не подтвердилось — остаётся сборкой галереи; "
+               "пул e621 сам по себе мангу не подтверждает."),
 ))
 
 SECTIONS = (WINDOW, GALLERY, VIDEOS, LIBRARY, TAGS, BACKUP, THUMBS, DOWNLOAD, COMPANION, MANGA_AUTO, VISUAL, DATABASE,
@@ -240,9 +250,13 @@ SECTIONS = (WINDOW, GALLERY, VIDEOS, LIBRARY, TAGS, BACKUP, THUMBS, DOWNLOAD, CO
 BY_ID = {s.id: s for s in SECTIONS}
 
 
+SIDES = (("", "Как у оформления"), ("light", "Светлая"), ("dark", "Тёмная"))
+
+
 def _looks_section() -> Section:
     """The look of each page of the menu — kept with the page's own choices (``webui/prefs.py``), not in the
-    settings; the menu «Оформление» of a page changes the same choice."""
+    settings; the menu «Оформление» of a page changes the same choice.  (v5.44.161) With them: the side of every page
+    at once (``side_all``: light, dark, or each look's own) and «Плавные переходы» (``motion``)."""
     from webui import prefs
     from webui.html import PAGE_NAMES
     from webui.skins import SKINS
@@ -250,15 +264,78 @@ def _looks_section() -> Section:
     fields = []
     for page, (key, default) in prefs.PAGE_LOOKS.items():
         gallery = key == "skin"
-        fields.append(Field(key, "choice", PAGE_NAMES[page], hint="его берут страницы «как у галереи»" if gallery else "",
+        fields.append(Field(key, "choice", "Оформление" if gallery else PAGE_NAMES[page],
+                            hint="" if gallery else "своё оформление страницы",
                             choices=looks if gallery else ((prefs.FOLLOW, "как у галереи"), *looks),
                             default=default if default is not None else prefs.FOLLOW))
-    return Section("looks", "Оформление страниц",
-                   lead="У каждой страницы меню — своё оформление. Меню «Оформление» на самой странице меняет "
-                        "только её; там же — «Это оформление — на всех страницах».", fields=tuple(fields))
+    fields.append(Field("side_all", "choice", "Светлая или тёмная сторона", default="", choices=SIDES,
+                        hint="у всех страниц сразу; оформлениям r34 не задаётся — у них сторона своя"))
+    fields.append(Field("motion", "choice", "Плавные переходы", default="vivid",
+                        choices=tuple((level, prefs.MOTION_WORDS[level]) for level in ("none", "calm", "vivid")),
+                        hint="появление страниц, меню, плитки под курсором, ход загрузок"))
+    return Section("looks", "Оформление", fields=tuple(fields))
 
 
 LOOKS = _looks_section()
+
+
+def _side_all(stored: dict) -> str:
+    """The side every page has now: «light» or «dark» when all of them were given the same one, else "" (each look's
+    own, or the pages differ)."""
+    from webui import prefs, skins
+    sides = {str(stored.get(vkey) or "") for vkey in prefs.VARIANT_KEYS}
+    return next(iter(sides)) if len(sides) == 1 and next(iter(sides)) in skins.VARIANTS else ""
+
+
+def looks_now() -> dict:
+    """What the section «Оформление» shows: each page's look, the side of all, the motion."""
+    from webui import prefs
+    stored = prefs.load()
+    return {**prefs.choices(stored), "side_all": _side_all(stored), "motion": prefs.motion(stored)}
+
+
+def _looks_block() -> str:
+    """«Оформление» — one row for every page (the gallery's look: the pages «как у галереи» take it), the pages that
+    have a look of their own named under it, the lists of the pages behind «изменить по страницам»."""
+    from webui import prefs
+    from webui.html import PAGE_NAMES
+    from webui.settings_form import _control_html, row_html
+    from webui.skins import BY_ID
+    now = looks_now()
+    by_key = {f.key: f for f in LOOKS.fields}
+    own, same, pages = [], 0, []
+    for page, (key, _default) in prefs.PAGE_LOOKS.items():
+        if key == "skin":
+            continue
+        choice = now[key]
+        if choice == prefs.FOLLOW:
+            same += 1
+        else:
+            own.append(f'<span><b>{esc(PAGE_NAMES[page])}</b>{esc(BY_ID[choice].name if choice in BY_ID else choice)}</span>')
+        item = by_key[key]
+        pages.append(row_html(item.label, "", _control_html(item, choice, f"looks-{key}"), fid=f"looks-{key}", key=key))
+    chips = "".join(own)
+    if same:
+        from webui.pages.post_sets import plural
+        chips += ('<span class="same">' + ("остальные " if own else "все ")
+                  + plural(same, ("страница", "страницы", "страниц")) + " — как у галереи</span>")
+    skin = by_key["skin"]
+    first = row_html(skin.label, "", _control_html(skin, now["skin"], "looks-skin"), fid="looks-skin", key="skin",
+                     hint_html='одно на все страницы — или своё у каждой: <button type="button" class="link" '
+                               'data-action="looks-pages" aria-expanded="false" aria-controls="looks-pages">изменить '
+                               'по страницам</button>')
+    rest = "".join(_row(by_key[key], now) for key in ("side_all", "motion"))
+    save = ('<button type="submit" class="form-submit" hidden tabindex="-1">Сохранить</button>'
+            '<p class="form-error" role="alert" hidden></p>')
+    return (f'<section class="settings-block sx-block" id="set-looks" data-title="{esc(LOOKS.title)}">'
+            f'<form class="settings-form" data-form="settings" data-section="looks"><div class="sx-group">{first}'
+            f'<div class="sx-pages" data-looks-chips>{chips}</div>'
+            f'<div class="sx-pages-edit" id="looks-pages" hidden>{"".join(pages)}</div>{rest}</div>{save}</form></section>')
+
+
+def _row(item: Field, values: dict) -> str:
+    from webui.settings_form import field_row
+    return field_row(item, values, LOOKS.id)
 
 
 def _check(section: Section, changes: dict, settings: dict) -> None:
@@ -365,8 +442,7 @@ def _gallery_extra(settings: dict) -> str:
     return (f'<p class="hint">Сборок: {sets}' + (f", из них ваших (собраны или изменены вами): {mine}" if mine else "")
             + f'. Про скачанное {esc(asked)}.</p>{notes}'
             '<div class="tool-actions"><button type="button" data-action="settings-act" data-act="card_sets_rebuild">'
-            'Собрать сборки заново</button><span class="action-status" role="status"></span></div>'
-            + _comic_extra(settings))
+            'Собрать сборки заново</button><span class="action-status" role="status"></span></div>')
 
 
 def _comic_extra(settings: dict) -> str:
@@ -386,12 +462,12 @@ def _comic_extra(settings: dict) -> str:
     elif st["looked_at"]:
         parts.append(f"папка парсера просмотрена {_day(st['looked_at'])}")
     room = f'<p class="hint warn">{esc(st["no_room"])}</p>' if st["no_room"] else ""
-    return (f'<p class="hint">Комиксы и манга: {esc("; ".join(parts))}. Комиксы галереи программа переносит сама, '
-            f'раз в несколько минут, — те, что подтвердил сайт манги (тайтл с теми же страницами); «Проверить '
-            f'сейчас» — заново смотрит папку парсера и копирует в папку манги '
-            f'подтверждённую там сайтом манги мангу — ComicInfo.xml, ссылка или тайтл с теми же страницами (каждая — '
-            f'строкой в журнале; '
-            f'что не подтвердилось — парсер берёт как обычно), потом переносит комиксы.</p>{room}'
+    return (f'<p class="hint">Комиксы и манга: {esc("; ".join(parts))}.</p>'
+            '<details class="sx-more"><summary>Что делает «Проверить сейчас»</summary><p>Комиксы галереи программа '
+            'переносит сама, раз в несколько минут, — те, что подтвердил сайт манги (тайтл с теми же страницами). '
+            '«Проверить сейчас» заново смотрит папку парсера и копирует в папку манги подтверждённую там сайтом манги '
+            'мангу — ComicInfo.xml, ссылка или тайтл с теми же страницами (каждая — строкой в журнале; что не '
+            f'подтвердилось — парсер берёт как обычно), потом переносит комиксы.</p></details>{room}'
             '<div class="tool-actions"><button type="button" data-action="settings-act" data-act="comic_manga_check">'
             'Проверить сейчас</button><span class="action-status" role="status"></span></div>'
             '<div class="job" data-job data-comic-job hidden><div class="job-head"><b class="job-title"></b> '
@@ -427,14 +503,15 @@ def _manga_auto_extra(settings: dict) -> str:
     the parser's folder's titles — «Скачать → Из архива»."""
     from core import manga_pictures as P
     if not P.key_of(settings):
-        note = "Ключа SauceNAO нет (Настройки → Парсер) — по картинкам программа не ищет."
+        note = "Ключа SauceNAO нет (Настройки → Парсер и сайты) — по картинкам программа не ищет."
     elif not settings.get("enable_saucenao", True):
         note = "SauceNAO выключен в настройках парсера — по картинкам программа не ищет."
     else:
         note = (f"По картинкам — не больше {P.PER_TITLE} поисков SauceNAO на тайтл и {P.per_day(settings)} в день, "
                 "в фоне — только когда не работает парсер.")
     return (f'<p class="hint">{esc(note)}</p>'
-            '<p class="hint"><a href="/get/archive">Тайтлы в папке парсера — что программа считает мангой</a></p>')
+            '<p class="hint"><a href="/get/archive">Тайтлы в папке парсера — что программа считает мангой</a></p>'
+            + _comic_extra(settings))
 
 
 EXTRAS = {"backup": _backup_extra, "thumbs": _thumbs_extra, "companion": _companion_extra, "visual": _visual_extra,
@@ -617,24 +694,127 @@ def _profile_html() -> str:
 </section>"""
 
 
-# The tabs of the page (like the old settings page's tab strip): one part shown at a time.  A section's anchor
-# (#set-…) opens its tab; links from other pages keep working.
-TABS = (
-    ("main", "Основное", "Как выглядит программа: какое окно открывается, оформление страниц, что видно в списках "
-     "тегов, превью.", ("window", "looks", "gallery", "videos", "tags", "thumbs")),
-    ("library", "Библиотека", "Где лежат данные, что делается с новыми и удалёнными файлами, резервные копии.",
-     ("folders", "library", "backup")),
-    ("download", "Скачивание и браузер", "Скачивание в галерею, подписки и расширение браузера.",
-     ("download", "companion")),
-    ("manga", "Сайты манги", "Что программа делает с мангой и манхвой сама (v5.44.116); сайты манги и манхвы: новые "
-     "адреса, когда сайт переехал, и вход на них (v5.44.78).", ("manga_auto", "manga_sites")),
-    ("phone", "Телефон", "Библиотека на телефоне вне дома — через ваш сервер (v5.44.71) или через Tailscale "
-                         "(v5.44.64).", ("phone",)),
-    ("visual", "Брак: фото или рисунок", "Модель, которая отличает фото от рисунка в Браке.", ("visual",)),
-    ("db", "База и журналы", "Как программа обращается со своей базой, журналы и отчёт об ошибке.",
-     ("db", "logs", "dev")),
-    ("profile", "Профиль", "Все настройки одним файлом — перенести на другой компьютер.", ("profile",)),
+# (v5.44.161) The sections of the page, on its left: (id, name, icon, the blocks of its pane, the address of a section
+# that is a page of its own — «Проверка и починка» is «Диагностика» inside the same frame).  None — a line between the
+# sections of what the program does and of where its data is.  A block's anchor (#set-…) opens its section; the old
+# tabs' addresses (#tab-…) open the sections their blocks went to (:data:`OLD_TABS`).
+PANES = (
+    ("look", "Внешний вид", "palette", ("looks", "window", "tags"), ""),
+    ("gallery", "Галерея", "image", ("gallery", "library", "thumbs", "visual"), ""),
+    ("videos", "Видео", "video", ("videos",), ""),
+    ("manga", "Манга и манхва", "book", ("manga_auto", "manga_sites"), ""),
+    ("download", "Скачивание", "download", ("download", "companion"), ""),
+    ("sites", "Парсер и сайты", "sites", ("sites",), ""),
+    ("phone", "Телефон", "phone", ("phone",), ""),
+    None,
+    ("storage", "Хранение и копии", "disk", ("folders", "backup"), ""),
+    ("diag", "Проверка и починка", "wrench", (), "/diag"),
+    ("advanced", "Для опытных", "sliders", ("db", "logs", "dev"), ""),
+    ("profile", "Профиль", "user", ("profile",), ""),
 )
+OLD_TABS = {"main": "look", "library": "storage", "download": "download", "manga": "manga", "phone": "phone",
+            "visual": "gallery", "db": "advanced", "profile": "profile"}
+# what the search of the settings finds on the other pages: (name, a line about it, address, the page of the menu it
+# is of — "" for any mode; a page the mode «SFW» hides is not pointed at)
+POINTERS = (
+    ("Проверка библиотеки", "что не так с файлами и базой — найти и починить", "/diag", ""),
+    ("Медленные страницы", "какие страницы программы открываются долго", "/diag", ""),
+    ("Обслуживание", "сжать базу, пересчитать счётчики, почистить кэш и превью", "/diag/maintenance", ""),
+    ("Удаление и сброс", "удалить часть библиотеки или начать её заново", "/diag/reset", ""),
+    ("Дубли", "одинаковые и похожие картинки галереи", "/dupes", "dupes"),
+    ("Вход на сайты манги и их адреса", "cookies, токен, новый адрес сайта, который переехал; язык глав MangaDex",
+     "/settings#set-manga-sites", ""),
+    ("Папка с картинками для парсера", "выбирается на странице «Парсер»", "/parser", "parser"),
+)
+
+_STROKE = 'fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
+ICONS = {
+    "search": '<circle cx="8.5" cy="8.5" r="5"/><path d="m12.5 12.5 4 4"/>',
+    "palette": '<path d="M10 3a7 7 0 1 0 0 14c1 0 1.5-.7 1.5-1.5 0-1.5 1-2 2.3-2H15a2 2 0 0 0 2-2A7 7 0 0 0 10 3z"/>'
+               '<circle cx="6.8" cy="9" r=".6"/><circle cx="9.2" cy="6.4" r=".6"/><circle cx="12.6" cy="7.2" r=".6"/>',
+    "image": '<rect x="3" y="4" width="14" height="12" rx="1"/><path d="m3.5 14 3.5-3.5 3 3 2.5-2.5 4 4"/>'
+             '<circle cx="12.5" cy="7.5" r="1"/>',
+    "video": '<rect x="3" y="4.5" width="14" height="11" rx="1"/><path d="m8.5 7.8 4 2.2-4 2.2z"/>',
+    "book": '<path d="M10 5.5C8.5 4.4 6.5 4 3.5 4v11c3 0 5 .4 6.5 1.5 1.5-1.1 3.5-1.5 6.5-1.5V4c-3 0-5 .4-6.5 1.5zM10 5.5v11"/>',
+    "download": '<path d="M10 3.5v8.5M6.5 9l3.5 3.5L13.5 9M4 15.5h12"/>',
+    "sites": '<path d="M3 5.5h14M3 10h7M3 14.5h5"/><circle cx="14" cy="13" r="2.6"/><path d="m16 15 1.8 1.8"/>',
+    "phone": '<rect x="6" y="2.5" width="8" height="15" rx="1.5"/><path d="M9 14.5h2"/>',
+    "disk": '<ellipse cx="10" cy="5.5" rx="6" ry="2.3"/><path d="M4 5.5v9c0 1.3 2.7 2.3 6 2.3s6-1 6-2.3v-9M4 10c0 1.3 2.7 2.3 6 2.3s6-1 6-2.3"/>',
+    "wrench": '<path d="M12.8 3.2a4 4 0 0 0-4.3 5.5L3.3 14a1.7 1.7 0 0 0 2.4 2.4l5.2-5.2a4 4 0 0 0 5.6-4.3l-2.4 2.4-2.1-.5-.5-2.1z"/>',
+    "sliders": '<path d="M3 6h7M14 6h3M3 10h3M10 10h7M3 14h9M16 14h1"/><circle cx="12" cy="6" r="1.8"/><circle cx="8" cy="10" r="1.8"/><circle cx="14" cy="14" r="1.8"/>',
+    "user": '<circle cx="10" cy="7" r="3"/><path d="M4 16.5c.8-3 3-4.5 6-4.5s5.2 1.5 6 4.5"/>',
+}
+
+
+def icon(name: str) -> str:
+    return f'<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false" {_STROKE}>{ICONS[name]}</svg>'
+
+
+def _shown_panes() -> list:
+    """The sections this mode shows: in «SFW» the parser's sites are not («Сайты» is a page of the gallery's world)."""
+    from webui import content_mode
+    mode = content_mode.mode()
+    return [pane for pane in PANES
+            if pane is None or pane[0] != "sites" or content_mode.page_shown("sites", mode)]
+
+
+def frame(active: str, content: str, *, here: bool = False, find: str = "") -> str:
+    """The frame of «Настройки» around ``content``: the heading, on the left the search of a setting and the
+    sections (``active`` — the one shown), on the right the content.  ``here`` — the page of the sections themselves
+    (they are switched without a reload: the links are #…); else a page of its own (the links lead to «Настройки»,
+    the search is asked of it)."""
+    links = []
+    for pane in _shown_panes():
+        if pane is None:
+            links.append("<hr>")
+            continue
+        pane_id, name, picture, _blocks, href = pane
+        address = href or (f"#{pane_id}" if here else f"/settings#{pane_id}")
+        on = pane_id == active
+        attrs = ' class="on" aria-current="page"' if on else ""
+        data = "" if href else f' data-pane="{pane_id}"'
+        links.append(f'<a href="{address}"{attrs}{data}>{icon(picture)}<span>{esc(name)}</span></a>')
+    search = (f'<form class="sx-search" role="search" action="/settings" method="get">{icon("search")}'
+              f'<input type="search" name="q" value="{esc(find)}" placeholder="Найти настройку" autocomplete="off" '
+              'spellcheck="false" aria-label="Найти настройку"></form>')
+    return (f'<div class="sx-body"><nav class="sx-nav" aria-label="Разделы настроек">{search}{"".join(links)}</nav>'
+            f'<div class="sx-main">{content}</div></div>')
+
+
+def in_frame(active: str, body: str, tabs: tuple = ()) -> str:
+    """A page of its own as a section of «Настройки» («Диагностика»: ``active`` — "diag"): the same frame around it;
+    its heading «Настройки» leads to the page of the sections.  ``tabs`` — ((label, href, current), …): the pages of
+    the section, above its content."""
+    bar = ""
+    if tabs:
+        links = "".join(f'<a href="{esc(href)}" class="active" aria-current="page">{esc(label)}</a>' if current
+                        else f'<a href="{esc(href)}">{esc(label)}</a>' for label, href, current in tabs)
+        bar = f'<nav class="sx-tabs" aria-label="Страницы раздела">{links}</nav>'
+    return ('<div class="sx sx-doc"><div class="sx-head"><a class="sx-up" href="/settings">Настройки</a></div>'
+            f'{frame(active, bar + body)}</div>')
+
+
+_BLOCK_HEAD = re.compile(r'^\s*<section class="([^"]*)" id="([^"]*)"([^>]*)>\s*<h2>(.*?)</h2>', re.S)
+
+
+def as_group(block: str, untitled: frozenset = frozenset()) -> str:
+    """A block of the page that is not rows of settings (the folders, the phone, the profile…) inside a section: its
+    heading as a group's title (none when it is one of ``untitled`` — a group named as its section), its content — a
+    panel."""
+    found = _BLOCK_HEAD.match(block)
+    if not found:
+        return block
+    classes, block_id, attrs, title = found.groups()
+    body = block[found.end():]
+    cut = body.rfind("</section>")
+    name = _plain(title).strip()
+    head = "" if name in untitled else f'<h3 class="sx-title">{title}</h3>'
+    return (f'<section class="{classes} sx-block sx-custom" id="{block_id}"{attrs} data-title="{esc(name)}">'
+            f'{head}<div class="sx-group sx-box">{body[:cut]}</div></section>')
+
+
+def _plain(markup: str) -> str:
+    return re.sub(r"<[^>]+>", "", markup)
 
 
 DUBS_FIELDS = ("video_source_dubs", "video_dub_merge", "yummy_api_url")
@@ -651,50 +831,71 @@ def section_fields(section: Section) -> tuple:
     return tuple(f for f in section.fields if f.key not in DUBS_FIELDS)
 
 
-def settings_page(req: Request) -> Response:
+def settings_page(req: Request, open_pane: str = "") -> Response:
+    """The page: every section a pane, one shown (``open_pane`` — by the address /sites; else by the address's #…,
+    else the one seen last).  ``?q=…`` — the search of a setting asked from another page of the frame."""
+    from webui.settings_form import render_rows, row_html
     s = req.settings
     blocks = {}
+    pane_names = frozenset(pane[1] for pane in PANES if pane is not None)   # a group named as its section: one title
     for section in SECTIONS:
         extra = EXTRAS.get(section.id)
         fields = section_fields(section)
         if extra is not None or fields != section.fields:
             section = Section(section.id, section.title, section.lead, fields, extra(s) if extra else section.extra,
                               section.note, section.danger)
-        blocks[section.id] = render(section, s)
-    from webui import prefs
-    from webui.pages import manga_sites, phone
-    blocks.update({"folders": _folders_html(s), "logs": _logs_html(), "profile": _profile_html(),
-                   "looks": render(LOOKS, prefs.choices()), "phone": phone.settings_block(s),
+        blocks[section.id] = render_rows(section, s, title="" if section.title in pane_names else None)
+    from webui.pages import manga_sites, phone, sites
+    blocks.update({"folders": as_group(_folders_html(s)), "logs": as_group(_logs_html()),
+                   "profile": as_group(_profile_html()), "looks": _looks_block(),
+                   "phone": as_group(phone.settings_block(s), pane_names),
                    "manga_sites": manga_sites.settings_block(s)})
-    tabs, panes = [], []
-    for tab_id, label, lead, parts in TABS:
-        tabs.append(f'<button type="button" role="tab" id="tab-{tab_id}" aria-controls="pane-{tab_id}" '
-                    f'aria-selected="false" tabindex="-1" data-tab="{tab_id}">{esc(label)}</button>')
-        panes.append(f'<div class="settings-pane" id="pane-{tab_id}" role="tabpanel" aria-labelledby="tab-{tab_id}" '
-                     f'data-tab="{tab_id}"><p class="pane-lead">{esc(lead)}</p>'
-                     + "".join(blocks.pop(part) for part in parts) + "</div>")
-    if blocks:                                       # a section no tab names: shown, never lost
-        panes.append('<div class="settings-pane" data-tab="other">' + "".join(blocks.values()) + "</div>")
-    body = f"""
-<section class="tool settings settings-page" id="settings">
-  <header class="tool-head">
-    <h1>Настройки</h1>
-    <p class="tool-lead">Что программа делает сама и где лежат её данные. Сайты и ключи — на странице «Сайты»,
-    проверка и починка библиотеки — на «Диагностике».</p>
-  </header>
-  <nav class="settings-tabs" role="tablist" aria-label="Разделы настроек" hidden>{"".join(tabs)}</nav>
+    shown = [pane for pane in _shown_panes() if pane is not None]
+    if any(pane[0] == "sites" for pane in shown):
+        blocks["sites"] = sites.settings_part(req)
+    ids = [pane[0] for pane in shown if not pane[4]]
+    first = open_pane if open_pane in ids else ids[0]
+    panes = []
+    for pane_id, name, _picture, parts, href in shown:
+        if href:
+            continue
+        inner = "".join(blocks.pop(part) for part in parts if part in blocks)
+        panes.append(f'<section class="sx-pane" id="pane-{pane_id}" data-pane="{pane_id}" data-title="{esc(name)}" '
+                     f'aria-labelledby="pane-{pane_id}-h"{"" if pane_id == first else " hidden"}>'
+                     f'<h2 id="pane-{pane_id}-h">{esc(name)}</h2>{inner}</section>')
+    blocks.pop("sites", None)
+    if blocks:                                       # a block no section names: shown, never lost
+        panes.append('<section class="sx-pane" data-pane="other" data-title="Остальное"><h2>Остальное</h2>'
+                     + "".join(blocks.values()) + "</section>")
+    from webui import content_mode
+    mode = content_mode.mode()
+    pointers = "".join(row_html(name, about, f'<a class="button" href="{esc(href)}">Открыть</a>', cls="sx-pointer")
+                       for name, about, href, of_page in POINTERS
+                       if not of_page or content_mode.page_shown(of_page, mode))
+    find = req.arg("q")[:80]
+    content = f"""<section class="sx-pane sx-found" data-found hidden aria-live="polite">
+    <h2 data-found-title>Найдено</h2>
+    <p class="sx-none" data-found-none hidden>Такой настройки нет. Попробуйте другое слово — или посмотрите разделы слева.</p>
+  </section>
   {"".join(panes)}
-  <div class="settings-savebar" role="region" aria-label="Несохранённые изменения" hidden>
-    <p class="savebar-what"><span data-bar-text>Есть несохранённые изменения</span><span data-dirty-list></span></p>
+  <section class="sx-pane sx-also" data-also hidden>
+    <div class="sx-group sx-pointers" data-title="Смотрите также">{pointers}</div>
+  </section>
+  <div class="settings-savebar sx-save" role="region" aria-label="Несохранённые изменения" hidden>
+    <p class="savebar-what"><span data-bar-text>Изменено</span><b data-dirty-list></b></p>
     <div class="tool-actions">
-      <button type="button" class="primary" data-action="settings-save-all">Сохранить</button>
-      <button type="button" data-action="settings-revert">Отменить изменения</button>
       <span class="action-status" role="status"></span>
+      <button type="button" data-action="settings-revert">Отменить</button>
+      <button type="button" class="primary" data-action="settings-save-all">Сохранить</button>
     </div>
-  </div>
+  </div>"""
+    body = f"""
+<section class="tool settings settings-page sx" id="settings" data-open="{esc(first)}" data-old-tabs="{esc(json.dumps(OLD_TABS))}">
+  <header class="sx-head"><h1>Настройки</h1></header>
+  {frame(first, content, here=True, find=find)}
 </section>"""
-    return Response.html(page_frame("Настройки", body, active="settings", subnav=False, kind="tool",
-                                    body_data={"tool": "settings"}, **_prefs()))
+    return Response.html(page_frame("Настройки", body, active="sites" if open_pane == "sites" else "settings", subnav=False,
+                                    kind="tool", body_data={"tool": "settings"}, assets=("settings",), **_prefs()))
 
 
 # ── saving ─────────────────────────────────────────────────────────────────
@@ -726,13 +927,19 @@ def _save_looks(body: dict) -> Response:
     the page is shown again in it."""
     from webui import prefs
     values = body.get("values") if isinstance(body.get("values"), dict) else {}
-    before = prefs.look("settings")["skin"]
+    was = prefs.look("settings")
+    now = looks_now()
     try:
-        changes = clean(LOOKS, values, prefs.choices())
+        changes = clean(LOOKS, values, now)
     except FieldError as exc:
         return Response.json({"ok": False, "error": str(exc), "field": exc.field.key}, 400)
+    side = changes.pop("side_all", "")
+    if side != now["side_all"]:                 # (v5.44.161) every page's side at once: given, or each look's own again
+        changes.update({vkey: side for vkey in prefs.VARIANT_KEYS})
     prefs.save(changes)
-    return Response.json({"ok": True, "message": "Сохранено", "reload": prefs.look("settings")["skin"] != before})
+    new = prefs.look("settings")
+    reload = (new["skin"], new["variant"]) != (was["skin"], was["variant"]) or changes.get("motion") != now["motion"]
+    return Response.json({"ok": True, "message": "Сохранено", "reload": reload})
 
 
 # ── actions ────────────────────────────────────────────────────────────────

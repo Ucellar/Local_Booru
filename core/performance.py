@@ -75,6 +75,41 @@ def timed(name: str, settings: dict | None = None, **detail: Any) -> Iterator[No
         record_slow_operation(name, (time.perf_counter() - started) * 1000.0, settings=settings, detail=detail)
 
 
+PAGE = "page "               # a page of the program that opened slowly: «page /videos/s/…» (``webui/server.py``)
+PAGES_READ = 2               # of the log's files looked through for them (the newest: 4 MB at most)
+
+
+def slow_pages() -> list[dict[str, Any]]:
+    """(v5.44.151) The pages of the program that took long to open, by the page: [{"page", "times", "longest_ms",
+    "last"}], the longest first — from the log of slow operations (its newest files; only the lines of pages are
+    parsed).  The owner: «некоторые страницы открываются по десять лет» — which ones, on his library and his disks,
+    is seen here («Диагностика → Проверка»)."""
+    found: dict = {}
+    paths = [PERFORMANCE_LOG_FILE] + [PERFORMANCE_LOG_FILE.with_suffix(f".jsonl.{i}") for i in range(1, PAGES_READ)]
+    mark = '"operation": "' + PAGE
+    for path in paths:
+        try:
+            if not path.exists():
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            continue
+        for line in lines:
+            if mark not in line:
+                continue
+            try:
+                item = json.loads(line)
+                name = str(item["operation"])[len(PAGE):]
+                took = float(item.get("duration_ms") or 0)
+            except Exception:
+                continue
+            row = found.setdefault(name, {"page": name, "times": 0, "longest_ms": 0.0, "last": ""})
+            row["times"] += 1
+            row["longest_ms"] = max(row["longest_ms"], took)
+            row["last"] = max(row["last"], str(item.get("at") or ""))
+    return sorted(found.values(), key=lambda r: -r["longest_ms"])
+
+
 def recent_slow_operations(limit: int = 100) -> list[dict[str, Any]]:
     """Read recent entries without raising or touching application data."""
     items: list[dict[str, Any]] = []

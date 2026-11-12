@@ -67,7 +67,7 @@ def _chips(names: list, *, empty: str) -> str:
     for name in names:
         off = "нет ключа" in name
         label = name.split(" (", 1)[0] if off else name
-        title = ' title="Нет ключа — выключен; ключ вписывается на странице «Сайты»"' if off else ""
+        title = ' title="Нет ключа — выключен; ключ вписывается в «Настройки → Парсер и сайты»"' if off else ""
         out.append(f'<li class="plan-chip{" off" if off else ""}"{title}>{esc(label)}</li>')
     return f'<ul class="plan-chips">{"".join(out)}</ul>'
 
@@ -82,16 +82,79 @@ def manga_plan(settings: dict) -> list:
     return out
 
 
+def _day(stamp: int) -> str:
+    """The day of a moment in the words of the page: «сегодня», «вчера», «9.11»."""
+    import datetime
+    then = datetime.datetime.fromtimestamp(stamp).date()
+    days = (datetime.date.today() - then).days
+    return "сегодня" if days <= 0 else "вчера" if days == 1 else f"{then.day}.{then.month:02d}"
+
+
+def _clock(stamp: int) -> str:
+    import time
+    return time.strftime("%H:%M", time.localtime(stamp))
+
+
+def _ago(stamp: int) -> str:
+    """When, in the words of the page: «сегодня в 06:22», «вчера в 23:10», «9.11 в 23:10» (tools.js says the same)."""
+    return f"{_day(stamp)} в {_clock(stamp)}"
+
+
+def _span(started: int, finished: int) -> str:
+    """From when to when: «вчера, 23:10 — 06:22»; the end on another day — «вчера, 23:10 — сегодня, 06:22»."""
+    end = _clock(finished) if _day(started) == _day(finished) else f"{_day(finished)}, {_clock(finished)}"
+    return f"{_day(started)}, {_clock(started)} — {end}"
+
+
+def _lasted(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} с"
+    minutes = round(seconds / 60)
+    return f"{minutes} мин" if minutes < 60 else f"{minutes // 60} ч {minutes % 60} мин"
+
+
+def last_words(note: dict | None) -> str:
+    """(v5.44.160) «прошлый запуск — вчера в 23:10, шёл 7 ч 12 мин» (``core.parser.jobs.last_run``); "" — none yet."""
+    if not note or not note.get("finished"):
+        return ""
+    words = f"прошлый запуск — {_ago(note['finished'])}"
+    if note.get("started") and note["finished"] >= note["started"]:
+        words += f", шёл {_lasted(note['finished'] - note['started'])}"
+    if note.get("status") == "failed":
+        words += " (остановлен ошибкой)"
+    return words
+
+
+COUNT_WORDS = (("tagged", "найдено"), ("nomatch", "в Брак"), ("deferred", "отложено"), ("skip", "пропущено"),
+               ("error", "ошибки"))
+
+
+def _sites_word(n: int) -> str:
+    from webui.pages.post_sets import plural
+    return plural(n, ("сайт", "сайта", "сайтов"))
+
+
+def _services_word(n: int) -> str:
+    from webui.pages.post_sets import plural
+    return plural(n, ("сервис", "сервиса", "сервисов"))
+
+
 def parser_page(req: Request) -> Response:
-    """The page «Парсер»: what to press on top (the folder, «Запустить / Пауза / Остановить»), what the run
-    will ask under it, then the run: its progress by answers, the pictures in work (each with the sites asking
-    about it), the last answers and the journal.  A picture opens large in the viewer (tools.js).  (v5.44.125) Under
-    the plan — «Манга в исходной папке» (``webui/pages/parser_manga.py``, макет G1)."""
+    """The page «Парсер» (v5.44.160: the mockup A — the owner: «парсер выглядит пиздец толи непонятно толи
+    перегруженно»).  On top — what is going on: the run goes or not, how much is done, how much is left, who holds
+    it; not running — the folder, one button and a line «что сделает».  Everything else — behind tabs: «Сейчас» (the
+    files in work, each with what the sites have said of it; the last answers) or «Итог» of the last run, «Сайты»
+    (one table of the queues), «Манга из папки» (``webui/pages/parser_manga.py``), «Журнал», «Параметры».  Every
+    number and button of the page before is here — in another place.  A picture opens large in the viewer
+    (tools.js).  The tab shown is in the address (``#sites``, ``#manga``, ``#log``, ``#params``)."""
+    from core.parser import jobs
     from webui.pages import parser_manga
     s = req.settings
     root = str(s.get("root") or "")
     exists = bool(root) and Path(root).is_dir()
     sites, reverse = site_plan(s)
+    manga = manga_plan(s)
     in_app = "QtWebEngine" in req.headers.get("User-Agent", "")
     if in_app:          # the window has a folder dialog; a browser page takes the path as text
         folder = (f'<code class="tool-path">{esc(root) or "не выбрана"}</code>'
@@ -103,79 +166,154 @@ def parser_page(req: Request) -> Response:
     folder_note = "" if exists else '<p class="tool-warn">Такой папки нет — выберите другую.</p>'
     recheck = " checked" if s.get("parser_recheck_new_sites") else ""
     nomatch_only = (" checked" if s.get("parser_recheck_nomatch_only") else "") + ("" if recheck else " disabled")
-    counts = "".join(f'<div class="lg-{key}"><dt>{label}</dt><dd data-count="{key}">0</dd></div>'
-                     for key, label in (("tagged", "найдено"), ("nomatch", "в Брак"), ("deferred", "отложено"),
-                                        ("skip", "пропущено"), ("error", "ошибки")))
-    segments = "".join(f'<span class="seg seg-{key}"></span>' for key in ("tagged", "nomatch", "deferred", "skip", "error"))
+    legend = "".join(f'<li><i class="px-{key}"></i>{label} <b data-count="{key}">0</b></li>' for key, label in COUNT_WORDS)
+    segments = "".join(f'<i class="seg seg-{key} px-{key}"></i>' for key, _label in COUNT_WORDS)
+    working = [name for name in reverse if "нет ключа" not in name]
+    plan = [f'<a href="#sites" data-px-go="sites">{_sites_word(len(sites))} по MD5</a>' if sites else
+            '<a href="/sites" class="off">нет включённых сайтов</a>']
+    if working:
+        plan.append(f'<a href="#sites" data-px-go="sites">{_services_word(len(working))} обратного поиска</a>')
+    plan.append('<a href="#manga" data-px-go="manga">манга из папки — в «Мангу»</a>' if manga else
+                '<a href="#manga" data-px-go="manga" class="off">манга из папки — как все картинки</a>')
+    plan_html = '<span class="arrow" aria-hidden="true">→</span>'.join(plan)
+    last = jobs.last_run()
+    said = last_words(last)
+    manga_n = parser_manga.total(s)
+    # the run going now: the page comes as it will be a moment later, when its script has asked (no jump of the top)
+    job = jobs.current()
+    live = job is not None and job.status in {"starting", "running", "paused", "stopping"}
+    if job is not None and not live:                # the run of this start of the program: its result, not the note's
+        last = None
+        said = ""
+    when_idle = " hidden" if live else ""
+    state_word = {"starting": "Запускается", "running": "Идёт", "paused": "Пауза",
+                  "stopping": "Останавливается"}.get(job.status if live else "", "Не запущен")
+    state_cls = "" if live and job.status != "paused" else " paused" if live else " idle"
+
+    def tab(key: str, words: str, n: str = "") -> str:
+        on = key == "now"
+        return (f'<button type="button" role="tab" id="px-tab-{key}" data-px-tab="{key}" aria-controls="px-{key}" '
+                f'aria-selected="{"true" if on else "false"}"' + (' class="on"' if on else "")
+                + f'><span data-px-tab-words>{words}</span>{n}</button>')
+    tabs = (tab("now", "Сейчас" if live else "Итог")
+            + tab("sites", "Сайты", f'<span class="px-n" data-px-n="sites">{len(sites) + len(working)}</span>')
+            + tab("manga", "Манга из папки", f'<span class="px-n" data-px-n="manga"{"" if manga_n else " hidden"}>'
+                                              f'{manga_n}</span>')
+            + tab("log", "Журнал") + tab("params", "Параметры"))
+    last_counts = (last or {}).get("counts") or {}
+    last_when = ""
+    if last and last.get("finished"):
+        last_when = (_span(last["started"], last["finished"]) if last.get("started") else _ago(last["finished"]))
     body = f"""
-<section class="tool parser-tool" id="parser" data-state-url="/api/parser/state">
-  <header class="tool-head">
+<section class="tool px parser-tool" id="parser" data-state-url="/api/parser/state" data-status="{job.status if live else "idle"}">
+  <header class="px-head">
     <h1>Парсер</h1>
-    <p class="tool-lead">Ищет теги для картинок из папки: точный MD5 на booru-сайтах, потом обратный поиск.
-    Найденное попадает в галерею, ненайденное — в «Брак». Манга из папки — в «Мангу», когда подтверждено, что это
-    манга.</p>
+    <p class="px-what">Ищет теги для картинок из папки: найденное — в галерею, ненайденное — в «Брак».</p>
   </header>
-  <div class="parser-top">
-    <div class="parser-controls" role="group" aria-label="Запуск">
-      <div class="parser-folder"><span class="tool-label">Папка</span>
-        <div class="tool-value">{folder}{folder_note}</div></div>
-      <div class="tool-actions parser-buttons">
-        <button type="button" class="primary" data-action="parser-start">Запустить</button>
-        <button type="button" data-action="parser-pause" disabled>Пауза</button>
-        <button type="button" class="danger" data-action="parser-stop" disabled>Остановить</button>
+  <div class="px-status">
+    <div class="px-row px-top">
+      <span class="px-state{state_cls}"><i class="px-dot" aria-hidden="true"></i><b data-px-state>{state_word}</b></span>
+      <span class="px-time" data-px-time>{"" if live else esc(said)}</span>
+      <span class="px-actions tool-actions parser-buttons" role="group" aria-label="Запуск">
         <span class="action-status" role="status"></span>
-      </div>
-      <label class="check parser-recheck"><input type="checkbox" name="recheck"{recheck}> Добор новых сайтов
-        <small>обработанные раньше файлы ищутся только там, где их ещё не искали; сначала — новые файлы, потом
-        Брак, потом найденные</small></label>
-      <label class="check parser-recheck parser-recheck-only"><input type="checkbox" name="recheck_only"{nomatch_only}>
-        Добор только для Брака <small>уже найденным файлам теги других сайтов не добираются — так быстрее</small></label>
+        <button type="button" class="primary go" data-action="parser-start"{when_idle}>Запустить</button>
+        <button type="button" data-action="parser-pause"{"" if live else " hidden"}>Пауза</button>
+        <button type="button" class="danger" data-action="parser-stop"{"" if live else " hidden"}>Остановить</button>
+      </span>
     </div>
-    <dl class="parser-plan" aria-label="Где ищет">
-      <div><dt>По MD5</dt><dd>{_chips(sites, empty="нет включённых сайтов")}</dd></div>
-      <div><dt>Обратный поиск</dt><dd>{_chips(reverse, empty="выключен")}</dd></div>
-      <div><dt>Манга</dt><dd>{_chips(manga_plan(s), empty="выключено — все папки как обычно")}</dd></div>
-      <div class="plan-edit"><dt></dt><dd><a href="/sites">Сайты и ключи</a></dd></div>
-    </dl>
-  </div>
-  {parser_manga.block(s)}
-  <p class="parser-idle muted" data-idle>Здесь будут картинки, которые парсер разбирает: нажмите «Запустить».</p>
-  <div class="job parser-run" data-job hidden>
-    <div class="run-head"><b class="job-title"></b> <span class="job-status run-status"></span>
-      <span class="job-numbers"></span></div>
-    <div class="run-bar" role="progressbar" aria-label="Готово" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0">
-      {segments}<span class="run-percent"></span></div>
-    <dl class="job-counts run-legend">{counts}</dl>
-    <div class="job-links" hidden>Смотреть: <a href="/posts?section=found">найденные</a> · <a href="/posts?section=no_match">Брак</a></div>
+    <div class="px-folder" data-px-when="idle"{when_idle}><span class="px-time">Папка</span>{folder}{folder_note}</div>
+    <div class="px-plan" data-px-when="idle"{when_idle}><span>Что сделает:</span>{plan_html}</div>
+    <div class="px-row" data-px-when="run" hidden>
+      <span class="px-count"><b data-px-done>0</b> <small data-px-total></small></span>
+      <span class="px-eta" data-px-eta></span>
+    </div>
+    <div class="px-bar run-bar" data-px-when="run" hidden role="progressbar" aria-label="Готово" aria-valuemin="0"
+         aria-valuemax="1" aria-valuenow="0">{segments}<b class="run-percent"></b></div>
+    <ul class="px-legend" data-px-when="run" hidden>{legend}</ul>
+    <p class="px-hint" data-px-hint hidden></p>
     <div class="run-alert" role="status" hidden></div>
-    <section class="run-part run-queues" aria-labelledby="run-queues-title" hidden>
-      <h2 id="run-queues-title">Очереди</h2>
-      <p class="queues-lead muted">Сначала файл читается (его MD5 и что о нём уже знает библиотека), потом его
-        спрашивают сайты — у каждого сайта и каждого сервиса обратного поиска своя очередь: найденное сразу
-        записывается в библиотеку, медленный не держит остальных. Файл, который сайты не нашли по MD5, идёт в обратный
-        поиск — от сервиса к сервису, пока какой-нибудь не найдёт.</p>
-      <h3 class="queues-group" data-for="files" hidden>Файлы — чтение и запись в библиотеку</h3>
-      <ul class="site-queues" data-kind="files" hidden></ul>
-      <h3 class="queues-group">Сайты — точный MD5</h3>
-      <ul class="site-queues" data-kind="site"></ul>
-      <h3 class="queues-group" data-for="reverse" hidden>Обратный поиск — похожие картинки</h3>
-      <ul class="site-queues" data-kind="reverse" hidden></ul>
+  </div>
+  <nav class="px-tabs" role="tablist" aria-label="Что показать">{tabs}</nav>
+  <div class="px-pane" id="px-now" role="tabpanel" aria-labelledby="px-tab-now" data-px-pane="now">
+    <section class="px-last" data-px-last{"" if last and not live else " hidden"}>
+      <h2>Прошлый запуск <small data-px-last-when>{esc(last_when)}</small></h2>
+      <ul class="px-legend">{"".join(f'<li><i class="px-{key}"></i>{label} <b data-last="{key}">{int(last_counts.get(key) or 0)}</b></li>' for key, label in COUNT_WORDS)}</ul>
+      <p class="px-last-said"><span data-px-last-said></span> <span class="job-links">Смотреть:
+        <a href="/posts?section=found">найденные</a> · <a href="/posts?section=no_match">Брак</a></span></p>
     </section>
-    <section class="run-part run-flight" aria-labelledby="run-flight-title">
-      <h2 id="run-flight-title">Сейчас в работе</h2>
-      <ul class="flight-cards" aria-live="off"></ul>
+    <p class="parser-idle muted" data-idle{" hidden" if last or job is not None else ""}>Здесь будут картинки, которые
+      парсер разбирает: нажмите «Запустить».</p>
+    <section class="run-part run-flight" aria-labelledby="run-flight-title" data-job hidden>
+      <h2 id="run-flight-title">В работе <small data-px-flight-n></small></h2>
+      <ul class="px-cards flight-cards" aria-live="off"></ul>
       <p class="flight-more muted" hidden></p>
       <p class="flight-empty muted" hidden>Сейчас ни один файл не в работе.</p>
     </section>
     <section class="run-part run-recent" aria-labelledby="run-recent-title" hidden>
-      <h2 id="run-recent-title">Готово недавно</h2>
-      <ul class="recent-strip"></ul>
+      <h2 id="run-recent-title">Только что <small data-px-recent-n></small></h2>
+      <ul class="px-strip recent-strip"></ul>
     </section>
-    <details class="run-part run-log" data-remember="parser-log" open>
-      <summary>Журнал</summary>
+  </div>
+  <div class="px-pane" id="px-sites" role="tabpanel" aria-labelledby="px-tab-sites" data-px-pane="sites" hidden>
+    <div class="px-will" data-px-will>
+      <dl class="parser-plan" aria-label="Где ищет">
+        <div><dt>По MD5</dt><dd>{_chips(sites, empty="нет включённых сайтов")}</dd></div>
+        <div><dt>Обратный поиск</dt><dd>{_chips(reverse, empty="выключен")}</dd></div>
+      </dl>
+      <p class="px-what">Сначала файл спрашивают сайты по точному MD5, потом — сервисы обратного поиска, по похожей
+        картинке. Какие сайты спрашивать и ключи к ним — <a href="/sites">Настройки → Парсер и сайты</a>. Когда парсер
+        идёт, здесь таблица: кто сколько ждёт и кто дольше всех.</p>
+    </div>
+    <div class="run-queues" data-px-queues hidden>
+      <table class="px-table">
+        <thead><tr><th scope="col">Кто</th><th scope="col" class="q-wide">Как спрашивается</th>
+          <th scope="col" class="n">Ждут</th><th scope="col" class="n q-rest">В минуту</th>
+          <th scope="col" class="n">Осталось</th><th scope="col" class="q-rest">Сделано</th></tr></thead>
+        <tbody class="site-queues" data-kind="files" hidden>
+          <tr class="group queues-group" data-for="files"><th scope="rowgroup" colspan="6">Файлы — чтение и запись в библиотеку</th></tr>
+        </tbody>
+        <tbody class="site-queues" data-kind="site">
+          <tr class="group queues-group"><th scope="rowgroup" colspan="6">Сайты — точный MD5</th></tr>
+        </tbody>
+        <tbody class="site-queues" data-kind="reverse" hidden>
+          <tr class="group queues-group" data-for="reverse"><th scope="rowgroup" colspan="6">Обратный поиск — похожие картинки, для тех, кого нет по MD5</th></tr>
+        </tbody>
+      </table>
+      <p class="px-what queues-lead">«Осталось» — вместе с файлами, которые ещё не прочитаны. У каждого сайта и
+        сервиса своя очередь: медленный не держит остальных, найденное сразу записывается в библиотеку. Сайт
+        отключился — его строка станет красной, а наверху появится «Проверить снова».</p>
+    </div>
+  </div>
+  <div class="px-pane mx" id="px-manga" role="tabpanel" aria-labelledby="px-tab-manga" data-px-pane="manga" hidden>
+    {parser_manga.block(s)}
+  </div>
+  <div class="px-pane" id="px-log" role="tabpanel" aria-labelledby="px-tab-log" data-px-pane="log" hidden>
+    <div class="run-part run-log">
       <div class="log-tabs" role="tablist" aria-label="Что показать в журнале"></div>
       <pre class="job-log" tabindex="0" aria-label="Журнал запуска"></pre>
-    </details>
+      <p class="px-what" data-px-nolog>Журнал появится, когда парсер запустится.</p>
+    </div>
+  </div>
+  <div class="px-pane" id="px-params" role="tabpanel" aria-labelledby="px-tab-params" data-px-pane="params" hidden>
+    <section class="px-params">
+      <h2>Что делать с файлами, которые парсер уже видел</h2>
+      <label class="check parser-recheck"><input type="checkbox" name="recheck"{recheck}> <span><b>Добор новых сайтов</b>
+        <small>обработанные раньше файлы ищутся только там, где их ещё не искали; сначала — новые файлы, потом
+        Брак, потом найденные</small></span></label>
+      <label class="check parser-recheck parser-recheck-only"><input type="checkbox" name="recheck_only"{nomatch_only}>
+        <span><b>Добор только для Брака</b> <small>уже найденным файлам теги других сайтов не добираются — так
+        быстрее</small></span></label>
+      <p class="px-what">Галочки берёт следующий запуск.</p>
+    </section>
+    <section class="px-params">
+      <h2>Где ищет</h2>
+      <dl class="parser-plan" aria-label="Где ищет">
+        <div><dt>По MD5</dt><dd>{_chips(sites, empty="нет включённых сайтов")}</dd></div>
+        <div><dt>Обратный поиск</dt><dd>{_chips(reverse, empty="выключен")}</dd></div>
+        <div><dt>Манга</dt><dd>{_chips(manga, empty="выключено — все папки как обычно")}</dd></div>
+        <div class="plan-edit"><dt></dt><dd><a href="/sites">Настройки → Парсер и сайты</a></dd></div>
+      </dl>
+    </section>
   </div>
   <dialog class="parser-viewer" aria-labelledby="pv-title">
     <div class="pv-media">
@@ -208,7 +346,8 @@ def parser_state(req: Request) -> Response:
     job = jobs.current()
     if job is None:
         busy = jobs.owner()
-        return Response.json({"ok": True, "status": "busy" if busy else "idle", "owner": busy})
+        return Response.json({"ok": True, "status": "busy" if busy else "idle", "owner": busy,
+                              "last": jobs.last_run()})         # (v5.44.160) the run before this start of the program
     snap = job.snapshot(after=req.int_arg("after", 0, lo=0))
     snap["ok"] = True
     return Response.json(snap)

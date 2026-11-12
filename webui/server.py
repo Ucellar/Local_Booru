@@ -53,6 +53,7 @@ MEDIA_PATHS = ("/thumb/", "/media/", "/poster/", "/manga/cover/", "/manga/thumb/
                "/api/manhwa/hit-cover", "/api/manhwa/find-cover", "/api/archive/cover",
                "/api/online/pic",                        # (v5.44.82) a page of a chapter read without downloading
                "/api/online/thumb",                      # (v5.44.110) …small, in the strip of the chapter's pages
+               "/api/gallery/pic",                       # (v5.44.148) a page of a gallery of nhentai read so
                "/api/manhwa/feed-cover",                 # (v5.44.83) a cover of «Лента»
                "/api/archive/folder-cover",              # (v5.44.84) a title of the parser's folder
                "/api/parser/manga/cover",                # (v5.44.125) «Парсер» → «Манга в исходной папке»
@@ -61,6 +62,8 @@ MEDIA_PATHS = ("/thumb/", "/media/", "/poster/", "/manga/cover/", "/manga/thumb/
                "/api/downloads/video-cover",             # (v5.44.120) «Загрузки»: the poster of the video going
                "/api/covers/pic",                        # (v5.44.123) the menu of covers: a site's cover, whole
                "/watch/s/")                              # (v5.44.106) an episode of «Смотреть»: its picture and sound
+SLOW_PAGE = 1.0           # (v5.44.151) seconds: a page or an answer slower than this is noted (``note_slow``)
+SLOW_MEDIA = 5.0          # …a picture or a file: a thumbnail of a large picture is made on the spot
 REQUEST_TIMEOUT = 10      # seconds a request may wait for a stalled browser (reading it or sending the answer)
 WATCH_TIMEOUT = 30 * 60   # (v5.44.106) …a player of «Смотреть» on a pause: it reads its stream on when it plays on
 KEEPALIVE_IDLE = 60       # seconds an idle browser connection stays open; it holds no worker meanwhile
@@ -683,6 +686,11 @@ class _RequestHandler(BaseHTTPRequestHandler):
                     return self._send(Response(405, b"Method not allowed", "text/plain"), method)
                 return self._send(Response.not_found(), method)
             request = Request(method, path, params or {}, query, dict(self.headers.items()), body, settings, ui, peer)
+            if method == "POST" or not path.startswith("/api/"):
+                # (v5.44.151) a page opened, a picture of it, a button pressed — the person is here (the pages' own
+                # questions every second — GET /api/… — are not): what the program does by itself waits
+                from core.maintenance_coordinator import get_maintenance_coordinator
+                get_maintenance_coordinator().note_user_activity()
             from webui import content_mode
             # (v5.44.116) the phone's request — in the phone's own mode «SFW / Всё / NSFW»
             with content_mode.answering(content_mode.of_phone(request, phone)):
@@ -705,6 +713,8 @@ class _RequestHandler(BaseHTTPRequestHandler):
             took = time.time() - started if started is not None else 0.0
             if took > 1.0:
                 _LOG.info("slow page %.1fs: %s", took, _loggable(self.path))
+            if took > (SLOW_MEDIA if str(self.path).startswith(MEDIA_PATHS) else SLOW_PAGE):
+                note_slow(self.path, took)
 
     def _auth(self, query: dict, method: str) -> None:
         token = (query.get("t") or [""])[0]
@@ -848,6 +858,25 @@ def _local_target(value: str) -> str:
     if parts.scheme or parts.netloc:
         return "/posts"
     return quote(value, safe="/?&=%:@!$'()*+,;-._~#")
+
+
+def page_shape(path: str) -> str:
+    """An address as a kind of page: its numbers and ids as «…», of its query — the names only (a search's words, a
+    link pasted stay out): «/videos/s/…», «/posts?page&tags»."""
+    url = urlparse(str(path))
+    parts = ["…" if re.fullmatch(r"\d+|[0-9a-f]{8,}|[A-Za-z0-9_-]{20,}", part) else part for part in url.path.split("/")]
+    names = sorted(set(parse_qs(url.query, keep_blank_values=True)) - {"t"})
+    return "/".join(parts)[:120] + ("?" + "&".join(names)[:80] if names else "")
+
+
+def note_slow(path: str, seconds: float) -> None:
+    """(v5.44.151) A page that took long is kept in the log of slow operations (``core.performance.slow_pages`` —
+    «Диагностика → Проверка → Медленные страницы»): the kind of page and how long, nothing of what was asked."""
+    try:
+        from core.performance import PAGE, record_slow_operation
+        record_slow_operation(PAGE + page_shape(path), float(seconds) * 1000.0, force=True)
+    except Exception as exc:  # noqa: BLE001 - the note is not worth a page
+        _LOG.debug("slow page not noted: %s", exc)
 
 
 def _loggable(text: str) -> str:

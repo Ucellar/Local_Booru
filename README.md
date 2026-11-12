@@ -25,15 +25,19 @@ on your computer.
   chapters are new; the parts of one title are stacked as one.
 - **Titles from manga sites.** Find a title by its name or paste a link: read it right in the program without
   downloading anything, or download every chapter or only the ones you tick, with a queue and a pause. Paid chapters
-  are never bought or bypassed: a chapter another site has for free is taken from there, otherwise it waits. The
-  program checks the titles you downloaded for new chapters once a day. A title has one page: what is already in the
-  folder, what you read, «Продолжить» (continue); you can pick its cover from every site's covers or use your own.
-- **The feed.** The sites' catalogs as one list with filters: genres, tags, type, status, chapter count, rating, year.
-  Every title has its own page: description, chapters, «Read» and «Download».
+  are never bought or bypassed: a chapter is looked for on every site that has it for free, otherwise it waits. The
+  program checks the titles you downloaded for new chapters once a day, while you are away from the computer. A title
+  has one page: what is already in the folder, what you read, «Продолжить» (continue); you can pick its cover from
+  every site's covers or use your own.
+- **The feed.** The sites' catalogs as one list with filters: genres, tags, authors, type, status, chapter count,
+  rating, year. Every title has its own page: description, chapters, «Read» and «Download»; the genres and tags on
+  it are links into the feed.
 - **Manga in your folders.** The program recognizes the titles in your archive folders by itself — by their files,
   names and pictures — and adds the description, the cover and the missing chapters. Manga in the parser's folder goes
   to «Манга» only when a manga site confirms it (the pages matched); everything else is parsed as usual and becomes
-  one set in the gallery. The program never changes the files of the source folder.
+  one set in the gallery. A manga page saved as a picture of its own is recognized by the answer of the reverse image
+  search, compared with the chapter's pages on a site, and its title is downloaded. The program never changes the
+  files of the source folder.
 - **Videos.** Series from your folders and from the sites — on one page and in one player, resume where you stopped,
   «Skip opening / ending» buttons (found by the program itself), audio and subtitle tracks, ratings. «Download from a
   site» takes the files and open streams a page gives.
@@ -47,13 +51,15 @@ on your computer.
   tags and artists check themselves and download only what is new: originals, nothing you already have.
 - **Duplicates.** Similar pictures are shown in pairs: the better one stays, the other goes to the trash, and its
   tags move to the one you keep.
-- **Diagnostics.** Library and database checks; one check and one repair of the files — the repair shows its plan
-  first. Cleanup and reset first show what they will remove, and only then remove it.
+- **Check and repair.** Library and database checks; one check and one repair of the files — the repair shows its
+  plan first. Cleanup and reset first show what they will remove, and only then remove it.
+- **Help and settings.** The «?» at the top of every page opens the help section about that page. The settings have
+  their sections on the left and a search of the settings by words.
 - **A window with tabs.** The middle mouse button opens a page in a second window with tabs, so several titles load
   at once.
 - **Browser extension** (Chrome, Edge, Firefox). Cards on the sites show what your library already has. A post goes
-  to the program in one click, you can subscribe to a search right from the site, and posts with tags from your
-  blocklist are blurred.
+  to the program in one click, you can subscribe to a search right from the site, posts with tags from your
+  blocklist are blurred, and the favorites of your account on a site are downloaded into the gallery as a whole.
 - **14 looks**, each with a light and a dark side, and every page can have its own.
 
 <img src="screenshots/post.png" width="360" alt="Picture page"> <img src="screenshots/gallery_hub.png" width="360" alt="Gallery in another look">
@@ -70,11 +76,13 @@ The interface is in Russian.
 2. Run `Local Booru.exe`.
 
 Windows 10 or 11, 64-bit. The program keeps its database, settings and cache in `Documents\Local_Booru` by default.
-In «Настройки → Папки» (Settings → Folders) you can gather them and the library's files into one archive folder
+In «Настройки → Хранение и копии» (Settings → Storage and copies) you can gather them and the library's files into
+one archive folder
 (`Local_Booru_Archive`), connect an archive you already have, or move the whole archive to another drive.
 
 If the program window stays blank on your computer, the program draws its pages without the graphics card the next
-time, and if that does not help either, opens them in your usual browser (Settings → Program window).
+time, and if that does not help either, opens them in your usual browser («Настройки» → «Внешний вид» → «Окно
+программы»: Settings → Looks → Program window).
 
 ### Browser extension
 
@@ -82,8 +90,8 @@ time, and if that does not help either, opens them in your usual browser (Settin
 2. **Chrome / Edge:** open `chrome://extensions`, turn on Developer mode, click «Load unpacked» and choose the
    extension folder.
    **Firefox:** open `about:debugging` → This Firefox → Load Temporary Add-on, and choose `manifest.json`.
-3. In the program: «Настройки» → «Браузер и расширение» → «Код для подключения расширения». Enter the code in the
-   extension's window.
+3. In the program: «Настройки» → «Скачивание» → «Браузер и расширение» → «Код для подключения расширения». Enter
+   the code in the extension's window.
 
 The extension talks only to the program on this computer (127.0.0.1), and only after it is paired with that code.
 

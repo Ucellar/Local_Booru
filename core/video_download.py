@@ -148,10 +148,14 @@ class Found:
             item.pop("page")
             item["alts"] = len(item.pop("alts") or [])
             files.append(dict(item, i=n, label=labels[n]))
-        return {"title": self.title, "folder": where, "new_folder": self.new_folder, "page_url": self.page.url,
+        # (v5.44.142) «новая» — while it is not there: a list shown again after a download into it says «уже есть»
+        new = self.new_folder and not self.folder.is_dir()
+        from core import video_dubs          # (v5.44.152) the voice-overs of players not taken: by player, with why
+        return {"title": self.title, "folder": where, "new_folder": new, "page_url": self.page.url,
                 "streams": self.streams, "hidden": self.hidden, "frames": self.frames, "frame_site": self.frame_site,
                 "episodes": self.episodes, "files": files, "sources": [dict(x) for x in self.sources],
-                "voices": [dict(v) for v in self.voices], "facts": dict(self.facts), "poster": self.poster is not None,
+                "voices": [dict(v) for v in self.voices], "closed": video_dubs.closed_voices(self.voices),
+                "facts": dict(self.facts), "poster": self.poster is not None,
                 "choose": self.choose}
 
 
@@ -1028,15 +1032,21 @@ def _describe(found: Found, say, stop) -> None:
 
 
 def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality: str = "", merge: bool = False,
-             start_paused: bool = False) -> dict:
+             start_paused: bool = False, repicture: bool = False, planned=None) -> dict:
     """Download the chosen files of a page into the series folder: {"done", "whole", "failed", "folder", "series"}.
     ``quality`` — «Качество» of the page for addresses asked right before a file (``Found.resolve``); ``merge`` — then
     ``Found.after`` (the voice-overs of each episode into one file); ``start_paused`` — begun on «Пауза» (one paused
-    when the program closed)."""
+    when the program closed).  (v5.44.150) With ``merge`` the picture of an episode is the title's best, lent by a
+    release that was not asked for when it has a better one (``Resolver.roles``: its file joins the download for
+    the picture alone); ``repicture`` — the episodes already in the folder get it too (their picture taken anew;
+    nothing need be chosen then); ``planned`` — called with the places of every file the download takes, the lent
+    pictures among them (the page of the series shows them on its tiles)."""
     from core.video_meta_import import _session
     places = [n for n in dict.fromkeys(chosen) if isinstance(n, int) and 0 <= n < len(found.files)]
     files = [found.files[n] for n in places]
-    if not files:
+    repicture = bool(repicture and merge and found.after is not None and found.resolve is not None
+                     and hasattr(found.resolve, "roles"))
+    if not files and not repicture:
         return {"failed": "Не выбрано ни одного файла"}
     states = {n: "queued" for n in places}         # each file's state for its tile: queued, active, then its end
     try:
@@ -1046,21 +1056,52 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
     say(f"Папка: {found.folder}")
     _describe(found, say, stop_check)
     video_library.LIBRARY.invalidate()
-    session = _session(files[0].url)
+    session = _session(files[0].url if files else (found.page.url or "https://site.yummyani.me/"))
     counts = {"done": 0, "whole": 0, "other": 0, "failed": 0, "dead": 0, "stopped": 0, "merged": 0}
     roles = {}                                     # into one file: voice-overs wanted for their sound only — lower
     if merge and found.after is not None and found.resolve is not None and hasattr(found.resolve, "roles"):
         from core import video_merge               # (without PyAV nothing is put together: every file as chosen)
         if video_merge.available():
-            roles = found.resolve.roles(files, quality, session=session, say=say, stop=stop_check)
+            again = None                           # (v5.44.150) the episodes of the folder whose picture may be
+            if repicture:                          # taken anew: the ones put together and the ones waiting for it
+                waiting = found.after.waiting() if callable(getattr(found.after, "waiting", None)) else set()
+                again = {p.stem for p in found.folder.glob("*.mkv")} | set(waiting)
+            if hasattr(found.resolve, "donors"):   # (a resolver of another source lends no pictures)
+                roles = found.resolve.roles(files, quality, session=session, say=say, stop=stop_check,
+                                            repicture=again)
+            else:
+                roles = found.resolve.roles(files, quality, session=session, say=say, stop=stop_check)
+            for remote in getattr(found.resolve, "donors", None) or []:
+                place = next((n for n, f in enumerate(found.files) if f is remote), None)
+                if place is not None and place not in places:      # a picture lent: its file joins the download
+                    places.append(place)
+                    files.append(remote)
+                    states[place] = "queued"
+            for line in (found.resolve.lent_words() if hasattr(found.resolve, "lent_words") else []):
+                say(line)
         sound = sum(1 for role in roles.values() if role == "sound")
         if sound:
             say(f"Озвучки собираются в один файл: картинку серии даёт одна озвучка, остальные ({sound}) качаются "
                 "ради звука — у CVH только звук (без картинки), у Kodik в 360p: звук тот же, скачивать в разы меньше. "
-                "Сначала — картинки")
-        if roles:   # the pictures first: one that does not come is given by another voice-over, not yet downloaded
-            pairs = sorted(zip(places, files), key=lambda pair: roles.get(id(pair[1])) == "sound")
+                "По сериям: сначала картинка серии, потом звук — и серия сразу собирается")
+        if roles:
+            # (v5.44.150) episode by episode — its picture, then the others' sound, and it is put together at once
+            # (it was every picture of the season first: the first episode to watch came after them all).  The
+            # picture first all the same: one that does not come is given by another voice-over of the episode,
+            # not downloaded yet (``Resolver.instead``)
+            first: dict = {}
+            for n, remote in enumerate(files):
+                first.setdefault(remote.name.rsplit(".", 1)[0], n)
+            pairs = sorted(zip(places, files), key=lambda pair: (first[pair[1].name.rsplit(".", 1)[0]],
+                                                                 roles.get(id(pair[1])) == "sound"))
             places, files = [p for p, _f in pairs], [f for _p, f in pairs]
+    if planned is not None and len(places) != len([n for n in dict.fromkeys(chosen) if isinstance(n, int)
+                                                    and 0 <= n < len(found.files)]):
+        planned(list(places))
+    if not files:                                  # nothing chosen, and no picture of the folder to take anew
+        say("Картинку серий в папке заменить нечем: лучше, чем есть, у тайтла нет")
+        return {"done": 0, "whole": 0, "failed_files": 0, "folder": str(found.folder),
+                "series": video_library._id_for(root, found.folder), "stopped": False, "states": {}}
     # into one file: each episode as soon as its files have all come (not only at the end — owner, 05.11.2026: a season
     # stopped half-way stayed half in «Озвучка JAM»), and first what an earlier download left in the sub-folders
     merger = found.after if merge and found.after is not None and callable(getattr(found.after, "waiting", None)) else None

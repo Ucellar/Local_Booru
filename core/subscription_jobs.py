@@ -26,6 +26,7 @@ from collections import deque
 LOG_KEEP = 3000                  # lines a page can still fetch
 PLAN_WAIT_SECONDS = 30 * 60
 AUTO_PAUSE_SECONDS = 60 * 60
+FILES_KEPT = 200_000             # (v5.44.141) files of a run kept for what comes after it (favorites → the parser)
 ENDED: list = []                 # (v5.44.120) fn(job) when a check has ended (never in its way)
 _LOCK = threading.Lock()
 _OWNER = ""                      # who checks subscriptions now ("" — nobody)
@@ -42,7 +43,7 @@ class SubscriptionsBusy(RuntimeError):
     def __init__(self, owner: str, message: str = ""):
         from core.parser.jobs import MAINTENANCE_OWNER
         maintenance = owner.startswith(MAINTENANCE_OWNER.split("«")[0])
-        super().__init__(message or (f"Сейчас идёт {owner} (Диагностика → Обслуживание)" if maintenance
+        super().__init__(message or (f"Сейчас идёт {owner} (Настройки → Проверка и починка → Обслуживание)" if maintenance
                                      else f"Подписки уже проверяются ({owner})"))
         self.owner = owner
 
@@ -133,6 +134,7 @@ class SubscriptionJob:
         self._paused = threading.Event()          # (v5.44.120) «Пауза» of «Загрузки»: the next file waits
         self._skip_now = False                    # (v5.44.120) «Пропустить подписку»: the one going stops, the next goes
         self.skipped: list = []                   # the names of the subscriptions skipped
+        self.files: list = []                     # (v5.44.141) the files the run downloaded (favorites → the parser)
         self._log: deque = deque(maxlen=LOG_KEEP)
         self._seq = 0
         self._lock = threading.Lock()
@@ -281,7 +283,7 @@ class SubscriptionJob:
                 self._skip_now = False
                 try:
                     got = run_subscription(sub, self.settings, log=self._say, progress=self._on_progress,
-                                           stop_flag=_EngineFlag(self),
+                                           stop_flag=_EngineFlag(self), on_file_ready=self._file_ready,
                                            run_mode=self.run_mode or sub.get("run_mode") or "all",
                                            confirm_plan=self._confirm_plan)
                     result["downloaded"] = int(got or 0)
@@ -326,6 +328,10 @@ class SubscriptionJob:
                     hook(self)
                 except Exception as exc:  # noqa: BLE001 - a record of the history not made: the check is over anyway
                     self._say(f"(запись в «Готово» не сделана: {type(exc).__name__})")
+
+    def _file_ready(self, path: str) -> None:
+        if len(self.files) < FILES_KEPT:
+            self.files.append(str(path))
 
     def _on_progress(self, downloaded_in_sub: int) -> None:
         # run_subscription counts the files of the subscription it is checking

@@ -51,8 +51,8 @@ def grab_page(req: Request) -> Response:
         f'<label class="check"><input type="checkbox" name="site" value="{esc(host)}"'
         f'{" checked" if not asked or host in asked else ""}> {esc(label)}</label>' for host, label in sites)
     hide = " checked" if s.get("grabber_preview_hide_existing", True) else ""
-    no_sites = ('<span class="tool-warn">нет включённых сайтов с поиском по тегам — включите их на странице '
-                '<a href="/sites">«Сайты»</a></span>')
+    no_sites = ('<span class="tool-warn">нет включённых сайтов с поиском по тегам — включите их: '
+                '<a href="/sites">Настройки → Парсер и сайты</a></span>')
     data = {"categories": [[c, CATEGORY_TITLES[c]] for c in CATEGORY_ORDER]}
     data_json = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     body = f"""
@@ -172,7 +172,8 @@ def grab_search(req: Request) -> Response:
         batch = _batch(search, search.more())
         if not batch["cards"]:
             lane = next(iter(search.state()["sites"].values()), {})
-            why = lane.get("error") or "на сайте нет такого поста (или его видно только после входа — «Сайты»)"
+            why = lane.get("error") or ("на сайте нет такого поста (или его видно только после входа: «Настройки → "
+                                        "Парсер и сайты»)")
             batch["error_note"] = f"Пост не получен: {why}"
         return Response.json(batch)
     known = {host for host, _label in searchable_sites(req.settings)}

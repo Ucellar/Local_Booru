@@ -380,6 +380,27 @@
   const adding = document.querySelector(".select-bar[data-add-to]");
   if (adding) setSelecting(true);
 
+  // ── (v5.44.161) the frame of «Настройки» (its own page and the pages of «Проверка и починка») ─────────────
+  // The list of the sections stays in sight while the page scrolls: below the header in the looks whose header
+  // stays at the top (--sx-top; a block opened by its address stops below it too).
+  const settingsFrame = document.querySelector(".sx");
+  if (settingsFrame) {
+    const place = () => {
+      const header = document.querySelector("header.top");
+      let top = 8;
+      if (header) {
+        const style = window.getComputedStyle(header);
+        const box = header.getBoundingClientRect();
+        const stays = style.position === "sticky" || style.position === "fixed";
+        const across = box.width >= window.innerWidth * 0.6 && box.height < window.innerHeight * 0.4 && box.top <= 1;
+        if (stays && across) top = Math.round(box.height) + 8;
+      }
+      settingsFrame.style.setProperty("--sx-top", top + "px");
+    };
+    place();
+    window.addEventListener("resize", place);
+  }
+
   // ── the parser page ────────────────────────────────────────────────────
   const tool = document.getElementById("parser");
   if (tool) setupParser(tool);
@@ -639,26 +660,8 @@
         say(button, err.message, true);
       }
     });
-
-    section.querySelectorAll("form.settings-form").forEach((settingsForm) => {
-      settingsForm.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const body = {};
-        Array.from(settingsForm.elements).forEach((el) => {
-          if (!el.name) return;
-          body[el.name] = el.type === "checkbox" ? el.checked : el.value;
-        });
-        const button = settingsForm.querySelector('button[type="submit"]');
-        try {
-          await postJson("/api/sites/" + (settingsForm.dataset.form === "services" ? "services" : "options"), body);
-          say(button, "Сохранено");
-          const key = settingsForm.querySelector('input[name="saucenao_api_key"]');
-          if (key && key.value) { key.value = ""; key.placeholder = "ключ сохранён — оставьте пустым, чтобы не менять"; }
-        } catch (err) {
-          say(button, err.message, true);
-        }
-      });
-    });
+    // (v5.44.161) «Обратный поиск» and «Парсер» are rows of «Настройки» now: saved by its one «Сохранить»
+    // (settings.js; their forms say where — data-save)
   }
 
   // (v5.44.125) «Манга в исходной папке»: what the folders that look like a manga turned out to be; the server draws
@@ -675,6 +678,15 @@
       return new Set(Array.from(inner.querySelectorAll("details.pm-open[open]")).map((d) => d.dataset.key));
     }
 
+    // (v5.44.160) the number on the tab «Манга из папки» of the page «Парсер»: the folders that look like a manga
+    function counted(counts) {
+      const tab = document.querySelector('[data-px-n="manga"]');
+      if (!tab || !counts) return;
+      const n = Number(counts.total) || 0;
+      tab.textContent = String(n);
+      tab.hidden = n === 0;
+    }
+
     async function load() {
       if (asking) return;
       asking = true;
@@ -685,9 +697,14 @@
         const data = await response.json();
         if (data && data.ok && typeof data.html === "string") {
           const keep = opened();
+          const why = inner.querySelector("details.mx-why");
+          const whyOpen = !!(why && why.open);           // «Как программа решает…» being read stays open
           inner.innerHTML = data.html;
           inner.querySelectorAll("details.pm-open").forEach((d) => { if (keep.has(d.dataset.key)) d.open = true; });
+          const whyNow = inner.querySelector("details.mx-why");
+          if (whyNow && whyOpen) whyNow.open = true;
           box.dataset.live = data.live ? "1" : "";
+          counted(data.counts);
         }
       } catch (_) {
         /* the program busy for a moment: the next time */
@@ -695,6 +712,23 @@
         asking = false;
         timer = setTimeout(load, box.dataset.live ? 4000 : 30000);
       }
+    }
+
+    // (v5.44.164) what a row's button said — in the row itself (the page's first status line is at its top, out of
+    // sight from a row far below: LB's «say» took that one); no row named — the block's own line
+    function told(key, text, isError) {
+      const row = key ? Array.from(inner.querySelectorAll(".pm-row")).find((r) => r.dataset.key === key) : null;
+      const tools = row ? row.querySelector(".pm-tools") : null;
+      let status = tools ? tools.querySelector(".action-status") : inner.querySelector(".action-status");
+      if (tools && !status) {
+        status = document.createElement("span");
+        status.className = "action-status";
+        status.setAttribute("role", "status");
+        tools.appendChild(status);
+      }
+      if (!status) { say(null, text, isError); return; }
+      status.textContent = text;
+      status.style.color = isError ? "var(--danger)" : "";
     }
 
     box.addEventListener("click", async (event) => {
@@ -718,7 +752,20 @@
           await postJson(`/api/parser/manga/${act === "pm-not" ? "not" : "is"}`, { key: el.dataset.key });
           load();
         } catch (err) {
-          say(inner.querySelector(".action-status") || el, err.message, true);
+          told(el.dataset.key, err.message, true);
+          el.disabled = false;
+        }
+      } else if (act === "pm-now") {
+        // (v5.44.164) «Скачать сейчас» of a manga of the loose pictures: its download waited for the person to leave
+        event.preventDefault();
+        el.disabled = true;
+        const key = el.dataset.key;
+        try {
+          const done = await postJson("/api/parser/manga/now", { key });
+          await load();
+          told(key, (done && done.message) || "Скачивание в очереди");
+        } catch (err) {
+          told(key, err.message, true);
           el.disabled = false;
         }
       }
@@ -728,32 +775,39 @@
       if (!sw) return;
       try {
         await postJson("/api/parser/manga/switch", { name: sw.dataset.pmSwitch, value: sw.checked });
-        say(inner.querySelector(".action-status"), "Сохранено");
+        told("", "Сохранено");
       } catch (err) {
         sw.checked = !sw.checked;
-        say(inner.querySelector(".action-status"), err.message, true);
+        told("", err.message, true);
       }
     });
     inner.querySelectorAll("details.pm-open").forEach((d, n) => { if (n === 0) d.open = true; });
     timer = setTimeout(load, box.dataset.live ? 4000 : 30000);
   }
 
+  // (v5.44.160; the mockup A — the owner: «парсер выглядит пиздец толи непонятно толи перегруженно») «Парсер»: on top
+  // — what is going on (the state, how much is done and left, who holds the run); the rest behind tabs: the files in
+  // work and the last answers («Сейчас» — «Итог» when nothing runs), the table of the queues («Сайты»), the manga of
+  // the folder, the journal, the parameters.  The tab shown is in the address (#sites, #manga, #log, #params).
   function setupParser(section) {
-    const job = section.querySelector("[data-job]");
+    const pre = section.querySelector(".job-log");
+    const tabs = section.querySelector(".log-tabs");
+    const noLog = section.querySelector("[data-px-nolog]");
     const idle = section.querySelector("[data-idle]");
-    const pre = job.querySelector(".job-log");
-    const tabs = job.querySelector(".log-tabs");
-    const cardsBox = job.querySelector(".flight-cards");
-    const flightEmpty = job.querySelector(".flight-empty");
-    const flightMore = job.querySelector(".flight-more");
-    const recentPart = job.querySelector(".run-recent");
-    const recentBox = job.querySelector(".recent-strip");
-    const queuesPart = job.querySelector(".run-queues");
-    const queuesBox = job.querySelector('.site-queues[data-kind="site"]');
-    const reverseBox = job.querySelector('.site-queues[data-kind="reverse"]');
-    const reverseTitle = job.querySelector('.queues-group[data-for="reverse"]');
-    const filesBox = job.querySelector('.site-queues[data-kind="files"]');
-    const filesTitle = job.querySelector('.queues-group[data-for="files"]');
+    const lastPart = section.querySelector("[data-px-last]");
+    const flightPart = section.querySelector(".run-flight");
+    const cardsBox = section.querySelector(".flight-cards");
+    const flightEmpty = section.querySelector(".flight-empty");
+    const flightMore = section.querySelector(".flight-more");
+    const recentPart = section.querySelector(".run-recent");
+    const recentBox = section.querySelector(".recent-strip");
+    const queuesPart = section.querySelector("[data-px-queues]");
+    const willPart = section.querySelector("[data-px-will]");
+    const queueBoxes = {
+      files: section.querySelector('.site-queues[data-kind="files"]'),
+      site: section.querySelector('.site-queues[data-kind="site"]'),
+      reverse: section.querySelector('.site-queues[data-kind="reverse"]'),
+    };
     const viewer = section.querySelector(".parser-viewer");
     const lines = [];                  // [{seq, channel, text}], the last LOG_KEEP
     const LOG_KEEP = 4000;
@@ -766,32 +820,29 @@
     let lastStatus = "";
     let flight = [];                   // files in work, as the last answer gave them
     let recent = [];                   // the last answers, newest first
-    let lanes = {};                    // site or service → {status, file, file_id}
+    let services = new Set();          // the reverse-search services of the run (their «нет» is not a site's)
 
     const button = (name) => section.querySelector(`[data-action="${name}"]`);
     const running = (status) => ["starting", "running", "paused", "stopping"].includes(status);
     const STATUS = {
-      starting: "запускается", running: "идёт", paused: "на паузе", stopping: "останавливается",
-      done: "закончен", failed: "остановлен ошибкой", idle: "", busy: "занят",
+      starting: "Запускается", running: "Идёт", paused: "Пауза", stopping: "Останавливается",
+      done: "Закончен", failed: "Остановлен ошибкой", idle: "Не запущен", busy: "Занят",
     };
     const OUTCOME = {
-      tagged: ["найдено", "✓"], nomatch: ["в Брак", "?"], deferred: ["отложен", "‖"],   // text marks, not emoji
-      skip: ["пропущен", "–"], error: ["ошибка", "!"],
+      tagged: "найдено", nomatch: "в Брак", deferred: "отложен", skip: "пропущен", error: "ошибка",
     };
     const thumbUrl = (id) => `/api/parser/thumb/${shownJob}/${id}`;
     const fileUrl = (id, frame) => `/api/parser/file/${shownJob}/${id}` + (frame ? "?frame=1" : "");
 
-    // «Журнал» remembers whether it is open (only for this viewer: a convenience)
-    const logBox = job.querySelector("details[data-remember]");
-    if (logBox) {
-      try {
-        const kept = localStorage.getItem("lb." + logBox.dataset.remember);
-        if (kept === "closed") logBox.open = false;
-      } catch (_) { /* no storage here: open */ }
-      logBox.addEventListener("toggle", () => {
-        try { localStorage.setItem("lb." + logBox.dataset.remember, logBox.open ? "open" : "closed"); } catch (_) { /* kept only in this page */ }
-      });
+    // ── words ──
+    const num = (n) => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+    function plural(n, one, few, many) {
+      const d = Math.abs(n) % 10, h = Math.abs(n) % 100;
+      if (d === 1 && h !== 11) return one;
+      return d >= 2 && d <= 4 && (h < 12 || h > 14) ? few : many;
     }
+    const tagsWord = (n) => num(n) + " " + plural(n, "тег", "тега", "тегов");
+    const sitesWord = (n) => n + " " + plural(n, "сайт", "сайта", "сайтов");
 
     function minutes(sec) {
       if (sec == null) return "";
@@ -800,6 +851,76 @@
       return m < 60 ? m + " мин" : Math.floor(m / 60) + " ч " + (m % 60) + " мин";
     }
 
+    const two = (n) => String(n).padStart(2, "0");
+    const clock = (d) => two(d.getHours()) + ":" + two(d.getMinutes());
+    function dayWord(d) {
+      const midnight = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+      const days = Math.round((midnight(new Date()) - midnight(d)) / 86400000);
+      return days <= 0 ? "сегодня" : days === 1 ? "вчера" : d.getDate() + "." + two(d.getMonth() + 1);
+    }
+    // «вчера в 23:10»; «вчера, 23:10 — 06:22» (webui/pages/tools.py says the same: _ago, _span)
+    const ago = (stamp) => { const d = new Date(stamp * 1000); return dayWord(d) + " в " + clock(d); };
+    function span(started, finished) {
+      const a = new Date(started * 1000), b = new Date(finished * 1000);
+      const same = dayWord(a) === dayWord(b);
+      return dayWord(a) + ", " + clock(a) + " — " + (same ? "" : dayWord(b) + ", ") + clock(b);
+    }
+
+    // ── the tabs ──
+    const TABS = ["now", "sites", "manga", "log", "params"];
+    const tabButtons = Array.from(section.querySelectorAll("[data-px-tab]"));
+    function showTab(name) {
+      const tab = TABS.includes(name) ? name : "now";
+      tabButtons.forEach((b) => {
+        const on = b.dataset.pxTab === tab;
+        b.classList.toggle("on", on);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
+      });
+      section.querySelectorAll("[data-px-pane]").forEach((pane) => { pane.hidden = pane.dataset.pxPane !== tab; });
+      section.dataset.tab = tab;
+      if (tab === "log") pre.scrollTop = pre.scrollHeight;
+      return tab;
+    }
+    function tabOfAddress() {
+      let hash = "";
+      try { hash = decodeURIComponent(location.hash.slice(1)); } catch (_) { hash = ""; }
+      if (hash === "parser-manga" || hash.startsWith("pm-")) return "manga";       // the address of the block before
+      return TABS.includes(hash) ? hash : "now";
+    }
+    function openTab(name) {                 // by the person: the address says it (a page opened anew shows the same)
+      const tab = showTab(name);
+      try {
+        history.replaceState(null, "", tab === "now" ? location.pathname + location.search : "#" + tab);
+      } catch (_) { /* the address stays: the tab is shown */ }
+    }
+    section.querySelector(".px-tabs").addEventListener("click", (event) => {
+      const b = event.target.closest("[data-px-tab]");
+      if (b) openTab(b.dataset.pxTab);
+    });
+    section.querySelector(".px-tabs").addEventListener("keydown", (event) => {
+      const at = tabButtons.indexOf(document.activeElement);
+      if (at < 0) return;
+      let to = -1;
+      if (event.key === "ArrowRight") to = (at + 1) % tabButtons.length;
+      else if (event.key === "ArrowLeft") to = (at + tabButtons.length - 1) % tabButtons.length;
+      else if (event.key === "Home") to = 0;
+      else if (event.key === "End") to = tabButtons.length - 1;
+      if (to < 0) return;
+      event.preventDefault();
+      openTab(tabButtons[to].dataset.pxTab);
+      tabButtons[to].focus();
+    });
+    section.addEventListener("click", (event) => {             // «6 сайтов по MD5», «манга из папки…» of the plan
+      const go = event.target.closest("[data-px-go]");
+      if (!go) return;
+      event.preventDefault();
+      openTab(go.dataset.pxGo);
+    });
+    window.addEventListener("hashchange", () => showTab(tabOfAddress()));
+    showTab(tabOfAddress());
+
+    // ── the journal ──
     function channelLabel(ch) {
       if (ch === "all") return "Всё";
       if (ch === "final") return "Итоги файлов";
@@ -845,6 +966,12 @@
       pre.scrollTop = pre.scrollHeight;
     }
 
+    function logShown() {                    // no line yet: the note instead of an empty box
+      const any = lines.length > 0;
+      pre.hidden = tabs.hidden = !any;
+      noLog.hidden = any;
+    }
+
     function appendLog(fresh) {
       const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
       fresh.forEach((l) => { lines.push(l); channels.add(l.channel); });
@@ -856,31 +983,66 @@
         const text = fresh.filter(visible).map((l) => l.text).join("\n");
         if (text) pre.textContent += (pre.textContent ? "\n" : "") + text;
       }
+      logShown();
       if (stick) pre.scrollTop = pre.scrollHeight;
       renderTabs();
     }
 
-    // ── what a site or a service is doing with a file ──
-    function laneState(status) {
-      const s = String(status || "").toLowerCase();
-      if (s.startsWith("найдено")) return "found";
-      if (s === "нет") return "miss";
-      if (s.startsWith("ошибка")) return "error";
-      return "busy";
+    // ── what the sites have said of a file: [[a site or a service, its last word]] → the chips of its card ──
+    // the words of the run (core/parser/engine.py, jobs.py): «MD5» and «поиск» — being asked, «найдено N», «нет»,
+    // «ошибка», «отложено» (a service that could not answer), «очередь» — not asked yet
+    const CHIP_ORDER = { found: 0, busy: 1, error: 2, wait: 3, miss: 4 };
+    function chipsOf(sites) {
+      const out = [];
+      const list = Array.isArray(sites) ? sites : [];
+      const misses = list.filter(([label, word]) => word === "нет" && !services.has(label));
+      const fold = misses.length >= 3;                   // «5 сайтов нет» instead of five chips
+      list.forEach(([label, said]) => {
+        const word = String(said || "");
+        if (word === "нет") {
+          if (!fold || services.has(label)) out.push({ name: label, state: "miss", said: "нет" });
+        } else if (word.startsWith("найдено")) {
+          const n = parseInt(word.slice(7), 10);
+          out.push({ name: label, state: "found", said: n > 0 ? tagsWord(n) : "нашёл" });
+        } else if (word.startsWith("ошибка")) {
+          out.push({ name: label, state: "error", said: "ошибка" });
+        } else if (word === "отложено") {
+          out.push({ name: label, state: "miss", said: "не ответил" });
+        } else if (word === "очередь") {
+          out.push({ name: label, state: "wait", said: "в очереди" });
+        } else {
+          out.push({ name: label, state: "busy", said: "спрашиваю" });
+        }
+      });
+      out.sort((a, b) => CHIP_ORDER[a.state] - CHIP_ORDER[b.state]);
+      if (fold) out.push({ name: sitesWord(misses.length), state: "miss", said: "нет" });
+      return out;
     }
 
-    function laneChip(name, lane) {
+    function chipNode(chip) {
       const li = document.createElement("li");
-      li.className = "lane lane-" + laneState(lane.status);
-      li.append(name + " ");
+      li.className = "lane lane-" + chip.state;
+      li.append(chip.name + " ");
       const small = document.createElement("small");
-      small.textContent = lane.status || "";
+      small.textContent = chip.said;
       li.appendChild(small);
       return li;
     }
 
-    function lanesOf(id) {
-      return Object.keys(lanes).sort().filter((name) => Number(lanes[name].file_id) === Number(id));
+    // a file in work in a line: where it is (jobs.py: stage)
+    function saidOf(item) {
+      const sites = Array.isArray(item.sites) ? item.sites : [];
+      const found = sites.filter(([, word]) => String(word).startsWith("найдено")).length;
+      const waits = sites.filter(([, word]) => word === "очередь" || word === "MD5").length;
+      if (item.stage === "sites") {
+        if (found) return `найден на ${found} ${found === 1 ? "сайте" : "сайтах"}, ждёт ещё ${waits}`;
+        const answered = sites.length - waits;
+        return answered ? `сайты спрашиваются: ответили ${answered} из ${sites.length}` : "сайты спрашиваются";
+      }
+      if (item.stage === "write") return "найден — записываю в библиотеку";
+      if (item.stage === "after") return "по MD5 нигде нет — проверяю имя файла и галерею";
+      if (item.stage === "reverse") return "по MD5 нигде нет — ищу похожую картинку";
+      return "читается: MD5 и что о нём знает библиотека";
     }
 
     function kindBadge(item) {
@@ -891,8 +1053,8 @@
       return b;
     }
 
-    // ── the pictures in work: one card per file, kept while the file is in work (its picture loads once) ──
-    function renderFlight() {
+    // ── «В работе»: a card per file, kept while the file is in work (its picture loads once) ──
+    function renderFlight(more) {
       const ids = new Set(flight.map((f) => String(f.id)));
       cardsBox.querySelectorAll(".flight-card").forEach((card) => { if (!ids.has(card.dataset.id)) card.remove(); });
       flight.forEach((item, index) => {
@@ -915,26 +1077,47 @@
           pic.appendChild(img);
           const badge = kindBadge(item);
           if (badge) pic.appendChild(badge);
+          const text = document.createElement("div");
+          text.className = "flight-text";
           const name = document.createElement("p");
           name.className = "flight-name";
           name.textContent = item.name;
           name.title = item.name;
+          const said = document.createElement("p");
+          said.className = "flight-said";
           const chips = document.createElement("ul");
           chips.className = "lane-chips";
-          card.append(pic, name, chips);
+          text.append(name, said, chips);
+          card.append(pic, text);
         }
         if (cardsBox.children[index] !== card) cardsBox.insertBefore(card, cardsBox.children[index] || null);
-        const chips = card.querySelector(".lane-chips");
-        chips.textContent = "";
-        lanesOf(item.id).forEach((name) => chips.appendChild(laneChip(name, lanes[name])));
+        const list = chipsOf(item.sites);
+        const key = item.stage + "|" + list.map((c) => c.name + ":" + c.state + ":" + c.said).join("|");
+        if (card.dataset.said !== key) {              // the same: not drawn again
+          card.dataset.said = key;
+          card.dataset.stage = item.stage || "read";
+          card.querySelector(".flight-said").textContent = saidOf(item);
+          const chips = card.querySelector(".lane-chips");
+          chips.textContent = "";
+          list.forEach((chip) => chips.appendChild(chipNode(chip)));
+        }
       });
-      flightEmpty.hidden = flight.length > 0 || !running(lastStatus);
+      const live = running(lastStatus);
+      const all = flight.length + more;
+      section.querySelector("[data-px-flight-n]").textContent = !flight.length ? ""
+        : more > 0 ? `показаны ${flight.length} из ${num(all)} — нажмите на картинку, чтобы открыть крупно`
+          : `${filesWord(flight.length)} — нажмите на картинку, чтобы открыть крупно`;
+      flightEmpty.hidden = flight.length > 0 || !live;
+      flightMore.hidden = more <= 0;
+      flightMore.textContent = more > 0 ? `…и ещё ${num(more)} — ждут ответа сайтов: их очереди — на вкладке «Сайты»` : "";
     }
 
-    // ── the last answers: a strip of small pictures with their result ──
-    function renderRecent() {
-      recentPart.hidden = recent.length === 0;
+    // ── «Только что»: the last answers, each with what it came to ──
+    function renderRecent(live) {
       const shown = recent.slice(0, RECENT_SHOWN);
+      recentPart.hidden = shown.length === 0;
+      recentPart.querySelector("h2").firstChild.textContent = live ? "Только что " : "Последние файлы запуска ";
+      section.querySelector("[data-px-recent-n]").textContent = shown.length ? "последние " + shown.length : "";
       const ids = new Set(shown.map((r) => String(r.id)));
       recentBox.querySelectorAll(".recent-item").forEach((li) => { if (!ids.has(li.dataset.id)) li.remove(); });
       shown.forEach((item, index) => {
@@ -954,13 +1137,13 @@
           img.src = thumbUrl(item.id);
           const mark = document.createElement("span");
           mark.className = "st-badge";
-          mark.setAttribute("aria-hidden", "true");
           b.append(img, mark);
           li.appendChild(b);
         }
-        const [word, glyph] = OUTCOME[item.status] || [item.status, "•"];
+        const word = OUTCOME[item.status] || item.status;
+        const caption = item.status === "tagged" ? (item.tags ? tagsWord(item.tags) : "найден") : word;
         li.className = "recent-item st-" + item.status;
-        li.querySelector(".st-badge").textContent = glyph;
+        li.querySelector(".st-badge").textContent = caption;
         const what = word + (item.status === "tagged" && item.tags ? `, тегов: ${item.tags}` : "");
         li.querySelector("button").title = item.name + " — " + what;
         li.querySelector("button").setAttribute("aria-label", item.name + " — " + what + ". Открыть крупно");
@@ -969,7 +1152,7 @@
     }
 
     // ── a site switched off for the run: why, and «Проверить снова» once the person has fixed it ──
-    const alertBox = job.querySelector(".run-alert");
+    const alertBox = section.querySelector(".run-alert");
     let alertShown = "";
     function renderAlert(list, status) {
       const off = list.filter((q) => q.how === "выключен");
@@ -1013,16 +1196,12 @@
       });
     }
 
-    // ── the sites' own queues: how each asks, how many files wait for it, what it asks now ──
-    // the files' own stages: reading, writing into the library, the checks after the sites
-    const FILE_STAGES = {
-      read: (q) => `ждут чтения ${q.waiting} · прочитано ${q.answered}`,
-      writes: (q) => `ждут записи ${q.waiting} · записано ${q.answered}`,
-      after: (q) => `ждут проверки ${q.waiting} · проверено ${q.answered}`,
-    };
+    // ── «Сайты»: one table of the queues — who, how it is asked, how many wait, its pace, how long, how much done ──
+    const STAGE_NAMES = { read: "Чтение", writes: "Запись в библиотеку", after: "Проверки после сайтов" };
+    const stageOf = (q) => (q.stage === "writes" || q.stage === "after" ? q.stage : "read");
 
     function perTask(seconds) {
-      return (seconds < 0.1 ? Math.round(seconds * 1000) + " мс" : seconds.toFixed(1) + " с") + " на файл";
+      return (seconds < 0.1 ? Math.round(seconds * 1000) + " мс" : seconds.toFixed(1).replace(".", ",") + " с") + " на файл";
     }
 
     function queueState(q) {
@@ -1032,85 +1211,186 @@
       return q.waiting > 0 || q.file ? "busy" : "idle";
     }
 
-    function renderQueues(all) {
+    function renderQueues(state, live) {
+      const all = state.queues || [];
       queuesPart.hidden = all.length === 0;
-      const reverse = all.filter((q) => q.kind === "reverse");
-      const files = all.filter((q) => q.kind === "files");    // the files' own stage: read, then written
-      reverseBox.hidden = reverseTitle.hidden = reverse.length === 0;
-      filesBox.hidden = filesTitle.hidden = files.length === 0;
-      fillQueues(filesBox, files);
-      fillQueues(queuesBox, all.filter((q) => q.kind !== "reverse" && q.kind !== "files"));
-      fillQueues(reverseBox, reverse);
+      willPart.hidden = all.length > 0;
+      const groups = {
+        files: all.filter((q) => q.kind === "files"),         // the files' own stages: read, written, checked after
+        site: all.filter((q) => q.kind !== "reverse" && q.kind !== "files"),
+        reverse: all.filter((q) => q.kind === "reverse"),
+      };
+      queueBoxes.files.hidden = groups.files.length === 0;
+      queueBoxes.reverse.hidden = groups.reverse.length === 0;
+      const slowest = live && state.eta != null && state.eta > 0 ? state.eta_by || "" : "";
+      Object.keys(groups).forEach((kind) => fillQueues(queueBoxes[kind], groups[kind], slowest, live));
+      if (all.length) {
+        const counter = section.querySelector('[data-px-n="sites"]');
+        if (counter) counter.textContent = String(groups.site.length + groups.reverse.length);
+      }
     }
 
-    function fillQueues(box, list) {
+    function cell(tag, cls) {
+      const el = document.createElement(tag);
+      if (cls) el.className = cls;
+      return el;
+    }
+
+    function fillQueues(box, list, slowest, live) {
       const names = new Set(list.map((q) => q.site));
-      box.querySelectorAll(".site-queue").forEach((li) => { if (!names.has(li.dataset.site)) li.remove(); });
+      box.querySelectorAll("tr.site-queue").forEach((tr) => { if (!names.has(tr.dataset.site)) tr.remove(); });
       list.forEach((q, index) => {
-        let li = box.querySelector(`.site-queue[data-site="${CSS.escape(q.site)}"]`);
-        if (!li) {
-          li = document.createElement("li");
-          li.dataset.site = q.site;
-          const name = document.createElement("b");
-          name.className = "q-site";
-          name.textContent = q.site;
-          const how = document.createElement("span");
-          how.className = "q-how";
-          const numbers = document.createElement("span");
-          numbers.className = "q-numbers";
-          const now = document.createElement("span");
-          now.className = "q-now";
-          li.append(name, how, numbers, now);
+        let tr = box.querySelector(`tr.site-queue[data-site="${CSS.escape(q.site)}"]`);
+        if (!tr) {
+          tr = document.createElement("tr");
+          tr.dataset.site = q.site;
+          const who = cell("th");
+          who.scope = "row";
+          who.append(cell("span", "q-site"), cell("span", "px-tag"));
+          const how = cell("td", "q-wide");
+          how.append(cell("span", "q-how"), cell("span", "q-now"));
+          const done = cell("td", "q-done q-rest");
+          const meter = cell("span", "px-meter");
+          meter.appendChild(document.createElement("i"));
+          done.append(meter, cell("small", "q-count"));
+          tr.append(who, how, cell("td", "n q-wait"), cell("td", "n q-rate q-rest"), cell("td", "n q-left"), done);
         }
-        li.className = "site-queue q-" + queueState(q);
-        li.querySelector(".q-how").textContent = q.how;
-        let numbers = q.kind !== "files" ? `ждут ${q.waiting} · ответил ${q.answered}`
-          : FILE_STAGES[q.stage === "writes" || q.stage === "after" ? q.stage : "read"](q);
-        // its own pace and how long what waits for it takes at that pace
-        if (q.per_minute > 0) numbers += ` · ${q.per_minute < 10 ? q.per_minute.toFixed(1) : Math.round(q.per_minute)} в мин`;
-        if (q.kind === "files" && q.stage !== "read" && q.average > 0) numbers += " · " + perTask(q.average);
-        if (q.eta != null && (q.waiting > 0 || (q.kind === "files" && q.stage !== "read"))) numbers += " · ~" + minutes(q.eta);
-        li.querySelector(".q-numbers").textContent = numbers;
-        const now = li.querySelector(".q-now");
-        if (q.kind === "files") now.textContent = q.stage === "read" && q.reading > 0 ? "читаются сейчас: " + q.reading : "";
+        const state = queueState(q);
+        const slow = !!slowest && (q.name || q.site) === slowest;
+        tr.className = "site-queue q-" + state + (slow ? " slow" : "");
+        tr.querySelector(".q-site").textContent = q.kind === "files" ? STAGE_NAMES[stageOf(q)] : q.site;
+        const tag = tr.querySelector(".px-tag");
+        const keeps = live && q.kind !== "files" && state !== "off" && state !== "paused" && q.waiting === 0 && q.answered > 0;
+        tag.hidden = !(slow || keeps);
+        tag.className = "px-tag" + (slow ? "" : " calm");
+        tag.textContent = slow ? "дольше всех" : "успевает";
+        // how it is asked; the files' own stages — with what they are doing and how long a file takes
+        let how = q.how || "";
+        if (q.kind === "files" && q.stage === "read" && q.reading > 0) how += ", сейчас читаются " + q.reading;
+        if (q.kind === "files" && q.stage !== "read" && q.average > 0) how += ", " + perTask(q.average);
+        tr.querySelector(".q-how").textContent = how;
+        const now = tr.querySelector(".q-now");
+        if (q.kind === "files") now.textContent = "";
+        else if (state === "off") now.textContent = q.reason || "";
         else now.textContent = q.file ? (q.kind === "reverse" ? "ищет: " : "спрашивает: ") + q.file
-          : (q.how === "пауза" ? "ждёт конца паузы" : "");
-        now.title = q.file || "";
-        if (box.children[index] !== li) box.insertBefore(li, box.children[index] || null);
+          : (state === "paused" ? "ждёт конца паузы" : "");
+        now.title = now.textContent;
+        tr.querySelector(".q-wait").textContent = num(q.waiting);
+        const pace = Number(q.per_minute) || 0;
+        tr.querySelector(".q-rate").textContent = pace <= 0 ? "—"
+          : pace < 10 ? pace.toFixed(1).replace(".", ",") : num(pace);
+        // how long its work still takes, with the files not read yet (jobs.py: left)
+        const left = tr.querySelector(".q-left");
+        left.title = "";
+        if (!live || state === "off") left.textContent = "—";
+        else if (q.left == null) {
+          left.textContent = "считаю…";
+          left.title = "Станет ясно, когда очередь разгонится";
+        } else if (q.left >= 60) left.textContent = "≈ " + minutes(q.left);
+        else if (q.left > 0 || q.waiting > 0) left.textContent = "меньше минуты";
+        else left.textContent = q.kind === "files" && q.stage === "read" ? "всё прочитано" : "успевает";
+        const share = q.answered + q.waiting > 0 ? q.answered / (q.answered + q.waiting) : 0;
+        tr.querySelector(".px-meter i").style.width = Math.round(100 * share) + "%";
+        tr.querySelector(".q-count").textContent = num(q.answered);
+        const at = index + 1;                             // the first row of the group is its title
+        if (box.children[at] !== tr) box.insertBefore(tr, box.children[at] || null);
       });
     }
 
-    // ── progress: one bar split by answers, the rest is still to do ──
+    // ── on top: the state, how much is done and left, who holds the run ──
+    const stateBox = section.querySelector(".px-state");
+    const stateWord = section.querySelector("[data-px-state]");
+    const timeLine = section.querySelector("[data-px-time]");
+    const etaLine = section.querySelector("[data-px-eta]");
+    const hint = section.querySelector("[data-px-hint]");
+
     function renderBar(state) {
-      const bar = job.querySelector(".run-bar");
+      const bar = section.querySelector(".run-bar");
       const total = Math.max(1, state.total || 0);
       const counts = state.counts || {};
       ["tagged", "nomatch", "deferred", "skip", "error"].forEach((key) => {
         const seg = bar.querySelector(".seg-" + key);
         seg.style.width = Math.min(100, (100 * (counts[key] || 0)) / total) + "%";
+        const shown = section.querySelector(`[data-count="${key}"]`);
+        if (shown) shown.textContent = num(counts[key] || 0);
       });
       const done = state.done || 0;
       const percent = state.total ? Math.floor((100 * done) / state.total) : 0;
-      bar.querySelector(".run-percent").textContent = state.total ? percent + "%" : "";
+      bar.querySelector(".run-percent").textContent = state.total ? percent + " %" : "";
       bar.setAttribute("aria-valuemax", String(total));
       bar.setAttribute("aria-valuenow", String(done));
       bar.setAttribute("aria-valuetext", state.total ? `${done} из ${state.total}` : "файлы ещё считаются");
     }
 
+    function timeWords(state, status, live) {
+      if (status === "busy") return "запущен из другого места" + (state.owner ? " (" + state.owner + ")" : "");
+      if (live) return minutes(state.elapsed || 0) + (state.folder ? ` · папка «${state.folder}»` : "");
+      const run = state.id ? state : state.last;               // the run in memory, else the note of the last one
+      if (!run || !run.finished) return "";
+      const lasted = run.started && run.finished >= run.started ? ", шёл " + minutes(run.finished - run.started) : "";
+      return (state.id ? "" : "прошлый запуск — ") + ago(run.finished) + lasted;
+    }
+
+    function renderEta(state, status) {
+      etaLine.textContent = "";
+      if (status === "starting") etaLine.textContent = "файлы считаются…";
+      else if (status === "stopping") etaLine.textContent = "доделываю начатые файлы, новые не беру";
+      else if (state.eta != null) {
+        const b = document.createElement("b");
+        b.textContent = minutes(state.eta);
+        etaLine.append("осталось ≈ ", b);
+      } else if ((state.total || 0) > (state.done || 0)) {
+        // not known yet: the stage that has work and no pace is named
+        etaLine.textContent = "сколько осталось — станет ясно, когда " + (state.eta_by ? "разгонится: " + state.eta_by
+          : "очереди разгонятся");
+      }
+    }
+
+    // who holds the run: the slowest queue by name, how it is asked and its pace
+    function renderHint(state, live) {
+      const slow = live && state.eta != null && state.eta > 0 && state.eta_by
+        ? (state.queues || []).find((q) => (q.name || q.site) === state.eta_by) : null;
+      hint.hidden = !slow;
+      if (!slow) return;
+      const who = slow.kind === "files" ? STAGE_NAMES[stageOf(slow)].toLowerCase() : slow.site;
+      const pace = Number(slow.per_minute) || 0;
+      const paceWords = pace > 0 ? `, ${pace < 10 ? pace.toFixed(1).replace(".", ",") : num(pace)} в минуту` : "";
+      const b = document.createElement("b");
+      b.textContent = "Дольше всех — " + who + ":";
+      hint.textContent = "";
+      hint.append(b, " " + (slow.how || "") + paceWords + ". " + (slow.kind === "files"
+        ? "Сайты успевают за файлами."
+        : "Остальные его не ждут — найденное на них уже в галерее."));
+    }
+
+    // «Итог»: what the run came to — the run in memory, else the note of the last one (a program started anew)
+    function renderLast(state, live) {
+      const run = state.id ? state : state.last;
+      const any = !live && !!run && !!run.finished;
+      lastPart.hidden = !any;
+      idle.hidden = live || any;
+      if (!any) return;
+      lastPart.querySelector("h2").firstChild.textContent = state.id ? "Этот запуск " : "Прошлый запуск ";
+      section.querySelector("[data-px-last-when]").textContent = run.started ? span(run.started, run.finished) : ago(run.finished);
+      const counts = run.counts || {};
+      Object.keys(OUTCOME).forEach((key) => {
+        const shown = lastPart.querySelector(`[data-last="${key}"]`);
+        if (shown) shown.textContent = num(counts[key] || 0);
+      });
+      const stopped = state.id ? !!(state.summary && state.summary.stopped) : !!run.stopped;
+      const done = `обработано ${num(run.done || 0)} из ${num(run.total || 0)} файлов`;
+      const said = [];
+      if (run.status === "failed") said.push(`Запуск остановлен ошибкой: ${done}` + (state.id ? " — причина в журнале." : "."));
+      else if (stopped) said.push(`Остановлен вручную: ${done} — остальные возьмёт следующий запуск.`);
+      if (counts.deferred) said.push(`Отложенные ${num(counts.deferred)} — сайт или сервис не смог ответить (лимит, пауза): следующий запуск спросит их снова.`);
+      if (counts.error && state.id) said.push(`Ошибки ${num(counts.error)} — что с каждым файлом, написано в журнале.`);
+      section.querySelector("[data-px-last-said]").textContent = said.join(" ");
+    }
+
     function render(state) {
       const status = state.status || "idle";
-      button("parser-start").disabled = running(status) || status === "busy";
-      button("parser-pause").disabled = !(status === "running" || status === "paused");
-      button("parser-pause").textContent = status === "paused" ? "Продолжить" : "Пауза";
-      button("parser-pause").dataset.paused = status === "paused" ? "1" : "";
-      button("parser-stop").disabled = !(status === "running" || status === "paused");
-      if (status === "busy") {
-        say(button("parser-start"), "Парсер запущен из другого места (" + (state.owner || "?") + ")");
-      }
-      if (!state.id) { job.hidden = true; idle.hidden = false; return; }
-      job.hidden = false;
-      idle.hidden = true;
-      if (state.id !== shownJob) {            // another run: its journal and pictures afresh
+      const live = running(status);
+      if (state.id && state.id !== shownJob) {            // another run: its journal and pictures afresh
         shownJob = state.id;
         lines.length = 0;
         channels.clear();
@@ -1118,45 +1398,45 @@
         tabs.textContent = "";
         cardsBox.textContent = "";
         recentBox.textContent = "";
-        queuesBox.textContent = "";
-        reverseBox.textContent = "";
-        filesBox.textContent = "";
+        Object.values(queueBoxes).forEach((box) => box.querySelectorAll("tr.site-queue").forEach((tr) => tr.remove()));
       }
-      job.querySelector(".job-title").textContent = state.label || "Парсер";
-      job.querySelector(".job-status").textContent = STATUS[status] || status;
-      job.dataset.status = status;
-      renderBar(state);
-      const numbers = [];
-      if (state.total) numbers.push(`${state.done} из ${state.total}`);
-      numbers.push(minutes(state.elapsed) + (running(status) ? " идёт" : ""));
-      if (state.eta != null && running(status)) {
-        numbers.push("осталось ~" + minutes(state.eta) + (state.eta_by ? " (дольше всех — " + state.eta_by + ")" : ""));
-      } else if (running(status) && state.total > state.done) {
-        // not known yet: the stage that has work and no pace is named
-        numbers.push("сколько осталось — станет ясно, когда " + (state.eta_by ? "разгонится: " + state.eta_by
-          : "очереди разгонятся"));
-      }
-      job.querySelector(".job-numbers").textContent = numbers.join(" · ");
-      Object.entries(state.counts || {}).forEach(([k, v]) => {
-        const dd = job.querySelector(`[data-count="${k}"]`);
-        if (dd) dd.textContent = String(v);
-      });
-      job.querySelector(".job-links").hidden = running(status);
       lastStatus = status;
-      lanes = state.activity || {};
-      flight = state.files || [];
-      recent = state.recent || [];
-      renderFlight();
-      const more = Number(state.files_more || 0);
-      flightMore.hidden = more <= 0;
-      flightMore.textContent = more > 0 ? `…и ещё ${more} — ждут ответа сайтов (их очереди — выше)` : "";
-      renderRecent();
-      renderQueues(state.queues || []);
+      section.dataset.status = status;
+      section.dataset.ready = "1";                        // the first answer of the program is drawn
+      stateBox.className = "px-state" + (status === "paused" ? " paused" : status === "failed" ? " failed" : live ? "" : " idle");
+      stateWord.textContent = STATUS[status] || status;
+      timeLine.textContent = timeWords(state, status, live);
+      const start = button("parser-start"), pause = button("parser-pause"), stop = button("parser-stop");
+      start.hidden = live;
+      start.disabled = live || status === "busy";
+      pause.hidden = stop.hidden = !live;
+      pause.disabled = stop.disabled = !(status === "running" || status === "paused");
+      pause.textContent = status === "paused" ? "Продолжить" : "Пауза";
+      pause.dataset.paused = status === "paused" ? "1" : "";
+      section.querySelectorAll("[data-px-when]").forEach((el) => { el.hidden = (el.dataset.pxWhen === "run") !== live; });
+      section.querySelector("#px-tab-now [data-px-tab-words]").textContent = live ? "Сейчас" : "Итог";
+      services = new Set((state.queues || []).filter((q) => q.kind === "reverse").map((q) => q.site));
+      if (live) {
+        section.querySelector("[data-px-done]").textContent = num(state.done || 0);
+        section.querySelector("[data-px-total]").textContent = state.total ? "из " + num(state.total) + " "
+          + plural(state.total, "файла", "файлов", "файлов") : "";
+        renderBar(state);
+        renderEta(state, status);
+      }
+      renderHint(state, live);
+      renderLast(state, live);
+      flight = state.id ? state.files || [] : [];
+      recent = state.id ? state.recent || [] : [];
+      flightPart.hidden = !live;
+      renderFlight(live ? Number(state.files_more || 0) : 0);
+      renderRecent(live);
+      renderQueues(state, live);
       renderAlert(state.queues || [], status);
       if (viewer.open && pv.list === "flight") viewerLanes();
       // only lines not shown yet: a poll from a button and a timed one can carry the same lines
       const fresh = (state.log || []).filter((l) => l.seq > after);
       if (fresh.length) appendLog(fresh);
+      else logShown();
       after = Math.max(after, state.last_seq || 0);
     }
 
@@ -1217,7 +1497,7 @@
       if (pv.list === "flight") {
         viewerLanes();
       } else {
-        const [word] = OUTCOME[item.status] || [item.status];
+        const word = OUTCOME[item.status] || item.status;
         let text = word[0].toUpperCase() + word.slice(1);
         if (item.status === "tagged") text += (item.tags ? `: тегов ${item.tags}` : "") + (item.reason ? ` (${item.reason})` : "");
         else if (item.reason && item.status !== "nomatch") text += " — " + item.reason;
@@ -1235,17 +1515,21 @@
       viewer.querySelector(".pv-next").disabled = pv.index >= pv.items.length - 1;
     }
 
-    // the sites asking about the picture shown, as the last answer says (kept fresh while the viewer is open)
+    // what the sites have said of the picture shown, as the last answer says (kept fresh while the viewer is open)
     function viewerLanes() {
       const item = viewerItem();
       if (!item) return;
       const chips = viewer.querySelector(".pv-chips");
-      const names = lanesOf(item.id);
-      const still = flight.some((f) => String(f.id) === String(item.id));
-      viewer.querySelector(".pv-what").textContent = !still ? "Готово — ответ в «Готово недавно»."
-        : (names.length ? "Сейчас его ищут:" : "В работе — сайты ещё не ответили.");
+      const now = flight.find((f) => String(f.id) === String(item.id));
+      const what = viewer.querySelector(".pv-what");
       chips.textContent = "";
-      if (still) names.forEach((name) => chips.appendChild(laneChip(name, lanes[name])));
+      if (!now) {
+        what.textContent = "Готово — ответ в «Только что».";
+        return;
+      }
+      const said = saidOf(now);
+      what.textContent = said[0].toUpperCase() + said.slice(1) + ".";
+      chipsOf(now.sites).forEach((chip) => chips.appendChild(chipNode(chip)));
     }
 
     function step(delta) {
@@ -1304,6 +1588,7 @@
           say(el, "Запущено");
           after = 0;
           wasRunning = true;
+          openTab("now");                    // the files in work: what the run is doing
           poll();
         } catch (err) {
           say(el, err.message, true);
@@ -1368,6 +1653,7 @@
         }
       });
     }
+    logShown();
     poll();
   }
 })();

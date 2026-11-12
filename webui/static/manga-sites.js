@@ -1,7 +1,10 @@
-// (v5.44.78) «Настройки → Сайты манги» (webui/pages/manga_sites.py, core/manhwa_access.py): the addresses of the sites
+// (v5.44.78) «Настройки → Манга и манхва» (webui/pages/manga_sites.py, core/manhwa_access.py): the addresses of the sites
 // of manga and manhwa (a site that moved) and the owner's sign-in — cookies from a file read here and sent to the
 // program, MangaLib's token pasted.  What comes back is only what there is (how many cookies, until when the token
 // lasts): no value is ever shown; the token's field is emptied as soon as it is sent.
+// (v5.44.161) The sites are one table, a site's row opens («настроить»); the addresses and the language of MangaDex's
+// chapters are saved by the page's one «Сохранить» (settings.js: the form says where — data-save), the sign-in — at
+// once, by its own buttons here.
 // (v5.44.100) The sign-in from the browser: the extension «Local Booru Companion» 0.10.0 takes it by itself — the page
 // says whether it is there, «Открыть сайт» (through the extension, else the usual way), «Обновить вход» (the
 // extension sends it now; the page waits for its answer), and keeps what there is fresh while it is open.
@@ -40,9 +43,19 @@
         const ended = mine.until && mine.until * 1000 < Date.now();
         parts.push(ended ? "токен закончился — возьмите новый" : "токен есть" + (mine.until ? `, до ${day(mine.until)}` : ""));
       }
+      // (v5.44.161) the sign-in in a word on the site's row (whose chapters need one: data-need), the rest inside
       const state = li.querySelector("[data-ms-state]");
-      state.textContent = parts.length ? "вход: " + parts.join("; ") : "вход не задан";
-      state.classList.toggle("on", parts.length > 0);
+      const has = parts.length > 0;
+      const lib = (signin || {}).mangalib || {};
+      const shared = !has && li.dataset.site === "hentailib" && !!lib.token;
+      const need = li.dataset.need || "";
+      state.textContent = has ? "вход есть" : shared ? "общий с MangaLib" : need === "must" ? "нужен вход"
+        : need === "some" ? "для 18+ — вход" : "не нужен";
+      state.className = "ms-state sx-chip" + (has || shared ? " ok on" : need === "must" ? " need" : "");
+      li.classList.toggle("signed", has || shared);            // «войти» of a site that shows nothing without it
+      const detail = li.querySelector("[data-ms-detail]");
+      if (detail) detail.textContent = has ? "Вход: " + parts.join("; ") + "." : shared ? "Вход общий с MangaLib."
+        : "Вход не задан.";
       li.querySelectorAll('[data-action="ms-forget"]').forEach((b) => {
         b.hidden = b.dataset.what === "token" ? !mine.token : !mine.cookies;
       });
@@ -72,7 +85,7 @@
       show(st.signin);
       return st;
     } catch (err) {
-      if (!quiet) say(form.querySelector('button[type="submit"]'), "Не узнать, что сохранено: " + err.message, true);
+      if (!quiet) say(box.querySelector(".ms-site .tool-actions"), "Не узнать, что сохранено: " + err.message, true);
       return null;
     }
   }
@@ -80,54 +93,31 @@
   // (v5.44.100) what the extension brings while the page is open (the owner signs in on a site it opened)
   setInterval(() => { if (!document.hidden && document.body.contains(box)) refresh(true); }, 5000);
 
-  // ── (v5.44.79) the language of MangaDex's chapters ──
-  const languageForm = box.querySelector("[data-ms-language]");
-  if (languageForm) {
-    languageForm.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const button = languageForm.querySelector('button[type="submit"]');
-      try {
-        await postJson("/api/manga-sites/language", { language: languageForm.elements.language.value });
-        say(button, "Язык сохранён");
-      } catch (err) {
-        say(button, err.message, true);
-      }
-    });
+  // ── (v5.44.79) the language of MangaDex's chapters: said in its row («главы: русский») as it is chosen ──
+  let languages = {};
+  try { languages = JSON.parse(box.dataset.msLanguages || "{}"); } catch (_) { languages = {}; }
+  const languageField = form.elements.namedItem("language");
+  const languageSaid = box.querySelector("[data-ms-lang]");
+  function sayLanguage() {
+    if (languageField && languageSaid) languageSaid.textContent = " · главы: " + (languages[languageField.value] || languageField.value);
   }
+  if (languageField) languageField.addEventListener("change", sayLanguage);
 
-  // ── the addresses ──
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = form.querySelector('button[type="submit"]');
-    const asked = {};
-    form.querySelectorAll("input[name]").forEach((input) => {
-      input.removeAttribute("aria-invalid");
-      asked[input.name] = input.value.trim();
-    });
-    form.querySelectorAll(".ms-wrong").forEach((n) => n.remove());
-    try {
-      const reply = await postJson("/api/manga-sites/addresses", { addresses: asked });
-      (reply.sites || []).forEach((site) => {
-        const field = form.querySelector(`input[name="${site.name}"]`);
-        if (field) field.value = site.mine || "";
-        const api = form.querySelector(`input[name="${site.name}_api"]`);
-        if (api && site.api) api.value = site.api.mine || "";
-      });
-      say(button, "Адреса сохранены");
-    } catch (err) {
-      const wrong = (err.data && err.data.wrong) || {};
-      Object.keys(wrong).forEach((name) => {
-        const field = form.querySelector(`input[name="${name}"]`);
-        if (!field) return;
-        field.setAttribute("aria-invalid", "true");
-        const note = document.createElement("small");
-        note.className = "ms-wrong";
-        note.textContent = wrong[name];
-        field.parentElement.append(note);
-      });
-      say(button, err.message, true);
-    }
+  // ── the addresses: saved by the page's «Сохранить» (settings.js); a site's row says its address as it is typed ──
+  form.addEventListener("input", (event) => {
+    const input = event.target;
+    if (!(input instanceof HTMLInputElement) || input.type !== "text" || !input.name || input.name.endsWith("_api")) return;
+    const host = input.closest("li.ms-site").querySelector("[data-ms-host]");
+    const typed = (input.value.trim() || input.placeholder).replace(/^[a-z]+:\/\//i, "").replace(/\/.*$/, "");
+    if (host && typed) host.textContent = typed;
   });
+  // a site's row opened: the others close (one at a time — the table stays a table)
+  form.addEventListener("toggle", (event) => {
+    const opened = event.target;
+    if (!(opened instanceof HTMLDetailsElement) || !opened.open || !opened.classList.contains("ms-more")) return;
+    if (form.closest("[data-finding]")) return;
+    form.querySelectorAll("details.ms-more[open]").forEach((other) => { if (other !== opened) other.open = false; });
+  }, true);
 
   // ── cookies from a file ──
   box.addEventListener("change", async (event) => {

@@ -15,15 +15,20 @@ API https://nhentai.net/api/v2/docs» — the downloader of 5.23 got no descript
 * ``/api/v2/galleries?page=&per_page=`` — the newest (25 a page): ``result`` [{id, media_id, english_title,
   japanese_title, thumbnail, num_pages, num_favorites, tag_ids, …}], ``num_pages``, ``total``;
 * ``/api/v2/search?query=&sort=date|popular|popular-today|popular-week|popular-month&page=`` — 25 a page; ``-tag:x``
-  leaves a tag out (``*`` — 659 264 galleries, ``-tag:lolicon`` — 544 223); ten searches a minute (429,
+  leaves a tag out (``*`` — 659 264 galleries); ten searches a minute (429,
   ``Retry-After: 60``) — the newest are taken from the list, not the search;
-* ``/api/v2/tags/ids?ids=1,2,3`` — tags by their numbers; ``/api/v2/tags/<type>/<slug>`` — one by its name.
+* ``/api/v2/tags/ids?ids=1,2,3`` — tags by their numbers; ``/api/v2/tags/<type>/<slug>`` — one by its name;
+* (v5.44.148, asked 11.11.2026) ``POST /api/v2/tags/search`` {type or null, query, limit} — its tags whose names begin
+  with the words: [{id, type, name, slug, count, …}] (tag, artist, character, parody, group, language, category);
+  ``/api/v2/tags/<type>?sort=popular|name&page=&per_page=`` — every tag of a kind, 120 a page (4 775 tags, 33 350
+  artists, 18 006 characters, 4 401 parodies, 25 383 groups); the search takes ``tag:"…"``, ``artist:"…"``… and the
+  same with «-».
 
 It has no Russian: its languages are Japanese, English, Chinese («language/russian» — 404).
 
-The program's rule about minors (as at the other sites of hentai): the tags of that kind (:data:`NEVER_TAGS`, their
-numbers :data:`NEVER_IDS` — asked 6.11.2026) are left out of every search; a gallery that has one of them, or whose
-tags' or titles' words say so (``manhwa_sources.depicts_minors``), is not a tile, is not described, not downloaded."""
+The program's gates (``core/gates.py``): the tags ``gates.left_out`` names are left out of every search
+(:func:`search_words`); a gallery ``gates.title`` closes — by what :func:`gallery_facts` reads of it — is not a tile, is
+not described, not downloaded."""
 from __future__ import annotations
 
 import re
@@ -31,7 +36,7 @@ import threading
 from collections import OrderedDict
 from urllib.parse import urlencode, urlparse
 
-from core import filter as F
+from core import gates as G
 from core import manhwa_sources as S
 
 SITE = "https://nhentai.net"
@@ -41,31 +46,29 @@ IMAGE_SERVERS = ("https://i1.nhentai.net", "https://i2.nhentai.net", "https://i3
 THUMB_SERVERS = ("https://t1.nhentai.net", "https://t2.nhentai.net", "https://t3.nhentai.net",
                  "https://t4.nhentai.net")
 PAGE_SIZE = 25
-# the program's rule: the tags of that kind (their names on the site and their numbers, 6.11.2026) — left out of every
-# search, and a gallery with one of them is never shown; any other tag whose words say so — by its name
-NEVER_TAGS = F.NHENTAI_NEVER_TAGS           # (v5.44.101) in core/filter.py
-NEVER_IDS = F.NHENTAI_NEVER_IDS
 TAGS_KEPT = 40000                          # names of tags kept (they do not change)
 TAGS_AT_ONCE = 100                         # numbers asked in one request
-EXCLUDED = "Эту галерею программа не показывает и не скачивает: в ней изображены несовершеннолетние"
 
 _TAGS: "OrderedDict[int, tuple]" = OrderedDict()       # a tag's number → (its type, its name)
 _LOCK = threading.Lock()
 _BRACKETS = re.compile(r"\s*(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\}|【[^】]*】|（[^）]*）)\s*")
 
 
-def search_words(text: str = "") -> str:
-    """The words of a search: the person's and the tags the program never shows, each «-tag:"…"»."""
+def search_words(text: str = "", also: str = "") -> str:
+    """The words of a search: the person's, (v5.44.148) the filters' (``also`` — «tag:"…" -artist:"…"», made by
+    ``catalog.nhentai_words``) and the tags its lists are always asked without (``gates.left_out``), each «-tag:"…"»."""
     words = " ".join(str(text or "").split())[:200]
-    return " ".join(x for x in (words, *(f'-tag:"{name}"' for name in NEVER_TAGS)) if x)
+    return " ".join(x for x in (words, str(also or "").strip(),
+                                *(f'-tag:"{name}"' for name in G.left_out("nhentai").names)) if x)
 
 
-def list_url(how: str, page: int, text: str = "") -> str:
+def list_url(how: str, page: int, text: str = "", also: str = "") -> str:
     """The address of a page of a list: ``how`` — «date» (the newest: its list, not the search — the search is ten a
-    minute) or an order of its search («popular», «popular-week»…); ``text`` — words searched."""
+    minute) or an order of its search («popular», «popular-week»…); ``text`` — words searched, ``also`` — the
+    filters' words (:func:`search_words`)."""
     page = max(1, int(page or 1))
-    if text or how != "date":
-        return f"{API}/search?" + urlencode({"query": search_words(text), "sort": how or "date", "page": page})
+    if text or also or how != "date":
+        return f"{API}/search?" + urlencode({"query": search_words(text, also), "sort": how or "date", "page": page})
     return f"{API}/galleries?" + urlencode({"page": page, "per_page": PAGE_SIZE})
 
 
@@ -148,15 +151,10 @@ def forget() -> None:
         _TAGS.clear()
 
 
-def forbidden(titles=(), tag_ids=(), names=()) -> bool:
-    """The program's rule: a gallery with a tag it never shows (by its number), or whose tags' names or titles say
-    that it depicts minors."""
-    return F.nhentai_forbidden(titles, tag_ids, names)          # (v5.44.101) core/filter.py
-
-
-def forbidden_gallery(data: dict) -> bool:
-    """:func:`forbidden` of a gallery's description (the API's, of both of its versions)."""
+def gallery_facts(data: dict) -> dict:
+    """What a gallery's description (the API's, of both of its versions) says of it, for the program's gate —
+    ``gates.title("nhentai", **gallery_facts(data))``: its titles, its tags' names and numbers."""
     title = data.get("title") if isinstance(data.get("title"), dict) else {}
     tags = [t for t in data.get("tags") or [] if isinstance(t, dict)]
-    return forbidden([str(title.get(k) or "") for k in ("english", "japanese", "pretty")],
-                     [t.get("id") for t in tags], [str(t.get("name") or "") for t in tags])
+    return {"names": [str(title.get(k) or "") for k in ("english", "japanese", "pretty")],
+            "tags": [str(t.get("name") or "") for t in tags], "tag_ids": [t.get("id") for t in tags]}

@@ -559,6 +559,78 @@ def _slow_html(report: dict) -> str:
                     _table(["Когда", "Что", "мс", "Подробности"], table, empty="Медленных операций не записано."))
 
 
+PAGE_NAMES = (      # the kinds of pages in words (``server.page_shape``): the longest beginning that fits
+    ("/posts", "Галерея"), ("/post/…", "Карточка"), ("/tags", "Теги"), ("/random", "Случайная"),
+    ("/manga/g/…", "Манга: тайтл"), ("/manga/s/…", "Манга: серия"), ("/manga/r/…", "Манга: читалка"),
+    ("/manga/read", "Манга: чтение с сайта"), ("/manga/feed", "Манга: лента"), ("/manga/title", "Манга: тайтл сайта"),
+    ("/manga", "Манга"), ("/manhwa/t/…", "Манхва: тайтл"), ("/manhwa/r/…", "Манхва: читалка"),
+    ("/manhwa/feed", "Манхва: лента"), ("/manhwa/title", "Манхва: тайтл сайта"), ("/manhwa", "Манхва"),
+    ("/videos/s/…", "Видео: сериал"), ("/videos/watch", "Видео: сериал сайта"), ("/videos/feed", "Видео: лента"),
+    ("/videos/get", "Видео: скачать с сайта"), ("/videos", "Видео"), ("/title", "Тайтл сайта"), ("/online", "Чтение с сайта"),
+    ("/get/downloads", "Загрузки"), ("/get/archive", "Из архива"), ("/get", "Скачать"), ("/grab", "Галерея (booru)"),
+    ("/subs", "Подписки"), ("/parser", "Парсер"), ("/sites", "Парсер и сайты"), ("/dupes", "Дубли"),
+    ("/diag/maintenance", "Обслуживание"), ("/diag/reset", "Удаление и сброс"), ("/diag", "Проверка"),
+    ("/settings", "Настройки"), ("/help", "Справка"), ("/m/", "Телефон"))
+PAGES_SHOWN = 12
+
+
+def page_name(shape: str) -> str:
+    """«Видео: сериал» for «/videos/s/…» — the page in words; an answer to a page's own question — «ответ странице»."""
+    path = shape.split("?", 1)[0]
+    if path.startswith("/api/"):
+        return "ответ странице"
+    for begin, name in PAGE_NAMES:
+        if path == begin or path.startswith(begin.rstrip("/") + "/") or (begin.endswith("/") and path.startswith(begin)):
+            return name
+    return ""
+
+
+def _pages_html() -> str:
+    """(v5.44.151) «Медленные страницы»: what took more than a second to open on this library and these disks, by
+    the page (``core.performance.slow_pages``).  The owner: «некоторые страницы открываются по десять лет»."""
+    from core.performance import slow_pages
+    rows = slow_pages()[:PAGES_SHOWN]
+    table = []
+    for row in rows:
+        seconds = float(row["longest_ms"]) / 1000.0
+        name = page_name(str(row["page"]))
+        last = str(row["last"])                           # «2026-11-11 10:04:31» → «11.11 10:04»
+        when = f"{last[8:10]}.{last[5:7]} {last[11:16]}" if len(last) >= 16 else last
+        table.append([(f'{esc(name)}<br>' if name else "") + f'<small>{esc(row["page"])}</small>', _n(row["times"]),
+                      esc(f"{seconds:.1f} с".replace(".", ",")), esc(when)])
+    lead = ("Что открывалось дольше секунды — на этой библиотеке и этих дисках. Если что-то тормозит, здесь видно, "
+            "что именно и насколько.")
+    return (f'<section class="panel" id="diag-pages" aria-labelledby="pages-title"><h2 id="pages-title">Медленные '
+            f'страницы</h2><p class="hint">{esc(lead)}</p>'
+            + _table(["Страница", "Раз", "Дольше всего", "Последний раз"], table,
+                     empty="Ни одна страница не открывалась дольше секунды.") + _base_read_html() + "</section>")
+
+
+def base_read_words(read: dict) -> str:
+    """(v5.44.152) «База: 512 МБ — при запуске прочитана с диска за 6,2 с (83 МБ в секунду)» — how fast the disk
+    gave the base's file to the reading at the start (``core/base_warm.py``); "" when it has not been read.  A part
+    only (the base larger than half of the free memory, a reading cut short) — said."""
+    try:
+        done, size = float(read.get("bytes") or 0) / 1048576.0, float(read.get("size") or 0) / 1048576.0
+        seconds = float(read.get("seconds") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if done < 1:
+        return ""
+    took = f"{seconds:.1f}".replace(".", ",")
+    speed = f" ({done / seconds:.0f} МБ в секунду)" if seconds >= 0.05 else ""
+    if size - done >= 1:
+        return (f"База: {size:.0f} МБ — при запуске с диска прочитано {done:.0f} МБ за {took} с{speed}; остальное "
+                "программа читает по мере надобности.")
+    return f"База: {done:.0f} МБ — при запуске прочитана с диска за {took} с{speed}."
+
+
+def _base_read_html() -> str:
+    from core import base_warm
+    words = base_read_words(dict(base_warm.READ))
+    return f'<p class="hint" data-base-read>{esc(words)}</p>' if words else ""
+
+
 def _safe(name: str, fn, *args) -> str:
     """One part of the page; a value it did not expect (an old or damaged report file) costs that part,
     not the whole page — the page is where a new check is started."""
@@ -783,7 +855,7 @@ def _running_now() -> str:
 
 
 def tabs(current: str) -> tuple:
-    """The pages of «Диагностика» for the section bar."""
+    """The pages of «Проверка и починка» — the tabs above each of them (``settings.in_frame``)."""
     return tuple((label, href, key == current) for key, label, href in (
         ("check", "Проверка", "/diag"), ("maintenance", "Обслуживание", "/diag/maintenance"),
         ("reset", "Удаление и сброс", "/diag/reset")))
@@ -814,7 +886,7 @@ def diag_page(req: Request) -> Response:
     body = f"""
 <section class="tool tool-wide settings diag" id="diag">
   <header class="tool-head">
-    <h1>Диагностика</h1>
+    <h1>Проверка и починка</h1>
     <p class="tool-lead">Проверка только читает: ничего не удаляет и не переносит. Чинят отдельные кнопки — у того, что
     они чинят; перед каждым изменением базы программа сама делает её копию.</p>
   </header>
@@ -843,12 +915,14 @@ def diag_page(req: Request) -> Response:
     </div>
     <aside class="board-side">
       {_safe("Несколько постов одного сайта", _sources_html, sources, busy)}
+      {_safe("Медленные страницы", _pages_html)}
       {_history_html(history)}
     </aside>
   </div>
 </section>"""
-    return Response.html(page_frame("Диагностика", body, active="diag", subnav=False, kind="tool",
-                                    body_data={"tool": "diag"}, tabs=tabs("check"), **_prefs()))
+    from webui.pages import settings                # (v5.44.161) a section of «Настройки»: «Проверка и починка»
+    return Response.html(page_frame("Проверка и починка", settings.in_frame("diag", body, tabs("check")),
+                                    active="diag", subnav=False, kind="tool", body_data={"tool": "diag"}, **_prefs()))
 
 
 # ── the task: the check and the repairs ────────────────────────────────────

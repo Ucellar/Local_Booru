@@ -80,6 +80,20 @@
 .dl .dl-res-top time { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 .dl .dl-res p { margin: 0; }
 .dl .dl-res ul { margin: 0; padding-left: 16px; font-size: 12.5px; }
+.dl .dl-res p.dl-note { color: var(--muted); font-size: 12.5px; }
+/* (v5.44.151) a title's downloads before its last one: folded under it (a finger's row: 36px at least) */
+.dl .dl-earlier { font-size: 12.5px; }
+.dl .dl-earlier summary { display: flex; align-items: center; min-height: 36px; color: var(--muted); list-style: none; }
+.dl .dl-earlier summary::-webkit-details-marker { display: none; }
+.dl .dl-earlier summary::before { content: "▸"; display: inline-block; width: 14px; }
+.dl .dl-earlier[open] summary::before { content: "▾"; }
+.dl .dl-earlier ol { display: flex; flex-direction: column; gap: 6px; margin: 0 0 4px; padding: 0 0 0 14px; list-style: none; }
+.dl .dl-earlier li { display: flex; flex-wrap: wrap; gap: 0 8px; padding-left: 14px; position: relative; }
+.dl .dl-earlier li::before { content: ""; position: absolute; left: 0; top: 0.55em; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--muted); }
+.dl .dl-earlier li.ok::before { background: var(--dl-ok); }
+.dl .dl-earlier li:is(.part, .fail)::before { background: var(--dl-warn); }
+.dl .dl-earlier li time { flex-basis: 100%; color: var(--muted); font-size: 12px; }
 .dl .dl-res { flex-wrap: wrap; }
 .dl .dl-res-tools { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding-left: 34px; }
 .dl .dl-more { margin: 4px 14px 0; }

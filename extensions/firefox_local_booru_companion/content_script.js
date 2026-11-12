@@ -12,7 +12,7 @@ const LB = {
   items: new Map(), offlineNoticed: false,
   sub: null, blocked: 0,
 };
-const OWN_NODES = '.lb-known-badge,.lb-companion-toast,.lb-selection-toolbar,.lb-blocked-label';
+const OWN_NODES = '.lb-known-badge,.lb-companion-toast,.lb-selection-toolbar,.lb-blocked-label,.lb-fav';
 const CARD_SELECTOR = 'article,.post-preview,.thumbnail-preview,.thumb,.image-list span,.content span,.post,.preview,li,[data-id],[data-post-id]';
 const MAIN_MEDIA_SELECTOR = '#image,#main_image,#image-container img,#image-container video,.image-container img,.image-container video,#gelcomVideoPlayer,video';
 
@@ -629,12 +629,341 @@ async function subscribeHere() {
   renderSub();
 }
 
+// ── «Скачать избранное» (0.11.0): an account's favorites («лайки») of a booru site into the program ─────────────────
+// The owner: «на r34 люди часто лайкают посты что бы сохранить … добавить кнопку через расширение прямо на странице
+// профиля любого из сайтов».  On an account's page — its profile, its favorites — of rule34.xxx, Gelbooru, Danbooru, ATF
+// and e621/e926 a block «Скачать избранное».  The numbers of the account's favorite posts are collected here, in this
+// browser: the site's own pages, the ones the person could open himself, one after another with pauses (a check of the
+// site — Cloudflare — is the person's to pass: the extension never goes around it), then handed to the program
+// (/extension/favorites).  It downloads what the library lacks with the site's tags, then parses those files on every
+// site.  New likes — «Докачать новые»: Danbooru, ATF and e621 give the favorites newest first, so the pages stop at one
+// of posts handed before; the Gelbooru-likes are walked through.
+const FAV = { key: '', account: null, state: null, run: null, stop: false };
+const FAV_PAUSE = { gelbooru: 1000, danbooru: 600, e621: 600 };   // ms between two pages of the site
+const FAV_LIMIT = { danbooru: 200, e621: 320 };                     // posts on a page of their API
+const FAV_PAGES = 4000;                                             // pages at most (a site that never ends)
+
+function favEngine() {
+  const h = canonicalHost();
+  if (h === 'rule34.xxx' || h === 'gelbooru.com') return 'gelbooru';
+  if (h === 'danbooru.donmai.us' || h === 'booru.allthefallen.moe') return 'danbooru';
+  if (h === 'e621.net' || h === 'e926.net') return 'e621';
+  return '';
+}
+function favDigits(v) { const t = String(v || '').trim(); return /^\d{1,12}$/.test(t) ? t : ''; }
+// The account this page is of — {engine, id, name} (id "" — only the name is known: the site is asked for the number);
+// null — not an account's page.
+function favAccountOfPage() {
+  const engine = favEngine();
+  if (!engine) return null;
+  let u;
+  try { u = new URL(location.href); } catch (_) { return null; }
+  const q = k => String(u.searchParams.get(k) || '').trim();
+  if (engine === 'gelbooru') {
+    const page = q('page'), s = q('s');
+    if (page === 'favorites' && (!s || s === 'view')) return favDigits(q('id')) ? { engine, id: q('id'), name: '' } : null;
+    if (page !== 'account' || s !== 'profile') return null;
+    let id = favDigits(q('id'));
+    for (const a of id ? [] : querySafe(document, 'a[href*="page=favorites"]')) {     // the profile's link «Favorites»
+      try {
+        const v = new URL(a.getAttribute('href'), location.href);
+        if ((v.searchParams.get('s') || 'view') === 'view' && favDigits(v.searchParams.get('id'))) { id = v.searchParams.get('id'); break; }
+      } catch (_) {}
+    }
+    return id ? { engine, id, name: q('uname') } : null;
+  }
+  const path = u.pathname.replace(/\/+$/, '');
+  let m = path.match(/^\/users\/([^/.]+)$/);
+  if (m) {
+    if (favDigits(m[1])) return { engine, id: m[1], name: '' };
+    let name = '';
+    try { name = decodeURIComponent(m[1]); } catch (_) { name = m[1]; }
+    return engine === 'e621' && name ? { engine, id: '', name } : null;
+  }
+  if (path === '/favorites' && favDigits(q('user_id'))) return { engine, id: q('user_id'), name: '' };
+  if (path === '/posts' || path === '') {           // Danbooru shows an account's favorites as «ordfav:NAME», e621 as «fav:NAME»
+    const tags = q('tags').split(/\s+/).filter(Boolean);
+    m = tags.length === 1 ? tags[0].match(/^(?:ord)?fav:(.+)$/i) : null;
+    if (m) return { engine, id: '', name: m[1] };
+  }
+  return null;
+}
+function favNameOnPage(acc) {
+  const el = acc.id ? document.querySelector('[data-user-id="' + acc.id + '"][data-user-name]') : null;
+  return String(el && el.getAttribute('data-user-name') || '').trim();
+}
+function favSleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function favError(kind, detail) { const e = new Error(detail || kind); e.fav = kind; return e; }
+// A page of the site's check of the browser (Cloudflare and the like) instead of the page asked for.
+function favChallenge(res, text) {
+  const head = String(text || '').slice(0, 30000);
+  return /challenge-platform|cf-chl|cf_chl_opt|<title>\s*Just a moment|Attention Required! \| Cloudflare|DDoS-Guard/i.test(head)
+    && ([403, 429, 503].includes(res.status) || /<title>\s*Just a moment/i.test(head));
+}
+// One page of the site — the person's own request on the site's own address (its cookies, its browser).
+async function favFetch(url, json) {
+  for (let attempt = 0; ; attempt += 1) {
+    if (FAV.stop) throw favError('stopped');
+    let res, text;
+    try {
+      res = await fetch(location.origin + url, { credentials: 'include', cache: 'no-store',
+                                                 headers: json ? { Accept: 'application/json' } : {} });
+      text = await res.text();
+    } catch (e) {
+      if (attempt < 2) { await favSleep(3000 * (attempt + 1)); continue; }
+      throw favError('network', String(e && e.message || e));
+    }
+    if (favChallenge(res, text)) throw favError('challenge');
+    if (res.status === 429 || res.status >= 500) {
+      if (attempt < 3) { await favSleep(4000 * (attempt + 1)); continue; }
+      throw favError('busy', 'HTTP ' + res.status);
+    }
+    if (res.status === 401 || res.status === 403) throw favError('hidden', 'HTTP ' + res.status);
+    if (!res.ok) throw favError('http', 'HTTP ' + res.status);
+    if (/[?&]page=account&s=login/i.test(res.url || '')) throw favError('login');
+    if (!json) return text;
+    try { return JSON.parse(text); } catch (_) {
+      throw favError(/<html|<!doctype/i.test(text.slice(0, 500)) ? 'challenge' : 'http', 'не JSON');
+    }
+  }
+}
+// The number of an account known by its name (Danbooru: «ordfav:NAME»; e621: /users/NAME, «fav:NAME»).
+async function favResolve(acc) {
+  if (acc.id) return acc;
+  try {
+    const data = acc.engine === 'e621'
+      ? await favFetch('/users/' + encodeURIComponent(acc.name) + '.json', true)
+      : await favFetch('/users.json?search%5Bname_matches%5D=' + encodeURIComponent(acc.name) + '&limit=1', true);
+    const row = Array.isArray(data) ? data[0] : data;
+    if (row && favDigits(row.id)) return { ...acc, id: String(row.id), name: String(row.name || acc.name || '') };
+  } catch (_) {}
+  return null;
+}
+// The post numbers of a favorites page of a Gelbooru-like: its pictures' links to their posts.
+function favIdsOfHtml(doc) {
+  const root = doc.querySelector('.image-list') || doc.querySelector('#content') || doc.body || doc;
+  const out = [];
+  for (const a of querySafe(root, 'a[href]')) {
+    if (!a.querySelector('img')) continue;
+    let id = '';
+    try {
+      const v = new URL(a.getAttribute('href'), location.href);
+      if (v.searchParams.get('page') === 'post' && v.searchParams.get('s') === 'view') id = favDigits(v.searchParams.get('id'));
+    } catch (_) {}
+    if (!id) { const m = String(a.id || '').match(/^p(\d{1,12})$/); if (m) id = m[1]; }
+    if (id) out.push(Number(id));
+  }
+  return out;
+}
+// The pager of a Gelbooru-like: the offset of the next page (on the first one — the page's size) and of the last one.
+function favPager(doc) {
+  let last = 0, next = 0;
+  for (const el of querySafe(doc, '#paginator a, .pagination a, #paginator [onclick]')) {
+    const text = String(el.getAttribute('href') || '') + ' ' + String(el.getAttribute('onclick') || '');
+    for (const m of text.matchAll(/[?&]pid=(\d+)/g)) {
+      const n = Number(m[1]);
+      last = Math.max(last, n);
+      if (n > 0) next = next ? Math.min(next, n) : n;
+    }
+  }
+  return { last, next };
+}
+async function favCollectGelbooru(acc, progress) {
+  const ids = [], seen = new Set();
+  let pid = 0, step = 0, last = 0;
+  for (let page = 1; page <= FAV_PAGES; page += 1) {
+    const html = await favFetch('/index.php?page=favorites&s=view&id=' + acc.id + '&pid=' + pid, false);
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const got = favIdsOfHtml(doc);
+    let fresh = 0;
+    for (const id of got) if (!seen.has(id)) { seen.add(id); ids.push(id); fresh += 1; }
+    if (page === 1) { const p = favPager(doc); step = p.next || got.length || 50; last = p.last; }
+    progress(page, ids.length, last ? Math.floor(last / step) + 1 : 0);
+    if (!fresh || (last && pid >= last)) break;
+    pid += step;
+    await favSleep(FAV_PAUSE.gelbooru);
+  }
+  return ids;
+}
+async function favCollectJson(acc, mode, known, progress) {
+  const limit = FAV_LIMIT[acc.engine];
+  const ids = [], seen = new Set();
+  for (let page = 1; page <= FAV_PAGES; page += 1) {
+    const url = acc.engine === 'e621'
+      ? '/favorites.json?user_id=' + acc.id + '&limit=' + limit + '&page=' + page
+      : '/favorites.json?search%5Buser_id%5D=' + acc.id + '&limit=' + limit + '&page=' + page;
+    const data = await favFetch(url, true);
+    const rows = acc.engine === 'e621' ? (data && Array.isArray(data.posts) ? data.posts : []) : (Array.isArray(data) ? data : []);
+    const got = rows.map(r => Number(acc.engine === 'e621' ? r && r.id : r && r.post_id)).filter(n => Number.isInteger(n) && n > 0);
+    let fresh = 0, unknown = 0;
+    for (const id of got) {
+      if (!seen.has(id)) { seen.add(id); ids.push(id); fresh += 1; }
+      if (!known.has(id)) unknown += 1;
+    }
+    progress(page, ids.length, 0);
+    if (!fresh) break;
+    if (mode === 'new' && !unknown) break;              // a page of posts handed before: the older ones were too
+    await favSleep(FAV_PAUSE[acc.engine]);
+  }
+  return ids;
+}
+async function favAsk(type, payload) {
+  try { return await browser.runtime.sendMessage({ type, ...payload }); } catch (e) { return { ok: false, error: String(e && e.message || e) }; }
+}
+function favPosts(n) {
+  n = Number(n || 0);
+  const a = n % 10, b = n % 100;
+  return n + ' ' + (a === 1 && b !== 11 ? 'пост' : a >= 2 && a <= 4 && (b < 12 || b > 14) ? 'поста' : 'постов');
+}
+function favProgramWords(r) {
+  if (r && r.offline) return 'Local Booru закрыта — запустите её и нажмите ещё раз';
+  const err = String(r && r.error || '');
+  if (/pairing_required/.test(err)) return 'Расширение не подключено к программе: в его окне («Связь с программой») введите код из Local Booru';
+  if (/not_found/.test(err)) return 'Эта версия Local Booru не скачивает избранное — нужна 5.44.141 или новее';
+  return 'Не получилось: ' + String(r && (r.message || r.error) || 'программа не ответила');
+}
+function favSiteWords(e) {
+  const kind = e && e.fav;
+  if (kind === 'stopped') return 'Остановлено — в программу ничего не передано';
+  if (kind === 'challenge') return 'Сайт попросил проверку браузера — пройдите её на сайте (обновите страницу) и нажмите ещё раз';
+  if (kind === 'login') return 'Сайт показывает это избранное только после входа — войдите на сайте и нажмите ещё раз';
+  if (kind === 'hidden') return 'Сайт не показывает избранное этого аккаунта — оно скрыто';
+  if (kind === 'busy') return 'Сайт не отвечает (' + e.message + ') — попробуйте позже';
+  return 'Не получилось собрать избранное: ' + String(e && e.message || e);
+}
+// Where the block goes: the top of the page's content.
+function favPlace() {
+  return document.querySelector('#content') || document.querySelector('#a-show') || document.querySelector('#c-users')
+    || document.querySelector('#page') || document.querySelector('main') || document.body;
+}
+function ensureFavBox() {
+  if (!FAV.account) return null;
+  let box = document.querySelector('.lb-fav');
+  if (box) return box;
+  box = document.createElement('div');
+  box.className = 'lb-fav';
+  box.setAttribute('role', 'group');
+  box.setAttribute('aria-label', 'Local Booru — избранное аккаунта');
+  box.innerHTML = '<span class="lb-fav-logo" aria-hidden="true">LB</span><div class="lb-fav-main"><b class="lb-fav-title"></b>'
+    + '<div class="lb-fav-note" role="status"></div><div class="lb-fav-bar" hidden><i></i></div></div>'
+    + '<div class="lb-fav-buttons"><button type="button" class="lb-fav-go" data-fav="all">Скачать избранное</button>'
+    + '<button type="button" class="lb-fav-stop" data-fav="stop" hidden>Остановить</button></div>';
+  box.addEventListener('click', ev => {
+    const act = ev.target && ev.target.closest ? ev.target.closest('[data-fav]') : null;
+    if (!act) return;
+    ev.preventDefault();
+    if (act.dataset.fav === 'stop') { FAV.stop = true; act.disabled = true; return; }
+    favStart(act.dataset.fav === 'new' ? 'new' : 'all').catch(e => { FAV.run = { phase: 'error', text: favSiteWords(e) }; renderFav(); });
+  });
+  const place = favPlace();
+  if (place) place.insertBefore(box, place.firstChild);
+  return box;
+}
+function renderFav() {
+  const box = ensureFavBox();
+  if (!box) return;
+  const acc = FAV.account, st = FAV.state || { loading: true }, run = FAV.run;
+  const title = 'Избранное аккаунта ' + (acc.name || st.name || '№' + acc.id);
+  box.querySelector('.lb-fav-title').textContent = title;
+  const go = box.querySelector('.lb-fav-go'), stop = box.querySelector('.lb-fav-stop'), bar = box.querySelector('.lb-fav-bar');
+  let note = '', state = '', button = '', busy = false, pct = -1;
+  const known = Number(st.known || 0) > 0;
+  const waiting = st.going ? `Скачивается: ${Number(st.going.downloaded || 0)} из ${Number(st.going.cards || 0)} — ход в «Скачать → Загрузки»`
+    : st.pending ? 'Ждёт: скачается, когда закончится проверка подписок' : '';
+  if (run && run.phase === 'check') { note = 'Спрашиваю Local Booru…'; busy = true; }
+  else if (run && run.phase === 'collect') {
+    note = `Собираю избранное… страница ${run.page}${run.pages ? ' из ' + run.pages : ''} · ${favPosts(run.count)} — не закрывайте вкладку`;
+    busy = true;
+    pct = run.pages ? Math.min(100, Math.round(run.page / run.pages * 100)) : 0;
+  } else if (run && run.phase === 'send') { note = `Передаю в Local Booru: ${favPosts(run.count)}…`; busy = true; }
+  else if (run && (run.phase === 'done' || run.phase === 'error' || run.phase === 'stopped')) {
+    note = run.text;
+    state = run.phase === 'done' ? 'ok' : 'bad';
+  } else if (st.loading) { note = 'Спрашиваю Local Booru…'; busy = true; }
+  else if (st.ok === false) { note = favProgramWords(st); state = 'bad'; }
+  else if (waiting) note = waiting;
+  else if (known) {
+    const day = st.last_at ? new Date(Number(st.last_at) * 1000).toLocaleDateString('ru-RU') : '';
+    note = `Скачано раньше${day ? ' (' + day + ')' : ''}: в библиотеке ${Number(st.have || 0)} из ${favPosts(st.known)}`
+      + (st.parse ? ` · ждут парсера: ${Number(st.parse)}` : '');
+  } else note = 'Local Booru скачает все лайки этого аккаунта и сама проставит теги';
+  if (!busy) button = waiting && st.ok !== false ? '' : (known ? 'Докачать новые' : 'Скачать избранное');
+  const noteEl = box.querySelector('.lb-fav-note');
+  if (noteEl.textContent !== note) noteEl.textContent = note;
+  box.dataset.state = state;
+  stop.hidden = !(run && run.phase === 'collect');
+  go.hidden = (!button && !busy) || !stop.hidden;
+  go.disabled = busy;
+  if (button) { go.textContent = button; go.dataset.fav = known ? 'new' : 'all'; }
+  if (stop.hidden) stop.disabled = false;
+  bar.hidden = pct < 0;
+  bar.classList.toggle('lb-fav-bar-any', pct === 0);
+  if (pct > 0) bar.style.setProperty('--lb-fav-p', pct + '%');
+}
+async function favStart(mode) {
+  const acc = FAV.account;
+  if (!acc || (FAV.run && ['check', 'collect', 'send'].includes(FAV.run.phase))) return;
+  const site = canonicalHost();
+  FAV.stop = false;
+  FAV.run = { phase: 'check' };
+  renderFav();
+  const st = await favAsk('LB_FAV_STATE', { site, account: acc.id });          // the program closed: nothing is collected
+  FAV.state = st;
+  if (!st || st.ok === false) { FAV.run = { phase: 'error', text: favProgramWords(st) }; renderFav(); return; }
+  if (st.going || st.pending) { FAV.run = null; renderFav(); return; }
+  const known = new Set((st.ids || []).map(Number));
+  FAV.run = { phase: 'collect', page: 0, pages: 0, count: 0 };
+  renderFav();
+  const progress = (page, count, pages) => { FAV.run = { phase: 'collect', page, pages, count }; renderFav(); };
+  let ids;
+  try {
+    ids = acc.engine === 'gelbooru' ? await favCollectGelbooru(acc, progress) : await favCollectJson(acc, mode, known, progress);
+  } catch (e) {
+    FAV.run = { phase: e && e.fav === 'stopped' ? 'stopped' : 'error', text: favSiteWords(e) };
+    renderFav();
+    return;
+  }
+  if (!ids.length) {
+    FAV.run = { phase: 'error', text: 'Сайт не показал ни одного поста в избранном этого аккаунта — оно пустое или скрыто' };
+    renderFav();
+    return;
+  }
+  FAV.run = { phase: 'send', count: ids.length };
+  renderFav();
+  const r = await favAsk('LB_FAV_TAKE', { site, account: acc.id, name: acc.name || st.name || '', ids, mode });
+  FAV.run = r && r.ok ? { phase: 'done', text: String(r.message || 'Передано в Local Booru') } : { phase: 'error', text: favProgramWords(r) };
+  if (r && r.ok) {
+    const now = await favAsk('LB_FAV_STATE', { site, account: acc.id });
+    if (now && now.ok !== false) FAV.state = now;
+  }
+  renderFav();
+}
+// On every check of the page: the block on an account's page (the site is asked at most once per address).
+async function favoritesHere() {
+  const acc = favAccountOfPage();
+  const key = acc ? [acc.engine, acc.id, acc.name].join(':') : '';
+  if (key === FAV.key) { if (FAV.account) ensureFavBox(); return; }
+  FAV.key = key;
+  FAV.account = null; FAV.state = null; FAV.run = null;
+  document.querySelector('.lb-fav')?.remove();
+  if (!acc) return;
+  const full = await favResolve(acc);
+  if (FAV.key !== key || !full) return;
+  FAV.account = { ...full, name: full.name || favNameOnPage(full) };
+  renderFav();
+  const st = await favAsk('LB_FAV_STATE', { site: canonicalHost(), account: full.id });
+  if (FAV.key !== key) return;
+  if (!FAV.run) FAV.state = st || { ok: false };
+  renderFav();
+}
+
 async function checkPage() {
   try {
     const o = await browser.runtime.sendMessage({ type: 'LB_GET_OPTIONS' });
     if (o && o.options) LB.options = o.options;
     LB.profile = findProfile(LB.options.profiles || []);
-    if (!LB.options.enabled) return;
+    if (!LB.options.enabled) { FAV.key = ''; FAV.account = null; document.querySelector('.lb-fav')?.remove(); return; }
+    favoritesHere().catch(() => {});
     const items = collectItems();
     if (!items.length) return;
     ensureToolbar();

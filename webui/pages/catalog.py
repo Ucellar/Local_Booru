@@ -7,8 +7,8 @@ chosen as chips with ×, «Показать ещё» below; on the right «Фи�
 tags, type, status, «от — до» of chapters, rating and year, «Сбросить» / «Применить».
 
 * ``/manga/feed``, ``/manhwa/feed`` — Remanga and MangaLib together (the tab's kinds of comics); ``?site=`` — the feed
-  of one site of ``core/manhwa_feed`` (ReadManga, MangaBuff, Desu, MangaDex, Хентай-тян — as the site gives it, no
-  filters: «Новые главы» or «Популярное»; the address of before, ``?site=&how=``, — the same);
+  of one site of ``core/manhwa_feed`` (ReadManga, MangaBuff, Desu, MangaDex, Хентай-тян, Nude-Moon — as the site gives
+  it, no filters: «Новые главы» or «Популярное»; the address of before, ``?site=&how=``, — the same);
 * ``/videos/feed`` — YummyAnime's catalog;
 * ``?part=1`` — the tiles of a page as JSON ({html, more, next, notes, pending}): «Показать ещё» and «отвечает»;
 * what was chosen last is remembered for each tab (``prefs`` ``feed_<kind>``): the tab opens as it was left;
@@ -20,6 +20,7 @@ tags, type, status, «от — до» of chapters, rating and year, «Сброс
 """
 from __future__ import annotations
 
+import re
 from urllib.parse import parse_qs, urlencode
 
 from core import catalog as C
@@ -30,9 +31,11 @@ PATHS = {"manga": "/manga/feed", "manhwa": "/manhwa/feed", "video": "/videos/fee
 HEADS = {"manga": "Манга онлайн", "manhwa": "Манхва онлайн", "video": "Сериалы онлайн"}
 PREF = {"manga": "feed_manga", "manhwa": "feed_manhwa", "video": "feed_video"}
 # the address's words: what a link and the form keep (``page``, ``part``, ``again`` — not remembered)
-PARAMS = ("order", "q", "g", "x", "tg", "tx", "t", "st", "ch1", "ch2", "r1", "r2", "y1", "y2", "s", "site")
-ALONE = ("readmanga", "mangabuff", "desu", "mangadex", "hentaichan")   # sites shown as feeds of their own
-SHOWN_TAGS = 24                   # tags a search of «Найти тег» shows at most (the page asks none: all are here)
+# (v5.44.148) ``sg`` / ``sx`` — a site's own tags, «да» and «нет» («nhentai:artist:name»: ``catalog.Query.extra``)
+PARAMS = ("order", "q", "g", "x", "tg", "tx", "sg", "sx", "t", "st", "ch1", "ch2", "r1", "r2", "y1", "y2", "s", "site")
+ALONE = ("readmanga", "mangabuff", "desu", "mangadex", "hentaichan", "nudemoon")   # sites shown as feeds of their own
+SHOWN_TAGS = 24                   # tags a search of «Найти тег» shows at most (the feed's own: all are in the page;
+#                                   (v5.44.148) a site's own — asked of it as the words are typed, ``tags_json``)
 ICON_SEARCH = ('<svg class="cat-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle>'
                '<path d="m20 20-3.5-3.5"></path></svg>')
 
@@ -45,6 +48,8 @@ def register(router) -> None:
     router.add("GET", r"/m/manhwa/feed", lambda req: page(req, "manhwa", phone=True))
     router.add("GET", r"/m/videos/feed", lambda req: page(req, "video", phone=True))
     router.add("GET", r"/api/catalog/cover", cover)
+    router.add("GET", r"/api/catalog/filters", filters_json)          # (v5.44.130) a page's genres as searches
+    router.add("GET", r"/api/catalog/tags", tags_json)                # (v5.44.148) a site's own tags for «Найти тег»
 
 
 # ── what is asked ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -60,13 +65,16 @@ class Asked:
 
         self.kind = kind
         self.phone = phone             # (v5.44.105) the phone's page: its addresses
+        self.find = ""                 # (v5.44.149) words put into «Найти тег» by the address (``find``; an author
+        self.pick = ""                 # of a title's page) and whose tag of exactly that name is chosen at once
         order = one("order") or {"new": "updates", "popular": "popular"}.get(one("how"), "")   # the old «how»
         self.query = C.Query(
             kind, order=order, text=one("q"), genres=tuple(many("g")), without=tuple(many("x")),
             tags=tuple(many("tg")), untags=tuple(many("tx")), types=tuple(many("t")), status=tuple(many("st")),
             chapters=(C.as_number(one("ch1")), C.as_number(one("ch2"))),
             rating=(C.as_number(one("r1"), float), C.as_number(one("r2"), float)),
-            years=(C.as_number(one("y1")), C.as_number(one("y2"))), sites=tuple(many("s")), mode=mode)
+            years=(C.as_number(one("y1")), C.as_number(one("y2"))), sites=tuple(many("s")), mode=mode,
+            extra=tuple(many("sg")), unextra=tuple(many("sx")))
         site = one("site")
         self.site = site if kind != "video" and site in _alone_names(mode) else ""
 
@@ -77,6 +85,7 @@ class Asked:
             "order": [q.order if not self.site or q.order in ("updates", "popular") else "popular"],
             "q": [q.text] if q.text else [],
             "g": list(q.genres), "x": list(q.without), "tg": list(q.tags), "tx": list(q.untags), "t": list(q.types),
+            "sg": list(q.extra), "sx": list(q.unextra),
             "st": list(q.status), "ch1": _num(q.chapters[0]), "ch2": _num(q.chapters[1]), "r1": _num(q.rating[0]),
             "r2": _num(q.rating[1]), "y1": _num(q.years[0]), "y2": _num(q.years[1]), "s": list(q.sites),
             "site": [self.site] if self.site else []}
@@ -104,6 +113,7 @@ class Asked:
     def groups(self) -> list:
         q = self.query
         return [("g", list(q.genres)), ("x", list(q.without)), ("tg", list(q.tags)), ("tx", list(q.untags)),
+                ("sg", list(q.extra)), ("sx", list(q.unextra)),
                 ("t", list(q.types)), ("st", list(q.status)), ("s", list(q.sites)), ("q", [q.text] if q.text else [])]
 
 
@@ -124,10 +134,16 @@ def _asked(req: Request, kind: str, phone: bool = False) -> "tuple[Asked, bool]"
     from webui import content_mode, prefs
     mode = content_mode.mode()
     said = {name: values for name, values in req.query.items() if name in PARAMS or name == "how"}
-    if not said:
+    # (v5.44.149) ``find`` — the words of «Найти тег» (an author's name from a title's page), ``pick`` — whose tag of
+    # exactly that name the page chooses itself («lib»): asked on a list with nothing else chosen, not the remembered
+    find = " ".join(str(req.arg("find") or "").split())[:60]
+    if not said and not find:
         said = parse_qs(str(prefs.load().get(PREF[kind]) or ""))
         return Asked(kind, said, mode, phone), False
-    return Asked(kind, said, mode, phone), True
+    asked = Asked(kind, said or {"order": ["popular"]}, mode, phone)
+    asked.find = find if kind != "video" else ""
+    asked.pick = req.arg("pick") if asked.find and req.arg("pick") in C.EXTRA_SITES else ""
+    return asked, bool(said)
 
 
 def _remember(kind: str, asked: Asked) -> None:
@@ -195,8 +211,16 @@ def _answer(req: Request, asked: Asked, n: int, wait: float, rest: bool = False)
         return Answer()
     notes = []
     if not rest:
-        for label, why in got.skipped:
-            notes.append(f'<p class="cat-note">Без {esc(label)}: {esc(why)}.</p>')
+        for labels, why in _skipped_together(got.skipped):
+            notes.append(f'<p class="cat-note">Без {esc(_joined(labels))}: {esc(why)}.</p>')
+        own = list(asked.query.extra)
+        if own and n == 1:                           # (v5.44.148) a site's own tag: no other site has such a one
+            what = C.extra_parts(own[0])[1]
+            sites = [C.LABELS[s] for s in asked.query.asked()]    # (v5.44.149) an author of the Lib API — two sites
+            notes.append(f'<p class="cat-note quiet">{"Показан только" if len(sites) < 2 else "Показаны только"} '
+                         f'{esc(_joined(sites) or C.extra_where(own[0]))}: «{esc(C.extra_shown(own[0]))}» — '
+                         f'{"его" if len(sites) < 2 else "их"} {esc(C.EXTRA_WORDS.get(what, "тег"))}, у других '
+                         f'сайтов такого нет.</p>')
     for label, why in got.errors.items():
         if rest and label not in got.asked:
             continue
@@ -214,9 +238,10 @@ def _answer(req: Request, asked: Asked, n: int, wait: float, rest: bool = False)
     if rest:
         return Answer(got.tiles, got.more, "".join(notes), "", "")
     if asked.query.order == "popular":
-        newest = [label for label in ("Хентай-тян", "Hentasis") if label in got.asked]
+        newest = [label for label in ("Хентай-тян", "Hentasis", "HentaiHaven", "Hentai-XS", "HFShare")
+                  if label in got.asked]                  # (v5.44.139) Hentai-XS, HFShare
         if newest:
-            notes.append(f'<p class="cat-note quiet">{esc(" и ".join(newest))} — сначала новые: '
+            notes.append(f'<p class="cat-note quiet">{esc(_joined(newest))} — сначала новые: '
                          f'{"популярного у них нет" if len(newest) > 1 else "популярного у него нет"}.</p>')
     notes.append(_had_note(got.had))
     empty = ""
@@ -236,6 +261,28 @@ def _joined(names: list) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " и " + names[-1] if names else ""
 
 
+def _skipped_together(skipped) -> list:
+    """(v5.44.157) The sites a list is shown without — those that say the same of one tag or genre in one line:
+    [([labels], why)], «Без HentaiLib, nhentai и Nude-Moon: у них нет тега «Гяру-о»».  A tag one site alone has
+    (AllHentai's 56, 5.44.155) made a line of every other site of the list — four of them above the tiles.  Any other
+    reason, and the reason of one site, — as the site's builder says it."""
+    said, order = {}, []
+    for label, why in skipped:
+        found = re.fullmatch(rf"у {re.escape(label)} (нет (?:тега|жанра) «.+»)", why)
+        key = ("", found.group(1)) if found else (label, why)
+        if key not in said:
+            order.append(key)
+        said.setdefault(key, []).append((label, why))
+    out = []
+    for key in order:
+        rows = said[key]
+        if len(rows) > 1:
+            out.append(([label for label, _why in rows], "у них " + key[1]))
+        else:
+            out.append(([rows[0][0]], rows[0][1]))
+    return out
+
+
 def _alone(asked: Asked, n: int, wait: float, again: bool, have: "C.Have | None" = None) -> Answer:
     """The feed of one site (``manhwa_feed``) as the site gives it — every kind (Хентай-тян's are all «Манга», a page
     of ReadManga's «Популярное» may hold no manga at all: a filtered page would often be empty); (v5.44.93) without
@@ -252,7 +299,7 @@ def _alone(asked: Asked, n: int, wait: float, again: bool, have: "C.Have | None"
         return Answer([], False, f'<p class="cat-note bad" role="alert">{esc(got.error)} <a href="'
                                  f'{esc(asked.href(page=n, again=1))}">Попробовать ещё раз</a></p>')
     rows = [(h, list(h.names)) for h in got.hits]
-    if asked.site == "hentaichan":                 # (v5.44.95) the parts of one work — one tile
+    if asked.site in ("hentaichan", "nudemoon"):   # (v5.44.95) the parts of one work — one tile (v5.44.131 Nude-Moon)
         rows = C.works_of(got.hits)
     hits = [(h, names) for h, names in rows if have is None or not have.holds({(h.site, h.key)}, S.names_of(*names))]
     tiles = []
@@ -294,6 +341,9 @@ def page(req: Request, kind: str, phone: bool = False) -> Response:
     return _frame(req, kind, body, phone)
 
 
+WAIT_PLACES = 12           # (v5.44.158) how many places of tiles are drawn while the sites answer
+
+
 def _wait(asked: Asked, n: int) -> str:
     if asked.site:
         from core import manhwa_sources as S
@@ -304,8 +354,12 @@ def _wait(asked: Asked, n: int) -> str:
         names = [C.LABELS[s] for s in asked.query.asked() if s in shown]
         joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " и " + names[-1] if names else ""
         who = joined + (" отвечают" if len(names) > 1 else " отвечает")
+    # (v5.44.158) under the line — the places of the tiles to come (they shimmer while «Плавные переходы» are on):
+    # the page does not jump when the answer is put in
+    places = '<span><i></i><b></b><u></u></span>' * WAIT_PLACES
     return (f'<div class="cat-wait" role="status" data-part="{esc(asked.href(page=n, part=1))}">'
-            f'<span class="cat-spin" aria-hidden="true"></span> {esc(who)} — лента появится здесь сама.</div>')
+            f'<p class="cat-wait-said"><span class="cat-spin" aria-hidden="true"></span> {esc(who)} — лента появится '
+            f'здесь сама.</p><div class="cat-skel" aria-hidden="true">{places}</div></div>')
 
 
 def _grid(asked: Asked, n: int, got: Answer, next_href: str) -> str:
@@ -380,6 +434,10 @@ def _chips(asked: Asked) -> str:
         chip(f"тег: {name}", asked.without_value("tg", name), "yes")
     for name in q.untags:
         chip(f"без тега: {name}", asked.without_value("tx", name), "no")
+    for value in q.extra:                           # (v5.44.148) a site's own tags: «автор: name · nhentai»
+        chip(C.extra_label(value, q.kind, q.mode), asked.without_value("sg", value), "yes")
+    for value in q.unextra:
+        chip(f"без: {C.extra_label(value, q.kind, q.mode)}", asked.without_value("sx", value), "no")
     labels = {k: label for k, label, _s in C.types(q.kind)}
     for key in q.types:
         chip(labels[key], asked.without_value("t", key))
@@ -400,15 +458,19 @@ def _chips(asked: Asked) -> str:
     return (f'<div class="cat-chips">{"".join(out)}<a class="cat-reset" href="{esc(reset)}">Сбросить всё</a></div>')
 
 
-def _tri(names, yes: tuple, no: tuple, field_yes: str, field_no: str, *, rest_from: "int | None" = None) -> str:
+def _tri(names, yes: tuple, no: tuple, field_yes: str, field_no: str, *, rest_from: "int | None" = None,
+         also: "dict | None" = None) -> str:
     """Chips of three states: none, «да» (``field_yes``), «нет» (``field_no``); the hidden fields — the chosen ones;
-    from ``rest_from`` on the ones not chosen wait for «все жанры» / «Найти тег» (``data-rest``)."""
+    from ``rest_from`` on the ones not chosen wait for «все жанры» / «Найти тег» (``data-rest``); (v5.44.148)
+    ``also`` — {a name: its other names}: «Найти тег» looks in them too (``data-also``, «|» between them)."""
     chips, inputs = [], []
     for i, name in enumerate(names):
         state = "yes" if name in yes else "no" if name in no else ""
         mark = "✓" if state == "yes" else "−" if state == "no" else ""
         rest = ' data-rest' if rest_from is not None and i >= rest_from and not state else ""
-        chips.append(f'<button type="button" class="cat-tri-chip" data-name="{esc(name)}" data-state="{state}"{rest}>'
+        others = "|".join((also or {}).get(name) or ())
+        chips.append(f'<button type="button" class="cat-tri-chip" data-name="{esc(name)}" data-state="{state}"{rest}'
+                     + (f' data-also="{esc(others)}"' if others else "") + '>'
                      f'<span class="cat-mark" aria-hidden="true">{mark}</span>{esc(name)}</button>')
         if state:
             inputs.append(f'<input type="hidden" name="{field_yes if state == "yes" else field_no}" '
@@ -417,11 +479,56 @@ def _tri(names, yes: tuple, no: tuple, field_yes: str, field_no: str, *, rest_fr
             f'<span class="cat-tri-fields" hidden>{"".join(inputs)}</span></div>')
 
 
+def own_chip(value: str, state: str = "", found: bool = False, kind: str = "", mode: str = "") -> str:
+    """(v5.44.148) A site's own tag as a chip of three states: «автор shindol nhentai» (``data-name`` — what goes to
+    the address, ``data-label`` — what is read aloud); the script makes the same of what a site found
+    (``catalog.js``: ``ownChip``).  (v5.44.149) ``data-one`` — one of its kind at a time and no «нет» (an author of
+    MangaLib: the site's list takes one)."""
+    group, what, _name = C.extra_parts(value)
+    mark = "✓" if state == "yes" else "−" if state == "no" else ""
+    one = f' data-one="{esc(group)}"' if C.extra_single(value) else ""
+    return (f'<button type="button" class="cat-tri-chip cat-own-chip{" found" if found else ""}" '
+            f'data-name="{esc(value)}" data-label="{esc(C.extra_label(value, kind, mode))}" data-state="{state}"{one}>'
+            f'<span class="cat-mark" aria-hidden="true">{mark}</span>'
+            f'<span class="cat-own-kind">{esc(C.EXTRA_WORDS.get(what, what))}</span>'
+            f'<span class="cat-own-name">{esc(C.extra_shown(value))}</span>'
+            f'<span class="cat-own-site">{esc(C.extra_where(value, kind, mode))}</span></button>')
+
+
+def own_groups(kind: str, mode: str) -> list:
+    """(v5.44.149) [(whose — «nhentai», «lib», the labels of its sites shown)] — the sites of the list that have tags
+    of their own (``catalog.EXTRA_SITES``): nhentai — tags, artists, characters, parodies; the Lib API — authors."""
+    shown = C.sites_shown(kind, mode)
+    out = []
+    for group, sites in C.EXTRA_SITES.items():
+        mine = [C.LABELS[s] for s in sites if s in shown]
+        if mine and not (group == "nhentai" and kind != "manga"):
+            out.append((group, mine))
+    return out
+
+
+def _own_tags(q, groups: list) -> str:
+    """(v5.44.148) The sites' own tags: those of the query (chosen — «да» or «нет») and, put here by the script, those
+    the sites found for the words typed in «Найти тег» (``tags_json``); their hidden fields — ``sg`` / ``sx``."""
+    chips, inputs = [], []
+    for value, state in [(v, "yes") for v in q.extra] + [(v, "no") for v in q.unextra]:
+        chips.append(own_chip(value, state, kind=q.kind, mode=q.mode))
+        inputs.append(f'<input type="hidden" name="{"sg" if state == "yes" else "sx"}" value="{esc(value)}">')
+    said = [f'{"теги, авторы, персонажи и пародии" if group == "nhentai" else "авторы"} {_joined(labels)}'
+            for group, labels in groups]
+    who = _joined([label for _group, labels in groups for label in labels])
+    words = "; ".join(said)
+    hint = (f'<p class="cat-hint cat-own-hint" data-cat-own-hint data-sites="{esc(who)}">'
+            f'{esc(words[:1].upper() + words[1:])} — начните вводить название (от двух букв).</p>' if groups else "")
+    return (f'<div class="cat-tri cat-own" data-yes="sg" data-no="sx" data-cat-own>{"".join(chips)}'
+            f'<span class="cat-tri-fields" hidden>{"".join(inputs)}</span></div>{hint}')
+
+
 def _genre_names(kind: str, mode: str) -> list:
     """The genres in their order on the page: the usual ones first, then the rest by the alphabet; «Эротика» — not in
     «SFW» (and not in «NSFW» — there it is all of them)."""
     every = [g for g in C.offered(C.genres(kind), kind, mode, of_genres=True) if not (g == "Эротика" and mode != "all")]
-    top = [g for g in C.top_genres(kind) if g in every]
+    top = [g for g in C.top_genres(kind, mode) if g in every]
     return top + [g for g in every if g not in top]
 
 
@@ -436,10 +543,15 @@ def _side(asked: Asked) -> str:
     groups = []
     mine = C.sites_shown(kind, q.mode)
     if len(mine) > 1:
-        picked = q.asked()
-        boxes = "".join(f'<label class="cat-check"><input type="checkbox" name="s" value="{site}"'
-                        f'{" checked" if site in picked else ""}>{esc(C.LABELS[site])}</label>'
-                        for site in mine)
+        # (v5.44.149) the boxes — what the owner picked; with a site's own tag chosen only its sites are asked: the
+        # others are dimmed, not unticked (unticked, they stayed so after the tag was taken away)
+        picked = q.sites or mine
+        asked_now = q.asked()
+        idle = ' idle" title="Сейчас не спрашивается: выбранного тега или автора у этого сайта нет'
+        boxes = "".join(
+            f'<label class="cat-check{"" if site in asked_now else idle}">'
+            f'<input type="checkbox" name="s" value="{site}"{" checked" if site in picked else ""}>'
+            f'{esc(C.LABELS[site])}</label>' for site in mine)
         groups.append(f'<fieldset class="cat-group"><legend>Сайты</legend><div class="cat-checks">{boxes}</div>'
                       f'</fieldset>')
     if not C.filters_taken(kind, q.mode):          # (v5.44.93) NSFW: sites of hentai alone — they filter nothing
@@ -450,26 +562,39 @@ def _side(asked: Asked) -> str:
         return (f'<aside class="cat-side" aria-labelledby="cat-flt"><h2 id="cat-flt">Фильтры</h2>'
                 f'{"".join(groups)}</aside>')
     names = _genre_names(kind, q.mode)
-    top = len([g for g in C.top_genres(kind) if g in names])
+    top = len([g for g in C.top_genres(kind, q.mode) if g in names])
     groups.append(f'<div class="cat-group"><div class="cat-group-head"><span class="cat-label">Жанры</span>'
                   f'<span class="cat-hint">нажать — да, ещё раз — нет</span></div>'
                   f'{_tri(names, q.genres, q.without, "g", "x", rest_from=top)}'
                   f'<button type="button" class="cat-link" data-cat-all aria-expanded="false">все жанры ›</button></div>')
     if kind != "video":
         tag_names = C.offered(C.tags(kind), kind, q.mode)    # (v5.44.96) HentaiLib's — not in «SFW»
+        # (v5.44.148) the sites asked for their own tags as the words are typed (nhentai: tags, artists, characters…;
+        # v5.44.149 — the Lib API: the authors of MangaLib and HentaiLib)
+        own = own_groups(kind, q.mode)
+        words = ("Найти тег, автора, персонажа" if any(group == "nhentai" for group, _l in own)
+                 else "Найти тег или автора" if own else "Найти тег")
+        suggest = f' data-cat-suggest="/api/catalog/tags?kind={kind}"' if own else ""
+        found = (f' value="{esc(asked.find)}"' if asked.find else "") + \
+            (f' data-cat-pick="{esc(asked.pick)}"' if asked.pick and own else "")
         groups.append(f'<div class="cat-group cat-tags"><div class="cat-group-head"><span class="cat-label">Теги</span>'
                       f'<span class="cat-hint">{len(tag_names)}</span></div><label class="cat-vh" for="cat-tagq">'
-                      f'Найти тег</label><input id="cat-tagq" class="cat-field" type="search" placeholder="Найти тег" '
-                      f'autocomplete="off" spellcheck="false" data-cat-tagfind data-limit="{SHOWN_TAGS}">'
-                      f'{_tri(tag_names, q.tags, q.untags, "tg", "tx", rest_from=0)}</div>')
-    boxes = "".join(f'<label class="cat-check"><input type="checkbox" name="t" value="{key}"'
-                    f'{" checked" if key in q.types else ""}>{esc(label)}</label>' for key, label, _s in C.types(kind))
-    groups.append(f'<fieldset class="cat-group"><legend>Тип</legend><div class="cat-checks">{boxes}</div></fieldset>')
-    boxes = "".join(f'<label class="cat-check"><input type="checkbox" name="st" value="{key}"'
-                    f'{" checked" if key in q.status else ""}>{esc(label)}</label>'
-                    for key, label, _s in C.statuses(kind))
-    groups.append(f'<fieldset class="cat-group"><legend>Статус</legend><div class="cat-checks">{boxes}</div>'
-                  f'</fieldset>')
+                      f'{words}</label><input id="cat-tagq" class="cat-field" type="search" placeholder="{words}" '
+                      f'autocomplete="off" spellcheck="false" data-cat-tagfind data-limit="{SHOWN_TAGS}"{suggest}'
+                      f'{found}>'
+                      f'{_tri(tag_names, q.tags, q.untags, "tg", "tx", rest_from=0, also=C.also_names(kind))}'
+                      f'{_own_tags(q, own) if own or q.extra or q.unextra else ""}</div>')
+    if C.typed(kind, q.mode):                      # (v5.44.137) the videos in «NSFW»: their sites have no types
+        boxes = "".join(f'<label class="cat-check"><input type="checkbox" name="t" value="{key}"'
+                        f'{" checked" if key in q.types else ""}>{esc(label)}</label>'
+                        for key, label, _s in C.types(kind))
+        groups.append(f'<fieldset class="cat-group"><legend>Тип</legend><div class="cat-checks">{boxes}</div>'
+                      f'</fieldset>')
+        boxes = "".join(f'<label class="cat-check"><input type="checkbox" name="st" value="{key}"'
+                        f'{" checked" if key in q.status else ""}>{esc(label)}</label>'
+                        for key, label, _s in C.statuses(kind))
+        groups.append(f'<fieldset class="cat-group"><legend>Статус</legend><div class="cat-checks">{boxes}</div>'
+                      f'</fieldset>')
     ranges = [("r", "Оценка", q.rating, "decimal"), ("y", "Год", q.years, "numeric")]
     if kind != "video":
         ranges.insert(0, ("ch", "Количество глав", q.chapters, "numeric"))
@@ -534,6 +659,39 @@ def phone_chips(kind: str, current: str = "feed") -> str:
     links = "".join(f'<a class="m-chip" href="{esc(href)}"{here if key == current else ""}>{esc(words)}</a>'
                     for key, words, href in items)
     return f'<nav class="m-chips" aria-label="{label}">{links}</nav>'
+
+
+def filters_json(req: Request) -> Response:
+    """(v5.44.130) ``/api/catalog/filters?kind=manga|manhwa|video&n=<name>&n=…`` — each genre or tag a page shows as a
+    search of «Лента» (``core.catalog.feed_filter``): {chips: [{name, g | tg | never}]} — [{name}] the feed has not.
+    The cards of «Скачать → По ссылке» make their genres links with it (the answers of the downloads say only names)."""
+    kind = req.arg("kind") if req.arg("kind") in C.KINDS else "manga"
+    out = []
+    for raw in (req.query.get("n") or [])[:40]:
+        name = " ".join(str(raw or "").split())[:80]
+        if not name:
+            continue
+        field, value = C.feed_filter(kind, name, tag=req.arg("tags") == "1")
+        chip = {"name": name}
+        if field == "never":
+            chip["never"] = True
+        elif field:
+            chip[field] = value
+        out.append(chip)
+    return Response.json({"ok": True, "chips": out})
+
+
+def tags_json(req: Request) -> Response:
+    """(v5.44.148) ``/api/catalog/tags?kind=manga&q=<the words typed>`` — the sites' own tags whose names begin so
+    (``core.catalog.suggested``: nhentai's tags, artists, characters, parodies, groups; v5.44.149 — the authors of
+    MangaLib and HentaiLib): {found: [{value, name, kind, word, site, count, one}], silent: [the sites that did not
+    answer]} — «Найти тег» shows them as chips beside the feed's own tags.  Only the sites the mode shows («SFW» —
+    not the sites of hentai), nothing a gate of the program closes."""
+    from webui import content_mode
+    kind = req.arg("kind") if req.arg("kind") in C.KINDS else "manga"
+    words = " ".join(str(req.arg("q") or "").split())[:60]
+    found, silent = C.suggested(kind, content_mode.mode(), words)
+    return Response.json({"ok": True, "q": words, "found": found, "silent": silent})
 
 
 def cover(req: Request) -> Response:

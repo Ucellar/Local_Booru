@@ -122,8 +122,19 @@
 .tt .tt-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .tt .tt-chips li { padding: 3px 10px; border: 1px solid var(--tt-line); border-radius: 999px; color: var(--text);
   font-size: 13px; }
+/* (v5.44.129) a genre or tag — a search («Лента» of the tab): the whole chip is the link; a tag — as «Вся манхва» has
+   them, without the line round it */
+.tt .tt-chips li.tt-chip-tag { border-color: transparent; background: var(--panel-2, var(--panel)); }
+.tt .tt-chips li.tt-chip-go { padding: 0; }
+.tt .tt-chips li.tt-chip-go a { display: block; padding: 3px 10px; border-radius: 999px; color: var(--text);
+  text-decoration: none; }
+.tt .tt-chips li.tt-chip-go:hover, .tt .tt-chips li.tt-chip-go:focus-within { border-color: var(--accent); }
+.tt .tt-chips li.tt-chip-go a:hover, .tt .tt-chips li.tt-chip-go a:focus-visible { color: var(--accent-text, var(--accent));
+  text-decoration: none; }
 .tt .tt-tags { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
 .tt .tt-tags .tt-label { min-width: 90px; }
+/* (v5.44.149) the authors of a site's title: the label beside its chips, not a column of the gallery's lines */
+.tt .tt-people .tt-label { min-width: 0; }
 
 /* ── the chapters ── */
 .tt .tt-list { padding: 8px 0; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; }
@@ -171,6 +182,14 @@
   text-align: center; }
 .tt .tt-page img { display: block; width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 8px;
   background: var(--panel-2, var(--panel)); }
+/* (v5.44.148) a page — a link to the reader at that page; the one it was left at is marked */
+.tt .tt-page a { display: flex; flex-direction: column; gap: 4px; color: inherit; text-decoration: none;
+  border-radius: 8px; }
+.tt .tt-page a:hover { color: var(--text); text-decoration: none; }
+.tt .tt-page a:hover img { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tt .tt-page a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.tt .tt-page.here { color: var(--accent-text, var(--accent)); font-weight: 600; }
+.tt .tt-page.here img { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* ── a narrow window: the cover above, a chapter's marks under its name, «Скачивание» in one column ── */
 @media (max-width: 640px) {

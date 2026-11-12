@@ -19,6 +19,11 @@ of Netscape or the JSON of a browser's cookie extension) and MangaLib's token fr
   sends what the browser has of a site when its page loads, its cookies change or the program asks
   (:func:`take_from_browser`), and takes the program's asks — «Открыть сайт», «Обновить вход» of «Сайты манги»
   (:func:`ask_browser` → :func:`browser_asks`).  :func:`browser_state` — whether such an extension is there now.
+* (v5.44.131) The extension 0.10.1 sends the browser's User-Agent with the cookies (``agent``): a pass through a check
+  for browsers (Cloudflare's ``cf_clearance``) is good only with the agent of the browser that got it; the program asks
+  that site with it while the cookies hold such a pass (``manhwa_sources.signed_agent``).  The agent is kept with the
+  cookies (it is no secret), never shown either.  (v5.44.132) Enough where the service looks at the cookie and the
+  agent alone — Nude-Moon's Cloudflare looks at more (measured 8.11.2026): its pages come through the window's browser.
 """
 from __future__ import annotations
 
@@ -41,6 +46,7 @@ TOKEN_SITES = ("mangalib",)           # the sites whose API takes the owner's to
 # (v5.44.100) the sign-in from the browser (the extension 0.10.0)
 BROWSER_TOKEN = {"mangalib": "auth", "hentailib": "auth"}   # the localStorage key of a Lib site's token
 BROWSER_VERSION = (0, 10, 0)          # the extension that takes the sign-in of the sites of manga
+AGENT_VERSION = (0, 10, 1)            # (v5.44.131) …and gives the browser's User-Agent with it
 MAX_COOKIES = 300                     # of one site: more is not a sign-in
 SEEN_FOR = 45                         # seconds: the extension asked the program within this — it is there
 ASK_TTL = 120                         # an ask the extension has not taken in this long is dropped
@@ -195,6 +201,7 @@ def put_cookies(name: str, text: str) -> dict:
         data = load()
         entry = dict(data.get(name) or {})
         entry.update({"cookies": mine, "at": int(now), "from": "file"})
+        entry.pop("agent", None)                      # (v5.44.131) a file says not which browser they are of
         data[name] = entry
         _write(data)
     apply()
@@ -270,12 +277,16 @@ def put_token(name: str, text: str) -> dict:
 
 
 def forget(name: str, what: str = "all") -> None:
-    """The site's cookies ("cookies"), its token ("token") or both ("all") taken away."""
+    """The site's cookies ("cookies"), its token ("token") or both ("all") taken away; (v5.44.132) the cookies out of the
+    window's browser too (``manhwa_sources.forget_shared``: given to it for a site that lets in only the browser)."""
+    gone: list = []
     with _LOCK:
         data = load()
         entry = dict(data.get(name) or {})
         if what in ("cookies", "all"):
+            gone = list(entry.get("cookies") or [])
             entry.pop("cookies", None)
+            entry.pop("agent", None)                  # (v5.44.131) the agent of those cookies' browser
         if what in ("token", "all"):
             entry.pop("token", None)
             entry.pop("until", None)
@@ -285,10 +296,13 @@ def forget(name: str, what: str = "all") -> None:
             data.pop(name, None)
         _write(data)
     apply()
+    if what in ("cookies", "all"):
+        S.forget_shared(name, gone)
 
 
 # ── (v5.44.100) the sign-in from the owner's browser: the extension «Local Booru Companion» 0.10.0 ────────────────
-_BROWSER = {"seen": 0.0, "any": 0.0, "version": ""}   # when the extension 0.10 asked last; when any extension did
+_BROWSER = {"seen": 0.0, "any": 0.0, "version": "", "agent": False}   # when the extension 0.10 asked last; when any
+#                                                                        extension did; (v5.44.131) whether it is 0.10.1
 _ASKS: list = []                                       # [{"id", "site", "action", "at"}] the extension takes
 _ANSWERS: dict = {}                                    # site → what the extension sent last (no value)
 _ASKED: dict = {}                                      # an ask's id → the extension's answer to it (no value)
@@ -311,15 +325,18 @@ def browser_seen(version: str = "", *, manga: bool = False) -> None:
         if manga and _version(version) >= BROWSER_VERSION:
             _BROWSER["seen"] = now
             _BROWSER["version"] = str(version)[:20]
+            _BROWSER["agent"] = _version(version) >= AGENT_VERSION
 
 
 def browser_state() -> dict:
     """{"connected": the extension 0.10 is there (asked within :data:`SEEN_FOR`), "old": an extension is there that
-    does not take the sign-in (an old one: reloaded on the browser's page of extensions — it does), "version"}."""
+    does not take the sign-in (an old one: reloaded on the browser's page of extensions — it does), "version",
+    (v5.44.131) "agent": it gives the browser's User-Agent too (0.10.1)}."""
     now = time.time()
     connected = now - _BROWSER["seen"] <= SEEN_FOR
     return {"connected": connected, "old": not connected and now - _BROWSER["any"] <= SEEN_FOR,
-            "version": _BROWSER["version"] if connected else ""}
+            "version": _BROWSER["version"] if connected else "",
+            "agent": connected and bool(_BROWSER.get("agent"))}
 
 
 def browser_sites() -> list:
@@ -396,11 +413,12 @@ def _browser_cookie(c: dict) -> "dict | None":
             "path": str(c.get("path") or "/")[:1024], "expires": ends}
 
 
-def take_from_browser(name: str, cookies, token: str = "", *, missing=(), asked: int = 0) -> dict:
+def take_from_browser(name: str, cookies, token: str = "", *, missing=(), asked: int = 0, agent: str = "") -> dict:
     """What the extension took in the owner's browser for the site ``name``: its cookies (only the site's domains, not
     expired) take the place of the kept ones — none: the kept stay (the browser has nothing of it); the token of a Lib
-    site (its localStorage «auth»), when there is one and it has not ended.  {"cookies": how many kept, "token": bool,
-    "changed": bool} — never a value; ValueError — words."""
+    site (its localStorage «auth»), when there is one and it has not ended; (v5.44.131) the browser's User-Agent
+    (``agent``, 0.10.1) — kept with the cookies it came with (an extension before 0.10.1 sends none: the kept one stays).
+    {"cookies": how many kept, "token": bool, "changed": bool} — never a value; ValueError — words."""
     if S.by_name(name) is None:
         raise ValueError("Такого сайта программа не знает")
     every = [c for c in (_browser_cookie(x) for x in (cookies if isinstance(cookies, list) else [])[:2000]) if c]
@@ -416,11 +434,15 @@ def take_from_browser(name: str, cookies, token: str = "", *, missing=(), asked:
         if until and until < now:
             got_token = ""                            # ended: the site's page has not refreshed it yet
     changed = False
+    agent = S.plain_agent(agent)
     with _LOCK:
         data = load()
         entry = dict(data.get(name) or {})
         if mine and _key(mine) != _key(entry.get("cookies") or []):
             entry["cookies"] = mine
+            changed = True
+        if mine and agent and agent != entry.get("agent"):
+            entry["agent"] = agent
             changed = True
         if got_token and got_token != entry.get("token"):
             entry.update({"token": got_token, "until": until})

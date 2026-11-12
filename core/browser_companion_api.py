@@ -1266,7 +1266,8 @@ class _Handler(BaseHTTPRequestHandler):
                 got = manhwa_access.take_from_browser(
                     str(data.get("site") or "")[:40], data.get("cookies") if isinstance(data.get("cookies"), list) else [],
                     str(data.get("token") or ""), asked=int(asked) if asked.isdigit() else 0,
-                    missing=data.get("missing") if isinstance(data.get("missing"), list) else [])
+                    missing=data.get("missing") if isinstance(data.get("missing"), list) else [],
+                    agent=str(data.get("agent") or "")[:600])           # (v5.44.131, 0.10.1) the browser's agent
             except ValueError as exc:
                 self._send_json(400, {"ok": False, "error": "unknown_site", "message": str(exc)[:200]})
                 return
@@ -1417,6 +1418,18 @@ class _Handler(BaseHTTPRequestHandler):
             from core import companion_page
             act = companion_page.subscribe if path == "/extension/subscribe" else companion_page.subscription_state
             self._send_json(200, act(str(data.get("url") or "")[:2000]))
+            return
+        if path in {"/extension/favorites", "/extension/favorites/state"}:
+            # (0.11.0, v5.44.141) an account's favorites of a booru site: what is known of it, the numbers collected
+            from core import favorites
+            from core.settings import load_settings
+            site, account = str(data.get("site") or "")[:100], str(data.get("account") or "")[:40]
+            if path == "/extension/favorites/state":
+                self._send_json(200, favorites.state(load_settings(), site, account))
+            else:
+                self._send_json(200, favorites.take(load_settings(), site, account, str(data.get("name") or "")[:200],
+                                                    data.get("ids") if isinstance(data.get("ids"), list) else [],
+                                                    mode="new" if data.get("mode") == "new" else "all"))
             return
         if path == "/extension/blocklist":
             from core.companion_page import blocklist

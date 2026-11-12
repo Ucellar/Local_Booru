@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
   "permissions": [
     "storage",
@@ -47,6 +47,9 @@
     "*://*.mangadex.org/*",
     "*://*.mangalib.me/*",
     "*://*.mangalib.org/*",
+    "*://*.nude-moon.fun/*",
+    "*://*.nude-moon.net/*",
+    "*://*.nude-moon.org/*",
     "*://*.readmanga.io/*",
     "*://*.readmanga.live/*",
     "*://*.readmanga.me/*",

@@ -756,7 +756,7 @@ def classify_visual_status(path: str | Path, settings: dict | None = None) -> di
     if choice != "clip":
         return {"visual_status": UNKNOWN, "visual_confidence": 0.0, "visual_model": "none:error",
                 "visual_checked_at": int(time.time()),
-                "error": "нет модели: установите onnxruntime (Настройки → Брак: фото или рисунок)"}
+                "error": "нет модели: установите onnxruntime (Настройки → Галерея → Брак: фото или рисунок)"}
     try:
         return _clip_zero_shot_classify(path, settings)
     except Exception as exc:

@@ -27,7 +27,12 @@ FIT_NOTE = ("on", "off")                           # the box «Картинка 
 VIDEO_AUTONEXT = ("on", "off")                     # the tab «Видео»: the next episode starts by itself
 SETS_BOX = ("shown", "hidden")                     # the сборка over a card's picture: its previews or only its line
 CONTENT_MODES = ("sfw", "all", "nsfw")             # (v5.44.53) the switch in the header (webui/content_mode.py)
-MOTION = ("on", "off")                             # (v5.44.55) «Плавные переходы» (static/motion.js)
+# (v5.44.55) «Плавные переходы» (static/motion.js); (v5.44.158) three positions — «Заметные», «Спокойные», «Нет».
+# The words kept are new ones on purpose: «on» and «off» of the switch before 5.44.158 are not among them, so whatever
+# that switch said, the program starts with «Заметные» (the owner, 11.11.2026: «анимаций как будто вообще нет»; the
+# approved mockup «Анимации»); «Нет» chosen from now on is kept as "none"
+MOTION = ("vivid", "calm", "none")
+MOTION_WORDS = {"none": "Нет", "calm": "Спокойные", "vivid": "Заметные"}
 GET_KINDS = ("gallery", "manga", "manhwa", "video", "archive")  # (v5.44.75) the part of «Скачать» opened last
 MANHWA_WIDTHS = ("720", "900", "1200", "full")     # (v5.44.59) the width of the strip of «Манхва»
 
@@ -42,11 +47,12 @@ PAGE_LOOKS = {
     "get": ("grab_skin", None),                         # (v5.44.75) «Скачать» — the grabber's look goes on
     "parser": ("parser_skin", None),
     "subs": ("subs_skin", None),
-    "sites": ("sites_skin", None),
-    "dupes": ("dupes_skin", None),
-    "diag": ("diag_skin", None),
     "settings": ("settings_skin", None),
 }
+# (v5.44.161) pages that are a part of another one take its look: «Сайты» and «Диагностика» are sections of
+# «Настройки», «Дубли» — a tab of the gallery (their own choices of before — sites_skin, diag_skin, dupes_skin — are
+# not looked at any more)
+LOOK_OF = {"sites": "settings", "diag": "settings", "dupes": "posts"}
 FOLLOW = "gallery"                                 # a page's choice «как у галереи»
 LOOK_KEYS = tuple(key for key, _default in PAGE_LOOKS.values())
 VARIANT_KEYS = tuple(key + "_variant" for key in LOOK_KEYS)   # (v5.44.45) each page's light/dark side, kept on its own
@@ -61,7 +67,7 @@ def look(page: str, stored: dict | None = None) -> dict:
     stored = load() if stored is None else stored
     gallery = skins.valid(str(stored.get("skin") or skins.DEFAULT))
     gallery_side = skins.variant_of(gallery, str(stored.get("skin_variant") or ""))
-    key, default = PAGE_LOOKS.get(page, PAGE_LOOKS["posts"])
+    key, default = PAGE_LOOKS.get(LOOK_OF.get(page, page), PAGE_LOOKS["posts"])
     vkey = key + "_variant"
 
     def pack(skin_id: str, follows: bool) -> dict:
@@ -82,10 +88,11 @@ def look(page: str, stored: dict | None = None) -> dict:
 
 
 def motion(stored: dict | None = None) -> str:
-    """(v5.44.55) «Плавные переходы»: "on" (until turned off) or "off"."""
+    """(v5.44.55) «Плавные переходы»; (v5.44.158) "vivid" («Заметные» — until chosen otherwise), "calm" or "none"
+    («Нет»).  What the switch of a version before 5.44.158 kept («on», «off») is «Заметные»."""
     stored = load() if stored is None else stored
-    value = str(stored.get("motion") or "on")
-    return value if value in MOTION else "on"
+    value = str(stored.get("motion") or "vivid")
+    return value if value in MOTION else "vivid"
 
 
 def choices(stored: dict | None = None) -> dict:
@@ -169,6 +176,8 @@ def save(update: dict) -> dict:
             drop.add("phone_content_mode")
     if "motion" in update and str(update["motion"]) in MOTION:
         clean["motion"] = str(update["motion"])
+    elif update.get("motion") in ("on", "off"):   # the switch of a page drawn before 5.44.158 and still open
+        clean["motion"] = "vivid" if update["motion"] == "on" else "none"
     if "manhwa_width" in update and str(update["manhwa_width"]) in MANHWA_WIDTHS:
         clean["manhwa_width"] = str(update["manhwa_width"])
     if "get_kind" in update and str(update["get_kind"]) in GET_KINDS:

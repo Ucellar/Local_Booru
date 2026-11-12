@@ -51,9 +51,8 @@ manga (13 folders are the parts of one).
   only read: never moved, changed or removed.  Its copy is linked to the title that confirmed it as «Из архива» links
   (``.lb/source.json``: its description and tags, the cover — Remanga's first), the chapters it misses go into the queue
   of «Загрузки» (``manhwa_queue``; never a paid one).
-* **The program's rule about minors**: e621 says its pages speak of minors and are not rated safe — never taken
-  (``core/filter.page_forbidden``: the whole rule is in ``core/filter.py``; the sites keep it themselves:
-  ``manhwa_sources``).
+* **The program's gate**: a folder ``gates.pages`` closes by what e621's posts say of its pages (their tags, their
+  rating — :func:`_e621_pages`) is never taken.
 * **When**: in a run of the parser (:class:`RunWatch`: a thread beside the files — the pages of a folder found «not a
   manga» join the run, the journal says «МАНГА:», «НЕ МАНГА:», «ЖДЁТ:», «СБОРКА:» in its tab «Манга») and in the
   background (:func:`background_round`, a part of the duty «comic_manga»: what waited, new folders, the copies).  What
@@ -73,7 +72,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import comic_manga as CM, filter as F, manga_detect as MD
+from core import comic_manga as CM, gates as G, manga_detect as MD
 
 _LOG = logging.getLogger("local_booru.manga")
 
@@ -92,15 +91,15 @@ SEARCHES_PER_HOUR = 60          # searches of the sites of manga by a name an ho
 #                                 4 titles of 3 names every ten minutes) — a folder of thousands never floods them
 LATER = 30 * 60                 # a check put off (no network): asked again so much later
 ROUND_SECONDS = 40              # a round of the background works so long at most (its duty shares one thread)
-SAFE = F.SAFE_RATINGS            # (v5.44.128) the program's rule about minors — in core/filter.py
 
 HOW = {"comicinfo": "ComicInfo.xml", "link": "ссылка в файлах", "site": "тайтл на сайте манги",
        "saucenao": "SauceNAO", "hand": "вы сказали", "nothing": "не подтверждено",
-       "forbidden": "правило о несовершеннолетних", "off": "проверить нечем", "down": "сайты манги не ответили",
+       "forbidden": "не берётся", "off": "проверить нечем", "down": "сайты манги не ответили",
        "later": "SauceNAO — позже"}
 # (a «not a manga» for now: the files and the names confirmed nothing, SauceNAO could not be asked — its pages are
 # parsed, SauceNAO is asked by the background when it may; a manga then — copied, its cards of the gallery to the trash)
 LATER_BY = "SauceNAO спрошу позже: если подтвердит мангу, перенесу в «Мангу»"
+LOOSE = "loose:"                # (v5.44.164) a row's key of a manga found among the loose pictures (``parser_loose``)
 
 # the words of numbers (``core/download_history.plural``)
 FOLDERS = ("папка", "папки", "папок")
@@ -514,11 +513,11 @@ def _tags_of(raw: dict) -> list:
     return out
 
 
-def forbidden(raws: list) -> bool:
-    """The program's rule (``core/filter.page_forbidden``): a page that speaks of minors and is not rated safe — here
-    only what e621's posts of the pages say (their tags, their rating)."""
-    return any(F.page_forbidden(_tags_of(raw), [str(raw.get("rating") or "").strip().lower()[:1]])
-               for raw in raws if isinstance(raw, dict))
+def _e621_pages(raws: list) -> list:
+    """What e621's posts of the pages say, for the program's gate (``gates.pages``): (their tags, their rating) of
+    each."""
+    return [(_tags_of(raw), [str(raw.get("rating") or "").strip().lower()[:1]])
+            for raw in raws if isinstance(raw, dict)]
 
 
 def _hits_of_sauce(data: dict) -> tuple:
@@ -829,9 +828,10 @@ def _by_files(asker: Asker, cand: "MD.Candidate", work: "MD.Work", listed: "list
 
 def _e621_names(asker: Asker, work: "MD.Work", listed: list) -> tuple:
     """The exact MD5 of its first pages on e621 — (the names of the pools they are in: names to search the sites of
-    manga by, never a confirmation; whether e621 says they speak of minors and are not rated safe)."""
+    manga by, never a confirmation; the words of the gate that closes the folder by what e621 says of the pages —
+    "" when none does)."""
     if not asker.e621_ok():
-        return [], False
+        return [], ""
     md5s = []
     for index, part_pages in enumerate(listed):
         if work.parts[index].archive:
@@ -845,11 +845,11 @@ def _e621_names(asker: Asker, work: "MD.Work", listed: list) -> tuple:
                 continue
     found = asker.md5_posts(md5s) if md5s else {}
     if not found:
-        return [], False
+        return [], ""
     ids = [int(getattr(p, "post_id", 0) or 0) for p in found.values() if str(getattr(p, "post_id", "")).isdigit()]
     raws = [r for r in (asker.posts(ids) or {}).values() if r]
     pool_ids = sorted({pid for post in found.values() for pid in _pools_of(post)})
-    return asker.pool_names(pool_ids), forbidden(raws)
+    return asker.pool_names(pool_ids), G.pages(_e621_pages(raws), what="folder")
 
 
 def _dex_names(asker: Asker, links: list) -> list:
@@ -967,10 +967,10 @@ def check_work(asker: Asker, cand: "MD.Candidate", work: "MD.Work", *, steps: tu
             return Verdict("")
     if "names" in steps:
         if "pools" not in memo:                         # (asked once: a check gone on after the pace asks no more)
-            memo["pools"], memo["minors"] = _e621_names(asker, work, listed)
-        pools, minors = memo["pools"], memo["minors"]
-        if minors:
-            return Verdict(NOT, "forbidden", "e621: на страницах — несовершеннолетние, не «safe»: в «Мангу» не беру")
+            memo["pools"], memo["closed"] = _e621_names(asker, work, listed)
+        pools, closed = memo["pools"], memo["closed"]
+        if closed:
+            return Verdict(NOT, "forbidden", closed)               # a gate closed the folder: the words — its
         names = names_of(work, [*memo.get("extra", []), *pools])
         try:
             found, _seen = _by_names(asker, work, listed, names, said="имя ", searched=memo.setdefault("searched", set()))
@@ -1433,10 +1433,18 @@ def trash_cards(settings: dict, work: "MD.Work", name: str) -> int:
     """The gallery's cards the parser made of a manga's pages (``source_originals``) — to the trash as a comic's are
     («перенесено в мангу»: «Вернуть» brings each back); never a card of a сборка the person made or changed, never a
     file of the parser's folder (the cards' own copies in the library go).  How many went."""
+    paths = [str(Path(p)) for part in work.parts if not part.archive for _n, p in MD.pages_of(part)]
+    return trash_paths(settings, paths, name)
+
+
+def trash_paths(settings: dict, paths: list, name: str, *, brak_only: bool = False) -> int:
+    """:func:`trash_cards` of the files ``paths`` (the parser's own: the cards made of them go, the files stay);
+    (v5.44.164) ``brak_only`` — only a card still in Брак (``core/parser_loose.py``: a loose picture a site found
+    since is a card of the gallery with its tags — it stays).  How many went."""
     from core import comic_manga as CM
     from core.database.connection import db
     from core.library_lifecycle import move_to_trash
-    paths = [str(Path(p)) for part in work.parts if not part.archive for _n, p in MD.pages_of(part)]
+    paths = [str(p) for p in paths if p]
     if not paths:
         return 0
     rows: list = []
@@ -1452,13 +1460,14 @@ def trash_cards(settings: dict, work: "MD.Work", name: str) -> int:
                 ids |= {int(r[0]) for r in con.execute(
                     f"SELECT image_id FROM source_originals WHERE original_path IN ({marks}) AND image_id > 0", part)}
             wanted = sorted(ids - mine)
+            only = " AND +bucket='no_match'" if brak_only else ""
             for start in range(0, len(wanted), 800):
                 part = wanted[start:start + 800]
                 marks = ",".join("?" * len(part))
-                rows += [dict(r) for r in con.execute(f"SELECT * FROM images WHERE id IN ({marks}) AND deleted=0",
-                                                      part)]
+                rows += [dict(r) for r in con.execute(
+                    f"SELECT * FROM images WHERE id IN ({marks}) AND deleted=0{only}", part)]
     except Exception as exc:  # noqa: BLE001 - the base busy: the cards stay (the person may trash them)
-        _LOG.warning("parser manga: the cards of %s not read: %s", work.name, exc)
+        _LOG.warning("parser manga: the cards of %s not read: %s", name, exc)
         return 0
     root = str((settings or {}).get("root") or "").strip()
     if root:                                            # (the parser's own files are never moved)
@@ -1467,7 +1476,7 @@ def trash_cards(settings: dict, work: "MD.Work", name: str) -> int:
         return 0
     result = move_to_trash(settings, rows, reason=CM.REASON, tag_or_source=str(name)[:200])
     if result.get("error"):
-        _LOG.warning("parser manga: the cards of %s not trashed: %s", work.name, result["error"])
+        _LOG.warning("parser manga: the cards of %s not trashed: %s", name, result["error"])
         return 0
     return int(result.get("trashed_records") or 0)
 
@@ -2013,6 +2022,9 @@ def _in_libraries(settings: dict, cand: "MD.Candidate") -> bool:
 def say_not(settings: dict, key: str) -> dict:
     """«Это не манга» of a row: its folders go to the parser (and become a сборка of the gallery); a copy made in the
     manga folder stays (the owner removes it — as «Это не манга» of «Из архива»)."""
+    if str(key).startswith(LOOSE):                      # (v5.44.164) a manga of the loose pictures
+        from core import parser_loose
+        return parser_loose.say_not(settings, key)
     item = STORE.items().get(key)
     cand = _cand(item or {})
     if cand is None:
@@ -2033,6 +2045,9 @@ def say_not(settings: dict, key: str) -> dict:
 def say_manga(settings: dict, key: str) -> dict:
     """«Это манга» of a row: the owner's word confirms it — copied into «Манга» (by the background; its pages are
     not parsed any more).  A folder he refused before is the parser's no more."""
+    if str(key).startswith(LOOSE):                      # (v5.44.164) a manga of the loose pictures
+        from core import parser_loose
+        return parser_loose.say_manga(settings, key)
     item = STORE.items().get(key)
     cand = _cand(item or {})
     if cand is None:
@@ -2050,10 +2065,22 @@ def say_manga(settings: dict, key: str) -> dict:
     return {"ok": True}
 
 
+def download_now(settings: dict, key: str) -> dict:
+    """(v5.44.164) «Скачать сейчас» of a row of the loose pictures (``parser_loose.download_now``): a folder's manga
+    is copied by the background and has no such button."""
+    if not str(key).startswith(LOOSE):
+        return {"ok": False, "error": "Такой строки в списке нет — откройте страницу заново"}
+    from core import parser_loose
+    return parser_loose.download_now(settings, key)
+
+
 def cover_of(key: str, index: int = 0):
     """The first page (by its number) of a row's manga — a picture the page shows (by the row's key, never a path)."""
     import zipfile
     from core.manga_library import PageRef
+    if str(key).startswith(LOOSE):                      # (v5.44.164) a manga of the loose pictures: its first one
+        from core import parser_loose
+        return parser_loose.cover_of(str(key))
     item = STORE.items().get(str(key))
     cand = _cand(item or {})
     if cand is None or not cand.works:
@@ -2132,8 +2159,13 @@ def rows(settings: dict) -> list:
                     "state": state, "hand": item.get("hand", ""), "works": works, "pages": pages,
                     "size": (f"{plural(folders, FOLDERS)} · {pages} стр." if cand.is_set else
                              works[0]["size"] if works else ""), "at": int(item.get("at") or 0)})
+    try:                                                # (v5.44.164) the manga found among the loose pictures
+        from core import parser_loose
+        out += parser_loose.rows(settings)
+    except Exception as exc:  # noqa: BLE001 - its file not read: the folders' rows are shown all the same
+        _LOG.warning("parser manga: the loose pictures' rows not read: %s", exc)
     order = {"check": 0, MANGA: 1, "part": 1, WAIT: 2, NOT: 3}
-    return sorted(out, key=lambda r: (order.get(r["state"], 4), MD._natural(r["name"])))
+    return sorted(out, key=lambda r: (order.get(r["state"], 4), bool(r.get("loose")), MD._natural(r["name"])))
 
 
 def counts(settings: dict) -> dict:

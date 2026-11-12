@@ -8,9 +8,10 @@ comes from the same reading (``core.media_utils.image_size``).
 
 Containers read here: MP4 / MOV / M4V / 3GP (``mvhd``, fragmented files — their fragments), Matroska / WebM
 (``Info → Duration``; a file without it, as a browser's recording, — the time of its last cluster), AVI (``strh`` of
-the video stream, ``avih``), FLV (``onMetaData``), ASF / WMV (File Properties).  Anything else, or a file these
-readers cannot tell — OpenCV, when installed (frames / fps).  Reading takes a few small pieces of the file: the
-beginning, the ``moov`` box, the end of a Matroska file.
+the video stream, ``avih``), FLV (``onMetaData``), ASF / WMV (File Properties), (v5.44.151) MPEG-TS — what a site's
+stream is when it is kept as it came, «Серия 01.ts» (the times of its first and last pictures, the picture's own
+header).  Anything else, or a file these readers cannot tell — OpenCV, when installed (frames / fps).  Reading takes
+a few small pieces of the file: the beginning, the ``moov`` box, the end of a Matroska file or of a stream.
 
 (v5.44) What is inside, from the same headers: the container the file really is (a «.webm» may be an MP4 or a
 Matroska file with H.264 in it), the codec of its picture and of its first sound, the bits of the picture (10 — «Hi10P»,
@@ -41,7 +42,8 @@ class VideoInfo:
     duration: float = 0.0             # seconds, 0 — not told by the file
     width: int = 0
     height: int = 0
-    container: str = ""               # what the file really is: "mp4", "matroska", "avi", "flv", "asf"; "" — unknown
+    container: str = ""               # what the file really is: "mp4", "matroska", "avi", "flv", "asf", "mpegts";
+                                      # "" — unknown
     video: str = ""                   # the picture's codec ("h264", "hevc", "av1", "vp9", "vp8" …); "" — not told
     audio: str = ""                   # the first sound's codec ("aac", "opus" …); "" — no sound, or not told
     depth: int = 0                    # bits of the picture's samples when the file says (10, 12); 0 — not told
@@ -54,7 +56,7 @@ class _Bad(Exception):
 # ── public ─────────────────────────────────────────────────────────────────────
 _CACHE: dict = {}
 _CACHE_LOCK = threading.Lock()
-_CACHE_MAX = 512
+_CACHE_MAX = 8192                     # (v5.44.151; was 512, all let go at once: two long series asked each other out)
 
 
 def probe(path) -> VideoInfo | None:
@@ -71,8 +73,8 @@ def probe(path) -> VideoInfo | None:
             return _CACHE[key]
     info = _probe(p)
     with _CACHE_LOCK:
-        if len(_CACHE) >= _CACHE_MAX:
-            _CACHE.clear()
+        while len(_CACHE) >= _CACHE_MAX:
+            _CACHE.pop(next(iter(_CACHE)))               # the oldest answer goes
         _CACHE[key] = info
     return info
 
@@ -178,7 +180,9 @@ def _probe(p: Path) -> VideoInfo | None:
     except OSError as exc:
         _LOG.debug("video %s not readable: %s", p, exc)
         return None
-    if info is None or info.duration <= 0 or info.width <= 0:
+    # (v5.44.151) a stream whose length is read and whose picture's header is of a kind not read here (MPEG-2): as it
+    # is — OpenCV opens a stream in most of a second, and the page of a series asks every file of it
+    if info is None or info.duration <= 0 or (info.width <= 0 and not (info.container == "mpegts" and info.video)):
         more = _opencv(p)
         if more is not None:
             info = replace(info or VideoInfo(), duration=info.duration if info and info.duration > 0 else more.duration,
@@ -200,6 +204,8 @@ def _reader_for(head: bytes, ext: str):
         return _asf
     if ext in {".mp4", ".m4v", ".mov", ".3gp", ".3g2"}:
         return _mp4
+    if ext in _TS_EXTS and b"\x47" in head[:5]:          # a packet begins with 0x47 (M2TS: after 4 bytes of its time)
+        return _mpegts
     return None
 
 
@@ -920,6 +926,302 @@ def _asf(fh, file_size: int) -> VideoInfo:
             width, height = struct.unpack_from("<II", data, pos + 78)
         pos += size
     return VideoInfo(duration=seconds, width=width, height=height, container="asf")
+
+
+# ── MPEG-TS ──────────────────────────────────────────────────────────────────────
+# (v5.44.151) A site's stream kept as it came («Серия 01.ts»: «Скачать с сайта» writes one for every episode of a
+# voice-over taken from Kodik or AniLiberty) had no reader here and went to OpenCV: 0.76 s a file on the owner's
+# computer — and the page of a series asks every file of it: «Чёрный клевер», 164 such files, two minutes before its
+# page opened, at every start of the program.  Read here: the tables of the stream (which packets are the picture and
+# the sound, their codecs), the time of the first picture and of the last one, the picture's size from its own header.
+_TS_EXTS = {".ts", ".m2ts", ".mts", ".m2t"}
+TS_PIECE = 256 * 1024                 # of the beginning and of the end looked at first …
+TS_MORE = 2 * 1024 * 1024             # … and when they have not told: this much
+_TS_VIDEO = {0x01: "mpeg1", 0x02: "mpeg2", 0x10: "mpeg4", 0x1B: "h264", 0x24: "hevc"}
+_TS_AUDIO = {0x03: "mp2", 0x04: "mp2", 0x0F: "aac", 0x11: "aac", 0x81: "ac3", 0x87: "eac3"}
+_TS_PRIVATE = {0x6A: "ac3", 0x7A: "eac3", 0x7B: "dts"}       # descriptors of a «private» stream that say what it is
+_TS_CLOCK = 90000.0
+_TS_WRAP = 1 << 33
+_TS_ROUND_MOST = 12 * 3600.0          # seconds: a stream whose clock went round is believed up to this length
+
+
+def _ts_stride(data: bytes) -> tuple[int, int]:
+    """(where the first packet begins, how long a packet is: 188; 192 — M2TS, its time before each; 204 — with error
+    correction after each) of a transport stream's bytes."""
+    for stride in (188, 192, 204):
+        need = min(5, max(2, (len(data) - stride) // stride))
+        for start in range(min(stride, len(data))):
+            if data[start] == 0x47 and start + (need - 1) * stride < len(data) \
+                    and all(data[start + k * stride] == 0x47 for k in range(need)):
+                return start, stride
+    raise _Bad("not a transport stream")
+
+
+def _ts_packets(data: bytes, start: int, stride: int):
+    """(the packet's stream, whether a unit begins in it, its payload) of the packets in ``data`` from ``start`` —
+    after a place where the stream is broken, from the next packet found."""
+    pos, end = start, len(data)
+    while pos + 188 <= end:
+        if data[pos] != 0x47:
+            pos = data.find(b"\x47", pos + 1)
+            while 0 <= pos and pos + stride < end and data[pos + stride] != 0x47:
+                pos = data.find(b"\x47", pos + 1)
+            if pos < 0:
+                return
+            continue
+        b1, b3 = data[pos + 1], data[pos + 3]
+        body = pos + 4
+        if b3 & 0x20:                                    # an adaptation field before the payload
+            body += 1 + data[pos + 4]
+        if b3 & 0x10 and not b1 & 0x80 and body < pos + 188:
+            yield ((b1 & 0x1F) << 8) | data[pos + 2], bool(b1 & 0x40), data[body:pos + 188]
+        pos += stride
+
+
+def _ts_programs(payload: bytes) -> list[int]:
+    """The streams of the programs' tables a stream's first table (PAT) names."""
+    s = payload[1 + payload[0]:] if payload else b""
+    if len(s) < 8 or s[0] != 0x00:
+        return []
+    end = min(len(s), 3 + (((s[1] & 0x0F) << 8) | s[2]) - 4)
+    return [((s[i + 2] & 0x1F) << 8) | s[i + 3] for i in range(8, end - 3, 4) if s[i] or s[i + 1]]
+
+
+def _ts_streams(payload: bytes) -> tuple[tuple, tuple]:
+    """((the picture's stream, its codec), (the first sound's, its codec)) a program's table (PMT) names — (0, "")
+    for one it has not."""
+    s = payload[1 + payload[0]:] if payload else b""
+    video, audio = (0, ""), (0, "")
+    if len(s) < 12 or s[0] != 0x02:
+        return video, audio
+    end = min(len(s), 3 + (((s[1] & 0x0F) << 8) | s[2]) - 4)
+    i = 12 + (((s[10] & 0x0F) << 8) | s[11])
+    while i + 5 <= end:
+        kind, pid, extra = s[i], ((s[i + 1] & 0x1F) << 8) | s[i + 2], ((s[i + 3] & 0x0F) << 8) | s[i + 4]
+        notes = s[i + 5:min(end, i + 5 + extra)]
+        if kind in _TS_VIDEO and not video[0]:
+            video = (pid, _TS_VIDEO[kind])
+        elif kind in _TS_AUDIO and not audio[0]:
+            audio = (pid, _TS_AUDIO[kind])
+        elif kind == 0x06 and not audio[0]:              # «private»: its descriptors say what it is, if anything
+            k, codec = 0, ""
+            while k + 2 <= len(notes):
+                tag, size = notes[k], notes[k + 1]
+                if tag in _TS_PRIVATE:
+                    codec = _TS_PRIVATE[tag]
+                elif tag == 0x05 and notes[k + 2:k + 6] == b"Opus":
+                    codec = "opus"
+                k += 2 + size
+            if codec:
+                audio = (pid, codec)
+        i += 5 + extra
+    return video, audio
+
+
+def _pes_time(payload: bytes):
+    """When the unit a packet begins is shown (1/90000 s) — None for one that does not say."""
+    if len(payload) < 14 or payload[:3] != b"\x00\x00\x01" or not payload[7] & 0x80:
+        return None
+    p = payload[9:14]
+    return (((p[0] >> 1) & 0x07) << 30) | (p[1] << 22) | ((p[2] >> 1) << 15) | (p[3] << 7) | (p[4] >> 1)
+
+
+class _Bits:
+    """The bits of a picture's header, one after another."""
+
+    def __init__(self, data: bytes):
+        self.data, self.pos = data, 0
+
+    def u(self, count: int) -> int:
+        value = 0
+        for _ in range(count):
+            at = self.pos >> 3
+            if at >= len(self.data):
+                raise _Bad("the picture's header is cut short")
+            value = (value << 1) | ((self.data[at] >> (7 - (self.pos & 7))) & 1)
+            self.pos += 1
+        return value
+
+    def ue(self) -> int:
+        zeros = 0
+        while self.u(1) == 0:
+            zeros += 1
+            if zeros > 32:
+                raise _Bad("not a picture's header")
+        return (1 << zeros) - 1 + (self.u(zeros) if zeros else 0)
+
+    def se(self) -> int:
+        value = self.ue()
+        return (value + 1) // 2 if value & 1 else -(value // 2)
+
+
+def _h264_size(rbsp: bytes) -> tuple[int, int, int]:
+    """(width, height, bits of a sample) an H.264 picture's header (its sequence parameter set) says."""
+    b = _Bits(rbsp)
+    profile = b.u(8)
+    b.u(16)                                              # what the profile is held to, the level
+    b.ue()
+    chroma, depth = 1, 8
+    if profile in (100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135):
+        chroma = b.ue()
+        if chroma == 3:
+            b.u(1)
+        depth = 8 + b.ue()
+        b.ue()
+        b.u(1)
+        if b.u(1):                                       # its own scaling lists: read past
+            for k in range(8 if chroma != 3 else 12):
+                if b.u(1):
+                    last = coming = 8
+                    for _ in range(16 if k < 6 else 64):
+                        if coming:
+                            coming = (last + b.se() + 256) % 256
+                        last = coming or last
+    b.ue()
+    order = b.ue()
+    if order == 0:
+        b.ue()
+    elif order == 1:
+        b.u(1)
+        b.se()
+        b.se()
+        for _ in range(b.ue()):
+            b.se()
+    b.ue()
+    b.u(1)
+    width = (b.ue() + 1) * 16
+    rows = b.ue() + 1
+    frames_only = b.u(1)
+    height = (2 - frames_only) * rows * 16
+    if not frames_only:
+        b.u(1)
+    b.u(1)
+    if b.u(1):                                           # the picture is cut at its edges
+        left, right, top, bottom = b.ue(), b.ue(), b.ue(), b.ue()
+        width -= (left + right) * (2 if chroma in (1, 2) else 1)
+        height -= (top + bottom) * (2 if chroma == 1 else 1) * (2 - frames_only)
+    return width, height, depth
+
+
+def _hevc_size(rbsp: bytes) -> tuple[int, int, int]:
+    """(width, height, bits of a sample) an H.265 picture's header says."""
+    b = _Bits(rbsp)
+    b.u(4)
+    layers = b.u(3)
+    b.u(1)
+    b.u(96)                                              # the profile, the tier and the level of the whole
+    told = [(b.u(1), b.u(1)) for _ in range(layers)]
+    if layers:
+        b.u(2 * (8 - layers))
+    for profile, level in told:
+        b.u(88 * profile + 8 * level)
+    b.ue()
+    chroma = b.ue()
+    if chroma == 3:
+        b.u(1)
+    width, height = b.ue(), b.ue()
+    if b.u(1):
+        left, right, top, bottom = b.ue(), b.ue(), b.ue(), b.ue()
+        width -= (left + right) * (2 if chroma in (1, 2) else 1)
+        height -= (top + bottom) * (2 if chroma == 1 else 1)
+    return width, height, 8 + b.ue()
+
+
+def _picture_header(stream: bytes, codec: str):
+    """(width, height, bits) from the first header of the picture found in its stream's bytes — None when there is
+    none there, or the codec's header is not read here."""
+    if codec in ("mpeg1", "mpeg2"):                     # its sequence header: 12 bits of each
+        pos = stream.find(b"\x00\x00\x01\xb3")
+        if 0 <= pos and pos + 7 <= len(stream):
+            width = (stream[pos + 4] << 4) | (stream[pos + 5] >> 4)
+            height = ((stream[pos + 5] & 0x0F) << 8) | stream[pos + 6]
+            return (width, height, 0) if width and height else None
+        return None
+    want = {"h264": lambda head: head & 0x1F == 7, "hevc": lambda head: (head >> 1) & 0x3F == 33}.get(codec)
+    if want is None:
+        return None
+    pos = stream.find(b"\x00\x00\x01")
+    while 0 <= pos and pos + 6 < len(stream):
+        if want(stream[pos + 3]):
+            end = stream.find(b"\x00\x00\x01", pos + 3)
+            unit = stream[pos + (4 if codec == "h264" else 5):end if end > 0 else len(stream)]
+            try:
+                size = (_h264_size if codec == "h264" else _hevc_size)(unit.replace(b"\x00\x00\x03", b"\x00\x00"))
+            except _Bad:
+                size = None
+            if size is not None and 16 <= size[0] <= 16384 and 16 <= size[1] <= 16384:
+                return size
+        pos = stream.find(b"\x00\x00\x01", pos + 3)
+    return None
+
+
+def _mpegts(fh, file_size: int) -> VideoInfo:
+    """A transport stream: its length — from the first picture's time to the last one's and a frame more —, its
+    picture's size (H.264, H.265 — and their bits —, MPEG-2), the codecs its table names."""
+    video, audio, size, first = (0, ""), (0, ""), None, None
+    step = 0.0
+    for piece in (TS_PIECE, TS_MORE):
+        fh.seek(0)
+        data = fh.read(min(file_size, piece))
+        start, stride = _ts_stride(data)
+        tables: set = set()
+        times, picture = [], bytearray()
+        for pid, begins, payload in _ts_packets(data, start, stride):
+            if pid == 0 and begins:
+                tables.update(_ts_programs(payload))
+            elif pid in tables and begins and not (video[0] or audio[0]):
+                video, audio = _ts_streams(payload)
+            elif pid and pid == (video[0] or audio[0]):
+                if begins:
+                    when = _pes_time(payload)
+                    if when is not None:
+                        times.append(when)
+                    payload = payload[9 + payload[8]:] if len(payload) > 8 else b""
+                if video[0] and len(picture) < 512 * 1024:
+                    picture += payload
+        if times:
+            # the first times near the beginning (pictures shown after later ones come before them in the stream)
+            near = [t for t in times[:64] if abs(t - times[0]) < 10 * _TS_CLOCK] or times[:1]
+            first = min(near)
+            steps = sorted(set(near))
+            gaps = [b - a for a, b in zip(steps, steps[1:]) if 0 < b - a < _TS_CLOCK / 5]
+            step = min(gaps) / _TS_CLOCK if gaps else 0.0
+            size = _picture_header(bytes(picture), video[1]) if video[0] else None
+        if first is not None and (size is not None or not video[0]
+                                  or video[1] not in ("h264", "hevc", "mpeg1", "mpeg2")):
+            break
+        if file_size <= piece:
+            break
+    if first is None:
+        raise _Bad("a transport stream without times")
+    timed = video[0] or audio[0]
+    last = None
+    for piece in (TS_PIECE, TS_MORE):
+        begin = max(0, file_size - piece)
+        begin -= (begin - start) % stride                # at a packet's beginning
+        fh.seek(max(0, begin))
+        tail = fh.read(file_size - max(0, begin))
+        times = [when for pid, begins, payload in _ts_packets(tail, 0, stride)
+                 if begins and pid == timed and (when := _pes_time(payload)) is not None]
+        if times:
+            near = [t for t in times if abs(t - times[-1]) < 10 * _TS_CLOCK] or times[-1:]
+            last = max(near)
+            break
+        if file_size <= piece:
+            break
+    if last is None:
+        raise _Bad("a transport stream without its end")
+    wrapped = last < first
+    if wrapped:                                          # the stream's clock went round
+        last += _TS_WRAP
+    seconds = (last - first) / _TS_CLOCK + (step or 0.04)
+    # A clock set anew in the middle (two recordings in one file, a piece the site put in) reads the same as a clock
+    # gone round — an episode of a day and more: not believed, the file is told of as before (OpenCV).
+    if not 0 < seconds < (_TS_ROUND_MOST if wrapped else 7 * 24 * 3600):
+        raise _Bad("a transport stream of no length")
+    width, height, depth = size or (0, 0, 0)
+    return VideoInfo(duration=seconds, width=width, height=height, container="mpegts", video=video[1],
+                     audio=audio[1], depth=depth)
 
 
 # ── the background duty ───────────────────────────────────────────────────────────

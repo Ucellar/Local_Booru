@@ -52,7 +52,7 @@ computer (5.11.2026): :class:`ReadManga` (the Grouple network, now ``a.zazaza.me
 in the order, before com-x.life; both in «Найти по названию» and among the sites the chapters a title's site has not
 free are taken from.
 
-(v5.44.78) «Адреса сайтов и вход» (``core/manhwa_access.py``, «Настройки → Сайты манги»): a site that moved is asked at
+(v5.44.78) «Адреса сайтов и вход» (``core/manhwa_access.py``, «Настройки → Манга и манхва»): a site that moved is asked at
 the owner's own address (:func:`use_addresses` — ``ADDRESSES``; every :class:`Source` asks ``site()``/``api()``, never
 the module values directly; a link of the new address is the site's too), and the owner's sign-in on a site — its
 cookies (:func:`use_signins`: each session of a host gets the cookies of its domain) and MangaLib's token (its API
@@ -61,7 +61,17 @@ and the sessions: not into pages, journals or errors.
 
 (v5.44.85) Хентай-тян (:class:`Hentaichan`) — the owner (5.11.2026): «https://hentaichan.live/ еще добавь в
 поддерживаемые».  A site of hentai alone (``Source.adult_only``): asked only where hentai is shown, for another site's
-title only when it is erotic.  A title that depicts minors is neither opened nor taken (:class:`Excluded`).
+title only when it is erotic.  A title a gate closes is neither opened nor taken (:class:`Excluded`).
+
+(v5.44.131) Nude-Moon (:class:`NudeMoon`) — the owner (8.11.2026): «nude-moon.org надо добавить в поддержку»; its pages
+are behind Cloudflare's check for browsers, and to «как его проходить?» — «Да, как Com-X и куки»: the window's browser
+(as for com-x.life), or the owner's own browser — the extension 0.10.1 gives its cookies with its User-Agent, and the
+program asks a site with that agent while it has the owner's pass there (:func:`signed_agent`: Cloudflare ties its
+pass — ``cf_clearance`` — to the browser that got it).  (v5.44.132) Measured from the owner's computer the same day:
+the window's browser passes the check by itself (8–20 s, once 45 s were not enough in a new profile), but Nude-Moon's
+Cloudflare refuses the program's own requests even with that browser's pass and its very User-Agent (it looks at more
+than those) — so its pages and pictures are the browser's own requests (``Net._browser_fetch`` →
+``site_browser.fetch_bytes`` → ``ui/page_fetch.BytesFetch``), and the owner's cookies would not help there either.
 """
 from __future__ import annotations
 
@@ -73,13 +83,12 @@ import re
 import threading
 import time
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
-# (v5.44.101) the program's rule about minors — in ``core/filter.py``; its names here for the code that uses them
-from core.filter import depicts_minors  # noqa: F401 - used here and as S.depicts_minors elsewhere
-from core.filter import HENTAILIB_NEVER_GENRES as F_HENTAILIB_NEVER_GENRES
-from core.filter import HENTAILIB_NEVER_TAGS as F_HENTAILIB_NEVER_TAGS
+# the program's gates: what a site says of a title is handed to them (``core/gates.py``)
+from core import gates as G
 
 _LOG = logging.getLogger("local_booru.manhwa_get")
 
@@ -102,6 +111,8 @@ DESU_SITE = "https://desu.uno"                   # (v5.44.77) desu.me no longer 
 MANGADEX_SITE = "https://mangadex.org"           # (v5.44.79) every language of a title; its own check for browsers
 MANGADEX_API = "https://api.mangadex.org"
 HENTAICHAN_SITE = "https://hentaichan.live"      # (v5.44.85) its pages move from mirror to mirror (x17.h-chan.me…)
+NUDEMOON_SITE = "https://nude-moon.org"          # (v5.44.131) behind Cloudflare's check for browsers (8.11.2026)
+ONELOVE_SITE = "https://mangaonelove.space"      # (v5.44.143) Manga One Love — WordPress (Madara), open to programs
 TIMEOUT = (10, 40)
 PAGE_LIMIT = 8 * 1024 * 1024          # a page or an API answer — bigger is not one
 PICTURE_LIMIT = 40 * 1024 * 1024      # a slice of a strip is a few hundred KB
@@ -113,7 +124,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 # (v5.44.78) the owner's addresses of the sites (a site that moved) and his sign-in on them — ``core/manhwa_access.py``
 ADDRESSES: dict = {}                  # the site's name (or «<name>_api») → «https://its.address»
-_SIGNINS: dict = {}                   # the site's name → {"cookies": [{domain, name, value, path}], "token": "…"}
+_SIGNINS: dict = {}                   # the site's name → {"cookies": [{domain, name, value, path}], "token": "…",
+#                                       (v5.44.131) "agent": the User-Agent of the browser the cookies came from}
 API_OF = ("remanga", "recomics", "mangalib", "mangadex", "hentailib")   # the sites whose API is an address of its own
 # (v5.44.79) the language of the chapters of a site that has many (MangaDex): "ru", "en" or "original" — «Настройки →
 # Сайты манги» (``core/manhwa_access.py``); the card of a title picks another
@@ -159,7 +171,7 @@ def default_address(name: str) -> str:
             "mangabuff": MANGABUFF_SITE, "comx": COMX_SITE, "readmanga": READMANGA_SITE, "desu": DESU_SITE,
             "mangadex": MANGADEX_SITE, "mangadex_api": MANGADEX_API, "hentaichan": HENTAICHAN_SITE,
             "hentailib": HENTAILIB_SITE, "hentailib_api": HENTAILIB_API,
-            "allhentai": ALLHENTAI_SITE}.get(name, "")
+            "allhentai": ALLHENTAI_SITE, "nudemoon": NUDEMOON_SITE, "onelove": ONELOVE_SITE}.get(name, "")
 
 
 def use_language(value) -> str:
@@ -183,12 +195,14 @@ def _api_of(site: str) -> str:
 
 
 def use_signins(mapping) -> None:
-    """(v5.44.78) The owner's sign-in in place: {site: {"cookies": [...], "token": "..."}} (``core/manhwa_access``)."""
+    """(v5.44.78) The owner's sign-in in place: {site: {"cookies": [...], "token": "...", (v5.44.131) "agent": "..."}}
+    (``core/manhwa_access``)."""
     fresh = {}
     for name, value in dict(mapping or {}).items():
         if isinstance(value, dict):
             cookies = [c for c in value.get("cookies") or [] if isinstance(c, dict) and c.get("name")]
-            fresh[str(name)] = {"cookies": cookies, "token": str(value.get("token") or "")}
+            fresh[str(name)] = {"cookies": cookies, "token": str(value.get("token") or ""),
+                                "agent": plain_agent(value.get("agent"))}
     _SIGNINS.clear()
     _SIGNINS.update(fresh)
     _ACCOUNT_MARKS.clear()                           # (v5.44.107) another sign-in — another account's mark
@@ -223,6 +237,31 @@ def signed_cookies(host: str) -> list:
             if _cookie_fits(c.get("domain"), host)]
 
 
+# (v5.44.131) the cookies of a pass through a check for browsers — Cloudflare's «cf_clearance», DDoS-Guard's «__ddg…»:
+# the service lets in with one only the browser that got it — the same User-Agent (enough where the service looks at
+# the cookie and the agent alone; Nude-Moon's Cloudflare looks at more — v5.44.132: its pages through the browser)
+AGENT_BOUND = ("cf_clearance", "__ddg")
+
+
+def plain_agent(text) -> str:
+    """(v5.44.131) A browser's User-Agent as the extension gives it — one line of printable ASCII («Mozilla/5.0 …»);
+    "" — not one."""
+    text = str(text or "").strip()
+    return text if re.fullmatch(r"Mozilla/[\x20-\x7e]{10,500}", text) else ""
+
+
+def signed_agent(host: str) -> str:
+    """(v5.44.131) The User-Agent a session of ``host`` asks with: the owner's browser's, when the owner's cookies of
+    this host hold its pass through a check for browsers (:data:`AGENT_BOUND`) — the pass is good only with it; ""
+    — the program's own."""
+    for site in _SIGNINS.values():
+        agent = str(site.get("agent") or "")
+        if agent and any(_cookie_fits(c.get("domain"), host) and str(c.get("name") or "").startswith(AGENT_BOUND)
+                         for c in site.get("cookies") or []):
+            return agent
+    return ""
+
+
 class SourceError(RuntimeError):
     """A site did not give what was asked — the words are for the page."""
 
@@ -245,8 +284,17 @@ class Paid(SourceError):
     around; another site's free copy is the only way."""
 
 
+class Withheld(SourceError):
+    """(v5.44.136) The site gives the program none of its pictures: its picture server answers a stand-in instead of
+    each one (ReadManga, asked from the owner's computer 9.11.2026: status 300 and a bare link to someone else's photo —
+    for every page, whatever the request; his screenshot: «ReadManga прислал не картинку вместо страницы 1» and three
+    retries).  The site's protection against programs — not got around (as a captcha is not solved): asking again gives
+    nothing, another site's copy is the only way (``manhwa_run._attempt`` — as :class:`Paid`)."""
+
+
 class Excluded(SourceError):
-    """(v5.44.85) A title the program neither opens nor takes, whatever its site says: it depicts minors."""
+    """(v5.44.85) A title the program neither opens nor takes, whatever its site says: a gate closed it
+    (``gates.title`` — the words are the gate's)."""
 
 
 class Silent(SourceError):
@@ -256,7 +304,7 @@ class Silent(SourceError):
 
 
 SILENT_FOR = 3 * 60                 # (v5.44.98) seconds a silent site's pages are not asked again
-_SILENT: dict = {}                  # host → (until, the words), monotonic
+_SILENT: dict = {}                  # host → (until, the words, (v5.44.162) its name was not found), monotonic
 _SILENT_LOCK = threading.Lock()
 
 
@@ -283,12 +331,22 @@ def forget_silent(url_or_host: str = "") -> None:
             _SILENT.clear()
 
 
-def silent_words(what: str, left: float) -> str:
+def _nameless(url_or_host: str) -> bool:
+    """(v5.44.162) The silent site of this address is one whose name the computer did not find."""
+    with _SILENT_LOCK:
+        held = _SILENT.get(_place(url_or_host))
+    return bool(held and len(held) > 2 and held[2])
+
+
+def silent_words(what: str, left: float, nameless: bool = False) -> str:
+    """The words about a site that gave no answer; (v5.44.162) ``nameless`` — the computer did not find its name
+    (and a public resolver gave none either, ``core/name_lookup``): that is not the site's silence, and what helps
+    is another thing."""
     minutes = max(1, int(round(left / 60.0)))
+    if nameless:
+        from core import name_lookup
+        return f"{what}: {name_lookup.WORDS}; программа спросит снова через {minutes} мин"
     return f"{what} сейчас не отвечает — сайт молчит; программа спросит его снова через {minutes} мин"
-
-
-EXCLUDED = "Этот тайтл программа не открывает и не скачивает: в нём изображены несовершеннолетние"
 
 
 CLOSED = "{site} пускает только браузеры: сначала проверяет, что страницу открывает браузер (проверка на роботов{guard})"
@@ -301,6 +359,11 @@ _CHECKS = (("Cloudflare", ("cf-browser-verification", "cf_chl_", "Just a moment.
            ("MangaDex", ("MangaDex - Browser verification",), ()),
            # com-x.life's own (5.11.2026): the words of its <noscript> and its script that looks at the browser
            ("", (("необходимо включить JavaScript", "webdriver"),), ()))
+# (v5.44.131) Cloudflare's challenge itself — whatever the status and the heading: the options of its script and the
+# address of its challenge are on no other page (a page of a protected site carries «challenge-platform/scripts/jsd»
+# only).  As the window's browser has it, its script has put the site's name in an <h1> already («Nude-Moon», looked at
+# from the owner's computer 8.11.2026: the browser's page was not told from the site's — «не открыл страницу»).
+_CF_CHALLENGE = ("_cf_chl_opt", "/orchestrate/chl_page/", "/orchestrate/managed/", "/orchestrate/jsch/")
 
 
 def robot_check(status: int, page: bytes, url: str = "") -> "str | None":
@@ -314,6 +377,8 @@ def robot_check(status: int, page: bytes, url: str = "") -> "str | None":
     if "/edge/challenge" in str(url or ""):
         return "MangaDex"                                  # (v5.44.79) MangaDex sends its API there first
     refused = status in (403, 429, 503)
+    if any(mark in text for mark in _CF_CHALLENGE):
+        return "Cloudflare"
 
     def carries(mark) -> bool:
         return all(part in text for part in mark) if isinstance(mark, tuple) else mark in text
@@ -373,22 +438,99 @@ def fetch_picture(net: "Net", pic: Picture, *, what: str, headers: dict) -> tupl
     friend's reader Yomi does: «Перебирает зеркала картинок»).  (data, type) — or the first server's :class:`SourceError`.
     (v5.44.95) A server that is not the last one is asked once and shortly (:data:`MIRROR_TIMEOUT`: Хентай-тян's hung
     40 s three times for every picture); the picture hosts of a site of mirrors (:func:`picture_links`) — the one that
-    gave a picture last first."""
+    gave a picture last first.  (v5.44.134) A server that refused a picture (401/403/451) or did not answer while
+    another server of the site gave it — asked after the others :data:`SERVER_REST` seconds (said once): MangaLib's
+    «main» refuses the program's every picture (403 of DDoS-Guard), its «secondary» gives them — asked from the owner's
+    computer 8.11.2026, his journal had a line for every picture; a picture missing on a server (404) says nothing of
+    the server."""
     first = None
+    host = (urlparse(str(pic.url or "")).hostname or "").lower()
     links = list(dict.fromkeys(link for one in [pic.url, *pic.fallbacks] for link in picture_links(one)))
+    if len(links) > 1:
+        now = time.monotonic()
+        with _RESTING_LOCK:
+            resting = {host for host, until in _RESTING.items() if until > now}
+        if resting:                                      # stable: the others first, in the site's order
+            links.sort(key=lambda link: urlparse(link).netloc.lower() in resting)
+    failed: list = []
     for n, link in enumerate(links):
         last = n == len(links) - 1
         try:
             got = net.fetch(link, paced=False, limit=PICTURE_LIMIT, what=what, headers=headers,
                             **({} if last else {"timeout": MIRROR_TIMEOUT, "tries": 1}))
+            if stand_in(got[0]):                         # (v5.44.136) not a picture: the site's answer to programs
+                withhold(host, what)
+                raise Withheld(WITHHELD.format(site=what))
             gave_picture(link)
+            _rest(failed, what)
             return got
         except Closed:
             raise
         except SourceError as exc:
             first = first or exc
+            if not isinstance(exc, Missing):
+                failed.append((urlparse(link).netloc.lower(), exc))
             _LOG.info("%s: a picture not given by %s: %s", what, urlparse(link).netloc, exc)
     raise first or SourceError(f"{what}: картинка не пришла")
+
+
+# (v5.44.136) a site whose picture server gives the program a stand-in instead of every picture (:class:`Withheld`)
+WITHHELD = ("{site} не отдаёт программе картинки: вместо страницы его сервер присылает ссылку на чужую картинку — "
+            "это его защита от программ, её программа не обходит. Главу можно взять только с другого сайта")
+WITHHELD_FOR = 6 * 3600            # seconds such a site's chapters are asked of another site first (``withheld``)
+STAND_IN_MAX = 2048                # bytes: a stand-in is a bare link, a picture is never that short
+_WITHHELD: dict = {}               # a site's label → until when (``time.monotonic``)
+_WITHHELD_LOCK = threading.Lock()
+
+
+def stand_in(data: bytes) -> bool:
+    """(v5.44.136) A picture server's stand-in instead of the picture: a short answer that is one link and nothing else
+    (ReadManga's «https://upload.wikimedia.org/…Pumkins.JPG», 77 bytes, «image/jpeg»)."""
+    if not data or len(data) > STAND_IN_MAX:
+        return False
+    try:
+        text = bytes(data).decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return False
+    return bool(re.fullmatch(r"https?://[^\s<>\"']+", text))
+
+
+def withhold(host: str, what: str) -> None:
+    """The site ``what`` gave a stand-in instead of a picture: said once while it lasts; its chapters are asked of
+    another site first (``manhwa_run._attempt``) :data:`WITHHELD_FOR` seconds."""
+    now = time.monotonic()
+    with _WITHHELD_LOCK:
+        new = _WITHHELD.get(what, 0.0) <= now
+        _WITHHELD[what] = now + WITHHELD_FOR
+    if new:
+        _LOG.info("%s: its picture server (%s) gives the program a stand-in instead of the pictures — its chapters are "
+                  "taken from another site first for %d h", what, host, WITHHELD_FOR // 3600)
+
+
+def withheld(what: str) -> bool:
+    """(v5.44.136) The site ``what`` (its label) gave a stand-in instead of a picture lately."""
+    with _WITHHELD_LOCK:
+        return _WITHHELD.get(str(what or ""), 0.0) > time.monotonic()
+
+
+# (v5.44.134) picture servers asked after the others a while (``fetch_picture``)
+SERVER_REST = 10 * 60
+_RESTING: dict = {}                  # a picture server (its host[:port]) → until when (``time.monotonic``) asked last
+_RESTING_LOCK = threading.Lock()
+
+
+def _rest(failed: list, what: str) -> None:
+    """The servers that did not give a picture another server of the site gave (``failed``: (host, error)) — asked
+    after the others :data:`SERVER_REST` seconds; said once while it lasts."""
+    if not failed:
+        return
+    now = time.monotonic()
+    with _RESTING_LOCK:
+        for host, exc in failed:
+            if _RESTING.get(host, 0.0) <= now:
+                _LOG.info("%s: picture server %s did not give a picture another server gave (%s) — asked after the "
+                          "others for %d min", what, host, exc, SERVER_REST // 60)
+            _RESTING[host] = now + SERVER_REST
 
 
 # (v5.44.95) Хентай-тян's pictures: its pages name img4, mimg4, imgcover, megaimg.imgschan.xyz — on 6.11.2026 they all
@@ -460,6 +602,8 @@ class TitleRef:
     description: str = ""
     cover_url: str = ""
     authors: list = field(default_factory=list)
+    people: list = field(default_factory=list)         # (v5.44.149) [{id, name}] — its authors and artists as the site
+    #                                                    numbers them (the Lib API: «Лента» lists a person's titles)
     branches: list = field(default_factory=list)       # Branch; one with no id — a site without branches
     site_id: str = ""                  # MangaBuff's number of the title (for /chapters/load)
     licensed: bool = False             # (v5.44.72) the site sells it under a licence: its paid chapters stay paid
@@ -484,6 +628,24 @@ class TitleRef:
                 "source_url": self.url, "site": self.site}
 
 
+def checked(ref: TitleRef) -> TitleRef:
+    """(v5.44.143) A title a site has just described, past the program's gate (``gates.title``): what the site says of
+    it — its names, genres, tags and whether it marks it erotic (``is_erotic``: MangaLib's «18+ (RX)», Remanga's
+    ``is_erotic``, MangaDex's «erotica» and «pornographic», the genres «Хентай», «Эротика»…) — is handed to the gate;
+    :class:`Excluded` with the gate's words when it closes the title.  Every site's ``title`` ends with it: opened by
+    a link, as another site's copy, by the night's round, by «Читать»."""
+    why = G.title(ref.site, names=[ref.title, *ref.alt_titles], genres=ref.genres, tags=ref.tags, adult=ref.is_erotic)
+    if why:
+        raise Excluded(why)
+    return ref
+
+
+def checked_hits(hits: list) -> list:
+    """(v5.44.143) The tiles of a site's search or feed, past the program's gate: a title it closes by what the tile
+    says (its names, the site's mark of erotica) is not a tile (its page is not opened either — :func:`checked`)."""
+    return [h for h in hits or [] if not G.title(h.site, names=h.names, adult=h.adult)]
+
+
 # ── the way to a site ────────────────────────────────────────────────────────────────────────────────────────────
 class Net:
     """One session per site; straight first, then through the system's proxy; a pace between a site's requests;
@@ -501,6 +663,8 @@ class Net:
         self._browser_lock = threading.Lock()    # (v5.44.73) one page of the browser at a time
         self._passes: dict = {}                  # the site → (cookies, agent) the browser got there
         self._browser_only: set = set()          # hosts whose pages only the browser itself gets
+        self._bytes_only: set = set()            # (v5.44.132) …and their pictures too (the browser's own request)
+        self._no_fetch: set = set()              # (v5.44.132) hosts the browser's own request did not work for
 
     def asked_until(self, stop_check) -> "Net":
         """(v5.44.117) This net — its sessions (one per host; several threads may share them: ``requests`` sessions
@@ -526,6 +690,9 @@ class Net:
                 for c in signed_cookies(host):               # (v5.44.78) the owner's sign-in on this site
                     session.cookies.set(str(c["name"]), str(c.get("value") or ""), domain=str(c.get("domain") or host),
                                         path=str(c.get("path") or "/"))
+                agent = signed_agent(host)                   # (v5.44.131) his pass through a check — with his agent
+                if agent:
+                    session.headers["User-Agent"] = agent
                 self._sessions[host] = session
                 self._dress(host, session)
             return session
@@ -545,6 +712,10 @@ class Net:
         from core import site_browser
         cookies, agent = self._pass_of(host)
         mine = [c for c in cookies if site_browser.related(str(c.get("domain") or host), host)]
+        # (v5.44.131) the window's pass instead of the owner's one (of his browser, with his agent): never both
+        bound = {str(c.get("name") or "") for c in mine if str(c.get("name") or "").startswith(AGENT_BOUND)}
+        for old in [c for c in session.cookies if c.name in bound]:
+            session.cookies.clear(old.domain, old.path, old.name)
         for c in mine:
             session.cookies.set(str(c.get("name") or ""), str(c.get("value") or ""),
                                 domain=str(c.get("domain") or host), path=str(c.get("path") or "/"))
@@ -564,9 +735,28 @@ class Net:
         accept = str((headers or {}).get("Accept") or "")
         return method == "GET" and not accept.startswith("image/") and "json" not in accept
 
+    @contextmanager
+    def _browser_turn(self):
+        """(v5.44.163) This net's turn at the window's browser (one page of it at a time) — waited for only while
+        the answer is still wanted: «Остановить», or a title's sites whose common time is over (``asked_until`` — each
+        of them has this lock and its own stop), and the one waiting leaves (:class:`SourceError`).  Until now it
+        waited for the lock without an end and then opened its page all the same — a page of the browser takes
+        several processors — for an answer nobody took any more (the owner's computer, 12.11.2026: 480 threads of the
+        program, a new page of the browser every minute)."""
+        while not self._browser_lock.acquire(timeout=0.5):
+            if self.stop_check():
+                raise SourceError("остановлено")
+        try:
+            if self.stop_check():
+                raise SourceError("остановлено")
+            yield
+        finally:
+            self._browser_lock.release()
+
     def _open(self, url: str, closed: "Closed", what: str):
         """The page as the window's browser opens it — :class:`Closed` with words when it does not get in either."""
         from core import site_browser
+        share_signin(url)                                # (v5.44.132) the owner's sign-in there — the browser's too
         try:
             page = site_browser.open_page(url, still_check)
         except site_browser.BrowserError as exc:
@@ -589,9 +779,13 @@ class Net:
         headers = options.get("headers") or {}
         page_like = self._page_like(options.get("method", "GET"), headers)
         if host in self._browser_only and not page_like:
-            raise Closed(f"{closed} — пускает только сам браузер окна программы, а он такое не скачивает")
+            if options.get("method", "GET") != "GET":
+                raise Closed(f"{closed} — пускает только сам браузер окна программы, а он такое не отправляет")
+            with self._lock:                             # (v5.44.132) the browser's own request — and so the next ones
+                self._bytes_only.add(host)
+            return self._browser_bytes(url, closed, options)
         target = url if page_like else str(headers.get("Referer") or f"{urlparse(url).scheme}://{host}/")
-        with self._browser_lock:
+        with self._browser_turn():
             try:
                 return self._fetch(url, **options)        # another worker of this site got in meanwhile
             except Closed:
@@ -602,7 +796,13 @@ class Net:
             return self._fetch(url, **options)
         except Closed:
             if not page_like:
-                raise
+                if options.get("method", "GET") != "GET":
+                    raise
+                with self._lock:                         # (v5.44.132) its pictures — the browser's own request
+                    self._browser_only.add(host)
+                    self._bytes_only.add(host)
+                _LOG.info("%s: its pictures only through the window's browser", what)
+                return self._browser_bytes(url, closed, options)
         with self._lock:
             self._browser_only.add(host)
         _LOG.info("%s: its pages only through the window's browser", what)
@@ -615,10 +815,72 @@ class Net:
         closed = Closed(closed_words(what))
         if not site_browser.available():
             raise Closed(f"{closed} — а браузера окна программы сейчас нет")
-        with self._browser_lock:
+        host = (urlparse(url).hostname or "").lower()
+        if host not in self._no_fetch:                  # (v5.44.132) the browser's own request first: the page as the
+            got = self._browser_fetch(url, what, f"{urlparse(url).scheme}://{host}/", PAGE_LIMIT)   # site sent it,
+            if got is not None:                         # without opening it (quicker)
+                return got
+        with self._browser_turn():
             page = self._open(url, closed, what)
-            self._take((urlparse(url).hostname or "").lower(), page)
+            self._take(host, page)
         return page.html.encode("utf-8"), "text/html; charset=utf-8"
+
+    def _browser_fetch(self, url: str, what: str, referer: str, limit: int) -> "tuple | None":
+        """(v5.44.132) The window's browser's own request (``site_browser.fetch_bytes``): (the answer's bytes, its type);
+        None — the answer is the site's check again (the browser's pass ended), or the browser cannot ask so (it is
+        not asked so again by this net); :class:`Missing`, :class:`Refused`, :class:`SourceError` — as the site said."""
+        from core import site_browser
+        host = (urlparse(url).hostname or "").lower()
+        share_signin(url)                                # the owner's sign-in there — the browser's too
+        for attempt in (1, 2):
+            if self.stop_check():
+                raise SourceError("остановлено")
+            try:
+                status, data, ctype = site_browser.fetch_bytes(url, referer, limit)
+            except site_browser.BrowserError as exc:
+                _LOG.info("%s: the browser's own request did not work: %s", what, exc)
+                with self._lock:
+                    self._no_fetch.add(host)
+                return None
+            ctype = str(ctype or "").lower()
+            if "html" in ctype and status in (200, 403, 404, 429, 503) and robot_check(status, data, url) is not None:
+                return None                              # the check again: the browser's pass ended
+            if status in (429, 500, 502, 503, 504, 520, 521, 522, 524) and attempt == 1:
+                time.sleep(2.0)
+                continue
+            if status in (404, 410):
+                raise Missing(f"{what} ответил {status}")
+            if status in (401, 403, 451):
+                raise Refused(f"{what} ответил {status}")
+            if status >= 400 or status <= 0:
+                raise SourceError(f"{what} ответил {status or 'ничего'}")
+            if len(data) > limit:
+                raise SourceError(f"{what} прислал слишком большой ответ")
+            return bytes(data), ctype
+        raise SourceError(f"{what} не ответил")
+
+    def _browser_bytes(self, url: str, closed: "Closed", options: dict) -> tuple:
+        """(v5.44.132) A picture (or another answer that is no page) of a site that lets in nothing but the browser
+        itself: the window's browser's own request; the browser's pass ended — the browser passes the check again (on
+        the page the request is for — its Referer), and asks once more."""
+        from core import site_browser
+        if not site_browser.available():
+            raise Closed(f"{closed} — а браузера окна программы сейчас нет")
+        host = (urlparse(url).hostname or "").lower()
+        what = options.get("what") or host
+        headers = options.get("headers") or {}
+        referer = str(headers.get("Referer") or f"{urlparse(url).scheme}://{host}/")
+        limit = int(options.get("limit") or PAGE_LIMIT)
+        for attempt in (1, 2):
+            got = self._browser_fetch(url, what, referer, limit)
+            if got is not None:
+                return got
+            if attempt == 2 or host in self._no_fetch:
+                break
+            with self._browser_turn():
+                page = self._open(referer, closed, what)
+                self._take(host, page)
+        raise Closed(f"{closed} — пускает только сам браузер окна программы, а он это не получил")
 
     def _wait_turn(self, host: str) -> None:
         with self._lock:
@@ -639,6 +901,8 @@ class Net:
                    "timeout": timeout, "tries": tries, "keep_missing": keep_missing}
         if host in self._browser_only and self._page_like(method, headers):
             return self._through_browser(url, what or host)
+        if host in self._bytes_only and method == "GET":         # (v5.44.132) not asked again to be refused
+            return self._browser_bytes(url, Closed(closed_words(what or host)), options)
         try:
             return self._fetch(url, **options)
         except Closed as closed:
@@ -655,12 +919,19 @@ class Net:
         # (v5.44.98) its pages and API, not pictures: a cover that hangs says nothing of the site's pages
         watched = paced and not str((headers or {}).get("Accept") or "").startswith("image/")
         if watched and silent_left(place):           # it did not answer a moment ago: said at once
-            raise Silent(silent_words(what, silent_left(place)))
+            raise Silent(silent_words(what, silent_left(place), nameless=_nameless(place)))
         session = self.session(host)
+        if getattr(session, "lb_route", "") == "direct":
+            from core import name_lookup          # (v5.44.162) a name the system did not find lately: asked ahead
+            name_lookup.expect(url)
         last = ""
         silent = False
+        nameless = False                 # (v5.44.162) the computer did not find the site's name
+        looked = False                   # …and its name was asked of a public resolver (core/name_lookup), once
         timeout = timeout or self.timeout
-        for attempt in range(1, (tries or self.tries) + 1):
+        attempt = 0
+        while attempt < (tries or self.tries):
+            attempt += 1
             if self.stop_check():
                 raise SourceError("остановлено")
             if paced:
@@ -702,21 +973,34 @@ class Net:
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last = f"{what} не ответил: {sanitize_text(str(exc))[:160]}"
                 silent = True
+                from core import name_lookup
+                nameless = name_lookup.not_found(exc)
                 if getattr(session, "lb_route", "") == "direct" and _system_proxy(url):
                     _LOG.info("%s: not reached straight — through the system's proxy from now on", host)
                     session.trust_env = True
                     session.lb_route = "system"
                     _PROXIED.add(host)
+                    # (v5.44.162) with one try allowed (a feed's page of nhentai) the proxy was never asked: the try
+                    # went on the straight way, and the site was «silent» for three minutes before it was asked there
+                    if attempt >= (tries or self.tries):
+                        attempt -= 1
                     continue
+                if nameless and not looked:
+                    # (v5.44.162) the computer does not find the site's name and there is no other way to it: the
+                    # name is asked of a public resolver; given — the same request once more, by the address
+                    looked = True
+                    if name_lookup.learn(host):
+                        attempt -= 1
+                        continue
                 if attempt < (tries or self.tries):
                     time.sleep(1.5 * attempt)
             except requests.RequestException as exc:
                 raise SourceError(f"{what} не ответил: {sanitize_text(str(exc))[:160]}") from exc
         if silent and watched:                        # (v5.44.98) no answer at all: not asked again a while
             with _SILENT_LOCK:
-                _SILENT[place] = (time.monotonic() + SILENT_FOR, last)
+                _SILENT[place] = (time.monotonic() + SILENT_FOR, last, nameless)
             _LOG.info("%s: silent — its pages not asked for %d s (%s)", what, SILENT_FOR, last)
-            raise Silent(silent_words(what, SILENT_FOR))      # words for a person, not the library's
+            raise Silent(silent_words(what, SILENT_FOR, nameless=nameless))     # words for a person, not the library's
         raise SourceError(last or f"{what} не ответил")
 
     def _read(self, answer, limit: int, what: str, cut: bool = False) -> bytes:
@@ -742,6 +1026,72 @@ class Net:
     def text(self, url: str, **options) -> str:
         body, _ctype = self.fetch(url, **options)
         return body.decode("utf-8", "replace")
+
+
+# (v5.44.132) the owner's sign-in given to the window's browser (``share_signin``): its origin → the cookies given
+_SHARED: dict = {}
+_SHARED_LOCK = threading.Lock()
+
+
+def _signin_key(c: dict) -> tuple:
+    return str(c.get("domain") or ""), str(c.get("path") or "/"), str(c.get("name") or "")
+
+
+def share_signin(url: str) -> None:
+    """(v5.44.132) The owner's sign-in on the site of ``url`` — his cookies of it, not the pass of his own browser's
+    check (:data:`AGENT_BOUND`: the window's browser has its own) — given to the window's browser before it asks the
+    site, once while they are the same; the ones he no longer gives are taken back out of it.  A site whose pages and
+    pictures only the browser itself gets shows some of them only to the signed in (a third of Nude-Moon's readers)."""
+    from core import site_browser
+    parsed = urlparse(str(url or ""))
+    host = (parsed.hostname or "").lower()
+    if not host or parsed.scheme not in ("http", "https"):
+        return
+    origin = f"{parsed.scheme}://{parsed.netloc.lower()}"
+    mine = [dict(c) for c in signed_cookies(host) if not str(c.get("name") or "").startswith(AGENT_BOUND)]
+    with _SHARED_LOCK:
+        before = list(_SHARED.get(origin) or [])
+    if sorted((_signin_key(c), str(c.get("value") or "")) for c in mine) == \
+            sorted((_signin_key(c), str(c.get("value") or "")) for c in before):
+        return
+    gone = [c for c in before if _signin_key(c) not in {_signin_key(x) for x in mine}]
+    try:
+        if gone:
+            site_browser.share_cookies(origin, gone, forget=True)
+        if mine:
+            site_browser.share_cookies(origin, mine)
+    except site_browser.BrowserError as exc:
+        _LOG.info("%s: the sign-in not given to the window's browser: %s", host, exc)
+        return
+    with _SHARED_LOCK:
+        _SHARED[origin] = mine
+    _LOG.info("%s: the owner's sign-in given to the window's browser (%d cookies, %d taken back)", host, len(mine),
+              len(gone))
+
+
+def forget_shared(name: str = "", cookies=None) -> None:
+    """(v5.44.132) «Убрать» of «Сайты манги»: the owner's sign-in of the site ``name`` (every site without it) taken
+    back out of the window's browser — what was given to it in this run and ``cookies`` (the ones the program kept of
+    that site: given in an earlier run, they are in the browser still)."""
+    from core import site_browser
+    source = by_name(name) if name else None
+    with _SHARED_LOCK:
+        taken = {o: list(c) for o, c in _SHARED.items()
+                 if source is None or _host_of(o + "/", source.hosts, source.site())}
+        for origin in taken:
+            _SHARED.pop(origin, None)
+    for c in cookies or []:
+        domain = str(c.get("domain") or "").lower().lstrip(".")
+        if domain and not str(c.get("name") or "").startswith(AGENT_BOUND):
+            mine = taken.setdefault(f"https://{domain}", [])
+            if _signin_key(c) not in {_signin_key(x) for x in mine}:
+                mine.append(dict(c))
+    for origin, given in taken.items():
+        try:
+            if given:
+                site_browser.share_cookies(origin, given, forget=True)
+        except site_browser.BrowserError as exc:
+            _LOG.info("%s: the sign-in not taken back from the window's browser: %s", origin, exc)
 
 
 # (v5.44.85) the hosts that did not open straight in this run: the next looks go through the system's proxy at once
@@ -936,9 +1286,13 @@ def find_same(net: "Net", source: "Source", title: "TitleRef") -> "TitleRef | No
     """The same title on ``source``: its search asked by the title's names; the answers that agree in a name (and in
     the kind and the year) asked for and checked by every name they have.  When none agrees, the search's first answer
     is asked for too if it carries one name only (MangaBuff's carry only the Russian name, and a site's Russian name of
-    a title may be its own).  None — not there."""
+    a title may be its own).  None — not there.  (v5.44.146) A site none of whose searches answered (it was silent,
+    answered an error, would not let in) raises that error: «не ответил» is not «тайтла там нет» — a site that was
+    down when a title was found used to be kept as searched, and was not asked of that title again for a week
+    (``manhwa_download._helpers_of``).  A search that answers 404 has answered: nothing there."""
     wanted = names_of(title.title, *title.alt_titles)
     asked: set = set()
+    answered, unanswered = False, None
     for query in queries_of(title):
         try:
             hits = source.search(net, query)
@@ -946,7 +1300,12 @@ def find_same(net: "Net", source: "Source", title: "TitleRef") -> "TitleRef | No
             raise                                  # (v5.44.72) said by the one asking: the site lets no program in
         except SourceError as exc:
             _LOG.info("%s: the search for %r: %s", source.label, query, exc)
+            if isinstance(exc, Missing):
+                answered = True
+            else:
+                unanswered = exc
             continue
+        answered = True
         near = [h for h in hits if names_of(*h.names) & wanted and _fits(h.type, h.year, title.type, title.year)]
         if not near:
             near = [h for h in hits[:1] if len(h.names) <= 1 and _fits(h.type, h.year, title.type, title.year)]
@@ -961,6 +1320,8 @@ def find_same(net: "Net", source: "Source", title: "TitleRef") -> "TitleRef | No
                 continue
             if same_title(title, other):
                 return other
+    if not answered and unanswered is not None:
+        raise unanswered
     return None
 
 
@@ -1061,7 +1422,7 @@ class Remanga(Source):
         age = c.get("age_limit") if isinstance(c.get("age_limit"), dict) else {}
         dir_ = str(c.get("dir") or unquote(key))
         status = str((c.get("status") or {}).get("name") or "") if isinstance(c.get("status"), dict) else ""
-        return TitleRef(
+        return checked(TitleRef(                       # (v5.44.143) the program's gate — by a link too
             site=self.name, key=dir_, url=f"{self.site()}/manga/{quote(dir_, safe='')}",
             title=str(c.get("main_name") or c.get("secondary_name")).strip(), alt_titles=alt,
             type=str((c.get("type") or {}).get("name") or "") if isinstance(c.get("type"), dict) else "",
@@ -1071,7 +1432,7 @@ class Remanga(Source):
             cover_url=urljoin(self.site() + "/", cover_path) if cover_path else "",
             authors=[x["name"] for x in c.get("creators") or [] if isinstance(x, dict) and x.get("name")
                      and x.get("type") == 1],
-            branches=branches)
+            branches=branches))
 
     def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
         branch = branch or (title.best_branch().id if title.best_branch() else "")
@@ -1212,10 +1573,11 @@ class MangaBuff(Source):
         site_id = re.search(r'class="manga[\s"][^>]*data-id="(\d+)"', page) or re.search(r'data-manga-id="(\d+)"', page)
         erotic = any(g.lower() in ("хентай", "эротика", "hentai") for g in genres) or \
             bool(re.search(r'class="[^"]*\bmanga__age[^"]*"[^>]*>\s*18\+', page))
-        return TitleRef(site=self.name, key=key, url=url, title=name, alt_titles=[a for a in alt if a and a != name],
-                        type=kind, status=status, year=year, is_erotic=erotic, genres=genres, description=about,
-                        cover_url=_html.unescape(poster.group(1)) if poster else "",
-                        branches=[Branch(id="", name="MangaBuff")], site_id=site_id.group(1) if site_id else "")
+        return checked(TitleRef(site=self.name, key=key, url=url, title=name,       # (v5.44.143) the program's gate
+                              alt_titles=[a for a in alt if a and a != name], type=kind, status=status, year=year,
+                              is_erotic=erotic, genres=genres, description=about,
+                              cover_url=_html.unescape(poster.group(1)) if poster else "",
+                              branches=[Branch(id="", name="MangaBuff")], site_id=site_id.group(1) if site_id else ""))
 
     _ITEM = re.compile(r'<a[^>]+href="([^"]+/manga/[^"/]+/(\d+)/([\d.]+))"[^>]*class="chapters__item[^"]*"[^>]*>(.*?)</a>'
                        r'|<a[^>]+class="chapters__item[^"]*"[^>]*href="([^"]+/manga/[^"/]+/(\d+)/([\d.]+))"[^>]*>(.*?)</a>',
@@ -1335,7 +1697,8 @@ class MangaLib(Source):
     name = "mangalib"
     label = "MangaLib"
     hosts = ("mangalib.me", "mangalib.org", "test-front.mangalib.me")
-    FIELDS = ("summary", "genres", "tags", "authors", "otherNames", "releaseDate")
+    # (v5.44.149) ``artists`` — asked 11.11.2026: [{id, slug_url, name, rus_name, model «people»}], as ``authors``
+    FIELDS = ("summary", "genres", "tags", "authors", "artists", "otherNames", "releaseDate")
     SITE_ID = 1                                 # (v5.44.96) its site of the Lib sites' API (HentaiLib — 4)
 
     def site(self) -> str:
@@ -1359,8 +1722,10 @@ class MangaLib(Source):
         return out
 
     def _never(self) -> str:
-        """(v5.44.96) What its lists leave out always — the program's rule about minors (HentaiLib's)."""
-        return ""
+        """(v5.44.96) What its own lists are always asked without (``gates.left_out`` — «site»)."""
+        left = G.left_out(self.name, "nsfw", where="site")
+        tags, genres = left.tags, left.genres
+        return "".join(f"&tags_exclude[]={n}" for n in tags) + "".join(f"&genres_exclude[]={n}" for n in genres)
 
     def key_of(self, url: str) -> str:
         if not _ours(url, self.site(), self.hosts):
@@ -1424,10 +1789,15 @@ class MangaLib(Source):
             x = str(x or "").strip()
             if x and x != name and x not in alt:
                 alt.append(x)
-        if self.adult_only and depicts_minors([name, *alt, *_names(c.get("tags")), *_names(c.get("genres"))]):
-            raise Excluded(EXCLUDED)                 # (v5.44.96) the program's rule — HentaiLib's titles
-        year = _year(c.get("releaseDate") or c.get("releaseDateString"))
         label = lambda v: str(v.get("label") or v.get("name") or "") if isinstance(v, dict) else ""   # noqa: E731
+        # (v5.44.143) its «18+ (RX)» is erotica (as «Лента» has it): MangaLib's own titles of hentai too
+        erotic = self.adult_only or "RX" in label(c.get("ageRestriction")).upper()
+        ids = lambda items: [x.get("id") for x in items or [] if isinstance(x, dict)]                # noqa: E731
+        why = G.title(self.name, names=[name, *alt], tags=_names(c.get("tags")), tag_ids=ids(c.get("tags")),
+                      genres=_names(c.get("genres")), genre_ids=ids(c.get("genres")), adult=erotic)
+        if why:                                      # (v5.44.96) the gate — HentaiLib's titles, (v5.44.143) MangaLib's
+            raise Excluded(why)                      # of «18+ (RX)» — before its chapters are asked
+        year = _year(c.get("releaseDate") or c.get("releaseDateString"))
         branches: dict = {}
         for ch in self._chapters_raw(net, str(c.get("slug_url") or key)):
             for b in ch.get("branches") or []:
@@ -1438,10 +1808,22 @@ class MangaLib(Source):
         return TitleRef(site=self.name, key=str(c.get("slug_url") or key),
                         url=f"{self.site()}/ru/manga/{c.get('slug_url') or key}", title=name, alt_titles=alt,
                         type=label(c.get("type")), status=label(c.get("status")), year=year,
-                        age=label(c.get("ageRestriction")), is_erotic=self.adult_only, genres=_names(c.get("genres")),
+                        age=label(c.get("ageRestriction")), is_erotic=erotic, genres=_names(c.get("genres")),
                         tags=_names(c.get("tags")), description=self._summary(c.get("summary")),
                         cover_url=str(cover.get("default") or cover.get("md") or ""),
-                        authors=_names(c.get("authors")), branches=list(branches.values()))
+                        authors=_names(c.get("authors")), people=self._people(c), branches=list(branches.values()))
+
+    @staticmethod
+    def _people(c: dict) -> list:
+        """(v5.44.149) [{id, name}] of the title's authors and artists (a person once)."""
+        out, seen = [], set()
+        for x in [*(c.get("authors") or []), *(c.get("artists") or [])]:
+            number = _int(x.get("id")) if isinstance(x, dict) else 0
+            name = " ".join(str(x.get("name") or x.get("rus_name") or "").split()) if isinstance(x, dict) else ""
+            if number > 0 and name and number not in seen:
+                seen.add(number)
+                out.append({"id": number, "name": name})
+        return out
 
     def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
         branch = branch or (title.best_branch().id if title.best_branch() else "0")
@@ -1547,8 +1929,10 @@ class MangaLib(Source):
                 continue
             year = _year(x.get("releaseDate") or x.get("releaseDateString"))
             names = [str(n).strip() for n in (x.get("rus_name"), x.get("eng_name"), x.get("name")) if n and str(n).strip()]
-            if self.adult_only and depicts_minors(names):
-                continue                             # (v5.44.96) the program's rule — by the name too (HentaiLib)
+            age = x.get("ageRestriction") if isinstance(x.get("ageRestriction"), dict) else {}
+            erotic = self.adult_only or "RX" in str(age.get("label") or "").upper()     # (v5.44.143) as ``title``
+            if G.title(self.name, names=names, adult=erotic):
+                continue                             # (v5.44.96) a gate closed it — by the name too (HentaiLib)
             cover = x.get("cover") if isinstance(x.get("cover"), dict) else {}
             rating = x.get("rating") if isinstance(x.get("rating"), dict) else {}
             out.append(Hit(site=self.name, key=str(x["slug_url"]), names=names,
@@ -1556,7 +1940,7 @@ class MangaLib(Source):
                            year=year, url=f"{self.site()}/ru/manga/{x['slug_url']}",
                            cover=str(cover.get("thumbnail") or cover.get("default") or cover.get("md") or ""),
                            rating=_float(rating.get("average")), votes=_int(rating.get("votes")),
-                           adult=self.adult_only))
+                           adult=erotic))
         return out
 
     def referer(self, title: TitleRef) -> str:
@@ -1569,19 +1953,14 @@ class HentaiLib(MangaLib):
     computer 6.11.2026): its list (60 a page), a title and its chapters — without a sign-in; a chapter's pages — 404
     without one: :data:`SIGNED_ONLY` — its own sign-in, else MangaLib's (one account of the Lib sites); its pictures —
     its own servers of ``/api/constants`` (site 4: img2h/img3h.hentaicdn.org).  Every title is «18+ (RX)»: a site of
-    hentai alone.  The program's rule about minors: its tags «Лоликон», «Сетакон», «Юные», «Девочки-волшебницы» (and
-    MangaLib's «Лоли» — its titles carry MangaLib's tags too), the genres «Школа», «Кодомо» — always left out of its
-    lists (:data:`NEVER_TAGS`, :data:`NEVER_GENRES`); a title whose
-    tags, genres or name say so (``depicts_minors``: «Школа Каста» had neither of them) — not a hit, and
-    :class:`Excluded` when opened."""
+    hentai alone.  The program's gates: what ``gates.left_out`` names is always left out of its lists; a title
+    ``gates.title`` closes (by its tags, genres or name) — not a hit, and :class:`Excluded` when opened."""
     name = "hentailib"
     label = "HentaiLib"
     hosts = ("hentailib.me", "hentailib.org")
     adult_only = True
     SITE_ID = 4
     SIGNED_ONLY = True
-    NEVER_TAGS = F_HENTAILIB_NEVER_TAGS        # «Лоликон», «Сетакон», «Юные», «Девочки-волшебницы», «Лоли» (core/filter.py)
-    NEVER_GENRES = F_HENTAILIB_NEVER_GENRES    # «Школа», «Кодомо»
 
     def site(self) -> str:
         return address(self.name) or HENTAILIB_SITE
@@ -1595,12 +1974,8 @@ class HentaiLib(MangaLib):
     def token(self) -> str:                    # its own sign-in, else MangaLib's: one account of the Lib sites
         return token_of(self.name) or token_of("mangalib")
 
-    def _never(self) -> str:
-        return "".join(f"&tags_exclude[]={n}" for n in self.NEVER_TAGS) + \
-            "".join(f"&genres_exclude[]={n}" for n in self.NEVER_GENRES)
 
-
-SIGN_IN_FIRST = ("{site} даёт читать и скачивать главы только со входом: «Настройки → Сайты манги» → вход MangaLib (он "
+SIGN_IN_FIRST = ("{site} даёт читать и скачивать главы только со входом: «Настройки → Манга и манхва» → вход MangaLib (он "
                  "общий для сайтов Lib)")
 
 
@@ -1642,11 +2017,11 @@ class ComX(Source):
         facts = X.facts_of(page)
         cover = X.meta(page, "og:image")
         genres = facts["genres"]
-        return TitleRef(site=self.name, key=key, url=url, title=names[0], alt_titles=names[1:], type=facts["type"],
-                        status=facts["status"], year=facts["year"], genres=genres,
-                        is_erotic=any(g.casefold() in ("хентай", "эротика", "hentai") for g in genres),
-                        description=X.description_of(page), cover_url=urljoin(url, cover) if cover else "",
-                        branches=[Branch(id="", name="com-x.life")], site_id=news_id)
+        return checked(TitleRef(site=self.name, key=key, url=url, title=names[0], alt_titles=names[1:],   # (v5.44.143)
+                              type=facts["type"], status=facts["status"], year=facts["year"], genres=genres,
+                              is_erotic=any(g.casefold() in ("хентай", "эротика", "hentai") for g in genres),
+                              description=X.description_of(page), cover_url=urljoin(url, cover) if cover else "",
+                              branches=[Branch(id="", name="com-x.life")], site_id=news_id))
 
     def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
         from core import manhwa_comx as X
@@ -1774,14 +2149,15 @@ class ReadManga(Source):
             x = _text(x)
             if x and x not in authors:
                 authors.append(x)
-        return TitleRef(site=self.name, key=key, url=url, title=name, alt_titles=alt, type=kind,
-                        status=_text(status.group(1)) if status else "", year=year,
-                        age=next(iter(self._links(page, "age_limitation")), ""),
-                        is_erotic=any(g.casefold() in ("хентай", "эротика") for g in genres), genres=genres,
-                        tags=[t[:1].upper() + t[1:] for t in self._links(page, "tag", "creation-element-tags__item")],
-                        description=plain(_block(page, "cr-description__content")),
-                        cover_url=_html.unescape(poster.group(1)) if poster else "", authors=authors,
-                        branches=[Branch(id="", name=self.label)])
+        return checked(TitleRef(site=self.name, key=key, url=url, title=name, alt_titles=alt, type=kind,  # (v5.44.143)
+                              status=_text(status.group(1)) if status else "", year=year,
+                              age=next(iter(self._links(page, "age_limitation")), ""),
+                              is_erotic=any(g.casefold() in ("хентай", "эротика") for g in genres), genres=genres,
+                              tags=[t[:1].upper() + t[1:] for t in self._links(page, "tag",
+                                                                                "creation-element-tags__item")],
+                              description=plain(_block(page, "cr-description__content")),
+                              cover_url=_html.unescape(poster.group(1)) if poster else "", authors=authors,
+                              branches=[Branch(id="", name=self.label)]))
 
     _ROW = re.compile(r'<tr[^>]*class="[^"]*\bitem-row\b[^"]*"([^>]*)>(.*?)</tr>', re.S)
 
@@ -1933,14 +2309,17 @@ class AllHentai(ReadManga):
     ``/list/tag/`` of the class ``creation-element-tags__item``), chapters (``tr.item-row``), reader
     (``rm_h.readerInit``), search (``/search/suggestion``), catalog API (``/api/catalog/search?offset=&sortType=``: 50 a
     page; ``DATE_UPDATE``, ``POPULARITY``, ``DATE_CREATE``, ``RATING``, ``NAME`` — an order it does not know is its
-    default; no filters; a title's ``elements`` — its genres, tags, parodies and year, ``category`` — «Манга»,
-    «Манхва», «Комикс», «3D», «Без текста», ``rating`` {rate, voteCount}, ``picUrl`` on ``staticahen2.aaa200.one``).
+    default; a title's ``elements`` — its genres, tags, parodies and year, each with its number ``id``; ``category``
+    — «Манга», «Манхва», «Комикс», «3D», «Без текста»…, ``rating`` {rate, voteCount}, ``picUrl`` on
+    ``staticahen2.aaa200.one``; (v5.44.155) the API takes the filters — ``includeElementIds``, ``excludeElementIds``
+    (the numbers of genres, tags, kinds: ``/api/catalog/elementsByType?type=2|40|3``), ``includeProductionStatuses``,
+    ``years``, ``q``: ``core/catalog.py`` ``allhentai_url``).
     Without a sign-in a chapter's page answers 404 with every picture ``/static/deleted1.png`` (or with no reader): its
-    chapters are read with the owner's sign-in — the site's cookies («Настройки → Сайты манги»); (v5.44.107) and with
+    chapters are read with the owner's sign-in — the site's cookies («Настройки → Манга и манхва»); (v5.44.107) and with
     the mark of his account in the chapter's address, as the site's own script adds it to the links
     (:meth:`ReadManga._marked`; without it a signed-in reader got the «deleted» pictures as well — the owner's «не
-    скачалась … AllHentai не показал страницы главы», 7.11.2026).  Everything there is hentai; a title depicting
-    minors (its names, genres, tags) is never shown, opened or taken."""
+    скачалась … AllHentai не показал страницы главы», 7.11.2026).  Everything there is hentai; a title a gate closes
+    (its names, genres, tags) is never shown, opened or taken."""
     name = "allhentai"
     label = "AllHentai"
     hosts = ("allhen.online", "allhentai.ru", "allhentai.online")
@@ -1949,8 +2328,8 @@ class AllHentai(ReadManga):
     FEED_ORDER = {"new": "DATE_UPDATE", "popular": "POPULARITY"}
     GONE = "глава убрана с AllHentai: там её больше нет"
     SIGN_IN = ("AllHentai даёт читать и скачивать главы только со входом: войдите на сайте в своём браузере и добавьте "
-               "его куки в «Настройки → Сайты манги»")
-    NOT_SHOWN = ("AllHentai не показал страницы главы: либо вход устарел (обновите куки в «Настройки → Сайты манги»), "
+               "его куки в «Настройки → Манга и манхва»")
+    NOT_SHOWN = ("AllHentai не показал страницы главы: либо вход устарел (обновите куки в «Настройки → Манга и манхва»), "
                  "либо главу убрали с сайта")
 
     def site(self) -> str:
@@ -1967,9 +2346,7 @@ class AllHentai(ReadManga):
     def title(self, net: Net, key: str) -> TitleRef:
         ref = super().title(net, key)
         ref.is_erotic = True
-        if depicts_minors([ref.title, *ref.alt_titles, *ref.genres, *ref.tags]):
-            raise Excluded(EXCLUDED)
-        return ref
+        return checked(ref)
 
     def pictures(self, net: Net, title: TitleRef, chapter: ChapterRef) -> list:
         if not self.signed_in():
@@ -1990,15 +2367,31 @@ class AllHentai(ReadManga):
                 raise Closed(self.NOT_SHOWN) from exc
             raise
 
+    def _never(self) -> str:
+        """(v5.44.155) What its own lists are always asked without (``gates.left_out`` — «site»): the numbers of its
+        catalog's elements."""
+        left = G.left_out(self.name, "nsfw", where="site")
+        return "".join(f"&excludeElementIds={n}" for n in dict.fromkeys((*left.tags, *left.genres)))
+
+    @staticmethod
+    def said(row) -> dict:
+        """(v5.44.155) What a row of its catalog says of a title, for the program's gate (``gates.title``): the names
+        of its ``elements`` (genres, tags, parodies, the year) and their numbers at the site — a genre's among the
+        genres', every other one's among the tags'."""
+        elements = [e for e in (row.get("elements") if isinstance(row, dict) else None) or [] if isinstance(e, dict)]
+        return {"tags": [str(e.get("name") or "") for e in elements],
+                "genre_ids": [e["id"] for e in elements if e.get("typeName") == "genre" and e.get("id") is not None],
+                "tag_ids": [e["id"] for e in elements if e.get("typeName") != "genre" and e.get("id") is not None]}
+
     def feed(self, net: Net, how: str, page: int) -> tuple:
         data = net.json(f"{self.site()}/api/catalog/search?offset={self.FEED_COUNT * (max(1, page) - 1)}&sortType="
-                        f"{self.FEED_ORDER.get(how, 'DATE_UPDATE')}", what=self.label,
+                        f"{self.FEED_ORDER.get(how, 'DATE_UPDATE')}{self._never()}", what=self.label,
                         headers={"Accept": "application/json, text/plain, */*", "Referer": self.site() + "/"})
         return self.catalog_hits(data)
 
     def catalog_hits(self, data) -> tuple:
-        """([:class:`Hit`], whether there is a page more) of an answer of its catalog API — a title the program's rule
-        leaves out (its names, its ``elements``) not among them; the kind — its ``category``."""
+        """([:class:`Hit`], whether there is a page more) of an answer of its catalog API — a title a gate closes
+        (its names, its ``elements`` — :meth:`said`) not among them; the kind — its ``category``."""
         out = []
         for x in (data.get("list") if isinstance(data, dict) else None) or []:
             element = x.get("elementId") if isinstance(x, dict) and isinstance(x.get("elementId"), dict) else {}
@@ -2006,9 +2399,8 @@ class AllHentai(ReadManga):
             if not link or not re.fullmatch(r"[\w.-]{1,200}", link):
                 continue
             names = [str(x.get("name") or link).strip()]
-            marks = [str(e.get("name") or "") for e in x.get("elements") or [] if isinstance(e, dict)]
-            if depicts_minors(names + marks):
-                continue
+            if G.title(self.name, names=names, **self.said(x)):
+                continue                             # a gate closed it
             category = x.get("category") if isinstance(x.get("category"), dict) else {}
             rating = x.get("rating") if isinstance(x.get("rating"), dict) else {}
             out.append(Hit(site=self.name, key=link, names=names, type=str(category.get("name") or ""),
@@ -2021,7 +2413,7 @@ class AllHentai(ReadManga):
         return out, (offset + (limit or self.FEED_COUNT) < total) if total else len(out) >= self.FEED_COUNT
 
     def search(self, net: Net, query: str) -> list:
-        hits = [h for h in super().search(net, query) if not depicts_minors(h.names)]
+        hits = [h for h in super().search(net, query) if not G.title(self.name, names=h.names)]
         for h in hits:
             h.adult = True
         return hits
@@ -2074,17 +2466,17 @@ class Desu(Source):
         cover = m.get("cover") if isinstance(m.get("cover"), dict) else {}
         key = str(m.get("id") or key)
         url = str(m.get("view_url") or "").strip() or f"{self.site()}/manga/{key}/"
-        return TitleRef(site=self.name, key=key, url=url if url.endswith("/") else url + "/", title=name,
-                        alt_titles=alt, type=self.KINDS.get(str(m.get("kind") or "").casefold(), ""),
-                        status=self.STATUSES.get(str(m.get("status") or "").casefold(), ""),
-                        year=_year(_date(m.get("aired_on"))),
-                        age="" if str(m.get("content_rating") or "").casefold() in ("unrated", "none", "unknown")
-                        else str(m.get("content_rating") or ""),
-                        is_erotic=bool(slugs & {"hentai", "erotica"}) or any(
-                            g.casefold() in ("хентай", "эротика") for g in genres),
-                        genres=genres, description=plain(m.get("description")),
-                        cover_url=str(cover.get("preview") or cover.get("snippet") or cover.get("x120") or ""),
-                        branches=[Branch(id="", name=self.label)])
+        return checked(TitleRef(site=self.name, key=key, url=url if url.endswith("/") else url + "/",   # (v5.44.143)
+                              title=name, alt_titles=alt, type=self.KINDS.get(str(m.get("kind") or "").casefold(), ""),
+                              status=self.STATUSES.get(str(m.get("status") or "").casefold(), ""),
+                              year=_year(_date(m.get("aired_on"))),
+                              age="" if str(m.get("content_rating") or "").casefold() in ("unrated", "none", "unknown")
+                              else str(m.get("content_rating") or ""),
+                              is_erotic=bool(slugs & {"hentai", "erotica"}) or any(
+                                  g.casefold() in ("хентай", "эротика") for g in genres),
+                              genres=genres, description=plain(m.get("description")),
+                              cover_url=str(cover.get("preview") or cover.get("snippet") or cover.get("x120") or ""),
+                              branches=[Branch(id="", name=self.label)]))
 
     def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
         data = net.json(f"{self.site()}/api/manga/{quote(title.key, safe='')}/chapters", what=self.label,
@@ -2179,6 +2571,157 @@ class Desu(Source):
         return self.site() + "/"
 
 
+class MangaOneLove(Source):
+    """(v5.44.143) Manga One Love (mangaonelove.space) — the owner, 9.11.2026, of ReadManga, which gives the program none
+    of its pictures: «ну не обходи но сделай так что бы качало».  «Король меча», Глава 185 is free here and on no other
+    site the program reads (Remanga and ReComics sell it, com-x.life has no such chapter, MangaLib, MangaBuff, Desu —
+    no such title): its pages and pictures come to the program openly (asked from the owner's computer 9.11.2026 —
+    real JPEGs, no check for robots).  WordPress with the theme Madara and its own pages, as they were that day:
+
+    * the title — ``/manga/<slug>/``: ``h1.manga-title``; the rows ``<span class="info-label">…:</span>`` — «Тип»,
+      «Статус» («Онгоинг»), «Автор(ы)», «Переводчики», «Другое название», «Релиз» (the year); the genres and the tags
+      — the links ``a.info-tag`` to ``/manga-genre/…`` and ``/manga-tag/…`` (the menus' links of genres have no such
+      class); the description — ``.description-full``; the cover — ``og:image``;
+    * its chapters, all of them on that page, newest first — ``a.chapter-item`` (``data-chapter-number``,
+      ``data-volume-number`` — 0 without a tome; ``.chapter-number`` «185 Глава», ``.chapter-date`` «21.05.2024»),
+      each to ``/manga-reader/<slug>/glava-<N>/stranica-1/``;
+    * a chapter's page — every picture of it: ``img.feed-page__image`` (``data-page``, its size);
+    * its search — the quick search its pages ask (``/wp-admin/admin-ajax.php``, POST ``action=wp-manga-search-manga``,
+      ``title``): JSON ``{success, data: [{title, url, type}]}``.
+
+    One translation to a chapter; all free.  The genre «Взрослая» (as «Хентай», «Эротика») — erotica."""
+    name = "onelove"
+    label = "Manga One Love"
+    hosts = ("mangaonelove.space",)
+    EROTIC = ("взрослая", "хентай", "эротика", "18+")
+    STATUSES = {"онгоинг": "Продолжается", "завершен": "Завершён", "завершён": "Завершён", "заморожен": "Заморожен"}
+
+    def site(self) -> str:
+        return address(self.name) or ONELOVE_SITE
+
+    def key_of(self, url: str) -> str:
+        if not _host_of(url, self.hosts, self.site()):
+            return ""
+        m = re.match(r"/(?:manga|manga-reader)/([a-z0-9][a-z0-9_-]*)(?:/|$)", urlparse(url).path, re.I)
+        return m.group(1) if m and m.group(1).lower() != "page" else ""
+
+    def _page(self, net: Net, url: str, referer: str = "") -> str:
+        return net.text(url, what=self.label, headers={"Referer": referer or self.site() + "/",
+                                                        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
+
+    _VALUE = re.compile(r'\s*<(\w+)\b[^>]*\bclass="[^"]*\binfo-value\b[^"]*"[^>]*>')
+
+    @classmethod
+    def _rows(cls, page: str) -> dict:
+        """The rows of facts — the element ``.info-value`` right after each label: «Тип» → its words; a row of links —
+        their words, one after another (« / »)."""
+        out = {}
+        for m in re.finditer(r'<span class="info-label">\s*([^<]+?)\s*</span>', page):
+            value = cls._VALUE.match(page, m.end())
+            if not value:
+                continue
+            inner = _inside(page, value)
+            links = [x for x in (_text(a) for a in re.findall(r"<a\b[^>]*>(.*?)</a>", inner, re.S)) if x]
+            out.setdefault(m.group(1).rstrip(":").strip(), " / ".join(links) if links else _text(inner))
+        return out
+
+    @staticmethod
+    def _tags(page: str, kind: str) -> list:
+        out = []
+        for x in re.findall(r'<a href="[^"]*/manga-' + kind + r'/[^"]*"\s+class="info-tag[^"]*"[^>]*>(.*?)</a>', page,
+                            re.S):
+            x = _text(x)
+            if x and x not in out:
+                out.append(x)
+        return out
+
+    def title(self, net: Net, key: str) -> TitleRef:
+        url = f"{self.site()}/manga/{key}/"
+        page = self._page(net, url)
+        h1 = re.search(r'<h1[^>]*class="[^"]*\bmanga-title\b[^"]*"[^>]*>(.*?)</h1>', page, re.S)
+        name = _text(h1.group(1)) if h1 else ""
+        if not name:
+            raise SourceError(f"на странице {self.label} нет тайтла")
+        rows = self._rows(page)
+        alt = [x.strip() for x in rows.get("Другое название", "").split(" / ") if x.strip() and x.strip() != name]
+        genres = self._tags(page, "genre")
+        kind = rows.get("Тип", "")
+        cover = re.search(r'<meta property="og:image" content="([^"]+)"', page)
+        net.kept[(self.name, key)] = page                # its chapters are on this page: not asked again
+        return checked(TitleRef(                           # the program's gate
+            site=self.name, key=key, url=url, title=name, alt_titles=list(dict.fromkeys(alt)),
+            type=kind if kind in KNOWN_TYPES else "", year=_year(rows.get("Релиз", "")),
+            status=self.STATUSES.get(rows.get("Статус", "").casefold(), rows.get("Статус", "")),
+            is_erotic=any(g.casefold() in self.EROTIC for g in genres), genres=genres, tags=self._tags(page, "tag"),
+            description=plain(_block(page, "description-full")),
+            cover_url=_html.unescape(cover.group(1)) if cover else "",
+            authors=[x.strip() for x in rows.get("Автор(ы)", "").split(" / ") if x.strip()],
+            branches=[Branch(id="", name=rows.get("Переводчики", "") or self.label)]))
+
+    _CHAPTER = re.compile(r'<a\b([^>]*\bclass="chapter-item"[^>]*)>(.*?)</a>', re.S)
+
+    def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
+        page = net.kept.pop((self.name, title.key), None) or self._page(net, title.url)
+        found: dict = {}
+        for m in self._CHAPTER.finditer(page):
+            attrs, inner = m.group(1), m.group(2)
+            href = re.search(r'href="([^"]+)"', attrs)
+            number = re.search(r'data-chapter-number="([^"]*)"', attrs)
+            if not href or not number or not re.fullmatch(r"\d+(?:[.,]\d+)?", number.group(1).strip()):
+                continue
+            link = urljoin(title.url, _html.unescape(href.group(1)))
+            slug = re.search(r"/manga-reader/[^/]+/([^/?#]+)", link)
+            volume = re.search(r'data-volume-number="(\d*)"', attrs)
+            tome = _int(volume.group(1)) if volume else 0
+            n = _num(number.group(1))
+            words = re.search(r'class="chapter-number"[^>]*>(.*?)</span>', inner, re.S)
+            own = re.sub(r"^\s*[\d.,]+\s*(?:Глава|глава)?\s*[-–—:.]?\s*", "", _text(words.group(1)) if words else "")
+            day = re.search(r'class="chapter-date"[^>]*>\s*(\d\d)\.(\d\d)\.(\d{4})', inner)
+            found.setdefault((tome, n), ChapterRef(
+                id=slug.group(1) if slug else f"{tome}/{n}", tome=tome, number=n, name=own,
+                date=f"{day.group(3)}-{day.group(2)}-{day.group(1)}" if day else "", url=link))
+        out = sorted(found.values(), key=lambda c: (c.tome, _number_key(c.number)))
+        for k, ch in enumerate(out, 1):
+            ch.index = k
+        return out
+
+    def pictures(self, net: Net, title: TitleRef, chapter: ChapterRef) -> list:
+        page = self._page(net, chapter.url, referer=title.url)
+        out = []
+        for tag in re.findall(r'<img\b[^>]*\bclass="[^"]*\bfeed-page__image\b[^"]*"[^>]*>', page, re.S):
+            src = re.search(r'\b(?:data-src|src)="\s*([^"\s]+)\s*"', tag)
+            if not src or src.group(1).startswith("data:"):
+                continue
+            size = {k: _int(v) for k, v in re.findall(r'\b(width|height|data-page)="(\d+)"', tag)}
+            out.append((size.get("data-page") or len(out) + 1,
+                        Picture(url=urljoin(chapter.url, _html.unescape(src.group(1))), width=size.get("width", 0),
+                                height=size.get("height", 0))))
+        if not out:
+            raise SourceError(f"на странице главы {self.label} нет картинок")
+        return [pic for _place, pic in sorted(out, key=lambda x: x[0])]
+
+    def search(self, net: Net, query: str) -> list:
+        data = net.json(f"{self.site()}/wp-admin/admin-ajax.php", method="POST", what=self.label,
+                        data={"action": "wp-manga-search-manga", "title": query},
+                        headers={"Accept": "application/json, text/javascript, */*; q=0.01",
+                                 "X-Requested-With": "XMLHttpRequest", "Referer": self.site() + "/"})
+        if not isinstance(data, dict) or not data.get("success"):
+            return []                                    # «nothing found» comes as a message, not titles
+        out = []
+        for x in data.get("data") or []:
+            if not isinstance(x, dict):
+                continue
+            url = str(x.get("url") or "")
+            key = self.key_of(url)
+            name = _html.unescape(str(x.get("title") or "")).strip()
+            if key and name:
+                out.append(Hit(site=self.name, key=key, names=[name], url=f"{self.site()}/manga/{key}/"))
+        return out
+
+    def referer(self, title: TitleRef) -> str:
+        return title.url
+
+
 class MangaDex(Source):
     """(v5.44.79) MangaDex — a title in every language it is translated into; the owner (5.11.2026, of his friend's
     reader): «искало именно того перевода который тебе надо или оригинал».  Its open API (``api.mangadex.org``; from
@@ -2191,7 +2734,7 @@ class MangaDex(Source):
     translatedLanguage[]=``; the chapters of one — ``/manga/<id>/feed?translatedLanguage[]=…`` page by page (500): a
     chapter of several groups — of the group with the most chapters, one hosted elsewhere (``externalUrl``) or
     without pages — not taken; a chapter's pictures — ``/at-home/server/<chapter id>`` → ``<baseUrl>/data/<hash>/
-    <file>``.  The language taken unless the card picks another — «Настройки → Сайты манги» (:data:`LANGUAGE`)."""
+    <file>``.  The language taken unless the card picks another — «Настройки → Манга и манхва» (:data:`LANGUAGE`)."""
     name = "mangadex"
     label = "MangaDex"
     hosts = ("mangadex.org",)
@@ -2204,6 +2747,8 @@ class MangaDex(Source):
     STATUSES = {"ongoing": "Продолжается", "completed": "Завершён", "hiatus": "Приостановлен",
                 "cancelled": "Выпуск прекращён"}
     AGES = {"suggestive": "16+", "erotica": "18+", "pornographic": "18+"}
+    # (v5.44.143) its ratings of erotica: «erotica» (sexual, not explicit) is one too — before, «pornographic» alone
+    EROTIC = ("erotica", "pornographic")
     UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     PAGE = 500
 
@@ -2279,20 +2824,14 @@ class MangaDex(Source):
                 alt.append(name)
         original = str(attrs.get("originalLanguage") or "")
         available = [str(x) for x in attrs.get("availableTranslatedLanguages") or [] if x]
-        branches = []
-        for lang in dict.fromkeys([*self.WANTED, original]):
-            if lang and lang in available:
-                label = self.NAMES.get(lang, lang)
-                name = f"{label} — оригинал" if lang == original else label
-                branches.append(Branch(id=lang, name=name, count=self._count(net, key, lang)))
         wanted = LANGUAGE[0]
         rating = str(attrs.get("contentRating") or "")
         tags = [t for t in attrs.get("tags") or [] if isinstance(t, dict)]
         tag_name = lambda t: self._in((t.get("attributes") or {}).get("name"), "ru", "en")       # noqa: E731
-        return TitleRef(
-            site=self.name, key=key, url=f"{self.site()}/title/{key}", title=main, alt_titles=alt,
-            type=self.KINDS.get(original, ""), status=self.STATUSES.get(str(attrs.get("status") or ""), ""),
-            year=_int(attrs.get("year")), age=self.AGES.get(rating, ""), is_erotic=rating == "pornographic",
+        ref = checked(TitleRef(          # (v5.44.143) the program's gate — by a link too, before its
+            site=self.name, key=key, url=f"{self.site()}/title/{key}", title=main, alt_titles=alt,   # chapters are
+            type=self.KINDS.get(original, ""), status=self.STATUSES.get(str(attrs.get("status") or ""), ""),  # asked
+            year=_int(attrs.get("year")), age=self.AGES.get(rating, ""), is_erotic=rating in self.EROTIC,
             genres=[tag_name(t) for t in tags if (t.get("attributes") or {}).get("group") in ("genre", "theme")],
             tags=[tag_name(t) for t in tags if (t.get("attributes") or {}).get("group") not in ("genre", "theme")],
             description=plain(self._in(attrs.get("description"), "ru", "en")),
@@ -2300,7 +2839,13 @@ class MangaDex(Source):
             authors=list(dict.fromkeys(str((r.get("attributes") or {}).get("name") or "") for r in relations
                                        if isinstance(r, dict) and r.get("type") in ("author", "artist")
                                        and (r.get("attributes") or {}).get("name"))),
-            branches=branches, original=original, prefer=original if wanted == "original" else wanted)
+            original=original, prefer=original if wanted == "original" else wanted))
+        for lang in dict.fromkeys([*self.WANTED, original]):
+            if lang and lang in available:
+                label = self.NAMES.get(lang, lang)
+                name = f"{label} — оригинал" if lang == original else label
+                ref.branches.append(Branch(id=lang, name=name, count=self._count(net, key, lang)))
+        return ref
 
     def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
         lang = branch or (title.best_branch().id if title.best_branch() else "")
@@ -2382,7 +2927,7 @@ class MangaDex(Source):
                            type=self.KINDS.get(str(attrs.get("originalLanguage") or ""), ""), year=_int(attrs.get("year")),
                            url=f"{self.site()}/title/{key}",
                            cover=self._cover(key, item.get("relationships") or [], ".256.jpg"),
-                           adult=attrs.get("contentRating") == "pornographic"))
+                           adult=attrs.get("contentRating") in self.EROTIC))
         return out
 
     def referer(self, title: TitleRef) -> str:
@@ -2401,7 +2946,8 @@ def _cover_host(source: "MangaDex") -> str:
 # ── (v5.44.85) Хентай-тян ──────────────────────────────────────────────────────────────────────────────────────────
 _PART_AT = re.compile(r"(?i)(?<![^\W\d_])(?:глава|главы|часть|части|chapter|chap|ch|part|эпизод|episode|ep)\.?\s*[№#]?"
                       r"\s*(\d+(?:[.,]\d+)?)")
-_TRAILING_NUMBER = re.compile(r"[\s\-–—:,.#№]+(\d+(?:[.,]\d+)?)\s*$")
+# (v5.44.132) «… №9-11» — a range of parts (Nude-Moon's entries of several chapters at once): its first number
+_TRAILING_NUMBER = re.compile(r"[\s\-–—:,.#№]+(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*\d+(?:[.,]\d+)?)?\s*$")
 CLOUD = 60                   # a column of more tags than this is the site's every tag, not a title's
 
 
@@ -2496,7 +3042,7 @@ class Hentaichan(Source):
     ``div.content_row`` (``h2 a``, its picture, its tags — the links of ``.genre``; entries taken down are named «.»):
     «Обновления» ``/manga/newest?offset=`` (20 to a page), «Популярное» ``/mostviews&sort=manga?offset=``; its search —
     DataLife Engine's ``/?do=search&subaction=search&story=``.  Everything there is hentai (``adult_only``); a title
-    depicting minors is never opened or taken (:class:`Excluded`)."""
+    a gate closes is never opened or taken (:class:`Excluded`)."""
     name = "hentaichan"
     label = "Хентай-тян"
     hosts = ("hentaichan.live", "h-chan.me", "henchan.pro", "hentaichan.ru")
@@ -2575,8 +3121,9 @@ class Hentaichan(Source):
         rows = self._rows_of(page)
         words, keys = self._tags_of(page)
         series = [x for x in rows.get("Аниме/манга", rows.get("Серия", [])) if x and x != "Оригинальные работы"]
-        if depicts_minors([*words, *keys]):
-            raise Excluded(EXCLUDED)
+        why = G.title(self.name, tags=[*words, *keys])
+        if why:
+            raise Excluded(why)
         about = _by_id(page, "description")
         cut = re.search(r"<div\b", about)
         cover = re.search(r'<img\b[^>]*\bid=["\']cover["\'][^>]*>', page)
@@ -2670,7 +3217,7 @@ class Hentaichan(Source):
         if not out:
             if re.search(r"(?i)зарегистрир|авториз|войдите на сайт", _text(page[:400_000])):
                 raise Refused(f"главу {self.label} показывает только тем, кто вошёл на сайт (cookies входа — "
-                              "«Настройки → Сайты манги»)")
+                              "«Настройки → Манга и манхва»)")
             raise SourceError(f"на странице чтения {self.label} нет картинок")
         return out
 
@@ -2689,8 +3236,8 @@ class Hentaichan(Source):
                 continue
             tags = _block(row, "genre")
             words = [_text(x) for x in re.findall(r"<a\b[^>]*>(.*?)</a>", tags, re.S)]
-            if depicts_minors([*words, *re.findall(r'/tags/([^"\'/?#&<>]+)', tags)]):
-                continue
+            if G.title(self.name, tags=[*words, *re.findall(r'/tags/([^"\'/?#&<>]+)', tags)]):
+                continue                               # a gate closed it
             main, others = _chan_names(_text(link.group(4)))
             if not re.search(r"\w", main):
                 continue                               # an entry taken down: its name is «.»
@@ -2710,6 +3257,16 @@ class Hentaichan(Source):
 
     def feed_url(self, how: str, page: int) -> str:
         return self.site() + self.FEED.get(how, self.FEED["new"]).format(offset=self.PER_PAGE * (max(1, page) - 1))
+
+    TAG_ORDER = {"popular": "views", "new": "date"}
+
+    def tag_url(self, words, page: int, how: str = "new") -> str:
+        """(v5.44.135) A page of its titles with every one of its tags ``words`` («большие_груди»): ``/tags/a+b`` — the
+        site joins them (asked from the owner's computer 8.11.2026: «большие_груди+ahegao» — 20 titles of 20 with both,
+        and its second page so); its orders — ``&views``, ``&date`` (its own links there); 30 a step as its lists."""
+        path = "+".join(quote(str(w).strip().replace(" ", "_")) for w in words if str(w).strip())
+        order = self.TAG_ORDER.get(how, "date")
+        return f"{self.site()}/tags/{path}&{order}&rowstart={self.PER_PAGE * (max(1, page) - 1)}"
 
     def listing(self, net: Net, url: str) -> tuple:
         """([Hit], whether there is a page more) of a page of its lists (:meth:`feed_url`, :meth:`search_url`: one
@@ -2740,6 +3297,403 @@ class Hentaichan(Source):
         return self.listing(net, self.feed_url("new", page))
 
 
+# ── (v5.44.131) Nude-Moon ─────────────────────────────────────────────────────────────────────────────────────────
+_NM_TAG = re.compile(r"""<a\b[^>]*\bhref\s*=\s*["'][^"']*?/tag/([^"'/?#]+)["'][^>]*>(.*?)</a>""", re.S)
+# (v5.44.132) a chapter's number in Nude-Moon's name: «… №11», «… №9-11» (an entry of several chapters at once)
+_NM_NUMBER = re.compile(r"№\s*(\d+(?:[.,]\d+)?)(?:\s*[-–—]\s*(\d+(?:[.,]\d+)?))?")
+_NM_SIGN_IN = re.compile(r"(?i)только\s+(?:для\s+)?(?:зарегистрированн|авторизованн)|авторизуйтесь|войдите на сайт")
+
+
+def _nm_decoded(body: bytes, ctype: str = "") -> str:
+    """(v5.44.131) Nude-Moon's page as text: the charset its header or its ``<meta>`` names, else UTF-8 when the bytes
+    are that, else windows-1251 — its pages are windows-1251 and say so nowhere inside (its copies of 2025)."""
+    if re.search(r"charset=", str(ctype or ""), re.I) or re.search(rb"<meta[^>]+charset=", bytes(body[:4096]), re.I):
+        return _decoded(body, ctype)
+    try:
+        return bytes(body).decode("utf-8")
+    except UnicodeDecodeError:
+        return bytes(body).decode("cp1251", "replace")
+
+
+class NudeMoon(Source):
+    """(v5.44.131) Nude-Moon (nude-moon.org; nude-moon.net, nude-moon.fun — its other addresses) — the owner
+    (8.11.2026): «nude-moon.org надо добавить в поддержку».  Its pages answer a plain request with Cloudflare's check
+    for browsers (looked at from the owner's computer): the window's browser passes it as for com-x.life
+    (``Net._past_check``) — the owner: «Да, как Com-X и куки».  (v5.44.132) Its Cloudflare lets in nothing but the
+    browser itself — the program's own requests refused even with the browser's pass and agent (measured 8.11.2026):
+    its pages and pictures come by the browser's own requests (``Net._browser_fetch``, ``Net._browser_bytes``); the
+    owner's cookies with his agent (:func:`signed_agent`) would not help.  Not in «Найти по названию»
+    (``manhwa_search.ASKED``: that search never opens the window's browser) — its search is in «Лента».  A work's
+    entries of several chapters at once («№9-11») are not chapters while the chapters are there one by one.
+
+    Its pages (windows-1251; read from its copies of 2025 in the Wayback Machine and as the open readers Tachiyomi and
+    Kotatsu read them): an entry ``/<number>--<slug>.html`` — its name in ``<h1>`` («Оригинал №N / Русское»,
+    «Оригинал (English)»), its tags (``span.tag-links``: links ``/tag/<слово>``), «Автор» (``mangaka/``), «Перевод»
+    (``/perevod/`` — the translators, its branch), «Серия» (``/seria/`` — the work it parodies), ``div.description``,
+    its cover (``/images/thumb/…``); a work of chapters — each chapter an entry of its own («… №11 / …»), «Все главы»
+    (``/vse_glavy/<имя>``) lists them as its lists list entries: the title is the first chapter, its chapters — the
+    entries there of its name; the reader ``/<number>-online--<slug>.html`` — ``images[n].src = '/manga/…/1.jpg'`` of
+    its script (its strip ``?row`` — ``<img data-src>``).  Its lists — rows ``<tr valign="top">`` (the entry's link,
+    ``<h2>``, its tags as links or as words, 30 to a page, «Следующая»): «Новые» ``/all_manga?date&rowstart=``,
+    «Популярное» ``/all_manga?views&rowstart=``; its search — ``/all_manga?stext=`` (windows-1251).  The cookie the open
+    readers set for every visitor («NMfYa=1») is set; its mobile pages («nm_mobile») are not asked.  Everything there is
+    hentai (``adult_only``); a title a gate closes (its names, its tags) is never opened or taken
+    (:class:`Excluded`), nor a work one chapter of which is closed."""
+    name = "nudemoon"
+    label = "Nude-Moon"
+    hosts = ("nude-moon.org", "nude-moon.net", "nude-moon.fun")
+    adult_only = True
+    PER_PAGE = 30                  # the entries of a page of its lists
+    PARTS_PAGES = 20               # the pages of a work's «Все главы» asked at most
+    FEED = {"new": "/all_manga?date&rowstart={offset}", "popular": "/all_manga?views&rowstart={offset}"}
+    KEY = re.compile(r"^/+(\d+)(?:-online)?--([^/?#]+?)\.html?$")
+    ENTRY = re.compile(r"""<a\b([^>]*?\bhref\s*=\s*["']((?:https?://[^"'/]+)?/*(\d+)--([^"'/?#]+?)\.html?)"""
+                       r"""(?:[?#][^"']*)?["'][^>]*)>""")
+    ROW = re.compile(r"""<tr\b[^>]*\bvalign\s*=\s*["']?top\b[^>]*>""", re.I)
+
+    def site(self) -> str:
+        return address(self.name) or NUDEMOON_SITE
+
+    def key_of(self, url: str) -> str:
+        if not _host_of(url, self.hosts, self.site()):
+            return ""
+        m = self.KEY.match(urlparse(url).path)
+        return f"{m.group(1)}--{m.group(2)}" if m else ""
+
+    def referer(self, title: TitleRef) -> str:
+        return self.site() + "/"
+
+    def entry_url(self, key: str) -> str:
+        return f"{self.site()}/{key}.html"
+
+    def reader_url(self, key: str) -> str:
+        number, _sep, slug = str(key).partition("--")
+        return f"{self.site()}/{number}-online--{slug}.html"
+
+    @staticmethod
+    def _ready(net: Net, url: str) -> None:
+        """The cookie the open readers set for every visitor («NMfYa=1»); not its mobile pages: an «nm_mobile» the
+        owner's browser had makes them otherwise."""
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return
+        jar = net.session(host).cookies
+        for c in [c for c in jar if c.name == "nm_mobile"]:
+            jar.clear(c.domain, c.path, c.name)
+        if not any(c.name == "NMfYa" for c in jar):
+            jar.set("NMfYa", "1", domain=host, path="/")
+
+    def _page(self, net: Net, url: str, referer: str = "") -> str:
+        self._ready(net, url)
+        body, ctype = net.fetch(url, what=self.label, headers={"Referer": referer or self.site() + "/",
+                                                               "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
+        return _nm_decoded(body, ctype)
+
+    @staticmethod
+    def _names(full: str) -> tuple:
+        """(its own name, its other names) of an entry: «Оригинал №N / Русское» → («Оригинал №N», [«Русское»]); a name
+        in brackets at the end of the first one is another name when it is of two words or more («… (Life Journal of
+        a Mangaka)»), else the name's own («… Succubus (heart)» and «… (Cry)» are two works)."""
+        text = " ".join(_html.unescape(str(full or "")).split())
+        first, _sep, rest = text.partition(" / ")
+        others = [x.strip() for x in rest.split(" / ") if x.strip()]
+        main = first.strip()
+        bracket = re.search(r"\s\(([^()]+)\)$", main)
+        if bracket and " " in bracket.group(1).strip() and main[:bracket.start()].strip():
+            others.insert(0, bracket.group(1).strip())
+            main = main[:bracket.start()].strip()
+        if not main and others:
+            main = others.pop(0)
+        return main, others
+
+    @staticmethod
+    def _tags(fragment: str) -> tuple:
+        """(the tags as the site writes them, the words of their links) of a piece of a page: its links ``/tag/…``,
+        else the words of a row of its lists («тентакли   комикс   …» — a tag's page writes them so)."""
+        words, keys = [], []
+        for key, inner in _NM_TAG.findall(fragment or ""):
+            word = _text(inner)
+            if word and word not in words:
+                words.append(word)
+            keys.append(unquote(_html.unescape(key)).replace("_", " ").rstrip("+").strip())
+        if not words:
+            for inner in re.findall(r"""<span\b[^>]*class\s*=\s*["']small["'][^>]*>\s*<center>(.*?)</center>""",
+                                    fragment or "", re.S):
+                for word in re.split(r"\s{2,}", _html.unescape(re.sub(r"<[^>]+>", "", inner))):
+                    word = word.strip()
+                    if word and word not in words:
+                        words.append(word)
+        return words, [k for k in keys if k]
+
+    @staticmethod
+    def _kind(tags) -> str:
+        """Its tag «манхва» — a manhwa (the strip of the tab «Манхва»); else a manga."""
+        return "Манхва" if "манхва" in {str(t).strip().casefold() for t in tags or ()} else "Манга"
+
+    @staticmethod
+    def _links(fragment: str, part: str) -> list:
+        """The words of the links whose address has ``part`` («mangaka/», «/perevod/», «/seria/»)."""
+        out = []
+        pattern = r"""<a\b[^>]*\bhref\s*=\s*["'][^"']*""" + re.escape(part) + r"""[^"']*["'][^>]*>(.*?)</a>"""
+        for inner in re.findall(pattern, fragment or "", re.S):
+            word = _text(inner)
+            if word and word not in out and word != "-":
+                out.append(word)
+        return out
+
+    def _entry(self, page: str) -> dict:
+        """What an entry's page (or its reader) says: its names, authors, translators, the work it parodies, its tags,
+        description, cover, the address of its «Все главы»; :class:`Excluded` — a title a gate closes;
+        :class:`Refused` — a page the site shows only to the signed in."""
+        head = re.search(r"<h1\b[^>]*>(.*?)</h1>", page, re.S)
+        full = _text(head.group(1)) if head else ""
+        if not re.search(r"\w", full):
+            if _NM_SIGN_IN.search(_text(page[:400_000])):
+                raise Refused(f"эту страницу {self.label} показывает только тем, кто вошёл на сайт (cookies входа — "
+                              "«Настройки → Манга и манхва»)")
+            raise SourceError(f"на странице {self.label} нет тайтла")
+        main, others = self._names(full)
+        rest = page[head.end():]
+        ends = [m.start() for m in (re.search(r"""<table\b[^>]*class\s*=\s*["']tbl["']""", rest),
+                                    re.search(r"""\bid\s*=\s*["'](?:gallery|comments)["']""", rest)) if m]
+        info = rest[:min([*ends, 30000])]
+        links = re.search(r"""<span\b[^>]*class\s*=\s*["'][^"']*\btag-links\b[^"']*["'][^>]*>(.*?)</span>""", info,
+                          re.S)
+        words, keys = self._tags(links.group(1) if links else info)
+        series = self._links(info, "/seria/")
+        why = G.title(self.name, names=[main, *others, *series], tags=[*words, *keys])
+        if why:
+            raise Excluded(why)
+        about = re.search(r"""<div\b[^>]*class\s*=\s*["']description["'][^>]*>(.*?)</div>""", info, re.S)
+        cover = (re.search(r"""<img\b[^>]*?\b(?:data-src|src)\s*=\s*["']([^"']*/images/thumb/[^"']+)["']""", page)
+                 or re.search(r"""<meta\b[^>]*\bproperty\s*=\s*["']og:image["'][^>]*\bcontent\s*=\s*["']([^"']+)["']""",
+                              page))
+        everything = re.search(r"""<a\b[^>]*\bhref\s*=\s*["']([^"']*vse_glavy/[^"']+)["'][^>]*>\s*Все главы""", info)
+        return {"main": main, "others": others, "authors": self._links(info, "mangaka/"),
+                "team": ", ".join(self._links(info, "/perevod/")),
+                "tags": [*series, *(w for w in words if w not in series)],
+                "description": plain(about.group(1)) if about else "",
+                "cover": urljoin(self.site() + "/", _html.unescape(cover.group(1).strip())) if cover else "",
+                "all": _html.unescape(everything.group(1)) if everything else ""}
+
+    def title(self, net: Net, key: str) -> TitleRef:
+        entry = self._entry(self._page(net, self.entry_url(key)))
+        parts = self._parts(net, key, entry) if entry["all"] else []
+        if parts and parts[0]["key"] != key:            # a work of chapters: the title is its first
+            key = parts[0]["key"]
+            entry = self._entry(self._page(net, self.entry_url(key)))
+        net.kept[(self.name, key)] = parts
+        if parts:                                        # its name without «№ N»; the other one if every chapter has it
+            base = _without_part(entry["main"]) or entry["main"]
+            common = [x for x in entry["others"] if all(x in p["others"] for p in parts)]
+            name, alt = _shown_name(base, common)
+        else:
+            name, alt = _shown_name(entry["main"], entry["others"])
+        return TitleRef(site=self.name, key=key, url=self.entry_url(key), title=name,
+                        alt_titles=[x for x in dict.fromkeys(alt) if x and x != name], type=self._kind(entry["tags"]),
+                        age="18+", is_erotic=True, genres=["Хентай"], tags=entry["tags"],
+                        description=entry["description"], cover_url=entry["cover"], authors=entry["authors"],
+                        branches=[Branch(id="", name=entry["team"] or self.label)])
+
+    def _parts(self, net: Net, key: str, entry: dict) -> list:
+        """The chapters of the work the entry ``key`` is one of — its «Все главы»: [{key, main, others, number, range,
+        name}] in their order; [] — the entry is alone.  An entry there of another name is another work; one a
+        gate closes — the whole work is closed (:class:`Excluded`); (v5.44.132) one of several chapters at once
+        («№9-11») — not a chapter while they are there one by one."""
+        wanted = names_of(*(_without_part(x) or x for x in (entry["main"], *entry["others"])))
+        if not wanted:
+            return []
+        found: dict = {}
+        url = urljoin(self.site() + "/", entry["all"])
+        asked: set = set()
+        for _n in range(self.PARTS_PAGES):
+            if url in asked:
+                break
+            asked.add(url)
+            try:
+                page = self._page(net, url, referer=self.entry_url(key))
+            except Missing:
+                break
+            for item in self._row_items(page):
+                if item["key"] in found or not names_of(
+                        *(_without_part(x) or x for x in (item["main"], *item["others"]))) & wanted:
+                    continue
+                if item["forbidden"]:
+                    raise Excluded(item["forbidden"])
+                found[item["key"]] = self._part(item["key"], item["main"], item["others"])
+            more = self._next(page)
+            if not more:
+                break
+            url = urljoin(url, more)
+        if key not in found:                              # beyond the pages asked: itself all the same
+            found[key] = self._part(key, entry["main"], entry["others"])
+        # (v5.44.132) its entries of several chapters at once («№9-11», «№0-2» of «Bound Together», 8.11.2026) — not
+        # chapters of their own while the chapters are there one by one
+        if any(not p["range"] and p["number"] for p in found.values()):
+            found = {k: p for k, p in found.items() if not p["range"]}
+        if len(found) < 2:
+            return []
+        parts = list(found.values())
+        numbers = [p["number"] for p in parts]
+        if all(numbers) and len(set(numbers)) == len(numbers):
+            parts.sort(key=lambda p: _number_key(p["number"]))
+        else:                                             # in the order the site added them (their numbers)
+            parts.sort(key=lambda p: _int(p["key"].split("--", 1)[0]))
+            for n, part in enumerate(parts, 1):
+                part["number"] = str(n)
+        return parts
+
+    @staticmethod
+    def _part(key: str, main: str, others: list) -> dict:
+        """A chapter of a work: its key, names, number («№ N»; «№ A-B» — ``range``: an entry of several chapters)."""
+        numbers = _NM_NUMBER.findall(main)
+        if numbers:
+            first, last = numbers[-1]
+            return {"key": key, "main": main, "others": others, "number": _num(first), "range": bool(last),
+                    "name": ""}
+        return {"key": key, "main": main, "others": others, "number": _part_number(main), "range": False,
+                "name": _part_name(main)}
+
+    def chapters(self, net: Net, title: TitleRef, branch: str = "") -> list:
+        parts = net.kept.get((self.name, title.key))
+        if parts is None:
+            try:
+                entry = self._entry(self._page(net, title.url or self.entry_url(title.key)))
+            except Excluded:
+                raise
+            except SourceError:
+                entry = None
+            parts = self._parts(net, title.key, entry) if entry and entry["all"] else []
+        parts = parts or [{"key": title.key, "number": "1", "name": ""}]
+        return [ChapterRef(id=p["key"], number=p["number"], name=p.get("name", ""), url=self.reader_url(p["key"]),
+                           index=n) for n, p in enumerate(parts, 1)]
+
+    def pictures(self, net: Net, title: TitleRef, chapter: ChapterRef) -> list:
+        url = chapter.url or self.reader_url(chapter.id)
+        page = self._page(net, url, referer=self.entry_url(chapter.id))
+        try:
+            self._entry(page)                           # the chapter's own name and tags: the gate again
+        except Excluded:
+            raise
+        except SourceError:
+            pass
+        links = re.findall(r"""\bimages\s*\[\s*\d+\s*\]\s*\.src\s*=\s*["']([^"']+)["']""", page)
+        if not links:                                   # its strip: the pictures come as the page is scrolled
+            strip = url.split("?", 1)[0] + "?row"
+            links = [x for x in re.findall(r"""<img\b[^>]*?\bdata-src\s*=\s*["']([^"']+)["']""",
+                                           self._page(net, strip, referer=url))
+                     if "/manga/" in x and "/thumb" not in x]
+        out = [Picture(url=urljoin(url, _html.unescape(x.strip()))) for x in dict.fromkeys(links) if x.strip()]
+        if not out:
+            # (v5.44.132) «login_err» instead of the pictures — a chapter for the signed in alone (a third of its
+            # readers, 8.11.2026): the owner's sign-in from his browser goes to the window's browser too
+            if "login_err" in page or _NM_SIGN_IN.search(_text(page[:400_000])):
+                raise Refused(f"эту главу {self.label} показывает только тем, кто вошёл на сайт: войдите на "
+                              f"{urlparse(self.site()).hostname} в своём браузере — расширение программы передаст "
+                              "вход само (или cookies из файла: «Настройки → Манга и манхва»)")
+            raise SourceError(f"на странице чтения {self.label} нет картинок")
+        return out
+
+    def _row_items(self, page: str) -> list:
+        """The entries of a page of its lists (and of «Все главы»): [{key, url, main, others, tags, cover, forbidden}] —
+        ``forbidden``: the words of the gate that closes it (its names, its tags), "" — none does."""
+        starts = list(self.ROW.finditer(page))
+        out, seen = [], set()
+        for n, m in enumerate(starts):
+            row = page[m.start():starts[n + 1].start() if n + 1 < len(starts) else m.end() + 20000]
+            cut = re.search(r"<table\b[^>]*\bstyle\s*=", row)     # the next entry's table, the column of every tag
+            row = row[:cut.start()] if cut else row
+            link = self.ENTRY.search(row)
+            if not link:
+                continue
+            key = f"{link.group(3)}--{link.group(4)}"
+            if key in seen:
+                continue
+            heading = re.search(r"<h2\b[^>]*>(.*?)</h2>", row, re.S)
+            said = re.search(r"""\btitle\s*=\s*["']([^"']*)["']""", link.group(1))
+            main, others = self._names(_text(heading.group(1)) if heading else said.group(1) if said else "")
+            if not re.search(r"\w", main):
+                continue
+            seen.add(key)
+            words, keys = self._tags(row)
+            picture = (re.search(r"""<img\b[^>]*?\bdata-src\s*=\s*["']([^"']+)["']""", row)
+                       or re.search(r"""<img\b[^>]*?\bsrc\s*=\s*["']([^"']*thumb[^"']*)["']""", row))
+            cover = urljoin(self.site() + "/", _html.unescape(picture.group(1).strip())) if picture else ""
+            out.append({"key": key, "url": urljoin(self.site() + "/", _html.unescape(link.group(2))), "main": main,
+                        "others": others, "tags": words, "cover": cover if urlparse(cover).path.strip("/") else "",
+                        "forbidden": G.title(self.name, names=[main, *others], tags=[*words, *keys])})
+        return out
+
+    @staticmethod
+    def _next(page: str) -> str:
+        m = re.search(r"""<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>\s*Следующая\s*</a>""", page)
+        return _html.unescape(m.group(1)) if m else ""
+
+    def _rows(self, page: str, need=(), unwanted=()) -> tuple:
+        """The titles of a page of its lists: ([Hit], how many entries the page had).  (v5.44.135) ``need`` — its tags'
+        words a title has every one of, ``unwanted`` — none of (the tags its row carries)."""
+        items = self._row_items(page)
+        wanted = {name_key(str(w).replace("_", " ")) for w in need if str(w).strip()}
+        left = {name_key(str(w).replace("_", " ")) for w in unwanted if str(w).strip()}
+        out = []
+        for item in items:
+            if item["forbidden"]:
+                continue
+            if wanted or left:
+                has = {name_key(w) for w in item["tags"]}
+                if wanted - has or left & has:
+                    continue
+            name, alt = _shown_name(item["main"], item["others"])
+            out.append(Hit(site=self.name, key=item["key"], names=[name, *alt], type=self._kind(item["tags"]),
+                           url=item["url"], cover=item["cover"], adult=True))
+        return out, len(items)
+
+    def search_url(self, query: str) -> str:
+        return f"{self.site()}/all_manga?stext={quote(str(query or '').strip().encode('cp1251', 'ignore'))}&rowstart=0"
+
+    def feed_url(self, how: str, page: int) -> str:
+        return self.site() + self.FEED.get(how, self.FEED["new"]).format(offset=self.PER_PAGE * (max(1, page) - 1))
+
+    TAG_ORDER = {"popular": "views", "new": "date"}
+
+    def tag_url(self, words, page: int, how: str = "new") -> str:
+        """(v5.44.135) A page of its titles with every one of its tags ``words`` («большие_груди»): ``/tags/a+b`` — the
+        site joins them (asked from the owner's computer 8.11.2026: «большие_груди+ahegao» — 20 titles of 20 with both,
+        and its second page so); its orders — ``&views``, ``&date`` (its own links there); 30 a step as its lists."""
+        path = "+".join(quote(str(w).strip().replace(" ", "_")) for w in words if str(w).strip())
+        order = self.TAG_ORDER.get(how, "date")
+        return f"{self.site()}/tags/{path}&{order}&rowstart={self.PER_PAGE * (max(1, page) - 1)}"
+
+    @staticmethod
+    def _about(query: str, hit: Hit) -> bool:
+        """A title its search gave is of the words asked — one of them (three letters or more) in its names or its
+        address: a page of its newest titles (a search it did not take) is not an answer."""
+        words = [k for k in (name_key(w) for w in re.findall(r"[^\W_]+", str(query or ""))) if len(k) >= 3]
+        if not words:
+            return True
+        names = name_key(" ".join(hit.names)) + "|" + name_key(hit.key.split("--", 1)[-1])
+        return any(w in names for w in words)
+
+    def listing(self, net: Net, url: str, need=(), unwanted=()) -> tuple:
+        """([Hit], whether there is a page more) of a page of its lists (:meth:`feed_url`, :meth:`tag_url`) or of its
+        search (:meth:`search_url`: one page, its titles of the words asked alone) — the «Лента» of the manga asks it
+        too (``core/catalog.py``); (v5.44.135) ``need``/``unwanted`` — its tags a title has all of / none of."""
+        text = self._page(net, url)
+        hits, rows = self._rows(text, need, unwanted)
+        asked = dict(parse_qsl(urlparse(url).query, keep_blank_values=True, encoding="cp1251")).get("stext")
+        if asked is not None:
+            return [h for h in hits if self._about(asked, h)], False
+        return hits, bool(self._next(text)) or rows >= self.PER_PAGE
+
+    def search(self, net: Net, query: str) -> list:
+        if not str(query or "").strip().encode("cp1251", "ignore").strip():
+            return []                                    # nothing of it in the site's letters
+        return self.listing(net, self.search_url(query))[0]
+
+    def feed(self, net: Net, how: str, page: int) -> tuple:
+        return self.listing(net, self.feed_url(how, page))
+
+
 KNOWN_TYPES = ("Манхва", "Манга", "Маньхуа", "Комикс", "Комикс западный", "Западный комикс", "Рукомикс",
                "Индонезийский комикс", "OEL-манга", "Другое")
 KNOWN_STATUSES = ("Продолжается", "Завершен", "Завершён", "Заморожен", "Анонс", "Приостановлен", "Выпуск прекращён",
@@ -2755,9 +3709,9 @@ def _number_key(number: str) -> float:
 
 # (v5.44.73) com-x.life — through the browser, last; (v5.44.77) ReadManga and Desu after MangaBuff; (v5.44.79)
 # MangaDex after all (its Russian chapters for the others' titles); (v5.44.85) Хентай-тян, a site of hentai alone — the
-# very last
-SOURCES = (Remanga(), ReComics(), MangaLib(), MangaBuff(), ReadManga(), Desu(), ComX(), MangaDex(), HentaiLib(),
-           AllHentai(), Hentaichan())
+# very last; (v5.44.131) Nude-Moon after it (behind Cloudflare's check: its window's browser is slow to ask)
+SOURCES = (Remanga(), ReComics(), MangaLib(), MangaBuff(), ReadManga(), Desu(), ComX(), MangaOneLove(),  # (v5.44.143)
+           MangaDex(), HentaiLib(), AllHentai(), Hentaichan(), NudeMoon())
 
 
 def readable() -> list:

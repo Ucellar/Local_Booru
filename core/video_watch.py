@@ -32,8 +32,8 @@ frames — ``video_embeds.fill``, their video asked right before an episode play
 «Скачать» numbers them (``tile_labels``; sounds — not episodes).  A file goes to the player the way CVH's does
 (:func:`file_part`), an open stream — the way Kodik's does; there is one «player» (:data:`PAGE_PLAYER` — the site) and
 no «Качество» (the page's other qualities of a file — when the best does not come).  The page's own facts, description,
-genres and poster (``video_meta.parse_page``), its rating (DLE stars).  Such a site is hentai; the program's rule
-(``core/filter.depicts_minors`` — the names and the genres) — a title of it is not opened.
+genres and poster (``video_meta.parse_page``), its rating (DLE stars).  Such a site is hentai; a title the program's
+gate closes (``gates.title`` of what :func:`_said` reads — its names and its genres) is not opened.
 """
 from __future__ import annotations
 
@@ -47,11 +47,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+from core import gates as G
+
 _LOG = logging.getLogger("local_booru.video")
 
 SITE_NAME = "YummyAnime"
 # (v5.44.109) sites whose pages hand out their episodes as files («Скачать» reads them): the key's word -> the name
-PAGE_SITES = {"hentasis": "Hentasis"}
+PAGE_SITES = {"hentasis": "Hentasis", "haven": "HentaiHaven",   # (v5.44.138) HentaiHaven
+              "hentaixs": "Hentai-XS", "hfshare": "HFShare"}      # (v5.44.139)
 PAGE_PLAYER = "site"          # the one «player» of such a title: the site's own files
 TITLE_TTL = 20 * 60           # seconds a title found is kept (its voice-overs, the players' lists asked with it)
 TITLES_KEPT = 6
@@ -87,13 +90,24 @@ def alias_of(address: str) -> str:
 
 
 def key_of(address: str) -> str:
-    """«yummy:<alias>» — a title of YummyAnime; (v5.44.109) «hentasis:<number>» — of Hentasis; else ""."""
+    """«yummy:<alias>» — a title of YummyAnime; (v5.44.109) «hentasis:<number>» — of Hentasis; (v5.44.138)
+    «haven:<slug>» — of HentaiHaven; (v5.44.139) «hentaixs:<number>» — of Hentai-XS, «hfshare:<number>» — of HFShare;
+    else ""."""
     alias = alias_of(address)
     if alias:
         return f"yummy:{alias}"
-    from core.filter import _hentasis_number          # its address, a mirror's too — as «Лента» tells it
-    number = _hentasis_number(address)
-    return f"hentasis:{number}" if number else ""
+    from core.catalog_have import haven_slug, hentasis_number, hfshare_number, xs_number   # as «Лента» tells them
+    number = hentasis_number(address)
+    if number:
+        return f"hentasis:{number}"
+    slug = haven_slug(address)
+    if slug:
+        return f"haven:{slug}"
+    number = xs_number(address)
+    if number:
+        return f"hentaixs:{number}"
+    number = hfshare_number(address)
+    return f"hfshare:{number}" if number else ""
 
 
 def site_of(address: str) -> str:
@@ -265,17 +279,17 @@ def _page_dubs(found, root: Path) -> list:
     return list(out.values())
 
 
-def _excluded(title: "Title") -> bool:
-    """The program's rule (``core/filter.depicts_minors``): a hentai title that, by its names or genres, depicts
-    minors — not opened (the feed does not show it; a link to it is not opened either)."""
-    from core.filter import depicts_minors
-    if not title.hentai:
-        return False
+def _said(title: "Title") -> dict:
+    """What a title says of itself, for the program's gate — ``gates.title(**…)`` (a title it closes is not opened: the
+    feed does not show it, a link to it is not opened either): its site, its names and genres (a page's — as its page
+    tells them, YummyAnime's — as its API does), whether it is hentai."""
     if title.page:
-        names = [title.meta.get("title"), *(title.meta.get("alt_titles") or []), *(title.meta.get("genres") or [])]
-    else:
-        names = [title.anime.get("title"), *(title.anime.get("other_titles") or []), *_names(title.anime.get("genres"))]
-    return depicts_minors([str(x) for x in names if x])
+        names = [title.meta.get("title"), *(title.meta.get("alt_titles") or [])]
+        return {"site": title.key.split(":", 1)[0], "names": [str(x) for x in names if x],
+                "genres": [str(g) for g in title.meta.get("genres") or [] if g], "adult": title.hentai}
+    names = [title.anime.get("title"), *(title.anime.get("other_titles") or [])]
+    return {"site": "yummy", "names": [str(x) for x in names if x], "genres": _names(title.anime.get("genres")),
+            "adult": title.hentai}
 
 
 @dataclass
@@ -291,7 +305,8 @@ _TITLES: "OrderedDict[str, Title]" = OrderedDict()
 _LOOKING: dict = {}            # key -> _Looking: going, or failed (said for FAILED_TTL)
 
 
-NOT_WATCHABLE = "Смотреть в программе можно тайтлы YummyAnime и Hentasis — нужна ссылка на страницу тайтла"
+NOT_WATCHABLE = ("Смотреть в программе можно тайтлы YummyAnime, Hentasis, HentaiHaven, Hentai-XS и HFShare — нужна "
+                 "ссылка на страницу тайтла")
 
 
 def look(address: str, settings: dict, root: Path, *, wait: float = LOOK_WAIT, again: bool = False, window=None):
@@ -332,8 +347,7 @@ def kept(address: str):
 def _yummy_title(key: str, address: str, settings: dict, root: Path, say) -> Title:
     from core import video_dubs as Y
     if not Y.enabled(settings):
-        raise WatchError(f"Озвучки {SITE_NAME} выключены — включите «Все озвучки {SITE_NAME}» в «Настройки → "
-                         "Вкладка «Видео»»")
+        raise WatchError(f"Озвучки {SITE_NAME} выключены — включите «Все озвучки {SITE_NAME}» в «Настройки → Видео»")
     alias = alias_of(address)
     api = Y.Api(Y.api_of(settings))
     say(f"Спрашиваю {SITE_NAME} о тайтле…")
@@ -343,9 +357,9 @@ def _yummy_title(key: str, address: str, settings: dict, root: Path, say) -> Tit
     page = address_of(alias)
     found = Y._found(api, anime, Y.title_page(anime, page), root, say=say, stop=lambda: False, settings=settings)
     title = Title(key=key, alias=alias, address=page, anime=anime, found=found, root=root)
-    if _excluded(title):
-        from core.manhwa_sources import EXCLUDED
-        raise WatchError(EXCLUDED)
+    why = G.title(**_said(title))
+    if why:
+        raise WatchError(why)
     title.dubs = _dubs_of(found, root)
     if not title.dubs:
         raise WatchError(f"У {SITE_NAME} нет серий этого тайтла в плеерах, которые программа понимает")
@@ -357,8 +371,11 @@ def _page_title(key: str, address: str, root: Path, say, window) -> Title:
     from core import video_download as D
     from core import video_meta
     from core import video_meta_import as I
-    from core.manhwa_sources import EXCLUDED
     site = PAGE_SITES.get(key.split(":", 1)[0], "")
+    if key.startswith("haven:"):                # (v5.44.138) its genres and tags by their numbers — as its catalogue
+        why = haven_closed(key.split(":", 1)[1])                                                         # says them
+        if why:
+            raise WatchError(why)
 
     def fetch(link: str):                       # its pages (a series' episodes, its own): through the window's
         return I.page_from_url(link, progress=lambda _text: None, window_fetch=window)    # browser at a robot check
@@ -369,15 +386,17 @@ def _page_title(key: str, address: str, root: Path, say, window) -> Title:
         raise WatchError(f"Страница тайтла на {site} не открылась: {exc}") from exc
     title = Title(key=key, alias="", address=page.url or address, anime={}, found=None, root=root, site=site,
                   meta=video_meta.parse_page(page.html, page.url or address))
-    if _excluded(title):                        # before its files are asked
-        raise WatchError(EXCLUDED)
+    why = G.title(**_said(title))                # before its files are asked
+    if why:
+        raise WatchError(why)
     say("Ищу серии на странице…")
     title.found = D.look(page, root, say=say, stop_check=lambda: False, fetch=fetch)
     about = title.found.about
     if about is not None and about is not page:  # an episode's page: the series' page describes the series
         title.meta = video_meta.parse_page(about.html, about.url or address)
-        if _excluded(title):
-            raise WatchError(EXCLUDED)
+        why = G.title(**_said(title))
+        if why:
+            raise WatchError(why)
     if not title.found.files and not title.found.frame_site:
         _embeds(title.found, say)               # other sites' players in its frames, as «Скачать» takes them
     title.dubs = _page_dubs(title.found, root)
@@ -386,6 +405,31 @@ def _page_title(key: str, address: str, root: Path, say, window) -> Title:
         raise WatchError("На странице тайтла нет серий, которые программа может показать" + (f": {why}" if why else
                          " — ни файлов, ни открытых потоков, ни плееров, которые их отдают"))
     return title
+
+
+def haven_closed(slug: str, net=None) -> str:
+    """(v5.44.138) The gate's words about a title of HentaiHaven by what its catalogue says of it (its genres and tags
+    by their numbers — ``catalog.haven_said``; the page «Смотреть» opens names its genres only); "" — nothing against
+    it, or not known (no such slug, no answer)."""
+    from core import catalog as C, manhwa_sources as S
+    said = C.haven_said(net if net is not None else S.Net(), slug)
+    return G.title("haven", **said) if said else ""
+
+
+def page_closed(address: str, html: str, url: str = "") -> str:
+    """(v5.44.139) The gate's words about the title of a page of a site of hentai video (:data:`PAGE_SITES`) —
+    «Скачать с сайта» asks before it looks for the files, as «Смотреть» does (:func:`_page_title`): its site, its names
+    and genres as the page tells them, HentaiHaven's — as its catalogue says too; "" — nothing against it (a page of
+    another site too)."""
+    key = key_of(url or address) or key_of(address)
+    if not is_page(key):
+        return ""
+    from core import video_meta
+    site, ident = key.split(":", 1)
+    meta = video_meta.parse_page(str(html or ""), url or address)
+    names = [meta.get("title"), *(meta.get("alt_titles") or [])]
+    why = G.title(site, names=[str(x) for x in names if x], genres=[str(g) for g in meta.get("genres") or [] if g])
+    return why or (haven_closed(ident) if site == "haven" else "")
 
 
 def _embeds(found, say) -> bool:
@@ -560,11 +604,12 @@ def _text_of(value) -> str:
 
 
 def page_rating(html: str) -> tuple:
-    """(v5.44.109) (score of 10, votes) of a DLE page's stars (``.current-rating`` — its width in %; Hentasis), or
-    (0.0, 0)."""
+    """(v5.44.109) (score of 10, votes) of a DLE page's stars (``.current-rating`` — its width in %; Hentasis), (v5.44.139)
+    else of its people's «Нравится» (HFShare: ``catalog.likes_of``), or (0.0, 0)."""
     stars = _STARS.search(str(html or ""))
     if not stars:
-        return 0.0, 0
+        from core.catalog import likes_of
+        return likes_of(str(html or ""))
     value = round(float(stars.group(1)) / 10, 1)
     votes = _VOTES.search(str(html or ""))
     count = int(re.sub(r"\D", "", votes.group(1)) or 0) if votes else 0
@@ -639,6 +684,14 @@ class Stream:
     pieces: list = field(default_factory=list)    # [(address, start, length)] — the parts in their order
     init: tuple | None = None                     # the header of MP4 fragments
     fragments: bool = False                       # the parts are MP4 fragments (else MPEG-TS)
+    # (v5.44.138) a stream whose sound is a stream of its own (HentaiHaven): ``lines`` — the program's master list, the
+    # picture's list — ``video_lines`` (``video.m3u8``), the sound's — ``audio_lines`` (``audio.m3u8``: ``a<n>.<ext>``,
+    # its header ``ainit.mp4``)
+    video_lines: list = field(default_factory=list)
+    audio_lines: list = field(default_factory=list)
+    audio_pieces: list = field(default_factory=list)
+    audio_init: tuple | None = None
+    audio_ext: str = ""
     url: str = ""                 # the file (CVH)
     referer: str = ""
     session: object = None
@@ -776,10 +829,25 @@ def _resolve(stream: Stream) -> None:
 
 
 def _take_plan(stream: Stream, plan, referer: str, quality: str, qualities: list) -> None:
-    """The stream's list (rewritten to the program's addresses) and its parts, of a plan that opens."""
+    """The stream's list (rewritten to the program's addresses) and its parts, of a plan that opens; (v5.44.138) its
+    sound, when it is a stream of its own — its list and parts too, under a master list of the program's."""
     media = plan.media
     text = _text(stream.session, media.url, referer)
-    stream.lines = rewrite(text, media)
+    lines = rewrite(text, media)
+    sound = plan.audio
+    if sound is not None:
+        ext = _sound_ext(sound.media)
+        stream.audio_lines = rewrite(_text(stream.session, sound.media.url, referer), sound.media, prefix="a", ext=ext)
+        stream.audio_pieces = [(s.url, s.start, s.length) for s in sound.media.segments]
+        stream.audio_init = (sound.media.init.url, sound.media.init.start, sound.media.init.length) \
+            if sound.media.init is not None else None
+        stream.audio_ext = ext
+        stream.video_lines = lines
+        stream.lines = master(plan)
+    else:
+        stream.audio_lines, stream.audio_pieces, stream.audio_init, stream.audio_ext = [], [], None, ""
+        stream.video_lines = []
+        stream.lines = lines
     stream.pieces = [(s.url, s.start, s.length) for s in media.segments]
     stream.init = (media.init.url, media.init.start, media.init.length) if media.init is not None else None
     stream.fragments = media.init is not None
@@ -791,12 +859,37 @@ def _take_plan(stream: Stream, plan, referer: str, quality: str, qualities: list
 
 
 def _usable(plan):
-    """A stream's plan the program can play, else :class:`WatchError` why not (encrypted, sound apart…)."""
+    """A stream's plan the program can play, else :class:`WatchError` why not (encrypted…); (v5.44.138) its sound a
+    stream of its own — played with it (:func:`master`), unless that one cannot be."""
     if plan.blocked:
         raise WatchError(plan.blocked)
-    if plan.audio is not None:
-        raise WatchError("звук у потока идёт отдельной дорожкой — так смотреть программа пока не умеет")
+    if plan.audio is not None and plan.audio.blocked:
+        raise WatchError(f"звук потока: {plan.audio.blocked}")
     return plan
+
+
+def _sound_ext(media) -> str:
+    """The program's word for the parts of a stream's sound: MP4 fragments («m4s»), plain AAC («aac»), MPEG-TS."""
+    if media.init is not None:
+        return "m4s"
+    first = urlparse(media.segments[0].url).path.lower() if media.segments else ""
+    return "aac" if first.endswith(".aac") else "ts"
+
+
+def master(plan) -> list:
+    """(v5.44.138) The program's master list of a stream whose sound is apart: the sound (``audio.m3u8``) — the one
+    group, the picture (``video.m3u8``) with the site's bit rate, size and codecs."""
+    variant = plan.variant
+    attrs = [f"BANDWIDTH={int(getattr(variant, 'bandwidth', 0) or 0) or 1000000}"]
+    if variant is not None and variant.width and variant.height:
+        attrs.append(f"RESOLUTION={variant.width}x{variant.height}")
+    if variant is not None and variant.codecs:
+        attrs.append(f'CODECS="{variant.codecs}"')
+    attrs.append('AUDIO="lb-sound"')
+    name = re.sub(r'["\r\n]', "", str(plan.audio_name or "Звук"))[:60] or "Звук"
+    return ["#EXTM3U", "#EXT-X-VERSION:7",
+            f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="lb-sound",NAME="{name}",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"',
+            "#EXT-X-STREAM-INF:" + ",".join(attrs), "video.m3u8"]
 
 
 def _resolve_page(stream: Stream) -> None:
@@ -867,24 +960,25 @@ def _text(session, url: str, referer: str) -> str:
     return bytes(body).decode("utf-8", "replace")
 
 
-def rewrite(text: str, media) -> list:
+def rewrite(text: str, media, *, prefix: str = "", ext: str = "") -> list:
     """The stream's list with the program's addresses of its parts (``<n>.ts`` or ``<n>.m4s``, the header —
     ``init.mp4``): every tag of the site's list stays (its lengths, joins of pieces, its end) but the parts' byte
-    ranges (the program asks them itself) and keys (a stream with one is never opened: ``video_hls``)."""
-    lines = [line.strip() for line in str(text or "").lstrip("﻿").splitlines() if line.strip()]
+    ranges (the program asks them itself) and keys (a stream with one is never opened: ``video_hls``).  (v5.44.138)
+    ``prefix`` — of the sound's list (``a<n>.<ext>``, ``ainit.mp4``)."""
+    lines = [line.strip() for line in str(text or "").lstrip("\ufeff").splitlines() if line.strip()]
     if not lines or not lines[0].startswith("#EXTM3U"):
         raise WatchError("сайт прислал не список частей потока")
-    ext = "m4s" if media.init is not None else "ts"
+    ext = ext or ("m4s" if media.init is not None else "ts")
     out, n = [], 0
     for line in lines[1:]:
         if line.startswith(("#EXT-X-BYTERANGE", "#EXT-X-KEY", "#EXT-X-VERSION", "#EXT-X-SESSION-KEY")):
             continue
         if line.startswith("#EXT-X-MAP:"):
-            out.append('#EXT-X-MAP:URI="init.mp4"')
+            out.append(f'#EXT-X-MAP:URI="{prefix}init.mp4"')
         elif line.startswith("#"):
             out.append(line)
         else:
-            out.append(f"{n}.{ext}")
+            out.append(f"{prefix}{n}.{ext}")
             n += 1
     if n != len(media.segments):
         raise WatchError("список частей потока непонятный")
@@ -940,16 +1034,25 @@ def _ask_again(stream: Stream, seen: int) -> bool:
         return True
 
 
-def playlist(token: str) -> str:
+def playlist(token: str, which: str = "") -> str:
+    """The stream's list as the program gives it; (v5.44.138) ``which`` — "video" or "audio": the picture's or the
+    sound's own list of a stream whose sound is apart (else :class:`Gone`)."""
     stream = stream_of(token)
     if stream.kind != "hls":
         raise Gone("Это не поток")
     with stream.lock:
-        return "\n".join(stream.lines) + "\n"
+        lines = stream.video_lines if which == "video" else stream.audio_lines if which == "audio" else stream.lines
+        if not lines:
+            raise Gone("Такого списка у потока нет")
+        return "\n".join(lines) + "\n"
 
 
-def piece(token: str, n: int) -> tuple:
-    """(bytes, type) of the stream's part ``n`` (-1 — the header of its fragments), asked of the site now."""
+SOUND_TYPES = {"m4s": "audio/mp4", "aac": "audio/aac", "ts": "video/mp2t"}
+
+
+def piece(token: str, n: int, sound: bool = False) -> tuple:
+    """(bytes, type) of the stream's part ``n`` (-1 — the header of its fragments), asked of the site now;
+    (v5.44.138) ``sound`` — of its sound's own stream."""
     stream = stream_of(token)
     if stream.kind != "hls":
         raise Gone("Это не поток")
@@ -957,14 +1060,18 @@ def piece(token: str, n: int) -> tuple:
     for _attempt in range(PIECE_TRIES):
         with stream.lock:
             seen = stream.generation
+            pieces, header = (stream.audio_pieces, stream.audio_init) if sound else (stream.pieces, stream.init)
             if n < 0:
-                where = stream.init
+                where = header
             else:
-                where = stream.pieces[n] if n < len(stream.pieces) else None
+                where = pieces[n] if n < len(pieces) else None
+            ext = stream.audio_ext
         if where is None:
             raise Gone("Такой части у потока нет")
         status, body, why = _get(stream, *where)
         if body is not None:
+            if sound:
+                return body, SOUND_TYPES.get(ext, "audio/mp4")
             kind = "video/mp4" if stream.fragments else "video/mp2t"
             return body, kind
         last = why

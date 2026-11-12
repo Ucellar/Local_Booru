@@ -177,13 +177,14 @@ class E621Iqdb(ReverseService):
                     return ReverseOutcome("paused", detail="HTTP 429 — e621 просит реже")
                 self.disable("e621 второй раз ограничил частые поиски по картинке с этого адреса (HTTP 429) — до конца "
                              "запуска не спрашиваю, чтобы e621 не закрыл и остальное" +
-                             ("" if signed else "; с логином и API-ключом e621 («Сайты и ключи») поисков больше"))
+                             ("" if signed else "; с логином и API-ключом e621 («Настройки → Парсер и сайты») "
+                                                "поисков больше"))
                 return ReverseOutcome("disabled", detail="HTTP 429")
             self.disable(f"Cloudflare (HTTP {status}) — открой e621 в браузере и обнови cookies через Companion")
             return ReverseOutcome("disabled", detail="Cloudflare")
         if status in (401, 403):
             self.disable(f"HTTP {status}: проверь логин и API-ключ e621" if signed
-                         else f"HTTP {status}: e621 просит логин и API-ключ (их вписывают в «Сайтах»)")
+                         else f"HTTP {status}: e621 просит логин и API-ключ («Настройки → Парсер и сайты»)")
             return ReverseOutcome("disabled", detail=f"HTTP {status}")
         if status == 429:
             self._throttled()
@@ -197,8 +198,8 @@ class E621Iqdb(ReverseService):
                                self._last_ok + self.gap() - time.monotonic() if self._last_ok else 0.0)
                 self.http.sleep(max(1.0, min(wait, MAX_GAP)))
                 return self.search(upload_path, again=again + 1)
-            return ReverseOutcome("failed", detail=f"HTTP {status}" + ("" if signed else
-                                                               " — e621 без логина ищет медленно; логин и ключ — в «Сайтах»"))
+            slow = " — e621 без логина ищет медленно; логин и ключ — «Настройки → Парсер и сайты»"
+            return ReverseOutcome("failed", detail=f"HTTP {status}" + ("" if signed else slow))
         if status in REQUEST_UNFIT:             # 400 — «the requested feature (such as an IQDB query) is not available»
             return self._error(status, unfit=True)
         if 400 <= status <= 500:                # an error about this one search

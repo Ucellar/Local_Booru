@@ -1228,7 +1228,7 @@ dl.m-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 }
 .m-body .cat { padding: 4px 12px 24px; gap: 14px; }
 .m-body .cat .cat-head h1 { font-size: 22px; }
-.m-body .cat .cat-grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 14px 10px; }
+.m-body .cat .cat-grid, .m-body .cat .cat-skel { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 14px 10px; }
 .m-body .cat .cat-sites a { min-height: 36px; display: inline-flex; align-items: center; }
 .m-body .tt { padding: 8px 14px 24px; gap: 18px; }
 .m-body .tt .tt-back { display: none; }

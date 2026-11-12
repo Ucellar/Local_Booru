@@ -9,10 +9,15 @@ service is doing, the files in work and the last answers.  A file the page shows
 its run (:meth:`ParserJob.path_of`): the page asks for its picture by that number, never by a path.
 :func:`is_running` replaces the old ``settings["_parser_running"]`` flag for code that must yield to
 the parser (maintenance, heavy gallery queries).
+
+(v5.44.160; the page «Парсер» anew — the mockup A) A file in work also says what each site and service has answered
+about it so far (``files[n]["sites"]`` — the card of the file on the page), and the end of a run is noted on the disk
+(:func:`last_run`): the page of a program started anew still says when the parser ran last and what it found.
 """
 from __future__ import annotations
 
 import heapq
+import json
 import re
 import threading
 import time
@@ -25,6 +30,8 @@ RECENT_KEEP = 48                # answers of files a page shows («Готово 
 FILES_KEEP = 400                # files of a run whose pictures a page may still ask for (the newest)
 FLIGHT_SHOWN = 24               # files in work a page shows as pictures (the longest in work); the rest — a number
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
+COUNT_KEYS = ("tagged", "nomatch", "deferred", "skip", "error")
+LAST_RUN_FILE = "parser_last_run.json"      # (v5.44.160) the end of the last run, in the folder of the run's notes
 _CLAIM_LOCK = threading.Lock()
 _OWNER: str = ""                # who runs the parser now ("" — nobody)
 _CURRENT: "ParserJob | None" = None
@@ -55,7 +62,7 @@ MAINTENANCE_OWNER = "обслуживание «{}»"
 def busy_text(owner: str) -> str:
     """Why a parser run cannot start now, in words."""
     if owner.startswith(MAINTENANCE_OWNER.split("«")[0]):
-        return f"Сейчас идёт {owner} (Диагностика → Обслуживание)"
+        return f"Сейчас идёт {owner} (Настройки → Проверка и починка → Обслуживание)"
     return f"Парсер уже работает ({owner})"
 
 
@@ -130,6 +137,7 @@ class ParserJob:
         self._last_number = 0
         self._numbers: dict[str, int] = {}     # path → number
         self._flight: dict[int, float] = {}    # files in work → when taken
+        self._answers: dict[int, dict] = {}    # (v5.44.160) a file in work → {a site or service: its last word of it}
         self._recent: deque = deque(maxlen=RECENT_KEEP)
         self._log: deque = deque(maxlen=LOG_KEEP)
         self._seq = 0
@@ -211,11 +219,13 @@ class ParserJob:
             self.current_file = ""
             with self._lock:
                 self._flight.clear()
+                self._answers.clear()
             with _CLAIM_LOCK:
                 if _CURRENT is self:
                     _CURRENT = None
                 _LAST = self
             release(self.owner)
+            self._note_end()
             try:
                 from core.light_backup import checkpoint_sqlite
                 checkpoint_sqlite(self.settings, truncate=True, optimize=True)
@@ -241,8 +251,36 @@ class ParserJob:
 
     def _on_activity(self, label: str, status: str, path: str) -> None:
         with self._lock:
+            number = self._number(str(path)) if path else 0
             self.activity[str(label)] = {"status": str(status), "file": Path(str(path)).name if path else "",
-                                         "file_id": self._number(str(path)) if path else 0, "at": time.time()}
+                                         "file_id": number, "at": time.time()}
+            if number in self._flight:        # (v5.44.160) the file's card: what each has said of it so far
+                self._answers.setdefault(number, {})[str(label)] = str(status)
+
+    def _counts(self) -> dict:
+        counts = dict(getattr(self._runner, "counts", {}) or {}) if self._runner is not None else {}
+        if self.summary:
+            counts.update({k: v for k, v in self.summary.items() if isinstance(v, int)})
+        return {k: int(counts.get(k, 0) or 0) for k in COUNT_KEYS}
+
+    def _note_end(self) -> None:
+        """(v5.44.160) The end of the run on the disk (:func:`last_run`): when, how long, what it found — the page of
+        a program started anew says it.  The folder's name only, never its path.  A run over the folder only: «Искать
+        снова» for a few cards of Брак does not take the place of the folder's last run."""
+        if self.kind != "run":
+            return
+        try:
+            from core.file_safety import atomic_write_bytes
+            from core.paths import RUNTIME_DIR
+            root = str(self.settings.get("root") or "")
+            note = {"status": self.status, "kind": self.kind, "label": self.label, "started": int(self.started_at),
+                    "finished": int(self.finished_at), "done": int(self.done), "total": int(self.total),
+                    "counts": self._counts(), "folder": Path(root).name if root else "",
+                    "stopped": bool((self.summary or {}).get("stopped"))}
+            atomic_write_bytes(Path(RUNTIME_DIR) / LAST_RUN_FILE,
+                               json.dumps(note, ensure_ascii=False).encode("utf-8"))
+        except Exception as exc:              # a note for the page: the run itself is over
+            self._on_log(f"  заметка о конце запуска не записалась: {type(exc).__name__}: {exc}")
 
     def _on_result(self, path: str, result) -> None:
         """A file's answer: it leaves «в работе» and goes first in «Готово недавно» (once: a deferred file
@@ -250,6 +288,7 @@ class ParserJob:
         with self._lock:
             number = self._number(str(path))
             self._flight.pop(number, None)
+            self._answers.pop(number, None)
             entry = {"id": number, "name": Path(str(path)).name, "kind": _kind(str(path)),
                      "status": str(getattr(result, "status", "") or ""), "reason": str(getattr(result, "reason", "") or ""),
                      "tags": int(getattr(result, "tag_count", 0) or 0), "md5": str(getattr(result, "md5", "") or ""),
@@ -293,14 +332,14 @@ class ParserJob:
             # with the sites' queues thousands of files may wait for a slow site: a page shows the first of them
             waiting = [(n, at) for n, at in self._flight.items() if n in self._files]
             first = heapq.nsmallest(FLIGHT_SHOWN, waiting, key=lambda item: item[1])
-            flight = [{"id": n, "name": Path(self._files[n]).name, "kind": _kind(self._files[n]), "since": int(at)}
-                      for n, at in first]
+            flight = [{"id": n, "name": Path(self._files[n]).name, "kind": _kind(self._files[n]), "since": int(at),
+                       "sites": [[label, word] for label, word in (self._answers.get(n) or {}).items()],
+                       "stage": "read", "path": self._files[n]} for n, at in first]
             flight_more = max(0, len(waiting) - len(flight))
             recent = [dict(e) for e in self._recent]
-        counts = dict(getattr(self._runner, "counts", {}) or {}) if self._runner is not None else {}
+        self._where(flight)
+        counts = self._counts()
         queues = self._queues()
-        if self.summary:
-            counts.update({k: v for k, v in self.summary.items() if isinstance(v, int)})
         now = self.finished_at or time.time()
         elapsed = max(0.0, now - self.started_at)
         eta, eta_by = None, ""
@@ -310,13 +349,34 @@ class ParserJob:
             "id": self.id, "label": self.label, "kind": self.kind, "status": self.status,
             "done": self.done, "total": self.total, "elapsed": int(elapsed), "eta": eta, "eta_by": eta_by,
             "current_file": Path(self.current_file).name if self.current_file else "",
-            "counts": {k: int(counts.get(k, 0) or 0) for k in ("tagged", "nomatch", "deferred", "skip", "error")},
+            "counts": counts, "started": int(self.started_at), "finished": int(self.finished_at),
+            "folder": Path(str(self.settings.get("root") or "")).name,
             "summary": self.summary, "error": self.error, "activity": activity, "files": flight, "recent": recent,
             "files_more": flight_more, "queues": queues,
             "log": [{"seq": seq, "t": int(ts), "channel": ch, "text": text} for seq, ts, ch, text in lines],
             "last_seq": last_seq,
         }
 
+
+    def _where(self, flight: list) -> None:
+        """(v5.44.160) Where each file in work is (``ParserRunner.waits``): its ``stage`` — «read» (being read),
+        «sites» (some site is still to answer), «write» (found: being written), «after» (no site had it: the checks
+        after the sites), «reverse» (reverse search) — and, after what the sites have said of it, the sites it still
+        waits for: a site not asked yet — «очередь».  The path of the file is taken out: a page never gets it."""
+        waits = getattr(self._runner, "waits", None)
+        for item in flight:
+            path = item.pop("path", "")
+            if not callable(waits):
+                continue
+            try:
+                where = waits(path)
+            except Exception:  # the page's view of the run, not the run
+                where = None
+            if not where:
+                continue
+            item["stage"] = str(where.get("stage") or "sites")
+            said = {label for label, _word in item["sites"]}
+            item["sites"] += [[str(label), "очередь"] for label in where.get("waiting") or () if label not in said]
 
     def _estimate(self) -> tuple:
         """How long the run still takes and the queue that decides it — by the queues' own pace (``ParserRunner.
@@ -351,10 +411,13 @@ class ParserJob:
             with self._lock:
                 number = self._numbers.get(asking, 0) if asking else 0
             out.append({"site": str(row.get("site") or ""), "host": str(row.get("host") or ""),
+                        "name": str(row.get("name") or row.get("site") or ""),     # as ``eta_by`` names the slowest
                         "kind": str(row.get("kind") or "site"), "how": str(row.get("how") or ""),
                         "waiting": int(row.get("waiting") or 0), "answered": int(row.get("answered") or 0),
                         "per_minute": float(row.get("per_minute") or 0.0),
                         "eta": int(row["eta"]) if row.get("eta") is not None else None,
+                        # (v5.44.160) with the files not read yet: 0 — nothing to do or it keeps up, None — not known
+                        "left": int(row["left"]) if row.get("left") is not None else None,
                         "file": Path(asking).name if asking else "", "file_id": number,
                         "reading": int(row.get("reading") or 0), "stage": str(row.get("stage") or ""),
                         "average": float(row.get("average") or 0.0),
@@ -362,6 +425,28 @@ class ParserJob:
                         "reason": sanitize_text(str(row.get("reason") or "")),
                         "again": sanitize_text(str(row.get("again") or ""))})
         return out
+
+
+def last_run() -> dict | None:
+    """(v5.44.160) The end of the last run as it was noted (``ParserJob._note_end``): its status, when it began and
+    ended, how many files, the counts, the folder's name, whether it was stopped by hand — or None (no run yet, or
+    the note does not read)."""
+    try:
+        from core.paths import RUNTIME_DIR
+        note = json.loads((Path(RUNTIME_DIR) / LAST_RUN_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(note, dict) or not isinstance(note.get("counts"), dict):
+        return None
+    try:
+        return {"status": str(note.get("status") or ""), "kind": str(note.get("kind") or "run"),
+                "label": str(note.get("label") or "")[:200], "started": int(note.get("started") or 0),
+                "finished": int(note.get("finished") or 0), "done": int(note.get("done") or 0),
+                "total": int(note.get("total") or 0), "folder": str(note.get("folder") or "")[:200],
+                "stopped": bool(note.get("stopped")),
+                "counts": {k: int(note["counts"].get(k) or 0) for k in COUNT_KEYS}}
+    except (TypeError, ValueError):
+        return None
 
 
 def _kind(path: str) -> str:

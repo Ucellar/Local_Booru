@@ -35,6 +35,13 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+    from core import gates                           # (v5.44.147) every gate of the program must have its keeper
+    try:
+        gates.ready()
+    except gates.Unkept as exc:
+        print(str(exc), flush=True)
+        return 4
+
     from webui.server import WebUI
     ui = WebUI(_settings_provider(), port=args.port)
     ui.start()

@@ -73,9 +73,18 @@
 .gl .gl-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .gl .gl-chips li { padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--text);
   font-size: 13px; }
+/* (v5.44.130) a chip that is a search (a genre — «Лента», a gallery's tag — nhentai's search): the whole chip */
+.gl .gl-chips li.gl-chip-go { padding: 0; }
+.gl .gl-chips li.gl-chip-go a { display: block; padding: 3px 10px; border-radius: 999px; color: var(--text);
+  text-decoration: none; }
+.gl .gl-chips li.gl-chip-go:hover, .gl .gl-chips li.gl-chip-go:focus-within { border-color: var(--accent); }
+.gl .gl-chips li.gl-chip-go a:hover, .gl .gl-chips li.gl-chip-go a:focus-visible {
+  color: var(--accent-text, var(--accent)); text-decoration: none; }
 .gl .gl-note { margin: 0; max-width: 80ch; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .gl .gl-note b { color: var(--text); }
 .gl .gl-note.warn { padding: 6px 0 6px 12px; border-left: 3px solid var(--accent); color: var(--text); }
+/* (v5.44.152) a voice-over only in a player the program takes nothing from: the way to the site */
+.gl .gl-note .gl-closed-go { color: var(--accent-text, var(--accent)); text-decoration: underline; white-space: nowrap; }
 /* (v5.44.117) the other sites still asked: the card shows what came so far */
 .gl .gl-note.gl-asking { display: flex; align-items: center; gap: 8px; }
 .gl .gl-check { display: inline-flex; align-items: flex-start; gap: 8px; cursor: pointer; line-height: 1.4; }

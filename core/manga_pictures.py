@@ -86,11 +86,11 @@ def usable(settings: dict) -> str:
     """"" — SauceNAO may be asked for the archive; else why not, in words."""
     settings = settings or {}
     if not settings.get("manga_archive_pictures", True):
-        return "выключено в «Настройки → Сайты манги»"      # (v5.44.116) the switch moved there from «Из архива»
+        return "выключено в «Настройки → Манга и манхва»"      # (v5.44.116) the switch moved there from «Из архива»
     if not settings.get("enable_saucenao", True):
         return "SauceNAO выключен в настройках парсера"
     if not key_of(settings):
-        return "нет ключа SauceNAO (Настройки → Парсер)"
+        return "нет ключа SauceNAO (Настройки → Парсер и сайты)"
     return ""
 
 
@@ -244,6 +244,49 @@ def answers(data: dict) -> tuple:
     return names, links
 
 
+def manga_hits(data: dict) -> list:
+    """(v5.44.164) The manga of a SauceNAO answer, one a result: [{"name", "part", "link", "sim", "index"}], the best
+    first — of :data:`INDEXES`, :data:`SIMILAR` % alike at least (or as alike as the answer says is worth it); ``name``
+    — the title's (its ``source``; a result that names none is not one), ``part`` — which chapter of it, in the
+    index's own words («- Chapter 12», «Vol.3 Ch.12»), ``link`` — MangaDex's link of the chapter, when it gives one.
+    The parser's own search asks every index at once, so its answer about a picture no booru site has says this too
+    (``core/parser_loose.py``: pages of manga lying loose among the pictures)."""
+    header = data.get("header") if isinstance(data.get("header"), dict) else {}
+    try:
+        floor = max(SIMILAR, float(header.get("minimum_similarity") or 0))
+    except (TypeError, ValueError):
+        floor = SIMILAR
+    out = []
+    for result in data.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        head = result.get("header") if isinstance(result.get("header"), dict) else {}
+        body = result.get("data") if isinstance(result.get("data"), dict) else {}
+        try:
+            index = int(head.get("index_id"))
+            sim = float(head.get("similarity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if index not in INDEXES or sim < floor:
+            continue
+        name = ""
+        for key in ("source", "title", "eng_name"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip() and not value.strip().lower().startswith("http"):
+                name = " ".join(value.split())[:200]
+                break
+        if not name:
+            continue
+        link = next((u for u in body.get("ext_urls") or [] if isinstance(u, str) and "mangadex.org/chapter/" in u), "")
+        md = str(body.get("md_id") or "")
+        if not link and len(md) >= 32:
+            link = f"https://mangadex.org/chapter/{md}"
+        part = body.get("part")
+        out.append({"name": name, "part": " ".join(str(part).split())[:80] if isinstance(part, (str, int, float)) else "",
+                    "link": link, "sim": round(sim, 2), "index": index})
+    return sorted(out, key=lambda hit: -hit["sim"])
+
+
 def _ask(settings: dict, http, path: Path, *, dbs: tuple = INDEXES) -> dict:
     """One picture asked: {"names", "links", "data"} | {"later": why, "until"} | {"off": why} | {"bad": why} |
     {"stopped"}; (v5.44.125) ``dbs`` — the indexes asked (``core/parser_manga``: the manga's and e621's at once),
@@ -319,7 +362,7 @@ def ask_one(settings: dict, http, data: bytes, *, dbs: tuple = INDEXES) -> dict:
     if not settings.get("enable_saucenao", True):
         return {"off": "SauceNAO выключен в настройках парсера"}
     if not key_of(settings):
-        return {"off": "нет ключа SauceNAO («Сайты и ключи»)"}
+        return {"off": "нет ключа SauceNAO («Настройки → Парсер и сайты»)"}
     until, reason = _pause(settings)
     if until > time.time():
         return {"later": f"пауза SauceNAO ({reason or 'после лимита'})", "until": until}

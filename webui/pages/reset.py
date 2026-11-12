@@ -388,5 +388,7 @@ def reset_page(req: Request) -> Response:
   </div>
   {diag._history_html(history)}
 </section>"""
-    return Response.html(page_frame("Удаление и сброс", body, active="diag", subnav=False, kind="tool",
-                                    body_data={"tool": "diag"}, tabs=diag.tabs("reset"), **diag._prefs()))
+    from webui.pages import settings                # (v5.44.161) inside «Настройки»: «Проверка и починка»
+    return Response.html(page_frame("Удаление и сброс", settings.in_frame("diag", body, diag.tabs("reset")),
+                                    active="diag", subnav=False, kind="tool", body_data={"tool": "diag"},
+                                    **diag._prefs()))

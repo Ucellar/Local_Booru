@@ -1,0 +1,3 @@
+# Для проверок (tools/dev_checks), не для самой программы: страницы в настоящем браузере.
+# После установки: python -m playwright install chromium
+playwright==1.63.0

@@ -165,6 +165,16 @@ a.settings-link, a.settings-link:hover { text-decoration: none; }
 @media (max-width: 480px) {           /* a window as narrow as a phone: the row of the tools has no room for it */
   .top .top-back.skin-button { display: none; }
 }
+/* (v5.44.153) «?» — the help, at the section about this page (webui/pages/help.py): the button of «Настройки», the
+   mark alone (its title says «Справка»); «Legacy», whose tools are rows of its side menu, — «? Справка» */
+a.help-link, a.help-link:hover { text-decoration: none; }
+.help-link { padding-left: 7px; padding-right: 7px; }
+.help-link .skin-label { display: none; }
+.help-link.active { border-color: currentColor; }
+.help-icon { width: 14px; height: 14px; flex: none; }
+@media (max-width: 480px) {           /* a window as narrow as a phone: no room for it either (as «←») */
+  .top .help-link.skin-button { display: none; }
+}
 /* (v5.44.120) «Загрузки» — what downloads and waits, on every page (webui/pages/downloads.py, booru.js asks for the
    number while the page is seen): the button of «Настройки» with an arrow down; the number — a pill of the accent */
 a.dl-badge, a.dl-badge:hover { text-decoration: none; white-space: nowrap; }
@@ -944,12 +954,76 @@ html[data-skin="nhentai"] .taglist-r34 { display: none; }
    одна тема растворялась в другой, сама смена была слишком заметной (владелец, 4.11.2026: «анимации багуются из за
    разности самих тем и такой переход как будто слишком большой»), а снимки страниц нагружали видеокарту окна. Теперь
    шапка остаётся как есть, а содержимое под ней проявляется за 0,14 с; вперёд/назад — со сдвигом на 10 точек. */
-:where(:root[data-motion="on"]) main.content { animation: lb-come 0.14s ease-out; }
-:where(:root[data-motion="on"][data-turned="next"]) main.content { animation: lb-come-right 0.16s ease-out; }
-:where(:root[data-motion="on"][data-turned="prev"]) main.content { animation: lb-come-left 0.16s ease-out; }
-@keyframes lb-come { from { opacity: 0.4; } }
-@keyframes lb-come-right { from { opacity: 0.4; transform: translateX(10px); } }
-@keyframes lb-come-left { from { opacity: 0.4; transform: translateX(-10px); } }
+/* (v5.44.158; владелец: «анимаций как будто вообще нет», макет «Анимации» одобрен 11.11.2026) Три положения:
+   «Нет», «Спокойные», «Заметные» (motion.js ставит data-motion-level). Длительности, расстояния и ход — переменные
+   --m-…: правило движения пишется один раз, уровень меняет только числа. «Заметные»: страница поднимается на 20
+   точек за 0,34 с с лёгким перелётом, плитки списка приходят одна за другой, плитка под курсором приподнимается,
+   кнопка под нажатием поддаётся, меню раскрывается из угла, полосы загрузок бегут. */
+:root[data-motion="on"] {
+  --m-page: 220ms; --m-page-y: 8px; --m-turn-x: 12px; --m-lift: -2px; --m-grow: 1.015; --m-press: 0.975;
+  --m-hover: 130ms; --m-menu: 170ms; --m-menu-y: -6px; --m-menu-s: 0.97; --m-dialog: 190ms; --m-dialog-y: 10px;
+  --m-bar: 500ms; --m-switch: 150ms; --m-acc: 210ms; --m-toast: 230ms; --m-toast-x: 0px; --m-toast-y: 12px;
+  --m-stagger: 0ms; --m-ease: ease-out;
+}
+:root[data-motion="on"][data-motion-level="vivid"] {
+  --m-page: 340ms; --m-page-y: 20px; --m-turn-x: 28px; --m-lift: -5px; --m-grow: 1.045; --m-press: 0.94;
+  --m-hover: 190ms; --m-menu: 250ms; --m-menu-y: -10px; --m-menu-s: 0.9; --m-dialog: 300ms; --m-dialog-y: 28px;
+  --m-bar: 600ms; --m-switch: 240ms; --m-acc: 300ms; --m-toast: 320ms; --m-toast-x: 40px; --m-toast-y: 0px;
+  --m-stagger: 26ms; --m-ease: cubic-bezier(0.2, 0.9, 0.25, 1.18);
+}
+/* the page: its content comes up under a header that stays; turned forward — from the right, back — from the left.
+   Not lifted, only appearing: the reader's page (its strip is tens of thousands of points tall, and its place in it
+   is measured as it opens; turned to, it comes from the side as every page).  Not moved at all: a page with parts
+   that hang on the window's edges (the arrows of a card in «Кинозал») — a page being moved would carry them off
+   their places.  What sticks out of the page's frame while it comes is cut for that moment (motion.js: data-coming):
+   no scroll bar flashes at the window's edge.  A script that measures from the window's edge meanwhile takes the
+   shift off (booru.js: comingOff) */
+:where(:root[data-motion="on"]) main.content { animation: lb-come var(--m-page) var(--m-ease); }
+:where(:root[data-motion="on"]:not([data-turned="next"], [data-turned="prev"])) main.content:has(> .rd),
+:where(:root[data-motion="on"][data-skin="cinema"]) main.content:has(.post-nav) { animation: lb-arrive var(--m-page) ease-out; }
+:root[data-coming] .layout { overflow: clip; }
+:where(:root[data-motion="on"][data-turned="next"]) main.content { animation: lb-come-right var(--m-page) var(--m-ease); }
+:where(:root[data-motion="on"][data-turned="prev"]) main.content { animation: lb-come-left var(--m-page) var(--m-ease); }
+@keyframes lb-come { from { opacity: 0; transform: translateY(var(--m-page-y)); } }
+@keyframes lb-come-right { from { opacity: 0; transform: translateX(var(--m-turn-x)); } }
+@keyframes lb-come-left { from { opacity: 0; transform: translateX(calc(-1 * var(--m-turn-x))); } }
+/* the tiles of a list one after another («Заметные»: --m-stagger; the first sixteen — the rest with the last of them,
+   so a long list is all there in 0,4 с).  A list drawn again by its script as answers come (the tiles of a series)
+   says how long ago its first tile came (--m-since: the tiles go on from there, not from the start) or that it
+   stands as it was (data-still); tiles added to a list («Показать ещё») are numbered by the script (--m-i).  A page
+   come back to stands at the place left, far down its list: its tiles come together with it (data-came, motion.js).
+   The rule weighs nothing (:where): an animation a page gives its own tile (a wait, a spinner) is not taken off */
+:where(:root[data-motion="on"][data-motion-level="vivid"]) :where(:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles):not([data-still]) > *) {
+  animation: lb-tile var(--m-page) var(--m-ease) backwards;
+  animation-delay: calc(var(--m-i, 16) * var(--m-stagger) - var(--m-since, 0ms));
+}
+:root[data-motion="on"][data-motion-level="vivid"][data-came="back"] { --m-stagger: 0ms; }
+@keyframes lb-tile { from { opacity: 0; translate: 0 var(--m-page-y); } }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(1) { --m-i: 0; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(2) { --m-i: 1; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(3) { --m-i: 2; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(4) { --m-i: 3; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(5) { --m-i: 4; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(6) { --m-i: 5; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(7) { --m-i: 6; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(8) { --m-i: 7; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(9) { --m-i: 8; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(10) { --m-i: 9; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(11) { --m-i: 10; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(12) { --m-i: 11; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(13) { --m-i: 12; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(14) { --m-i: 13; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(15) { --m-i: 14; }
+:is(.thumbs, .covers, .mh-cards, .vcards, .cat-grid, .sv-tiles) > :nth-child(16) { --m-i: 15; }
+/* a tile under the pointer lifts, under a press gives (translate and scale: a look's own transform of it stays) */
+:where(:root[data-motion="on"]) :is(.thumb, .cover, .mh-card, .vcard, .cat-tile, .sv-tile, .vtiles > *, .gl-tile) {
+  transition: translate var(--m-hover) var(--m-ease), scale var(--m-hover) var(--m-ease),
+    color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+:where(:root[data-motion="on"]) :is(.thumb, .cover, .mh-card, .vcard, .cat-tile):hover { translate: 0 var(--m-lift); scale: var(--m-grow); z-index: 2; }
+:where(:root[data-motion="on"]) :is(.sv-tile, .vtiles > *, .gl-tile):hover { translate: 0 var(--m-lift); }
+:where(:root[data-motion="on"]) :is(.thumb, .cover, .mh-card, .vcard, .cat-tile, .sv-tile, .vtiles > *, .gl-tile):active { translate: 0 0; scale: var(--m-press); }
+:where(:root[data-motion="on"]) :where(button, .button, .btn, .cat-btn, input[type="submit"]):where(:not(:disabled)):active { scale: var(--m-press); }
 /* pictures: hidden until they have come (motion.js marks them .lb-in), then shown softly; the picture of a card —
    when it is decoded (booru.js takes «loading» off); (v5.44.117) the reader's pages and the slices of its strip
    (.reader-image) — never hidden by this: the reader puts a page when it has come whole (reader.js), a slice of the
@@ -958,30 +1032,37 @@ html[data-skin="nhentai"] .taglist-r34 { display: none; }
 :where(:root[data-motion="on"]) main img.lb-in:not(.lb-now, .post-media, .reader-image, .vslide) { animation: lb-arrive 0.28s ease-out; }
 :where(:root[data-motion="on"]) .media-wrap:not(.loading) img.post-media { animation: lb-arrive 0.16s ease-out; }
 @keyframes lb-arrive { from { opacity: 0; } }
-/* menus, hints of tags, notes and the tabs of «Настройки» open, colours change — not jump */
-:where(:root[data-motion="on"]) :is(.skin-list, .ac-list):not([hidden]) {
-  animation: lb-drop 0.15s cubic-bezier(0.2, 0.8, 0.2, 1);
+/* menus, hints of tags, sheets, notes and the sections of «Настройки» open, colours change — not jump */
+:where(:root[data-motion="on"]) :is(.skin-list, .ac-list):not([hidden]) { animation: lb-drop var(--m-menu) var(--m-ease); }
+/* the corner a menu opens from: the one it hangs by (a look that hangs it by another corner or opens it upwards
+   says so itself: transform-origin, --m-menu-dir: -1) */
+.skin-list { transform-origin: top right; }
+.ac-list { transform-origin: top left; }
+:where(:root[data-motion="on"]) .sx-pane:not([hidden]) { animation: lb-arrive 0.18s ease-out; }
+:where(:root[data-motion="on"]) .toast:not([hidden]) { animation: lb-rise var(--m-toast) var(--m-ease); }
+:where(:root[data-motion="on"]) :is(dialog[open], .cv-menu:not([hidden]), .sv-sheet-wrap:not([hidden]) .sv-sheet) {
+  animation: lb-sheet var(--m-dialog) var(--m-ease);
 }
-:where(:root[data-motion="on"]) .settings-pane:not([hidden]) { animation: lb-arrive 0.18s ease-out; }
-:where(:root[data-motion="on"]) .toast:not([hidden]) { animation: lb-rise 0.2s ease-out; }
-@keyframes lb-drop { from { opacity: 0; transform: translateY(-4px); } }
-@keyframes lb-rise { from { opacity: 0; transform: translateY(8px); } }
+:where(:root[data-motion="on"]) :is(.cv-dim, .sv-sheet-wrap:not([hidden]) .sv-sheet-dim) { animation: lb-arrive var(--m-dialog) ease-out; }
+:where(:root[data-motion="on"]) dialog[open]::backdrop { animation: lb-arrive var(--m-dialog) ease-out; }
+:where(:root[data-motion="on"]) :where(details[open] > :not(summary)) { animation: lb-open var(--m-acc) var(--m-ease); }
+@keyframes lb-drop { from { opacity: 0; transform: translateY(calc(var(--m-menu-y) * var(--m-menu-dir, 1))) scale(var(--m-menu-s)); } }
+@keyframes lb-rise { from { opacity: 0; transform: translate(var(--m-toast-x), var(--m-toast-y)); } }
+@keyframes lb-sheet { from { opacity: 0; translate: 0 var(--m-dialog-y); } }
+@keyframes lb-open { from { opacity: 0; translate: 0 -6px; } }
 :where(:root[data-motion="on"]) :where(a, button, input, select, textarea, .chip, .mtag, .vchip) {
-  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease,
+    scale var(--m-hover) var(--m-ease);
 }
-/* «Плавные переходы» in the menu «Оформление»: a switch, on every page at once */
-.skin-motion { margin-top: 6px; border-top: 1px solid var(--border); border-radius: 0 0 6px 6px; }
-.skin-motion::before {
-  content: "";
-  flex: none;
-  width: 30px;
-  height: 16px;
-  border-radius: 8px;
-  background: radial-gradient(circle at 8px 50%, var(--bg) 5px, transparent 5.5px), var(--border);
-}
-.skin-motion[aria-checked="true"]::before {
-  background: radial-gradient(circle at 22px 50%, var(--accent-ink) 5px, transparent 5.5px), var(--accent);
-}
+/* «Плавные переходы» in the menu «Оформление»: three positions, on every page at once.  The menu is longer than the
+   window (a dozen looks): this row stays at its foot, in sight, while the looks scroll under it */
+.skin-motion { position: sticky; bottom: 0; z-index: 1; display: flex; flex-direction: column; gap: 6px; margin-top: 6px;
+  padding: 8px 8px 6px; border-top: 1px solid var(--border); background: inherit; }
+/* the menu's own padding under the row: covered too, or a line of the looks shows through below it */
+.skin-motion::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 12px; background: inherit; }
+.skin-motion .skin-text { display: flex; flex-direction: column; gap: 1px; font: 13px/1.35 "Segoe UI", Tahoma, sans-serif; color: var(--text); }
+.skin-motion .skin-text small { color: var(--muted); font-size: 11.5px; }
+.skin-levels { display: flex; gap: 4px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }

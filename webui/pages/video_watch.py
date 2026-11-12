@@ -52,8 +52,11 @@ def register(router) -> None:
     router.add("POST", r"/api/watch/choose", choose_json)
     token = r"(?P<token>[A-Za-z0-9_-]{16,64})"
     router.add("GET", rf"/watch/s/{token}/index\.m3u8", playlist)
+    router.add("GET", rf"/watch/s/{token}/(?P<which>video|audio)\.m3u8", playlist)   # (v5.44.138) the sound apart
     router.add("GET", rf"/watch/s/{token}/(?P<n>\d{{1,6}})\.(?:ts|m4s)", piece)
+    router.add("GET", rf"/watch/s/{token}/a(?P<n>\d{{1,6}})\.(?:ts|m4s|aac)", sound_piece)
     router.add("GET", rf"/watch/s/{token}/init\.mp4", init)
+    router.add("GET", rf"/watch/s/{token}/ainit\.mp4", sound_init)
     router.add("GET", rf"/watch/s/{token}/video\.mp4", video_file)
 
 
@@ -280,10 +283,29 @@ def _failed(exc) -> Response:
 def playlist(req: Request) -> Response:
     from core import video_watch as W
     try:
-        text = W.playlist(req.params["token"])
+        text = W.playlist(req.params["token"], str(req.params.get("which") or ""))
     except W.WatchError as exc:
         return _failed(exc)
     return Response(200, text.encode("utf-8"), "application/vnd.apple.mpegurl")
+
+
+def sound_piece(req: Request) -> Response:
+    """(v5.44.138) A part of a stream's sound that is a stream of its own."""
+    from core import video_watch as W
+    try:
+        body, kind = W.piece(req.params["token"], int(req.params["n"]), sound=True)
+    except W.WatchError as exc:
+        return _failed(exc)
+    return Response(200, body, kind, {"Cache-Control": "private, max-age=3600"})
+
+
+def sound_init(req: Request) -> Response:
+    from core import video_watch as W
+    try:
+        body, kind = W.piece(req.params["token"], -1, sound=True)
+    except W.WatchError as exc:
+        return _failed(exc)
+    return Response(200, body, kind, {"Cache-Control": "private, max-age=3600"})
 
 
 def piece(req: Request) -> Response:

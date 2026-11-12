@@ -29,7 +29,7 @@ from core import manhwa_sources as S
 _LOG = logging.getLogger("local_booru.manhwa")
 
 SITES = ("remanga", "mangalib", "mangabuff", "readmanga", "desu", "mangadex", "hentailib",   # (v5.44.96) HentaiLib
-         "allhentai", "hentaichan")                                     # (v5.44.99) AllHentai; (v5.44.85) Хентай-тян
+         "allhentai", "hentaichan", "nudemoon")         # (v5.44.99) AllHentai; (v5.44.85) Хентай-тян; (v5.44.131)
 HOWS = (("new", "Обновления"), ("popular", "Популярное"))
 TTL = 10 * 60                          # a page of a catalog kept this long (seconds)
 FAILED_TTL = 5 * 60                    # …one that did not come, asked again after this (or by «Попробовать ещё раз»)
@@ -132,7 +132,8 @@ def _ask(key: tuple, source, net, going) -> None:
     site, how, n = key
     try:
         hits, more = source.feed(net or feed_net(source), how, n)
-        got = Page(site, how, n, hits=[h for h in hits if h.key and h.url], more=bool(more))
+        got = Page(site, how, n, hits=[h for h in S.checked_hits(hits) if h.key and h.url],   # (v5.44.143) the gate
+                   more=bool(more))
     except S.SourceError as exc:
         _LOG.info("feed: %s (%s, page %d) did not come: %s", source.label, how, n, exc)
         got = Page(site, how, n, error=sanitize_text(str(exc))[:300] or f"{source.label} не ответил")

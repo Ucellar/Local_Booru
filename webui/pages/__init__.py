@@ -30,10 +30,12 @@ def register(router) -> None:
     get_hub.register(router)
     from webui.pages import manga_archive        # (v5.44.76) «Скачать → Из архива»: the titles of the folders
     manga_archive.register(router)
-    from webui.pages import manga_sites          # (v5.44.78) «Настройки → Сайты манги»: addresses and sign-in
+    from webui.pages import manga_sites          # (v5.44.78) «Настройки → Манга и манхва»: addresses and sign-in
     manga_sites.register(router)
     from webui.pages import manga_online         # (v5.44.82) «Читать» a title of the sites without downloading it
     manga_online.register(router)
+    from webui.pages import gallery_read         # (v5.44.148) …and a gallery of nhentai, in the same reader
+    gallery_read.register(router)
     from webui.pages import reader               # (v5.44.117) the one reader: a folder's title's chapters on its site
     reader.register(router)
     from webui.pages import catalog              # (v5.44.90) «Лента» of «Манга», «Манхва», «Видео»: the sites' titles
@@ -49,6 +51,8 @@ def register(router) -> None:
     maintenance.register(router)
     reset.register(router)
     settings.register(router)
+    from webui.pages import help                 # (v5.44.153) «Справка»: how to use the program, a «?» on every page
+    help.register(router)
     phone.register(router)                       # (v5.44.64) the owner's phone through Tailscale; the phone's pages
     from webui import content_mode               # (v5.44.53) the switch «SFW / Всё / NSFW» and the marks of titles
     content_mode.register(router)

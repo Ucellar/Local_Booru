@@ -442,6 +442,49 @@
     return ul;
   }
 
+  // (v5.44.130; the owner: «все плитки связанные с каким либо поиском» — clickable) chips that are links:
+  // [{name, href, title}] (no href — words only)
+  function linkChips(items, cls) {
+    const ul = el("ul", "gl-chips gl-chips-go" + (cls ? " " + cls : ""));
+    items.forEach((c) => {
+      const li = el("li");
+      if (c.href) {
+        const a = el("a", "", c.name);
+        a.href = c.href;
+        if (c.title) a.title = c.title;
+        li.className = "gl-chip-go";
+        li.append(a);
+      } else {
+        li.textContent = c.name;
+      }
+      ul.append(li);
+    });
+    return ul;
+  }
+
+  // a series' genres — searches: «Видео → Лента» with the genre (its name in the feed — /api/catalog/filters), a
+  // genre the feed has not — (v5.44.148) the feed's search by the word (a series of a site: «Лента», not the folder),
+  // a name the program makes no search of — words only; the words at once, the links when the program has said
+  function genreChips(names, cls) {
+    const list = (names || []).filter(Boolean).map(String);
+    const ul = chips(list, cls);
+    getJson("/api/catalog/filters?kind=video" + list.map((n) => "&n=" + encodeURIComponent(n)).join(""))
+      .then((reply) => {
+        const items = (reply.chips || []).map((c) => ({
+          name: c.name, title: c.g ? "Найти в «Ленте»" : c.never ? "" : "Искать в «Ленте» по слову",
+          href: c.never ? "" : c.g ? "/videos/feed?g=" + encodeURIComponent(c.g) : "/videos/feed?q=" + encodeURIComponent(c.name),
+        }));
+        if (items.length && ul.isConnected) ul.replaceWith(linkChips(items, cls));
+      }).catch(() => { /* the words stay */ });
+    return ul;
+  }
+
+  // a gallery's tag — nhentai's galleries of it in «Манга → Лента»: (v5.44.148) its own tag chosen there
+  // («sg=nhentai:artist:name»), not words in the search field
+  function nhentaiSearch(type, name) {
+    return "/manga/feed?sg=" + encodeURIComponent("nhentai:" + type + ":" + String(name).toLowerCase());
+  }
+
   // a few lines of the description; «Ещё» — all of it
   function about(text) {
     const wrap = el("div", "gl-desc");
@@ -516,7 +559,7 @@
       ["Видео", facts.year, facts.type, facts.episodes ? "серий: " + facts.episodes : ""], (facts.alt || []).join(" / "));
     card.append(view.top);
     const a = view.about;
-    if ((facts.genres || []).length) a.append(chips(facts.genres, "gl-genres"));
+    if ((facts.genres || []).length) a.append(genreChips(facts.genres, "gl-genres"));     // (v5.44.130) searches
     if (facts.about) a.append(about(facts.about));
     (f.sources || []).forEach((x) => {
       const line = el("p", "gl-note" + (x.exact ? "" : " warn"));
@@ -547,10 +590,20 @@
         a.append(block);
       }
     });
-    const voices = f.voices || [];
-    if (f.choose === "dubs" && voices.length) {
-      a.append(el("p", "gl-note", "Только в плеерах, из которых программа не скачивает: " + voices.map((v) => v.name
-        + (v.players && v.players.length ? " (" + v.players.join(", ") + ")" : "")).join(", ") + "."));
+    // (v5.44.152) the voice-overs only in players the program takes nothing from: by player — why, and where they
+    // can be watched (the title's page of the site: the window opens it in the usual browser)
+    if (f.choose === "dubs") {
+      (f.closed || []).forEach((c) => {
+        const line = el("p", "gl-note gl-closed", "Только в плеере " + c.player + ": " + c.names.join(", ") + ". " + c.why + ".");
+        if (/^https?:\/\//.test(f.page_url || "")) {
+          const go = el("a", "gl-closed-go", "Смотреть на сайте");
+          go.href = f.page_url;
+          go.target = "_blank";
+          go.rel = "noopener noreferrer";
+          line.append(" ", go);
+        }
+        a.append(line);
+      });
     }
     const notes = [];
     if (f.episodes) notes.push("Серии сайт показывает на своих страницах — прочитано страниц серий: " + f.episodes + ".");
@@ -585,26 +638,32 @@
       const other = !!(job && RUNNING.includes(job.status) && String(job.find) !== String(findId));
       const said = f.choose === "dubs" || files.some((i) => f.files[i].kind !== "video")
         ? plural(files.length, ["файл", "файла", "файлов"]) : plural(files.length, ["серию", "серии", "серий"]);
-      go.disabled = !files.length;
-      goButton.words.textContent = files.length ? (other ? "В очередь: " : "Скачать ") + said : pick.empty();
+      // (v5.44.150) nothing ticked, «Заменить картинку у серий в папке» is: the pictures alone are downloaded
+      const again = pick.repicture ? pick.repicture() : 0;
+      go.disabled = !files.length && !again;
+      goButton.words.textContent = files.length ? (other ? "В очередь: " : "Скачать ") + said
+        : again ? (other ? "В очередь: " : "") + "Заменить картинку у " + plural(again, ["серии", "серий", "серий"])
+          : pick.empty();
       pick.go.textContent = goButton.words.textContent;
-      pick.go.hidden = !files.length;
+      pick.go.hidden = !files.length && !again;
       let bytes = pick.weight(files);
       let approx = bytes > 0;
       if (!bytes) {
         files.forEach((i) => { bytes += Number(f.files[i].size) || 0; approx = approx || !!f.files[i].stream; });
       }
-      sum.textContent = (files.length && bytes ? (approx ? "≈ " : "") + megabytes(bytes) + ", " : "")
+      sum.textContent = ((files.length || again) && bytes ? (approx ? "≈ " : "") + megabytes(bytes) + ", " : "")
         + "в папку «" + folderName(f.folder) + "» — " + (f.new_folder ? "новая" : "уже есть, новые серии лягут в неё")
         + (other ? " · начнётся после текущего скачивания" : "");
     }
 
     async function download() {
       const files = pick.chosen();
-      if (!files.length) return;
+      const again = pick.repicture ? pick.repicture() : 0;
+      if (!files.length && !again) return;
       go.disabled = true;
       try {
-        const reply = await postJson(KINDS.video.get, { find: findId, files, quality: pick.quality(), merge: pick.merge() });
+        const reply = await postJson(KINDS.video.get, { find: findId, files, quality: pick.quality(), merge: pick.merge(),
+          repicture: !!again });
         LB.say(null, reply.queued ? (reply.queued > 1 ? "В очереди " + reply.queued + "-м" : "В очереди следующим")
           + ": начнётся само" : "Скачивание началось — оно в «Загрузках»");
         watch("video", true);
@@ -746,9 +805,21 @@
     quality.addEventListener("change", () => { keep("lb.get-quality", quality.value); changed(); });
     qualityBox.append(el("span", "", "Качество"), quality);
     const merge = check("Собрать озвучки серии в один файл", box.dataset.merge === "1");
-    merge.tick.addEventListener("change", changed);
+    merge.tick.addEventListener("change", () => { ask(); changed(); });
+    quality.addEventListener("change", () => ask());
     row.append(qualityBox, merge.node);
     node.append(row);
+    // (v5.44.150; the owner: «удалило весь видеоряд а оставило jam где всего 720p») what the picture of an episode
+    // will be: the title's best one — said before «Скачать», with the release it comes from (one not ticked lends
+    // its picture alone); the episodes of the folder with a lower one — «Заменить картинку…» (off until ticked)
+    const pictureNote = el("p", "gl-note gl-picture");
+    pictureNote.hidden = true;
+    const again = check("", false);
+    again.node.classList.add("gl-repicture");
+    again.node.hidden = true;
+    again.tick.addEventListener("change", changed);
+    node.append(pictureNote, again.node);
+    let known = { releases: {}, picture: null, lower: { episodes: 0, height: 0 } };
     const go = button("gl-btn small", "");
     go.hidden = true;
     const counted = el("span", "gl-counted");
@@ -772,6 +843,7 @@
       const t = event.target;
       if (t.closest(".gl-studios")) {
         if (t.checked) chosen.add(t.value); else chosen.delete(t.value);
+        ask();                                   // (v5.44.150) another release ticked: the picture may be another's
       } else if (t.closest(".gl-grid")) {
         if (t.checked) episodes.add(t.value); else episodes.delete(t.value);
       } else {
@@ -780,14 +852,63 @@
       paint();
     });
 
-    function facts(list) {
+    function facts(list, name) {
       let best = 0;
       const players = [];
       list.forEach((x) => {
         best = Math.max(best, parseInt(String(x.quality || "").replace(/\D+/g, ""), 10) || 0);
         String(x.note || "").replace("Плеер: ", "").split(", ").forEach((p) => { if (p && !players.includes(p)) players.push(p); });
       });
-      return [best ? "до " + best + "p" : "", players.join(", ")].filter(Boolean).join(" · ");
+      // (v5.44.150) what the release really has, once its files were looked at (CVH's «до 1080p» was the player's
+      // best — AniLibria's files there end at 720p), and whether its cut is the original's
+      const real = known.releases[name];
+      const size = real && real.known ? real.height + "p" : best ? "до " + best + "p" : "";
+      const cut = !real || real.clean === null || real.clean === undefined ? ""
+        : real.clean ? "без перемонтажа" : "перемонтаж студии";
+      return [size, cut, players.join(", ")].filter(Boolean).join(" · ");
+    }
+
+    // which voice-overs are ticked (not the subtitles' releases: each of them is a video of its own)
+    const voices = () => [...chosen].filter((n) => !isSubs(n));
+
+    function paintPicture() {
+      const p = known.picture;
+      const on = merge.tick.checked && p && p.group && voices().length > 0;
+      pictureNote.hidden = !on;
+      if (on) {
+        const cut = p.clean === true ? ", без перемонтажа" : p.clean === false ? ", перемонтаж студии" : "";
+        pictureNote.textContent = "Картинка серий — от «" + p.title + "»: " + p.height + "p" + cut
+          + (p.lent ? ". Её озвучка не отмечена — скачается только ради картинки, её звук в файл серии не пойдёт." : ".");
+      }
+      const lower = known.lower || {};
+      const can = on && lower.episodes > 0;
+      again.node.hidden = !can;
+      if (!can) again.tick.checked = false;
+      else {
+        again.node.querySelector("span").textContent = "Заменить картинку у "
+          + plural(lower.episodes, ["серии", "серий", "серий"]) + " в папке: сейчас до " + lower.height + "p, станет "
+          + p.height + "p";
+      }
+    }
+
+    // asked again when the ticks that decide the picture change (the releases are looked at once: quick after it)
+    let asking = 0;
+    let askTimer = 0;
+    function ask() {
+      clearTimeout(askTimer);
+      askTimer = setTimeout(() => {
+        const mine = ++asking;
+        const query = ["find=" + encodeURIComponent(findId), "quality=" + encodeURIComponent(quality.value)]
+          .concat(merge.tick.checked ? voices().map((n) => "g=" + encodeURIComponent(n)) : []);
+        getJson("/api/videos/measure?" + query.join("&")).then((reply) => {
+          if (mine !== asking) return;
+          const first = measured === null;
+          measured = reply.measured || {};
+          known = { releases: reply.releases || {}, picture: reply.picture || null,
+            lower: reply.lower || { episodes: 0, height: 0 } };
+          if (first || Object.keys(known.releases).length) paint(); else { paintPicture(); changed(); }
+        }).catch(() => { if (mine === asking) { measured = measured || {}; changed(); } });
+      }, measured === null ? 0 : 250);
     }
 
     function paint() {
@@ -808,7 +929,7 @@
         tick.value = name;
         tick.checked = chosen.has(name);
         const text = el("span", "gl-studio-text");
-        text.append(el("b", "", shortName(name)), el("span", "gl-muted", [facts(list),
+        text.append(el("b", "", shortName(name)), el("span", "gl-muted", [facts(list, name),
           (had ? "есть " + had + " из " : "") + plural(list.length, ["серия", "серии", "серий"])].filter(Boolean).join(" · ")));
         label.append(tick, text);
         label.title = name;
@@ -836,6 +957,7 @@
         paintTile(tick);
       });
       counted.textContent = some ? "отмечено " + ticked + " из " + labels.length : "";
+      paintPicture();
       changed();
     }
 
@@ -846,17 +968,22 @@
 
     // what the chosen ones take on the disk: one episode measured in each quality (/api/videos/measure), as the
     // computer's page of it counts (videos.js estimate)
-    function weight(files) {
+    function weightOf(files) {
       const m = measured;
-      if (!m || !m.sizes || !m.seconds || !files.length) return 0;
+      if (!m || !m.sizes || !m.seconds) return 0;
       const heights = Object.keys(m.sizes).map(Number).sort((a, b) => b - a);
       const cap = quality.value === "best" ? 1e9 : Number(quality.value) || 1e9;
       const sizeAt = (limit) => {
         const h = heights.find((x) => x <= Math.min(cap, limit)) || heights[heights.length - 1];
         return m.sizes[String(h)] || 0;
       };
-      const limitOf = (x) => (/CVH/.test(x.note || "") ? 1e9 : /AniLiberty/.test(x.note || "") ? 1080 : 720);
+      const limitOf = (x) => {
+        const real = known.releases[x.group || ""];
+        return real && real.known ? real.height
+          : /CVH/.test(x.note || "") ? 1e9 : /AniLiberty/.test(x.note || "") ? 1080 : 720;
+      };
       const sound = 14000 * m.seconds;
+      const lent = merge.tick.checked && known.picture && known.picture.lent ? known.picture : null;
       let total = 0;
       const byEpisode = new Map();
       files.forEach((i) => {
@@ -870,18 +997,23 @@
         if (!voices.length) return;
         if (!merge.tick.checked) { total += voices.reduce((s, x) => s + sizeAt(limitOf(x)), 0); return; }
         const had = f.files.some((x) => x.label === label && !isSubs(x.group) && x.have === "whole");
+        // a picture lent by a release not ticked: its picture and every ticked one's sound
+        if (lent && !had) { total += sizeAt(lent.height) + voices.length * sound; return; }
         total += (had ? 0 : sizeAt(Math.max(...voices.map(limitOf)))) + (voices.length - (had ? 0 : 1)) * sound;
       });
-      return total;
+      return total + repicture() * sizeAt(known.picture ? known.picture.height : 1e9);
     }
-    getJson("/api/videos/measure?find=" + encodeURIComponent(findId)).then((reply) => {
-      measured = reply.measured || {};
-      changed();
-    }).catch(() => { measured = {}; });
+
+    // «Заменить картинку у N серий в папке»: how many (0 — not ticked, or there is none to replace)
+    function repicture() {
+      return again.tick.checked && !again.node.hidden ? Number((known.lower || {}).episodes) || 0 : 0;
+    }
+    ask();
     setTimeout(paint, 0);
 
     return {
-      node, go, weight,
+      node, go, repicture,
+      weight: (files) => (files.length || repicture() ? weightOf(files) : 0),
       chosen: picked,
       empty: () => (chosen.size ? "Отметьте серии" : "Выберите озвучку"),
       quality: () => quality.value,
@@ -892,7 +1024,7 @@
   // ── nhentai ───────────────────────────────────────────────────────────────────────────────────────────────────
   // (v5.44.97) one gallery — its card: the cover, the titles, the tags, the thumbnails of its pages (asked of the
   // program: /api/manga/gallery — the API of the site; a tile of «Манга → Лента» leads here); «Скачать» stays when the
-  // description does not come; a gallery the program's rule leaves out — said, nothing of it shown
+  // description does not come; a gallery the program does not open — said, nothing of it shown
   function showNhentai(ids) {
     const gen = ++nhGen;
     card.textContent = "";
@@ -902,7 +1034,10 @@
     const view = hero("", one ? "Галерея nhentai " + ids[0] : "Галереи nhentai: " + ids.length, ["Хентай", "nhentai"], "");
     card.append(view.top);
     if (!one) {
-      view.about.append(chips(ids.slice(0, 40).map((n) => "№ " + n), "gl-numbers"));
+      // (v5.44.130) a number — its gallery's page
+      view.about.append(linkChips(ids.slice(0, 40).map((n) => ({
+        name: "№ " + n, title: "Страница галереи", href: "/manga/title?url="
+          + encodeURIComponent("https://nhentai.net/g/" + n + "/") })), "gl-numbers"));
     }
     const note = el("p", "gl-note", "Галерея ляжет в папку манги со своими названиями и тегами; прерванная "
       + "докачается. Обложка и название появятся в «Загрузках», когда программа прочитает описание.");
@@ -943,7 +1078,7 @@
     if (gen !== nhGen) return;
     card.classList.remove("gl-busy");
     if (!g || !g.ok) {
-      if (g && g.forbidden) {                    // the program's rule: no picture, no name, no «Скачать»
+      if (g && g.forbidden) {                    // not opened by the program: no picture, no name, no «Скачать»
         card.textContent = "";
         const top = hero("", "Галерея nhentai " + id, ["Хентай", "nhentai"], "");
         top.about.append(el("p", "gl-note warn", g.error));
@@ -967,7 +1102,9 @@
     (g.tags || []).forEach((group) => {
       const line = el("div", "gl-nh-tags");
       line.append(el("span", "gl-nh-kind", group.kind));
-      line.append(chips(group.names.slice(0, 40), "gl-genres"));
+      // (v5.44.130) a tag, an artist… — nhentai's search in «Лента»
+      line.append(linkChips(group.names.slice(0, 40).map((name) => ({ name, title: "Найти в «Ленте»",
+        href: group.type ? nhentaiSearch(group.type, name) : "" })), "gl-genres"));
       a.append(line);
     });
     if (g.have) {

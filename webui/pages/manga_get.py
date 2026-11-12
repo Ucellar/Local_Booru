@@ -9,7 +9,7 @@ before), ``?nh=`` — galleries of nhentai, ``?q=`` — a name searched at once.
 
 (v5.44.97) ``/api/manga/gallery?id=`` — a gallery's description for its card on «Скачать → По ссылке» (a tile of
 «Манга → Лента» leads there): its titles, tags by kind, pages, its cover and the thumbnails of its pages (through the
-program: ``/api/catalog/cover``), whether it is in the manga folder already; a gallery the program's rule leaves out —
+program: ``/api/catalog/cover``), whether it is in the manga folder already; a gallery the program's gate closes —
 said, nothing of it shown.
 
 (v5.44.116, the owner's review) «Не продолжать» for the galleries of the last run while they wait to be begun again
@@ -101,7 +101,8 @@ def _root(req: Request) -> tuple[Path | None, str]:
     if not root:
         return None, "Папка с мангой не выбрана — выберите её на вкладке «Манга»"
     if not Path(root).is_dir():
-        return None, f"Папки манги нет на месте: {root}. Подключите её диск или выберите другую в «Настройки → Папки»"
+        return None, (f"Папки манги нет на месте: {root}. Подключите её диск или выберите другую в «Настройки → "
+                      "Хранение и копии»")
     return Path(root), ""
 
 
@@ -120,7 +121,7 @@ def page(req: Request) -> Response:
     chosen = bool(str(req.settings.get("manga_root") or "").strip())
     note = "" if root is not None else why if chosen else (
         "Папка манги не выбрана — пока её нет, манга с сайтов ляжет в папку манхвы и будет читаться лентой. Папку "
-        "выбирают на вкладке «Манга» или в «Настройки → Папки».")
+        "выбирают на вкладке «Манга» или в «Настройки → Хранение и копии».")
     sites = manhwa_get.block(req, "manga", asked, req.arg("q").strip(), note)
     nhentai = "" if content_mode.mode() == "sfw" else _nhentai(req, galleries)
     body = f'<div class="get-manga">{sites}{nhentai}</div>'
@@ -352,8 +353,11 @@ THUMBS = 300                      # the thumbnails of a gallery's pages the card
 
 def gallery(req: Request) -> Response:
     """A gallery's description for its card: {ok, id, title, full, japanese, pages, favorites, date, tags [{kind,
-    names}], cover, thumbs [cover numbers], have {folder, pages, open} | None, url} — or {ok: false, error,
-    forbidden}."""
+    type, names}], cover, thumbs [cover numbers], have {folder, pages, open} | None, url} — or {ok: false, error,
+    forbidden}.  (v5.44.129) ``type`` — nhentai's word of the kind («artist», «tag»…): the title's page shows
+    nhentai's galleries of it in «Лента» (``sg=nhentai:artist:…``).  (v5.44.148) ``reader`` — its address in the
+    program's reader, read without downloading (``webui/pages/gallery_read.py``: ``&p=`` — a page; the phone's —
+    with «/m» before it), ``read`` — {page (from 1), pages, done} where it was left there (None — never opened)."""
     import datetime as _dt
     from core import catalog as C, manga_download as D, nhentai as N
     from webui import content_mode
@@ -372,7 +376,7 @@ def gallery(req: Request) -> Response:
     data = found.data
     link = N.link_of(number)
     tags = [t for t in data.get("tags") or [] if isinstance(t, dict) and t.get("name")]
-    groups = [{"kind": label, "names": [str(t["name"]) for t in tags if t.get("type") == kind]}
+    groups = [{"kind": label, "type": kind, "names": [str(t["name"]) for t in tags if t.get("type") == kind]}
               for kind, label in TAG_KINDS]
     cover = data.get("cover") if isinstance(data.get("cover"), dict) else {}
     thumb = data.get("thumbnail") if isinstance(data.get("thumbnail"), dict) else {}
@@ -403,10 +407,16 @@ def gallery(req: Request) -> Response:
     shown = found.pretty or N.pretty(found.english)
     if len(re.sub(r"[\W_]", "", shown)) < 2:          # «[Artist] ♥ [English]»: the brackets were the most of it
         shown = found.title
+    from core import gallery_read as GR
+    from webui.pages import gallery_read as GP
+    place = GR.place(number)
+    left = ({"page": min(found.pages, int(place.get("page") or 0) + 1), "pages": found.pages,
+             "done": bool(place.get("done"))} if "page" in place else None)
     return Response.json({
         "ok": True, "id": number, "url": link, "title": shown,
         "full": found.english, "japanese": found.japanese, "pages": found.pages,
         "favorites": int(data.get("num_favorites") or 0), "date": when,
         "tags": [g for g in groups if g["names"]],
         "cover": C.cover_id(first, link) if first else "",
-        "thumbs": [C.cover_id(x, link) for x in thumbs if x], "have": have})
+        "thumbs": [C.cover_id(x, link) for x in thumbs if x], "have": have,
+        "reader": GP.link(number), "read": left})

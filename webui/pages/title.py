@@ -383,6 +383,74 @@ def hand_mark(found, settings: dict) -> str:
     return CM.marks()[lib].get((M if lib == "manga" else H)._id_for(Path(root), folder), "")
 
 
+CHIP_GENRES = 8                     # (v5.44.129) the genres of a title its page shows (as ``Found.public`` gives)
+CHIP_TAGS = 20                      # …and its tags
+
+
+def chips_of(found) -> list:
+    """(v5.44.129; the owner: «при открытии страницы с интернета (в ленте) теги и все плитки связанные с каким либо
+    поиском не кликабельны») The genres and tags of a site's title, as its page shows them (of the site the description
+    comes from, as ``Found.public``), each with what a click on it searches: [{name, tag, g | tg | never}] — «Лента»
+    of the page's tab with that genre (``g``) or tag (``tg``) chosen (``core.catalog.feed_filter`` — by any of its
+    names: (v5.44.148) «NTR» is the feed's «Нетораре»); neither — the feed has no such filter: (v5.44.148) the feed's
+    search by the word (``title.js``; it was the tab's library); ``never`` — a name the page makes no search of at
+    all (``gates.chip``)."""
+    from core import catalog as C, manhwa_sources as S
+    info = getattr(found, "about", None) or found.title
+    out, seen = [], set()
+    for names, is_tag, most in ((info.genres or found.title.genres, False, CHIP_GENRES),
+                                (info.tags or found.title.tags, True, CHIP_TAGS)):
+        shown = 0
+        for raw in names or ():
+            name = " ".join(str(raw or "").split())
+            key = S.name_key(name)
+            if not key or key in seen or shown >= most:
+                continue
+            seen.add(key)
+            shown += 1
+            chip = {"name": name, "tag": is_tag}
+            field, value = C.feed_filter("manga", name, tag=is_tag)
+            if field == "never":
+                chip["never"] = True
+            elif field:
+                chip[field] = value
+            out.append(chip)
+    return out
+
+
+PEOPLE = 6                            # authors of a title shown as chips at most
+
+
+def people_of(found) -> list:
+    """(v5.44.149) The authors of a site's title, each a search of «Лента»: [{name, sg | find | never}] — ``sg`` — the
+    person as the Lib API numbers them (the title or its description is MangaLib's or HentaiLib's: «lib:people:<number>
+    <name>» — the feed lists their titles); ``find`` — only a name is known (another site's): the feed opens with
+    «Найти тег» filled with it and picks the person of exactly that name itself (``catalog.js``); ``never`` — a name
+    a gate of the program closes (words only)."""
+    from core import catalog as C, manhwa_sources as S
+    info = getattr(found, "about", None) or found.title
+    numbered = {}
+    for ref in (info, found.title):
+        for person in getattr(ref, "people", None) or ():
+            numbered.setdefault(S.name_key(person["name"]), person)
+    names = [str(name) for name in (info.authors or found.title.authors or [])]
+    names += [person["name"] for person in numbered.values()]          # the artists the site numbers too
+    out, seen = [], set()
+    for raw in names:
+        name = " ".join(raw.split())
+        key = S.name_key(name)
+        if not key or key in seen or len(out) >= PEOPLE:
+            continue
+        seen.add(key)
+        if C.extra_closed("lib", name):
+            out.append({"name": name, "never": True})
+        elif key in numbered:
+            out.append({"name": name, "sg": C.extra_of(f"lib:people:{numbered[key]['id']} {name}")})
+        else:
+            out.append({"name": name, "find": name})
+    return out
+
+
 def shelf_of(found, settings: dict, *, phone: bool = False, now: "float | None" = None) -> dict:
     """What the folder of ``found`` (``manhwa_download.Found``) has, for the title's page: ``rows`` — {a chapter's id
     of the list: {have, disk — the one reader's address of the folder's chapter ("" — it cannot be opened from the

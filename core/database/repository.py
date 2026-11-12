@@ -179,6 +179,13 @@ def _bucket_clause(bucket):
     return "i.bucket=?", [bucket]
 
 
+# (v5.44.152) The cards that have a link of a site (``?`` — its host), asked once: the site's links (host, link), then
+# the cards of each (link, card) — «CROSS JOIN» keeps that order whatever the planner would guess.
+SOURCE_CARDS = (
+    "+i.id IN (SELECT isrc.image_id FROM sources s CROSS JOIN image_sources isrc ON isrc.source_id=s.id "
+    "WHERE s.host=?)"
+)
+
 # A сборка of cards (core/card_sets.py) is one tile of the gallery: of its cards found by a search only the first
 # (by its place in the сборка) is listed.  ``hits`` — the cards the search finds (a WITH of the same conditions).
 COLLAPSE_SETS = (
@@ -197,33 +204,40 @@ def _collapse_sets(settings, sql, args, query, source, bucket, extra_where, extr
     return head + sql + " AND " + COLLAPSE_SETS, cond_args + list(args)
 
 
-def _base_search_sql(settings, query="", source="all", bucket="all", count=False):
+# What a card's row of a list carries (``_item_from_row``), and the joins it and the order of a list need.
+_ROW_SELECT = (
+    "i.*, COALESCE(fi.presence_status,'unknown') AS file_presence_status, "
+    "COALESCE(fi.root_status,'unknown') AS file_presence_root_status, "
+    "COALESCE(fi.root_path,'') AS file_presence_root_path, "
+    "COALESCE(fi.last_error,'') AS file_presence_error, "
+    "COALESCE(fi.last_presence_check,0) AS file_presence_checked_at, "
+    "COALESCE(gf.family_id,0) AS family_id, COALESCE(gfi.family_index,0) AS family_index, "
+    "COALESCE(gf.total_items,0) AS family_total, COALESCE(gf.family_type,'') AS family_type, "
+    "COALESCE(gf.family_source,'') AS family_source, COALESCE(gf.title,'') AS family_title, "
+    "COALESCE(gf.completion_status,'unknown') AS family_completion_status, "
+    "COALESCE(gf.sort_anchor,0) AS family_sort_anchor"
+)
+_FILE_JOIN = "LEFT JOIN image_file_integrity fi ON fi.image_id=i.id AND fi.checked_path=i.path "
+_FAMILY_JOIN = (
+    "LEFT JOIN media_family_items gfi ON gfi.image_id=i.id AND gfi.family_id=("
+    " SELECT mfi2.family_id FROM media_family_items mfi2 "
+    " JOIN media_families mf2 ON mf2.family_id=mfi2.family_id "
+    " WHERE mfi2.image_id=i.id ORDER BY mf2.order_confidence DESC,mfi2.family_id LIMIT 1"
+    ") LEFT JOIN media_families gf ON gf.family_id=gfi.family_id"
+)
+IDS_AT_ONCE = 500        # cards asked by their numbers in one statement
+
+
+def _base_search_sql(settings, query="", source="all", bucket="all", count=False, ids=False):
+    """``count`` — how many; ``ids`` — the cards' numbers alone (the order's joins, not the file's: a list first
+    finds the numbers of its page, ``search_items``); else the whole rows."""
     where, args = _search_conditions(settings, query, source, bucket)
     if count:
-        select = "COUNT(*) AS c"
-        sql = "SELECT " + select + " FROM images i"
+        sql = "SELECT COUNT(*) AS c FROM images i"
+    elif ids:
+        sql = "SELECT i.id AS id FROM images i " + _FAMILY_JOIN
     else:
-        select = (
-            "i.*, COALESCE(fi.presence_status,'unknown') AS file_presence_status, "
-            "COALESCE(fi.root_status,'unknown') AS file_presence_root_status, "
-            "COALESCE(fi.root_path,'') AS file_presence_root_path, "
-            "COALESCE(fi.last_error,'') AS file_presence_error, "
-            "COALESCE(fi.last_presence_check,0) AS file_presence_checked_at, "
-            "COALESCE(gf.family_id,0) AS family_id, COALESCE(gfi.family_index,0) AS family_index, "
-            "COALESCE(gf.total_items,0) AS family_total, COALESCE(gf.family_type,'') AS family_type, "
-            "COALESCE(gf.family_source,'') AS family_source, COALESCE(gf.title,'') AS family_title, "
-            "COALESCE(gf.completion_status,'unknown') AS family_completion_status, "
-            "COALESCE(gf.sort_anchor,0) AS family_sort_anchor"
-        )
-        sql = (
-            "SELECT " + select + " FROM images i "
-            "LEFT JOIN image_file_integrity fi ON fi.image_id=i.id AND fi.checked_path=i.path "
-            "LEFT JOIN media_family_items gfi ON gfi.image_id=i.id AND gfi.family_id=("
-            " SELECT mfi2.family_id FROM media_family_items mfi2 "
-            " JOIN media_families mf2 ON mf2.family_id=mfi2.family_id "
-            " WHERE mfi2.image_id=i.id ORDER BY mf2.order_confidence DESC,mfi2.family_id LIMIT 1"
-            ") LEFT JOIN media_families gf ON gf.family_id=gfi.family_id"
-        )
+        sql = "SELECT " + _ROW_SELECT + " FROM images i " + _FILE_JOIN + _FAMILY_JOIN
     if where:
         sql += " WHERE " + " AND ".join(where)
     return sql, args
@@ -243,32 +257,37 @@ def _search_conditions(settings, query="", source="all", bucket="all"):
     # Space = intersection. Each slash-group accepts any one option. When a
     # site filter is active, search the selected site's independent tag set,
     # not a tag supplied by another site for the same image.
+    # (v5.44.152) Asked once, by the tag: the cards of a tag are read from the index (tag, card) — «i.id IN (…)».
+    # «EXISTS (…)» was asked of every card of the library: on 40 thousand cards a search by a tag read 8 600 places
+    # of the base (now about 500), and with a site chosen the planner — the base keeps no statistics — entered it from
+    # the site's links: every link of the site tried for every card.  Measured there (11 thousand links of the
+    # site): a count with a site chosen 40 seconds, with a frequent tag and a site — no end waited for; now 7–15 ms.
+    # With a site the links are entered by the tag and the site only checked («+»: its numbers are not a second key
+    # of the lookup — a «*» that means thousands of tags would try each of them with each link of the site).
+    # «+i.id»: the cards of the section are gone through once and each looked up in the lists — the lists are not
+    # keys to enter the cards by.  Two of them as keys of one index (the trash, Брак: «deleted, lifecycle, id»)
+    # made the planner try every card of one list with every card of the other — 0.7 s for two tags in a trash of
+    # a thousand cards, and with three tags no end.
     for negate, groups in ((False, plus), (True, minus)):
-        exists = "NOT EXISTS" if negate else "EXISTS"
+        inside = "NOT IN" if negate else "IN"
         for names, patterns in groups:
             condition, cond_args = _tag_condition(names, patterns)
             if selected_source != "all":
-                where.append(f"""{exists} (
-                    SELECT 1 FROM image_source_tags ist
-                    JOIN sources ts ON ts.id=ist.source_id
-                    JOIN tags t ON t.id=ist.tag_id
-                    WHERE ist.image_id=i.id AND ts.host=? AND {condition}
+                where.append(f"""+i.id {inside} (
+                    SELECT ist.image_id FROM image_source_tags ist
+                    WHERE ist.tag_id IN (SELECT t.id FROM tags t WHERE {condition})
+                      AND +ist.source_id IN (SELECT ts.id FROM sources ts WHERE ts.host=?)
                 )""")
-                args.append(selected_source); args.extend(cond_args)
+                args.extend(cond_args); args.append(selected_source)
             else:
-                where.append(f"""{exists} (
-                    SELECT 1 FROM image_tags it
-                    JOIN tags t ON t.id=it.tag_id
-                    WHERE it.image_id=i.id AND {condition}
+                where.append(f"""+i.id {inside} (
+                    SELECT it.image_id FROM image_tags it
+                    WHERE it.tag_id IN (SELECT t.id FROM tags t WHERE {condition})
                 )""")
                 args.extend(cond_args)
 
     if selected_source != "all":
-        where.append("""EXISTS (
-            SELECT 1 FROM image_sources isrc
-            JOIN sources s ON s.id=isrc.source_id
-            WHERE isrc.image_id=i.id AND s.host=?
-        )""")
+        where.append(SOURCE_CARDS)
         args.append(selected_source)
 
     bsql, bargs = _bucket_clause(bucket)
@@ -295,7 +314,14 @@ def count_search_items(settings, query="", source="all", bucket="all",
 @_measure("sql.gallery.page")
 def search_items(settings, query="", source="all", bucket="all", limit=None, offset=0, order="path",
                  extra_where=None, extra_params=None, collapse_sets=False):
-    sql, args = _base_search_sql(settings, query, source, bucket, count=False)
+    """The cards of a search in their order, ``limit`` of them from ``offset`` (None — all).
+
+    (v5.44.152) A page of them is found in two steps: the numbers of its cards, in the order (what the order and the
+    conditions ask of a card is in the index of migration 048 — the table is not read), then the rows of those
+    cards.  One statement sorted the whole rows of every card found to give 42 of them: 3 000–7 000 places of the
+    base a page on 40 thousand cards, the more the further the page; now about 400 and 42 rows."""
+    paged = limit is not None
+    sql, args = _base_search_sql(settings, query, source, bucket, count=False, ids=paged)
     if extra_where:
         for cond in extra_where:
             sql += f" AND {cond}"
@@ -324,12 +350,21 @@ def search_items(settings, query="", source="all", bucket="all", limit=None, off
     else:
         order_sql = "CASE WHEN COALESCE(gf.family_id,0)>0 THEN LOWER(COALESCE(NULLIF(gf.title,''),i.path)) ELSE LOWER(i.path) END ASC, CASE WHEN COALESCE(gf.family_id,0)>0 THEN gf.family_id ELSE i.id END ASC, " + family_tail
     sql += " ORDER BY " + order_sql
-    if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        args += [int(limit), int(offset)]
+    if not paged:
+        with db(settings, readonly=True) as con:
+            rows = con.execute(sql, args).fetchall()
+            return [_item_from_row(r, load_details=False) for r in rows]
+    sql += " LIMIT ? OFFSET ?"
+    args += [int(limit), int(offset)]
     with db(settings, readonly=True) as con:
-        rows = con.execute(sql, args).fetchall()
-        return [_item_from_row(r, load_details=False) for r in rows]
+        numbers = [int(r[0]) for r in con.execute(sql, args).fetchall()]
+        rows = {}
+        for at in range(0, len(numbers), IDS_AT_ONCE):
+            some = numbers[at:at + IDS_AT_ONCE]
+            for r in con.execute("SELECT " + _ROW_SELECT + " FROM images i " + _FILE_JOIN + _FAMILY_JOIN
+                                 + f" WHERE i.id IN ({','.join('?' for _ in some)})", some).fetchall():
+                rows[int(r["id"])] = r
+        return [_item_from_row(rows[n], load_details=False) for n in numbers if n in rows]
 
 
 def _item_from_row(row, load_details=False):

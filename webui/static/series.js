@@ -7,6 +7,12 @@
 // In the program's window an episode is a page of its own (?ep=…&play=1: the window's own player, booru.js
 // nativeVideo); in a browser and on the phone the same <video> takes the next episode (the bar of the page: ⏮ ⏭, the
 // number, the opening and the ending on it).
+// (v5.44.142; the owner's mockup «Видео: серии плитками и скачивание озвучек» — «да отлично») The episodes are tiles
+// over the player (no list of rows, no row of numbers over it): in the folder / only on the site / watched / new / where
+// it stopped, the voice-over of the series over them; «Скачать серии…» turns them into the choice of «Скачать» of the
+// page of before — «Дубляж / Озвучка / Субтитры», several studios at once, «Качество», «в один файл», the weight
+// (/api/videos/find → find-state, measure, download); what downloads for the series goes on its tiles
+// (/api/series/getting, polled).
 (() => {
   "use strict";
   const page = document.getElementById("series-page");
@@ -24,6 +30,7 @@
     folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", chev: "M6 9l6 6 6-6",
     voice: "M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21",
     videos: "M3 6h18v12H3zM10 9l5 3-5 3z", forth: "M9 5l7 7-7 7", back: "M15 5l-7 7 7 7",
+    down: "M12 3v12M7 10l5 5 5-5M5 21h14",
   };
 
   // ── small helpers ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -84,6 +91,17 @@
   }
   function say(text, bad) {
     if (LB.say) LB.say(null, text, !!bad);
+  }
+  // a word of «Серии» — in its own line (the hero's status line may be out of sight); the phone — its note
+  let toldTimer = 0;
+  function tell(text, bad) {
+    const line = $("[data-sv-said]");
+    if (!line || phone) { say(text, bad); return; }
+    clearTimeout(toldTimer);
+    line.textContent = text || "";
+    line.classList.toggle("bad", !!bad);
+    line.hidden = !text;
+    if (text) toldTimer = setTimeout(() => { line.hidden = true; }, bad ? 20000 : 9000);
   }
   const ref = () => (M.series ? { series: M.series } : { url: M.url || page.dataset.url || "" });
   function query(extra) {
@@ -220,13 +238,28 @@
       const from = $("[data-sv-from]");
       if (from && M.about_from) { from.textContent = M.about_from; from.hidden = false; }
     }
+    // (v5.44.129) a genre — a search, as the server draws it (video_series.chip_href): a title of a site (the page
+    // goes back to «Лента») — «Лента» with the genre chosen, (v5.44.148) one the feed has not — the feed's search by
+    // the word; a series of the folder — the folder's series by it; a name the program makes no search of — words only
     const chips = $("[data-sv-chips]");
-    if (chips && !chips.children.length && (M.genres || []).length) {
-      M.genres.forEach((g) => {
+    const named = M.chips || (M.genres || []).map((name) => ({ name }));
+    if (chips && !chips.children.length && named.length) {
+      const fromFeed = /\/videos\/feed$/.test(page.dataset.back || "");
+      named.forEach((c) => {
         const li = el("li");
-        const a = el("a", "", g);
-        a.href = (phone ? "/m/videos?q=" : "/videos?tags=") + encodeURIComponent(g);
-        li.append(a);
+        const feed = fromFeed && c.g;
+        const href = c.never ? "" : feed ? (phone ? "/m" : "") + "/videos/feed?g=" + encodeURIComponent(c.g)
+          : fromFeed ? (phone ? "/m" : "") + "/videos/feed?q=" + encodeURIComponent(c.name)
+            : (phone ? "/m/videos?q=" : "/videos?tags=") + encodeURIComponent(c.name);
+        if (href) {
+          const a = el("a", "", c.name);
+          a.href = href;
+          a.title = feed ? "Найти в «Ленте»" : fromFeed ? "Искать в «Ленте» по слову" : "Искать в папке видео";
+          li.append(a);
+        } else {
+          li.className = "sv-chip-words";
+          li.textContent = c.name;
+        }
         chips.append(li);
       });
     }
@@ -255,6 +288,84 @@
     list.textContent = "";
     rows.forEach(([label, words]) => list.append(el("dt", "", label), el("dd", "", words)));
   }
+  // ── «Порядок просмотра» of a title from YummyAnime: its seasons, films and extras in the order to watch them — the
+  // ones in the library open there, the others open their own page (watched there, downloaded there).  (v5.44.145)
+  // For a title of a site as for a series of the folder, on the computer and on the phone: the one page of 5.44.121
+  // drew it only for a series of the folder on the computer (the owner: «и почему пропал порядок просмотра?»).
+  // /api/videos/order/<id> — a series of the folder (with its ratings as they are now), /api/videos/order?url= — a title.
+  function setupOrder(box) {
+    const ask = box.dataset.order ? "/api/videos/order/" + encodeURIComponent(box.dataset.order)
+      : "/api/videos/order?url=" + encodeURIComponent(box.dataset.orderUrl || "");
+    const base = phone ? "/m" : "";
+    fetch(ask, { credentials: "same-origin" }).then((r) => r.json()).then((reply) => {
+      if (box.dataset.order) showRatings((reply && reply.ratings) || []);
+      const order = (reply && reply.order) || [];
+      if (order.length < 2) return;
+      const toggle = el("button", (phone ? "m-button m-quiet" : "vbutton primary") + " vorder-toggle");
+      toggle.type = "button";
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.append(el("span", "", "Порядок просмотра"), el("span", "vorder-count", plural(order.length, ["часть", "части", "частей"])));
+      const arrow = el("span", "vorder-arrow", "▾");
+      arrow.setAttribute("aria-hidden", "true");
+      toggle.append(arrow);
+      const list = el("ol", "vorder-list");
+      list.hidden = true;
+      for (const o of order) {
+        const li = el("li", o.here ? "here" : o.series ? "have" : o.soon ? "soon" : "");
+        let name;
+        if (o.series && !o.here) {
+          name = el("a", "vorder-name", o.title);
+          name.href = base + "/videos/s/" + encodeURIComponent(o.series);
+        } else if (o.watch && !o.here && !o.soon) {
+          name = el("a", "vorder-name", o.title);
+          name.href = base + o.watch;
+        } else {
+          name = el(o.here ? "b" : "span", "vorder-name", o.title);
+        }
+        li.append(name);
+        const about = [o.type, o.kind, o.year].filter(Boolean).join(", ");
+        if (about) li.append(document.createTextNode(" — " + about));
+        const mark = el("span", "vorder-mark");
+        if (o.here) mark.textContent = "это";
+        else if (o.series) mark.textContent = "есть" + (o.episodes ? ": " + plural(o.episodes, EPISODES) : "");
+        else if (o.soon) mark.textContent = "анонс";
+        else if (o.get) {
+          const get = el("a", "", "найти и скачать");
+          get.href = base + o.get;
+          mark.append(get);
+        }
+        li.append(mark);
+        list.append(li);
+      }
+      toggle.addEventListener("click", () => {
+        list.hidden = !list.hidden;
+        toggle.setAttribute("aria-expanded", String(!list.hidden));
+      });
+      box.append(toggle, list);
+      box.hidden = false;
+    }).catch(() => { /* the site did not answer: the page without its order */ });
+  }
+  // the title's ratings as YummyAnime has them now (its own people's first): «Оценки» of the folder's series written then
+  function showRatings(list) {
+    const facts = page.querySelector(".sv-hero .vfacts");
+    if (!facts || !list.length) return;
+    let dd = null;
+    for (const dt of facts.querySelectorAll("dt")) if (dt.textContent.trim() === "Оценки") dd = dt.nextElementSibling;
+    if (!dd) {
+      const dt = el("dt", "", "Оценки");
+      dd = el("dd");
+      const files = [...facts.querySelectorAll("dt")].find((x) => x.textContent.trim() === "Файлов");
+      if (files) { facts.insertBefore(dt, files); facts.insertBefore(dd, files); } else facts.append(dt, dd);
+    }
+    dd.textContent = "";
+    list.forEach(([name, value], n) => {
+      if (n) dd.append(" · ");
+      dd.append(name + " ");
+      dd.append(el("b", "", value));
+    });
+  }
+  page.querySelectorAll(".vorder[data-order], .vorder[data-order-url]").forEach(setupOrder);
+
   page.addEventListener("click", (event) => {
     const more = event.target.closest("[data-sv-more]");
     if (!more) return;
@@ -305,6 +416,17 @@
         holder.append(again);
       }
     }
+    // (v5.44.142) «Скачать серии…»: several voice-overs and subtitles at once, «Качество», «в один файл» — on the tiles
+    if (M.get && M.get.url && !M.single) {
+      const get = el("button", phone ? "m-button m-quiet sv-get-open" : "sv-btn sv-get-open");
+      get.type = "button";
+      get.dataset.svGetOpen = "";
+      get.setAttribute("aria-haspopup", "dialog");
+      get.title = "Выбрать озвучки, субтитры, качество и серии — скачать в папку сериала";
+      get.append(icon("down", 16), el("span", "", "Скачать серии…"));
+      get.addEventListener("click", openGet);
+      holder.append(get);
+    }
     if (M.series && !phone) {
       const reveal = el("button", "sv-btn quiet");
       reveal.type = "button";
@@ -312,74 +434,6 @@
       reveal.dataset.id = M.series;
       reveal.append(icon("folder", 16), el("span", "", "Показать в папке"));
       holder.append(reveal);
-    }
-  }
-
-  // ── a title of a site without a folder here: «Скачать серию N», «Скачать остальные N» (or «Скачать все N») — the
-  // machinery of «Скачать» (/api/videos/find, then /api/videos/download: the other chat's — only asked) ──
-  let getting = false;
-  function downloads() {
-    const side = $(".sv-side");
-    if (!side) return;
-    let box = side.querySelector("[data-sv-gets]");
-    const dub = (M.dubs || []).find((d) => d.name === M.dub);
-    if (M.series || !dub || !(M.site && M.site.online)) { if (box) box.remove(); return; }
-    if (!box) {
-      box = el("span", "sv-gets");
-      box.dataset.svGets = "";
-      side.prepend(box);
-    }
-    box.textContent = "";
-    const labels = Object.keys(dub.files || {});
-    const missing = episodes().filter((e) => !e.disk.length && labels.includes(e.key)).map((e) => e.key);
-    const target = current && labels.includes(current) ? current : (M.resume || {}).key;
-    const one = el("button", "sv-link sv-get-one");
-    one.type = "button";
-    one.dataset.svGetOne = target || "";
-    const inFolder = target && !missing.includes(target);
-    one.textContent = inFolder ? "Серия " + target + " в папке" : "Скачать серию " + (target || "");
-    one.disabled = !target || inFolder || getting;
-    one.addEventListener("click", () => download([target], dub));
-    const rest = el("button", "sv-link sv-get-rest");
-    rest.type = "button";
-    rest.dataset.svGetRest = "";
-    // (v5.44.116) none in the folder yet — «Скачать все 12»; some — «Скачать остальные 9»
-    rest.textContent = !missing.length ? "Все серии в папке"
-      : (missing.length === labels.length ? "Скачать все " : "Скачать остальные ") + missing.length;
-    rest.disabled = !missing.length || getting;
-    rest.addEventListener("click", () => download(missing, dub));
-    box.append(one, rest);
-  }
-  async function download(labels, dub) {
-    labels = (labels || []).filter(Boolean);
-    if (!labels.length || getting) return;
-    getting = true;
-    downloads();
-    try {
-      say("Готовлю скачивание: программа ищет серии тайтла…");
-      const started = await post("/api/videos/find", { url: M.url });
-      let state = null;
-      for (let after = 0; ;) {
-        state = await getJson("/api/videos/find-state?after=" + after);
-        after = Number(state.last_seq) || after;
-        if (String(state.id) !== String(started.id)) throw new Error("Поиск сменился другим — нажмите ещё раз");
-        if (state.status === "done" || state.status === "failed" || state.status === "stopped") break;
-        await sleep(700);
-      }
-      if (!state.found) throw new Error(state.error || "Серии для скачивания не нашлись");
-      const want = new Set(labels.map((n) => ((dub.files || {})[n] || ["", ""]).join("\u0000")));
-      const files = state.found.files.filter((f) => want.has((f.group || "") + "\u0000" + (f.title || "")) &&
-        f.have !== "whole" && f.have !== "other").map((f) => f.i);
-      if (!files.length) throw new Error("Эти серии уже в папке");
-      const reply = await post("/api/videos/download", { find: state.id, files,
-                                                         quality: (M.picks || {}).quality || "best" });
-      say((reply.queued ? "В очереди скачивания" + (reply.queued > 1 ? " " + reply.queued + "-м" : "") + " — начнётся само. "
-        : "Скачивание началось. ") + "Его видно в «Загрузках».");
-    } catch (err) {
-      say(err.message, true);
-    } finally {
-      getting = false;
-      downloads();
     }
   }
 
@@ -415,18 +469,11 @@
     const holder = $("[data-sv-src]");
     if (!holder) return;
     holder.textContent = "";
-    const c = M.counts || {};
-    const head = el("div", "sv-src-head");
-    const h = el(phone ? "h2" : "h2", "sv-src-h");
+    // (v5.44.142) under the tiles: where the episodes come from (their numbers — the legend over the tiles; the
+    // voice-over of the series — the choice over them)
+    const h = el("h3", "sv-src-h");
     h.append(icon("videos", 15), el("span", "", "Откуда серии"));
-    head.append(h);
-    if (!M.single) {
-      const words = [plural(c.total || 0, EPISODES) + ":"];
-      if (M.series) words.push((c.disk || 0) + " в папке");
-      if (c.site) words.push((M.series ? "" : "") + c.site + " — только на сайте");
-      head.append(el("span", "sv-src-note", words.join(" ").replace(": ", ": ").replace(/ в папке (\d)/, " в папке, $1")));
-    }
-    holder.append(head);
+    holder.append(h);
     const rows = el("dl", "sv-src-rows");
     const row = (label, cls) => {
       const wrap = el("div", "sv-src-row" + (cls ? " " + cls : ""));
@@ -510,7 +557,7 @@
         const none = el("p", "sv-src-line sv-muted");
         none.append(icon("globe", 14));
         // in «SFW» the sites of hentai are not named (v5.44.116)
-        const sites = document.documentElement.dataset.contentMode === "sfw" ? "YummyAnime" : "YummyAnime и Hentasis";
+        const sites = document.documentElement.dataset.contentMode === "sfw" ? "YummyAnime" : "YummyAnime, Hentasis, HentaiHaven, Hentai-XS и HFShare";
         const span = el("span", "", `Смотреть онлайн можно с ${sites}: возьмите описание тайтла с сайта — его адрес станет адресом серий. `);
         if (!phone) {
           const open = el("button", "sv-link", "Указать адрес");
@@ -522,163 +569,387 @@
         dd.append(none);
       }
     }
+    holder.append(rows);
+  }
+
+  // ── the episodes: tiles over the player (v5.44.142) ──────────────────────────────────────────────────────────
+  // the number; ✓ watched / ● new in the corner; under it «▶ 12:34» where it stopped, «досмотрена», «новая», «в папке»;
+  // the episode in the player framed; a file of it downloading — how far («62%», «в очереди», «✓ скачана»)
+  let newestFirst = false;
+  try { newestFirst = localStorage.getItem("lb-sv-order") === "new"; } catch (_) { newestFirst = false; }
+  const PAGE = 100;                      // a long series: its tiles a hundred at a time («1–100», «101–200» …)
+  let hundred = -1;                      // the hundred shown (-1: the one of the episode in the player)
+  let tilesShown = null;                 // (v5.44.158) which tiles the list showed last, and when they began to come
+  let tilesAt = 0;
+  const wasDone = new Map();             // (v5.44.158) an episode -> watched to the end when its tile was drawn last
+  let going = null;                      // what downloads for the series now (/api/series/getting)
+  const FILES = ["файл", "файла", "файлов"];
+
+  function parts(count) {                // [[first, last]] of the hundreds of a long list (one part — a short one)
+    if (count <= PAGE + PAGE / 5) return [[0, Math.max(0, count - 1)]];
+    const out = [];
+    for (let i = 0; i < count; i += PAGE) out.push([i, Math.min(count, i + PAGE) - 1]);
+    return out;
+  }
+  function hundreds(labels, now, choose) {   // the buttons of the hundreds: «1–100», «101–200» …
+    const nav = el("div", "sv-parts");
+    nav.setAttribute("role", "group");
+    nav.setAttribute("aria-label", "Серии по сотне");
+    parts(labels.length).forEach(([a, b], n) => {
+      const button = el("button", "sv-part", labels[a] + "–" + labels[b]);
+      button.type = "button";
+      button.setAttribute("aria-pressed", n === now ? "true" : "false");
+      button.addEventListener("click", () => choose(n));
+      nav.append(button);
+    });
+    return nav;
+  }
+
+  const DL = { active: "скачивается", paused: "пауза", queued: "в очереди", done: "✓ скачана", failed: "не скачалась",
+               stopped: "остановлена" };
+  function dlOf(e) {                     // the episode in the download going for the series, or in the queue
+    const g = going && going.going;
+    const slot = g && g.labels ? g.labels[e.key] : null;
+    if (slot) {
+      const pct = Math.round(100 * (Number(slot.part) || 0));
+      const sub = slot.state === "active" ? pct + "%" : slot.state === "paused" ? "пауза · " + pct + "%" : DL[slot.state] || "";
+      return { state: slot.state, part: Number(slot.part) || 0, sub,
+               words: slot.state === "active" ? "скачивается, " + pct + "%" : sub.replace("✓ ", "") };
+    }
+    const q = going && going.queued;
+    if (q && (q.labels || []).includes(e.key)) return { state: "queued", part: 0, sub: "в очереди", words: "в очереди на скачивание" };
+    return null;
+  }
+  function tileWords(e) {                // its tip and what a screen reader says (video_series.tile_words — the same)
+    const words = [nameOf(e)];
+    if (e.here && e.place) words.push("вы остановились на " + clock(e.place[0]));
+    else if (e.done) words.push("досмотрена");
+    if (e.new) words.push("новая");
+    words.push(e.disk.length ? "в папке" : e.site.length ? "на сайте, онлайн" : "нет ни в папке, ни на сайте");
+    const dl = dlOf(e);
+    if (dl) words.push(dl.words);
+    return words.join(", ");
+  }
+  function tile(e) {
+    const a = el("a", "sv-tile vep");
+    a.dataset.ep = e.key;
+    const top = el("span", "sv-tile-top");
+    const mark = el("span", "sv-tile-mark");
+    mark.setAttribute("aria-hidden", "true");
+    top.append(el("span", "sv-tile-n", e.label), mark);
+    const bar = el("span", "sv-tile-bar");
+    bar.setAttribute("aria-hidden", "true");
+    a.append(top, el("span", "sv-tile-sub"), bar);
+    a.addEventListener("click", (event) => {
+      if (!playable(e)) { event.preventDefault(); return; }
+      if (navigates() || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      choose(e.key, { autoplay: true });
+      toPlayer();
+    });
+    paintTile(a, e);
+    return a;
+  }
+  function paintTile(a, e) {
+    const dl = dlOf(e);
+    const cls = ["sv-tile", "vep", e.disk.length ? "disk" : e.site.length ? "site" : "off"];
+    if (e.done) cls.push("done");
+    if (e.here) cls.push("here");
+    if (e.new) cls.push("new");
+    if (current && e.key === current) cls.push("now");
+    a.className = cls.join(" ");
+    if (dl) a.dataset.dl = dl.state; else delete a.dataset.dl;
+    a.style.setProperty("--dl", dl ? Math.round(100 * dl.part) + "%" : "0%");
+    const mark = a.querySelector(".sv-tile-mark");
+    mark.textContent = e.done ? "✓" : e.new ? "●" : "";
+    // (v5.44.158) an episode watched to the end just now: its tick pops in («Плавные переходы», the mockup «Анимации»)
+    const html = document.documentElement;
+    if (e.done && wasDone.get(e.key) === false && html.dataset.motion === "on" && mark.animate) {
+      const style = getComputedStyle(html);
+      mark.animate([{ transform: "scale(0.2)", opacity: 0 }, { transform: "none", opacity: 1 }], {
+        duration: parseFloat(style.getPropertyValue("--m-dialog")) || 190,
+        easing: style.getPropertyValue("--m-ease").trim() || "ease-out",
+      });
+    }
+    wasDone.set(e.key, !!e.done);
+    let sub = "";
+    if (dl) sub = dl.sub;
+    else if (e.here && e.place) sub = "▶ " + clock(e.place[0]);
+    else if (e.done) sub = "досмотрена";
+    else if (e.new) sub = "новая";
+    else if (e.disk.length) sub = "в папке";
+    a.querySelector(".sv-tile-sub").textContent = sub;
+    const bar = a.querySelector(".sv-tile-bar");
+    const watched = e.place && e.place[1] && !e.done && !dl ? Math.min(100, Math.round(100 * e.place[0] / e.place[1])) : 0;
+    bar.style.width = watched + "%";
+    bar.hidden = !watched;
+    if (playable(e)) { a.href = address(e.key, true); a.removeAttribute("aria-disabled"); }
+    else { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); }
+    if (current && e.key === current) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
+    const words = tileWords(e);
+    a.title = words;
+    a.setAttribute("aria-label", words);
+  }
+  function markCurrent() {               // the episode in the player framed (a long series: its hundred shown)
+    const shown = current && [...page.querySelectorAll("[data-sv-eps] .sv-tile[data-ep]")].some((a) => a.dataset.ep === current);
+    if (current && !shown && parts(episodes().length).length > 1) { hundred = -1; list(); return; }
+    paintTiles();
+  }
+  function paintTiles() {                // the tiles as they are now (no new ones: the hover and the focus stay)
+    page.querySelectorAll("[data-sv-eps] .sv-tile[data-ep]").forEach((a) => {
+      const e = entryOf(a.dataset.ep);
+      if (e) paintTile(a, e);
+    });
+    paintGoing();
+  }
+  function toPlayer() {                  // a tile chosen in a browser: the player under the tiles in sight
+    const box = $("[data-sv-player]");
+    if (!box || phone) return;
+    const r = box.getBoundingClientRect();
+    if (r.top > window.innerHeight * 0.55 || r.bottom < 80) box.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function listHead() {
+    const c = M.counts || {};
+    const head = el("div", "sv-list-head");
+    const h = el("h2", "", "Серии ");
+    h.id = "sv-eps-h";
+    h.append(el("span", "sv-count", String(c.total || 0)));
+    head.append(h);
+    if (!phone) head.append(legend());
+    const tools = el("div", "sv-list-tools");
     if ((M.voices || []).length > 1 || (M.voices || []).some((v) => v.site.length)) {
-      const dd = row("Озвучка", "voice");
+      // the voice-over of the series — one choice for every episode (one of them in another: «Озвучка» of the player)
+      const pick = el("div", "sv-voice-pick");
+      if (!phone) pick.append(el("span", "sv-voice-label", "Смотреть в озвучке"));
       const now = currentVoice();
       const button = el("button", "sv-voice-now");
       button.type = "button";
       button.dataset.svVoice = "series";
-      button.append(icon("voice", 14), el("b", "", now ? now.name : "как в файлах серий"));
-      if (now) button.append(el("small", "", "· " + voiceLine(now)));
-      button.append(icon("chev", 13));
+      button.setAttribute("aria-haspopup", "dialog");
+      button.setAttribute("aria-label", "Озвучка сериала: " + (now ? now.name : "как в файлах серий"));
+      button.title = "Озвучка всего сериала — так идут и следующие серии; у одной серии другую можно выбрать в плеере";
+      if (phone) button.append(icon("voice", 14));
+      button.append(el("b", "", now ? now.name : "как в файлах серий"), icon("chev", 13));
       button.addEventListener("click", () => openVoices(null, button));
-      dd.append(button);
-      dd.append(el("p", "sv-src-line sv-muted", "выбрана у сериала — так и идёт дальше, со следующими сериями; у серии " +
-        "можно выбрать другую" + (phone ? " — «Озвучка» в плеере серии" : " (▾ в строке серии)")));
+      pick.append(button);
+      tools.append(pick);
     }
-    holder.append(rows);
+    if (episodes().length > 1 && !phone) {
+      const order = el("button", "sv-link sv-order", newestFirst ? "↓ сначала новые" : "↑ по порядку");
+      order.type = "button";
+      order.title = "Порядок плиток";
+      order.addEventListener("click", () => {
+        newestFirst = !newestFirst;
+        try { localStorage.setItem("lb-sv-order", newestFirst ? "new" : "old"); } catch (_) { /* this page */ }
+        list();
+      });
+      tools.append(order);
+    }
+    if (tools.children.length) head.append(tools);
+    return head;
   }
-
-  // ── the episodes ──────────────────────────────────────────────────────────────────────────────────────────────
-  let newestFirst = false;
-  try { newestFirst = localStorage.getItem("lb-sv-order") === "new"; } catch (_) { newestFirst = false; }
-  let opened = "";                       // the episode whose variants are open (the computer: a line under its row)
-
-  function marks(e) {
-    const out = el("span", "sv-marks-row");
-    if (e.done) {
-      const m = el("span", "sv-mark read");
-      m.append(icon("check", 12), "досмотрена");
-      out.append(m);
-    }
-    if (e.new) out.append(el("span", "sv-mark new", "новая"));
-    if (e.disk.length) {
-      const m = el("span", "sv-mark have");
-      m.append(icon("check", 12), "в папке");
-      out.append(m);
-    } else if (e.site.length) {
-      const m = el("span", "sv-mark from");
-      m.append(icon("globe", 12), "с сайта, онлайн");
-      out.append(m);
-    }
-    return out;
-  }
-  function subLine(e) {
-    if (e.here && e.place) return "Вы остановились здесь · " + clock(e.place[0]) + " из " + clock(e.place[1]);
-    if (e.place) return "остановились на " + clock(e.place[0]) + (e.place[1] ? " из " + clock(e.place[1]) : "");
-    if (e.done) return "досмотрена" + (e.seen ? " " + e.seen : "");
-    if (!e.disk.length && e.site.length) {
-      if (e.new) return "вышла на " + siteName();
-      return "нет в папке — смотреть с сайта, без скачивания";
-    }
-    if (!e.disk.length && !e.site.length) return "нет в папке — включите «Смотреть онлайн»";
-    return [e.note, e.length ? clock(e.length) : ""].filter(Boolean).join(" · ");
-  }
-  function voiceWords(e) {
-    const v = e.chosen || {};
-    if (!v.name) return { name: "—", where: "" };
-    return { name: v.name, where: v.where === "site" ? "онлайн" : v.kind === "track" ? "в файле" : "в папке" };
+  function legend() {                    // what the tiles say: in the folder, only on the site, watched, new
+    const c = M.counts || {};
+    const ul = el("ul", "sv-legend");
+    const item = (kind, text) => {
+      const li = el("li");
+      const swatch = el("span", "sv-sw " + kind, kind === "done" ? "✓" : "");
+      swatch.setAttribute("aria-hidden", "true");
+      li.append(swatch, text);
+      ul.append(li);
+    };
+    if (M.series) item("disk", "в папке — " + (c.disk || 0));
+    if (c.site) item("site", (M.series ? "только на сайте — " : "на сайте — ") + c.site);
+    item("done", "досмотрено — " + (c.done || 0));
+    if (c.new) item("new", (c.new === 1 ? "новая — " : "новые — ") + c.new);
+    return ul;
   }
 
   function list() {
     const holder = $("[data-sv-list]");
-    if (!holder || M.single) { if (holder) holder.hidden = true; return; }
-    holder.textContent = "";
-    const c = M.counts || {};
-    const head = el("div", "sv-list-head");
-    const h = el("h2", "", "Серии ");
-    h.append(el("span", "sv-count", String(c.total || 0)));
-    head.append(h);
-    const order = el("button", "sv-link sv-order", newestFirst ? "↓ сначала новые" : "↑ по порядку");
-    order.type = "button";
-    order.addEventListener("click", () => {
-      newestFirst = !newestFirst;
-      try { localStorage.setItem("lb-sv-order", newestFirst ? "new" : "old"); } catch (_) { /* this page */ }
-      list();
-    });
-    head.append(order);
-    const legend = el(phone ? "p" : "ul", "sv-legend");
-    const items = [];
-    if (M.series) items.push("в папке — " + (c.disk || 0));
-    if (c.site) items.push("только на сайте — " + c.site);
-    items.push("досмотрено — " + (c.done || 0));
-    if (c.new) items.push("новая — " + c.new);
-    if (phone) legend.textContent = items.join(" · ");
-    else items.forEach((t) => legend.append(el("li", "", t)));
-    head.append(legend);
-    holder.append(head);
-    const rows = el("ol", "sv-rows");
+    if (!holder) return;
+    if (M.single) { holder.hidden = true; return; }
+    holder.hidden = false;
+    let eps = holder.querySelector("[data-sv-eps]");
+    if (!eps) {
+      eps = el("div", "sv-eps");
+      eps.dataset.svEps = "";
+      holder.prepend(eps);
+    }
+    let said = holder.querySelector("[data-sv-said]");
+    if (!said) {                         // the card's own word (a download begun, stopped, not begun)
+      said = el("p", "sv-said");
+      said.dataset.svSaid = "";
+      said.setAttribute("role", "status");
+      said.hidden = true;
+      eps.after(said);
+    }
+    const src = eps.querySelector("[data-sv-src]") || el("section", "sv-src");
+    src.dataset.svSrc = "";
+    src.setAttribute("aria-label", "Откуда серии");
+    eps.textContent = "";
+    eps.hidden = !!(picker && !phone);
+    eps.append(listHead());
+    const box = el("div", "sv-going");
+    box.dataset.svGoing = "";
+    box.setAttribute("role", "status");
+    box.hidden = true;
+    eps.append(box);
     const all = newestFirst ? episodes().slice().reverse() : episodes();
-    all.forEach((e) => {
-      rows.append(row(e));
-      if (!phone && opened === e.key) rows.append(variantsRow(e));
+    const cut = parts(all.length);
+    if (hundred < 0 || hundred >= cut.length) {   // the hundred of the episode in the player (or «Продолжить»)
+      const key = current || (M.resume || {}).key || "";
+      const at = Math.max(0, all.findIndex((e) => e.key === key));
+      hundred = Math.max(0, cut.findIndex(([a, b]) => at >= a && at <= b));
+    }
+    if (cut.length > 1) {
+      eps.append(hundreds(all.map((e) => e.label), hundred, (n) => { hundred = n; list(); }));
+    }
+    const grid = el("div", "sv-tiles vepisodes");
+    // (v5.44.158) the tiles come one after another (booru.css) when they are new to the reader: the page opened, the
+    // other hundred or order chosen, the site's episodes read.  Drawn again with the same tiles (a download's news,
+    // an episode watched) the list stands — or goes on coming from where it was, if it has not finished
+    const showing = [hundred, newestFirst ? "new" : "old", all.length ? "some" : "none"].join("|");
+    if (showing !== tilesShown) {
+      const first = tilesShown === null;
+      tilesShown = showing;
+      tilesAt = performance.now();
+      if (first) {                           // the server's tiles began to come when the page was first drawn
+        try {
+          const painted = performance.getEntriesByType("paint")[0];
+          if (painted) tilesAt = painted.startTime;
+        } catch (_) { /* no such news in this browser: from now */ }
+      }
+    }
+    const since = Math.round(performance.now() - tilesAt);
+    if (since > 1500) grid.dataset.still = "";
+    else if (since > 0) grid.style.setProperty("--m-since", since + "ms");
+    let group = null;
+    const [from, to] = cut[hundred];
+    all.slice(from, to + 1).forEach((e) => {
+      if (e.group !== group && (group !== null || e.group)) {    // a season's sub-folder: its name over its tiles
+        grid.append(el("p", "sv-tiles-group", e.group || "Серии"));
+      }
+      group = e.group;
+      grid.append(tile(e));
     });
-    holder.append(rows);
+    eps.append(grid);
+    if (!all.length) {
+      eps.append(el("p", "sv-hint", M.site && M.site.pending ? "Читаю серии с " + siteName() + "…"
+        : "Серий пока нет" + (M.site && M.site.can && !M.site.online ? " — включите «Смотреть онлайн» ниже" : "")));
+    } else if (phone) {
+      eps.append(legend());
+    } else {
+      eps.append(el("p", "sv-hint", "Нажмите серию — она откроется в плеере ниже. Озвучка выбрана для всего сериала; " +
+        "у одной серии другую можно выбрать в плеере."));
+    }
+    eps.append(src);
+    paintGoing();
   }
 
-  function row(e) {
-    const cls = ["sv-row"];
-    if (e.done) cls.push("read");
-    if (e.here) cls.push("here");
-    if (!e.disk.length) cls.push("site");
-    if (current && e.key === current) cls.push("now");
-    const li = el("li", cls.join(" "));
-    li.dataset.ep = e.key;
-    const n = el("span", "sv-n", e.label);
-    const name = el("div", "sv-row-name");
-    name.append(el("span", "sv-row-title", phone ? (e.title || e.name) : nameOf(e)));
-    const sub = subLine(e);
-    if (sub) name.append(el("span", "sv-row-sub" + (e.here ? " here" : ""), sub));
-    if (e.place && e.place[1]) {
-      const bar = el("span", "sv-part");
-      const fill = el("i");
-      fill.style.width = Math.min(100, Math.round(100 * e.place[0] / e.place[1])) + "%";
-      bar.append(fill);
-      name.append(bar);
+  // what downloads for the series: the line over the tiles («Скачивается в папку: серия 9 · AniLibria — 62%», «Пауза»,
+  // «Остановить», «Загрузки»), or its place in the queue
+  function minutesWords(seconds) {
+    const m = Math.max(1, Math.round(Number(seconds) / 60));
+    return m >= 60 ? Math.floor(m / 60) + " ч" + (m % 60 ? " " + (m % 60) + " мин" : "") : m + " мин";
+  }
+  function releasesWords(groups) {       // «AniLibria, Dream Cast, субтитры Crunchyroll»
+    return (groups || []).filter(Boolean).map((g) => (kindOf(g) === "subs" ? "субтитры " : kindOf(g) === "dub" ? "дубляж " : "")
+      + shortName(g)).join(", ");
+  }
+  function qualityWords(q) {
+    return !q ? "" : q === "best" ? "лучшее качество" : "не выше " + q + "p";
+  }
+  function paintGoing() {
+    const box = $("[data-sv-going]");
+    if (!box) return;
+    const g = going && going.going;
+    const q = going && going.queued;
+    box.textContent = "";
+    box.hidden = !g && !q;
+    box.classList.toggle("queued", !g && !!q);
+    if (!g && !q) return;
+    box.append(icon("down", 18));
+    const text = el("span", "sv-going-text");
+    const head = el("b");
+    const more = el("small");
+    if (g) {
+      const now = g.now;
+      const pct = now ? Math.round(100 * (Number(now.part) || 0)) : 0;
+      head.textContent = g.merging ? "Собираю озвучки серии в один файл…"
+        : (g.paused ? "Пауза: " : "Скачивается в папку: ") + (now ? "серия " + now.label + (now.group ? " · " + shortName(now.group) : "")
+          + " — " + pct + "%" : "готовлю файлы…");
+      more.textContent = ["готово " + (g.ended || 0) + " из " + plural(g.count || 0, FILES),
+        g.eta >= 60 ? "ещё около " + minutesWords(g.eta) : "", releasesWords(g.groups), qualityWords(g.quality),
+        g.merge ? "в один файл" : ""].filter(Boolean).join(" · ");
+    } else {
+      head.textContent = "В очереди скачивания — " + (q.place > 1 ? q.place + "-м" : "следующим");
+      more.textContent = [q.before ? "начнётся после «" + q.before + "»" : "начнётся само",
+        q.files ? plural(q.files, FILES) : ""].filter(Boolean).join(" · ");
     }
-    if (phone) name.append(marks(e));
-    li.append(n, name);
-    if (!phone) li.append(marks(e));
-    const variants = e.disk.length + e.site.length;
-    if (!phone) {
-      const words = voiceWords(e);
-      const dub = el("button", "sv-dub");
-      dub.type = "button";
-      dub.dataset.svDub = e.key;
-      dub.setAttribute("aria-expanded", opened === e.key ? "true" : "false");
-      const inside = el("span");
-      inside.append(words.name + " ", el("small", "", words.where ? "· " + words.where : ""));
-      dub.append(inside, icon("chev", 13));
-      dub.disabled = variants < 2;
-      dub.title = variants < 2 ? "У этой серии один вариант" : "В какой озвучке смотреть";
-      dub.addEventListener("click", () => {
-        opened = opened === e.key ? "" : e.key;
-        list();
-      });
-      li.append(dub);
+    text.append(head, more);
+    box.append(text);
+    const buttons = el("span", "sv-going-buttons");
+    const button = (words, data, fn, tip) => {
+      const b = el("button", phone ? "m-button m-quiet" : "sv-btn small quiet", words);
+      b.type = "button";
+      b.dataset[data] = "";
+      if (tip) b.title = tip;
+      b.addEventListener("click", fn);
+      buttons.append(b);
+    };
+    if (g) {
+      button(g.paused ? "Продолжить" : "Пауза", "svPause", () => goingAct("/api/videos/download/pause", { pause: !g.paused }));
+      button("Остановить", "svStop", () => goingAct("/api/videos/download/stop", {}, "Скачивание остановлено"),
+             "Остановить скачивание (и очередь после него)");
+    } else {
+      button("Убрать из очереди", "svUnqueue", () => goingAct("/api/videos/download/unqueue", { id: q.id }, "Убрано из очереди"));
     }
-    const go = el("a", phone ? "sv-read" : "sv-btn small " + (e.here ? "primary" : "quiet") + " sv-read");
-    go.href = address(e.key, true);
-    go.dataset.svWatch = e.key;                      // (not data-sv-play: that is the player's own box)
-    go.setAttribute("aria-label", (e.here ? "Продолжить: " : "Смотреть: ") + e.name);
-    go.append(icon("play", phone ? 20 : 14));
-    if (!phone) go.append(el("span", "", e.here ? "Продолжить" : "Смотреть"));
-    if (!playable(e)) {
-      go.removeAttribute("href");
-      go.setAttribute("aria-disabled", "true");
-      go.classList.add("off");
+    const link = el("a", "sv-link", "«Загрузки»");
+    link.href = phone ? "/m/get/downloads" : "/get/downloads";
+    link.title = "Все скачивания программы и их журнал";
+    buttons.append(link);
+    box.append(buttons);
+  }
+  async function goingAct(path, body, words) {
+    try {
+      await post(path, body);
+      if (words) tell(words);
+    } catch (err) {
+      tell(err.message, true);
     }
-    go.addEventListener("click", (event) => {
-      if (!playable(e)) { event.preventDefault(); return; }
-      if (navigates()) return;
-      event.preventDefault();
-      choose(e.key, { autoplay: true });
-    });
-    li.append(go);
-    return li;
+    pollGoing();
+  }
+  let goingTimer = 0, goingOn = false, goingAsked = 0;
+  async function pollGoing() {
+    clearTimeout(goingTimer);
+    if (!M.get || !M.get.url || M.single) { going = null; return; }
+    const mine = ++goingAsked;
+    let reply = null;
+    try { reply = await getJson("/api/series/getting?" + query()); } catch (_) { reply = null; }
+    if (mine !== goingAsked) return;
+    const on = !!(reply && (reply.going || reply.queued));
+    const was = goingOn;
+    going = reply;
+    goingOn = on;
+    paintTiles();
+    if (picker && picker.phase === "ready") paintGet();
+    if (was && !on) gone(reply && reply.ended);
+    goingTimer = setTimeout(pollGoing, on ? 1500 : document.hidden ? 30000 : 10000);
+  }
+  function gone(how) {                   // the download of the series ended: the tiles say what is in the folder now
+    reload();
+    if (!how) return;
+    if (how.error) { tell(how.error, true); return; }
+    const words = ["скачано " + plural(how.done || 0, FILES)];
+    if (how.merged) words.push("собрано в один файл: " + plural(how.merged, EPISODES));
+    if (how.failed) words.push("не скачались " + how.failed + " — почему, в «Загрузках»");
+    tell((how.stopped ? "Скачивание остановлено: " : "Скачивание закончилось: ") + words.join(", "), !!how.failed);
   }
 
-  // the variants of an episode: the computer — a line under its row; the phone — a sheet at the bottom of the screen
+  // the variants of an episode («Озвучка» of the player): the computer — a list by its button; the phone — a sheet
+  // at the bottom of the screen
   function variantItems(e) {
     const disk = e.disk.map((v) => Object.assign({}, v, { where: "disk" }));
     const site = e.site.map((n) => {
@@ -700,43 +971,6 @@
     b.addEventListener("click", () => pickVariant(e, v));
     return b;
   }
-  function variantsRow(e) {
-    const li = el("li", "sv-vars");
-    const headText = el("p", "sv-vars-head");
-    headText.append(el("b", "", e.name + " — в какой озвучке смотреть"), " · выбор помнится для сериала, следующие серии пойдут в нём же");
-    li.append(headText);
-    const { disk, site } = variantItems(e);
-    if (disk.length) {
-      const g = el("div", "sv-vars-group");
-      const label = el("span", "sv-vars-label");
-      label.append(icon("folder", 13), " В папке");
-      g.append(label);
-      disk.forEach((v) => g.append(variantButton(e, v)));
-      li.append(g);
-    }
-    if (site.length) {
-      const g = el("div", "sv-vars-group");
-      const label = el("span", "sv-vars-label");
-      label.append(icon("globe", 13), " С сайта, онлайн");
-      g.append(label);
-      const first = site.slice(0, 6);
-      first.forEach((v) => g.append(variantButton(e, v)));
-      if (site.length > first.length) {
-        const more = el("button", "sv-link", "ещё " + (site.length - first.length));
-        more.type = "button";
-        more.addEventListener("click", () => {
-          more.remove();
-          site.slice(first.length).forEach((v) => g.append(variantButton(e, v)));
-        });
-        g.append(more);
-      }
-      li.append(g);
-    } else if (M.site && M.site.can && !M.site.online) {
-      li.append(el("p", "sv-vars-note", "Озвучки сайта — когда включено «Смотреть онлайн»"));
-    }
-    return li;
-  }
-
   // a sheet of choices at the bottom of the phone's screen (the voice-overs of an episode or of the series)
   function sheet(title, sub, groups) {
     const old = document.querySelector(".sv-sheet-wrap");
@@ -821,6 +1055,726 @@
     setTimeout(() => document.addEventListener("click", away, true), 0);
     document.addEventListener("keydown", escape, true);
     pop.addEventListener("click", (event) => { if (event.target.closest(".sv-var")) setTimeout(close, 50); });
+  }
+
+  // ── «Скачать серии…» (v5.44.142): the choice of «Скачать» of the page of before on the tiles themselves ─────────
+  // «Дубляж / Озвучка / Субтитры», several studios at once, «Качество», «Собрать озвучки серии в один файл», the weight;
+  // what is downloaded is each episode ticked of each studio ticked, not what is in the folder already (or downloads
+  // now).  The machinery of «Скачать с сайта»: /api/videos/find → find-state (one list at a time for the whole program),
+  // /api/videos/measure, /api/videos/download.  The computer — the card «Серии» turns into it; the phone — a sheet.
+  const KINDS = [["dub", "Дубляж"], ["voice", "Озвучка"], ["subs", "Субтитры"]];
+  const isSubs = (name) => /^субтитры/i.test(name || "");
+  const kindOf = (name) => (/^дубляж/i.test(name || "") ? "dub" : isSubs(name) ? "subs" : "voice");
+  const shortName = (name) => String(name || "").replace(/^(озвучка|озучка|дубляж|субтитры)\s+/i, "") || String(name || "");
+  // a voice-over named loosely (as the program's ``video_merge.dub_key``: «Озвучка X» — «X», no spaces nor signs)
+  const looseKey = (name) => String(name || "").toLowerCase().replace(/^(озвучка|озучка)\s+/, "").replace(/[^\p{L}\p{N}]+/gu, "");
+  const QUALITY = [["best", "лучшее, что есть"], ["1080", "не выше 1080p"], ["720", "не выше 720p"], ["480", "не выше 480p"],
+                   ["360", "не выше 360p"]];
+  const ENDED = ["done", "whole", "other", "failed", "dead"];
+  const natural = (a, b) => String(a).localeCompare(String(b), "ru", { numeric: true });
+  const stored = (key, fallback) => { try { return localStorage.getItem(key) || fallback; } catch (_) { return fallback; } };
+  const store = (key, value) => { try { localStorage.setItem(key, value); } catch (_) { /* this time only */ } };
+  let picker = null;                     // «Скачать серии…» open: {phase: finding | failed | ready, the list found, the choice}
+  let shift = false;                     // a tile clicked with Shift: every one from the one before it
+
+  function sameAddress(a, b) {           // one page of a site (no «www.», no «/» at the end — video_download._same_page)
+    const key = (x) => {
+      try {
+        const u = new URL(String(x || ""));
+        return u.hostname.replace(/^www\./, "") + u.pathname.replace(/\/+$/, "");
+      } catch (_) { return ""; }
+    };
+    return !!key(a) && key(a) === key(b);
+  }
+  function folderName(path) {
+    return String(path || "").split(/[\\/]+/).filter(Boolean).pop() || M.title || "";
+  }
+  function bytesWords(bytes) {
+    const gb = bytes / 1024 ** 3;
+    return gb >= 1 ? gb.toFixed(1).replace(".", ",") + " ГБ" : Math.max(1, Math.round(bytes / 1024 ** 2)) + " МБ";
+  }
+
+  function openGet() {
+    if (!M.get || !M.get.url) return;
+    if (picker) { focusGet(); return; }
+    let quality = stored("lb.get-quality", "best");
+    if (!QUALITY.some(([v]) => v === quality)) quality = "best";
+    picker = { phase: "finding", said: "", error: "", find: 0, found: null, files: [], groups: [], kinds: [], labels: [],
+               chosen: new Set(), episodes: new Set(), kind: "voice", quality, merge: M.get.merge !== false, dubs: false,
+               measured: null, hundred: 0, last: "", busy: false, sounds: 0,
+               // (v5.44.150) what the title's releases really give and which one the picture comes from
+               // (/api/videos/measure: releases, picture, lower); «Заменить картинку у серий в папке»
+               known: { releases: {}, picture: null, lower: { episodes: 0, height: 0 } }, again: false,
+               asking: 0, askTimer: 0 };
+    drawGet();
+    focusGet();
+    findGet(picker);
+  }
+  function closeGet() {
+    picker = null;
+    const wrap = document.querySelector(".sv-get-wrap");
+    if (wrap) wrap.remove();
+    const holder = $("[data-sv-list]");
+    if (holder) {
+      holder.classList.remove("getting");
+      const box = holder.querySelector("[data-sv-get]");
+      if (box) box.remove();
+      const eps = holder.querySelector("[data-sv-eps]");
+      if (eps) eps.hidden = false;
+    }
+    document.removeEventListener("keydown", getKeys, true);
+  }
+  function getKeys(event) {              // Escape closes it (not while a list of choices of the page is open)
+    if (event.key !== "Escape" || document.querySelector(".sv-pop")) return;
+    if (event.target && event.target.tagName === "SELECT") return;
+    closeGet();
+    const open = $("[data-sv-get-open]");
+    if (open) open.focus();
+  }
+  function focusGet() {
+    const box = getBox();
+    if (!phone) {
+      const holder = $("[data-sv-list]");
+      if (holder) holder.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    const head = box.querySelector("#sv-get-h");
+    if (head) head.focus({ preventScroll: true });
+  }
+  function getBox() {                    // where it is drawn: the card «Серии» (computer), a sheet (phone)
+    if (phone) {
+      let wrap = document.querySelector(".sv-get-wrap");
+      if (!wrap) {
+        wrap = el("div", "sv-sheet-wrap sv-get-wrap");
+        const dim = el("div", "sv-sheet-dim");
+        dim.addEventListener("click", closeGet);
+        const sheet = el("section", "sv-sheet sv-get-sheet");
+        sheet.setAttribute("role", "dialog");
+        sheet.setAttribute("aria-labelledby", "sv-get-h");
+        const handle = el("span", "sv-sheet-handle");
+        handle.setAttribute("aria-hidden", "true");
+        const box = el("div", "sv-get");
+        box.dataset.svGet = "";
+        sheet.append(handle, box);
+        wrap.append(dim, sheet);
+        document.body.append(wrap);
+        document.addEventListener("keydown", getKeys, true);
+      }
+      return wrap.querySelector("[data-sv-get]");
+    }
+    const holder = $("[data-sv-list]");
+    let box = holder.querySelector("[data-sv-get]");
+    if (!box) {
+      box = el("section", "sv-get");
+      box.dataset.svGet = "";
+      box.setAttribute("aria-labelledby", "sv-get-h");
+      holder.append(box);
+      document.addEventListener("keydown", getKeys, true);
+    }
+    holder.classList.add("getting");
+    const eps = holder.querySelector("[data-sv-eps]");
+    if (eps) eps.hidden = true;
+    return box;
+  }
+
+  async function findGet(mine) {
+    try {
+      let state = null;
+      try { state = await getJson("/api/videos/find-state"); } catch (_) { state = null; }
+      // the list of this page found a moment ago (here or on «По ссылке»): as it is — the server looks at the folder anew
+      const fresh = state && state.status === "done" && state.found && Number(state.age) < 600 &&
+        sameAddress(state.address || state.found.page_url, M.get.url);
+      if (!fresh) {
+        const started = await post("/api/videos/find", { url: M.get.url });
+        state = await waitFind(started.id, mine);
+      }
+      if (picker !== mine) return;
+      takeFound(mine, state);
+    } catch (err) {
+      if (picker !== mine) return;
+      mine.phase = "failed";
+      mine.error = err.message;
+      drawGet();
+    }
+  }
+  async function waitFind(id, mine) {
+    for (let after = 0; ;) {
+      const state = await getJson("/api/videos/find-state?after=" + after);
+      if (String(state.id) !== String(id)) {
+        throw new Error("Поиск серий начала заново другая страница программы — нажмите «Скачать серии…» ещё раз");
+      }
+      after = Number(state.last_seq) || after;
+      const lines = (state.log || []).map((x) => x.text).filter((t) => t && !/^(ГОТОВО|ОСТАНОВЛЕНО|СТОП)/.test(t));
+      if (lines.length && mine && picker === mine) {
+        mine.said = lines[lines.length - 1];
+        const line = getBox().querySelector("[data-sv-get-said]");
+        if (line) line.textContent = mine.said;
+      }
+      if (state.status === "done" && state.found) return state;
+      if (state.status === "failed" || state.status === "stopped" || state.status === "done") {
+        throw new Error(state.error || (state.status === "stopped" ? "Поиск серий остановлен" : "Серии для скачивания не нашлись"));
+      }
+      await sleep(600);
+    }
+  }
+  function takeFound(p, state) {
+    const f = state.found;
+    p.phase = "ready";
+    p.find = state.id;
+    p.found = f;
+    p.files = (f.files || []).filter((x) => x.kind !== "audio");
+    p.sounds = (f.files || []).length - p.files.length;
+    p.dubs = f.choose === "dubs";
+    p.groups = [];
+    p.files.forEach((x) => { if (!p.groups.includes(x.group || "")) p.groups.push(x.group || ""); });
+    // chosen at first: the releases begun in the folder (as «По ссылке»), else the voice-over the series plays; the
+    // files of a page — all its releases
+    const begun = (g) => p.files.some((x) => (x.group || "") === g && (x.have === "whole" || x.have === "part" || x.have === "other"));
+    let chosen = p.groups.filter(begun);
+    if (!p.dubs) {
+      chosen = p.groups.slice();
+    } else if (!chosen.length) {
+      const now = currentVoice();
+      const want = [M.dub, now ? now.voice || now.name : ""].map(looseKey).filter(Boolean);
+      chosen = p.groups.filter((g) => want.includes(looseKey(g))).slice(0, 1);
+    }
+    p.chosen = new Set(chosen);
+    p.kinds = p.dubs ? KINDS.map(([k]) => k).filter((k) => p.groups.some((g) => kindOf(g) === k)) : [];
+    p.kind = chosen.length && p.dubs ? kindOf(chosen[0]) : p.kinds.includes("voice") ? "voice" : p.kinds[0] || "voice";
+    p.labels = [...new Set(p.files.map((x) => x.label || ""))].sort(natural);
+    // ticked at first: the episodes the folder has not («которых нет в папке»)
+    p.episodes = new Set(p.labels.filter(missingHere));
+    p.measured = p.dubs ? null : {};
+    drawGet();
+    if (p.dubs) askPicture(p);
+  }
+  // (v5.44.150; the owner: «удалило весь видеоряд а оставило jam где всего 720p») the weight of an episode, and
+  // what its picture will be: each release's real quality and cut, the release the picture comes from for the
+  // voice-overs ticked (one not ticked lends its picture alone), the episodes of the folder with a lower one — asked
+  // again when the ticks that decide it change (the releases are looked at once: quick after that)
+  const voicesOf = (p) => [...p.chosen].filter((g) => !isSubs(g));
+  function askPicture(p) {
+    clearTimeout(p.askTimer);
+    p.askTimer = setTimeout(() => {
+      const mine = ++p.asking;
+      const query = ["find=" + encodeURIComponent(p.find), "quality=" + encodeURIComponent(p.quality)]
+        .concat(p.merge ? voicesOf(p).map((g) => "g=" + encodeURIComponent(g)) : []);
+      getJson("/api/videos/measure?" + query.join("&")).then((reply) => {
+        if (picker !== p || mine !== p.asking) return;
+        p.measured = reply.measured || {};
+        p.known = { releases: reply.releases || {}, picture: reply.picture || null,
+                    lower: reply.lower || { episodes: 0, height: 0 } };
+        paintGet();
+      }).catch(() => { if (picker === p && mine === p.asking) { p.measured = p.measured || {}; paintGet(); } });
+    }, p.measured === null ? 0 : 250);
+  }
+  // «Заменить картинку у N серий в папке»: how many (0 — not ticked, or there is none to replace)
+  function againCount(p) {
+    const lower = p.known.lower || {};
+    const pic = p.known.picture;
+    return p.dubs && p.merge && p.again && pic && pic.group && voicesOf(p).length ? Number(lower.episodes) || 0 : 0;
+  }
+  function missingHere(label) {
+    const e = entryOf(label);
+    return !e || !e.disk.length;
+  }
+
+  function drawGet() {
+    const p = picker;
+    if (!p) return;
+    const box = getBox();
+    box.textContent = "";
+    const head = el("div", "sv-get-head");
+    const folder = p.found ? folderName(p.found.folder) : (M.folder && M.folder.name) || M.title;
+    const h = el("h2", "", phone ? "Скачать в папку" : "Скачать в папку «" + folder + "»");
+    h.id = "sv-get-h";
+    h.tabIndex = -1;
+    head.append(h);
+    if (!phone && p.phase === "ready" && p.dubs) {
+      head.append(el("span", "sv-get-note", "скачается каждая отмеченная серия в каждой отмеченной озвучке"));
+    }
+    const close = el("button", "sv-get-close", phone ? "✕" : "Закрыть ✕");
+    close.type = "button";
+    close.dataset.svGetClose = "";
+    close.setAttribute("aria-label", "Закрыть «Скачать серии»");
+    close.addEventListener("click", closeGet);
+    head.append(close);
+    box.append(head);
+    if (p.phase !== "ready") {
+      const line = el("p", "sv-get-wait" + (p.phase === "failed" ? " bad" : ""));
+      line.setAttribute("role", p.phase === "failed" ? "alert" : "status");
+      if (p.phase === "failed") {
+        line.append(el("span", "", p.error + " "));
+        const again = el("button", "sv-link", "Спросить ещё раз");
+        again.type = "button";
+        again.addEventListener("click", () => {
+          p.phase = "finding";
+          p.error = "";
+          drawGet();
+          findGet(p);
+        });
+        line.append(again);
+      } else {
+        const spin = el("span", "sv-spin");
+        spin.setAttribute("aria-hidden", "true");
+        const words = el("span", "", p.said || "Ищу серии на " + (M.get.site || "сайте") + "…");
+        words.dataset.svGetSaid = "";
+        line.append(spin, words);
+      }
+      box.append(line);
+      return;
+    }
+    // the releases: the kind, its studios, «Качество», «в один файл»
+    const top = el("div", "sv-get-top");
+    const main = el("div", "sv-get-main");
+    if (p.kinds.length > 1) {
+      const tabs = el("div", "sv-kinds");
+      tabs.setAttribute("role", "tablist");
+      tabs.setAttribute("aria-label", "Вид");
+      p.kinds.forEach((k) => {
+        const tab = el("button", "sv-kind");
+        tab.type = "button";
+        tab.setAttribute("role", "tab");
+        tab.dataset.kind = k;
+        tab.append(el("span", "", KINDS.find(([x]) => x === k)[1]), el("span", "sv-kind-n"));
+        tab.addEventListener("click", () => { p.kind = k; drawGet(); const t = getBox().querySelector(`.sv-kind[data-kind="${k}"]`); if (t) t.focus(); });
+        tabs.append(tab);
+      });
+      main.append(tabs);
+    }
+    const mine = p.groups.filter((g) => !p.dubs || kindOf(g) === p.kind);
+    if (p.dubs || p.groups.length > 1) {
+      const studios = el("ul", "sv-studios");
+      studios.setAttribute("aria-label", p.dubs ? KINDS.find(([x]) => x === p.kind)[1] : "Релизы");
+      mine.forEach((g) => studios.append(studioRow(p, g)));
+      main.append(studios);
+      if (mine.length > 1) {
+        const tools = el("p", "sv-studio-tools");
+        const all = el("button", "sv-link", p.dubs ? "отметить все этого вида" : "отметить все");
+        all.type = "button";
+        all.addEventListener("click", () => { mine.forEach((g) => p.chosen.add(g)); paintGet(); });
+        const none = el("button", "sv-link", "снять все");
+        none.type = "button";
+        none.addEventListener("click", () => { mine.forEach((g) => p.chosen.delete(g)); paintGet(); });
+        tools.append(all, none);
+        main.append(tools);
+      }
+    }
+    if (p.dubs && p.kind === "subs") {
+      main.append(el("p", "sv-get-note", "Слова субтитров вшиты в картинку: каждый релиз — отдельное видео, весит как серия " +
+        "и в общий файл не собирается."));
+    }
+    if (main.children.length) top.append(main);
+    if (p.dubs) {
+      const side = el("div", "sv-get-side");
+      const quality = el("label", "sv-get-quality");
+      const select = el("select");
+      select.dataset.svGetQuality = "";
+      QUALITY.forEach(([value, words]) => {
+        const option = el("option", "", words);
+        option.value = value;
+        option.selected = value === p.quality;
+        select.append(option);
+      });
+      select.addEventListener("change", () => {
+        p.quality = select.value;
+        store("lb.get-quality", select.value);
+        askPicture(p);
+        paintGet();
+      });
+      quality.append(el("span", "", "Качество"), select);
+      const merge = el("label", "sv-get-merge");
+      const tick = el("input");
+      tick.type = "checkbox";
+      tick.checked = p.merge;
+      tick.dataset.svGetMerge = "";
+      tick.addEventListener("change", () => { p.merge = tick.checked; askPicture(p); paintGet(); });
+      const words = el("span");
+      words.append(el("b", "", phone ? "Озвучки серии — в один файл" : "Собрать озвучки серии в один файл"));
+      if (!phone) {
+        words.append(el("small", "", "картинка серии — одна, лучшая у тайтла; остальные озвучки качаются только ради " +
+          "звука и ложатся дорожками в тот же файл"));
+      }
+      merge.append(tick, words);
+      // (v5.44.150) which release the picture comes from, and the episodes of the folder with a lower one
+      const pic = el("p", "sv-get-note sv-get-picture");
+      pic.dataset.svGetPicture = "";
+      pic.hidden = true;
+      const again = el("label", "sv-get-merge sv-get-again");
+      again.hidden = true;
+      const againTick = el("input");
+      againTick.type = "checkbox";
+      againTick.checked = p.again;
+      againTick.dataset.svGetAgain = "";
+      againTick.addEventListener("change", () => { p.again = againTick.checked; paintGet(); });
+      again.append(againTick, el("span", "", ""));
+      side.append(quality, merge, pic, again);
+      if (!phone) {
+        side.append(el("p", "sv-get-note", "Плееры: Kodik — до 720p, CVH — до 1080p, AniLiberty — до 1080p. Программа " +
+          "берёт лучший в пределах качества."));
+      }
+      top.append(side);
+    }
+    if (top.children.length) box.append(top);
+    // what the site says of its files
+    notes(p).forEach(([text, warn, go]) => {
+      const line = el("p", "sv-get-note" + (warn ? " warn" : ""), text);
+      if (go) {                          // (v5.44.152) «Смотреть на сайте»: the window opens it in the usual browser
+        const link = el("a", "sv-get-go", go.text);
+        link.href = go.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        line.append(" ", link);
+      }
+      box.append(line);
+    });
+    // the episodes
+    const eh = el("div", "sv-get-eps-head");
+    eh.append(el("h3", "", "Серии"));
+    const counted = el("span", "sv-get-counted");
+    counted.dataset.svGetCounted = "";
+    eh.append(counted);
+    const quick = el("span", "sv-get-quick");
+    quick.setAttribute("role", "group");
+    quick.setAttribute("aria-label", "Отметить серии");
+    if (!phone) quick.append(el("span", "sv-muted", "Отметить:"));
+    [["new", phone ? "нет в папке" : "которых нет в папке"], ["all", "все"], ["none", "ничего"]].forEach(([how, words]) => {
+      const b = el("button", "sv-link", words);
+      b.type = "button";
+      b.dataset.svPick = how;
+      b.addEventListener("click", () => pickEpisodes(how));
+      quick.append(b);
+    });
+    eh.append(quick);
+    if (!phone) eh.append(el("span", "sv-muted sv-get-shift", "Shift+щелчок — подряд"));
+    box.append(eh);
+    const cut = parts(p.labels.length);
+    p.hundred = Math.min(p.hundred, cut.length - 1);
+    if (cut.length > 1) box.append(hundreds(p.labels, p.hundred, (n) => { p.hundred = n; drawGet(); }));
+    const grid = el("div", "sv-pick-grid");
+    grid.dataset.svGetGrid = "";
+    const [from, to] = cut[p.hundred];
+    p.labels.slice(from, to + 1).forEach((label) => grid.append(pickTile(p, label)));
+    box.append(grid);
+    if (!phone && p.dubs) {
+      const legendList = el("ul", "sv-get-legend");
+      [["on", "отмечена"], ["", "«есть» — у выбранных озвучек уже в папке"], ["", "«1/3» — из трёх выбранных одна уже есть"],
+        ["", "«нет» — у выбранных этой серии нет"]].forEach(([cls, words]) => {
+        const li = el("li");
+        if (cls) { const sw = el("span", "sv-sw pick"); sw.setAttribute("aria-hidden", "true"); li.append(sw); }
+        li.append(words);
+        legendList.append(li);
+      });
+      box.append(legendList);
+    }
+    // «Скачать N файлов», what it takes on the disk, where it goes
+    const foot = el("div", "sv-get-foot");
+    const go = el("button", phone ? "m-button sv-get-go" : "sv-btn primary sv-get-go");
+    go.type = "button";
+    go.dataset.svGetGo = "";
+    go.append(icon("down", 16), el("span", "", ""));
+    go.addEventListener("click", getGo);
+    const sum = el("span", "sv-get-sum");
+    sum.dataset.svGetSum = "";
+    foot.append(go, sum);
+    box.append(foot);
+    paintGet();
+  }
+  function notes(p) {                    // [words, a warning, a link after them] of what the find said of the files
+    const out = [];
+    const f = p.found || {};
+    (f.sources || []).forEach((x) => {
+      if (!x.exact) out.push([(x.dub || "Серии — с " + x.site) + ": " + x.what + " — " + x.how + ".", true]);
+      (x.borrowed || []).forEach((other) => out.push(["Не этого тайтла: " + x.site + " приложил к странице видео тайтла «" +
+        other.title + "» — их здесь нет, чтобы под этим именем не скачались чужие серии.", true]));
+    });
+    // (v5.44.152) the voice-overs only in players the program takes nothing from: by player — why, where to watch
+    const page = /^https?:\/\//.test(f.page_url || "") ? { href: f.page_url, text: "Смотреть на сайте" } : null;
+    if (p.dubs) (f.closed || []).forEach((c) => out.push(["Только в плеере " + c.player + ": " + c.names.join(", ") +
+      ". " + c.why + ".", false, page]));
+    const blocked = p.files.find((x) => x.blocked);
+    if (blocked) out.push(["Часть файлов программа не скачивает: " + blocked.blocked + ".", false]);
+    if (p.sounds) out.push(["На странице есть и файлы звука (" + p.sounds + ") — их можно скачать в «Скачать → По ссылке».", false]);
+    return out;
+  }
+  function studioRow(p, g) {
+    const files = p.files.filter((x) => (x.group || "") === g);
+    const li = el("li");
+    const label = el("label", "sv-studio");
+    const tick = el("input");
+    tick.type = "checkbox";
+    tick.value = g;
+    tick.addEventListener("change", () => {
+      if (tick.checked) p.chosen.add(g); else p.chosen.delete(g);
+      if (p.dubs) askPicture(p);         // (v5.44.150) another release ticked: the picture may be another's
+      paintGet();
+    });
+    const text = el("span", "sv-studio-text");
+    text.append(el("b", "", g ? shortName(g) : M.get.site || "Серии сайта"));
+    const facts = el("small", "", studioFacts(p, g));
+    facts.dataset.svStudioFacts = g;
+    text.append(facts);
+    const had = files.filter((x) => x.have === "whole" || x.have === "other").map((x) => x.label || "");
+    if (had.length) text.append(el("small", "sv-studio-have", "в папке: " + (had.length === 1 ? "серия " : "серии ") + ranges(had)));
+    label.append(tick, text);
+    if (g) label.title = g;
+    li.append(label);
+    return li;
+  }
+  // a release in words: its quality (v5.44.150: the real one once its files were looked at — CVH's «до 1080p» was the
+  // player's best, AniLibria's files there end at 720p — and whether its cut is the original's), its players, its
+  // episodes
+  function studioFacts(p, g) {
+    const files = p.files.filter((x) => (x.group || "") === g);
+    let best = 0;
+    const players = [];
+    files.forEach((x) => {
+      best = Math.max(best, parseInt(String(x.quality || "").replace(/\D+/g, ""), 10) || 0);
+      if (p.dubs) {
+        String(x.note || "").replace(/^Плеер:\s*/, "").split(", ").forEach((n) => { if (n && !players.includes(n)) players.push(n); });
+      }
+    });
+    const labels = files.map((x) => x.label || "");
+    const count = labels.length === p.labels.length ? plural(labels.length, EPISODES)
+      : (labels.length === 1 ? "серия " : "серии ") + ranges(labels);
+    const real = p.known.releases[g];
+    const size = real && real.known ? real.height + "p" : best ? "до " + best + "p" : "";
+    const cut = !real || real.clean === null || real.clean === undefined ? ""
+      : real.clean ? "без перемонтажа" : "перемонтаж студии";
+    return [size, cut, players.join(", "), count].filter(Boolean).join(" · ");
+  }
+  function pickTile(p, label) {
+    const cell = el("label", "sv-pt");
+    cell.dataset.label = label;
+    const tick = el("input", "sv-vh");
+    tick.type = "checkbox";
+    tick.value = label;
+    const top = el("span", "sv-pt-top");
+    const mark = el("span", "sv-pt-tick");
+    mark.setAttribute("aria-hidden", "true");
+    top.append(el("span", "sv-pt-n", label), mark);
+    cell.append(tick, top, el("span", "sv-pt-sub"));
+    cell.addEventListener("click", (event) => { if (event.target !== tick) shift = event.shiftKey; });
+    tick.addEventListener("click", (event) => { if (event.shiftKey) shift = true; });
+    tick.addEventListener("change", () => {
+      const on = tick.checked;
+      if (shift && p.last && p.last !== label && p.labels.includes(p.last)) {
+        const a = p.labels.indexOf(p.last), b = p.labels.indexOf(label);
+        p.labels.slice(Math.min(a, b), Math.max(a, b) + 1).forEach((x) => { if (on) p.episodes.add(x); else p.episodes.delete(x); });
+      } else if (on) {
+        p.episodes.add(label);
+      } else {
+        p.episodes.delete(label);
+      }
+      p.last = label;
+      shift = false;
+      paintGet();
+    });
+    return cell;
+  }
+  function pickEpisodes(how) {
+    const p = picker;
+    if (!p) return;
+    p.episodes = new Set(how === "all" ? p.labels : how === "none" ? [] : p.labels.filter(missingHere));
+    paintGet();
+  }
+  // the files of the series downloading now (or waiting in the queue): not asked again
+  function goingNow() {
+    const g = going && going.going;
+    return new Set(((g && g.pairs) || []).filter((x) => !ENDED.includes(x.state)).map((x) => x.label + "\u0000" + x.group));
+  }
+  function episodeOf(p, label, busy) {   // the files of an episode in the studios chosen: had, downloading, the rest
+    const files = p.files.filter((x) => (x.label || "") === label && p.chosen.has(x.group || ""));
+    const had = files.filter((x) => x.have === "whole" || x.have === "other").length;
+    const now = files.filter((x) => x.have !== "whole" && x.have !== "other" && busy.has(label + "\u0000" + (x.group || ""))).length;
+    const shut = files.filter((x) => x.blocked && x.have !== "whole" && x.have !== "other" &&
+      !busy.has(label + "\u0000" + (x.group || ""))).length;
+    return { files: files.length, had, now, shut, left: files.length - had - now - shut };
+  }
+  function picked() {
+    const p = picker;
+    if (!p) return [];
+    const busy = goingNow();
+    return p.files.filter((x) => p.episodes.has(x.label || "") && p.chosen.has(x.group || "") && x.have !== "whole" &&
+      x.have !== "other" && !x.blocked && !busy.has((x.label || "") + "\u0000" + (x.group || ""))).map((x) => x.i);
+  }
+  // what the chosen ones take on the disk: one episode measured in each quality (/api/videos/measure) — as «По ссылке»
+  // counts it (get-link.js weight); the files of a page — the sizes the site said
+  function weight(files) {
+    const p = picker;
+    let approx = false;
+    if (!p.dubs) {
+      let total = 0;
+      files.forEach((i) => { const x = p.found.files[i]; total += Number(x.size) || 0; approx = approx || !!x.stream; });
+      return [total, approx];
+    }
+    const m = p.measured;
+    const again = againCount(p);
+    if (!m || !m.sizes || !m.seconds || (!files.length && !again)) return [0, true];
+    const heights = Object.keys(m.sizes).map(Number).sort((a, b) => b - a);
+    const cap = p.quality === "best" ? 1e9 : Number(p.quality) || 1e9;
+    const sizeAt = (limit) => {
+      const h = heights.find((x) => x <= Math.min(cap, limit)) || heights[heights.length - 1];
+      return m.sizes[String(h)] || 0;
+    };
+    const limitOf = (x) => {
+      const real = p.known.releases[x.group || ""];
+      return real && real.known ? real.height : /CVH/.test(x.note || "") ? 1e9 : /AniLiberty/.test(x.note || "") ? 1080 : 720;
+    };
+    const sound = 14000 * m.seconds;
+    const lent = p.merge && p.known.picture && p.known.picture.lent ? p.known.picture : null;
+    let total = again * sizeAt(p.known.picture ? p.known.picture.height : 1e9);
+    const byEpisode = new Map();
+    files.forEach((i) => {
+      const x = p.found.files[i];
+      if (!byEpisode.has(x.label)) byEpisode.set(x.label, []);
+      byEpisode.get(x.label).push(x);
+    });
+    byEpisode.forEach((mine, label) => {
+      const voices = mine.filter((x) => !isSubs(x.group));
+      total += mine.filter((x) => isSubs(x.group)).reduce((s, x) => s + sizeAt(limitOf(x)), 0);
+      if (!voices.length) return;
+      if (!p.merge) { total += voices.reduce((s, x) => s + sizeAt(limitOf(x)), 0); return; }
+      const had = p.files.some((x) => x.label === label && !isSubs(x.group) && x.have === "whole");
+      // a picture lent by a release not ticked: its picture and every ticked one's sound
+      if (lent && !had) { total += sizeAt(lent.height) + voices.length * sound; return; }
+      total += (had ? 0 : sizeAt(Math.max(...voices.map(limitOf)))) + (voices.length - (had ? 0 : 1)) * sound;
+    });
+    return [total, true];
+  }
+  function paintGet() {
+    const p = picker;
+    if (!p || p.phase !== "ready") return;
+    const box = getBox();
+    box.querySelectorAll(".sv-kind").forEach((tab) => {
+      const mine = p.groups.filter((g) => kindOf(g) === tab.dataset.kind);
+      const on = mine.filter((g) => p.chosen.has(g)).length;
+      tab.setAttribute("aria-selected", tab.dataset.kind === p.kind ? "true" : "false");
+      tab.querySelector(".sv-kind-n").textContent = on ? on + "/" + mine.length : String(mine.length);
+    });
+    box.querySelectorAll(".sv-studio").forEach((label) => {
+      const tick = label.querySelector("input");
+      tick.checked = p.chosen.has(tick.value);
+      label.classList.toggle("on", tick.checked);
+      const facts = label.querySelector("[data-sv-studio-facts]");
+      if (facts) facts.textContent = studioFacts(p, tick.value);
+    });
+    // (v5.44.150) the picture of the episodes: whose, how large, of which cut; the folder's lower ones
+    const picNote = box.querySelector("[data-sv-get-picture]");
+    const againTick = box.querySelector("[data-sv-get-again]");
+    if (picNote && againTick) {
+      const pic = p.known.picture;
+      const on = !!(p.merge && pic && pic.group && voicesOf(p).length);
+      picNote.hidden = !on;
+      if (on) {
+        const cut = pic.clean === true ? ", без перемонтажа" : pic.clean === false ? ", перемонтаж студии" : "";
+        picNote.textContent = "Картинка серий — от «" + pic.title + "»: " + pic.height + "p" + cut
+          + (pic.lent ? ". Её озвучка не отмечена — скачается только ради картинки, её звук в файл серии не пойдёт." : ".");
+      }
+      const lower = p.known.lower || {};
+      const can = on && lower.episodes > 0;
+      againTick.closest("label").hidden = !can;
+      if (!can) { p.again = false; againTick.checked = false; }
+      else {
+        againTick.closest("label").querySelector("span").textContent = "Заменить картинку у "
+          + plural(lower.episodes, ["серии", "серий", "серий"]) + " в папке: сейчас до " + lower.height + "p, станет "
+          + pic.height + "p";
+      }
+    }
+    const busy = goingNow();
+    const some = p.chosen.size > 0;
+    let ticked = 0;
+    p.labels.forEach((label) => {
+      const s = episodeOf(p, label, busy);
+      if (s.left > 0 && p.episodes.has(label)) ticked += 1;
+    });
+    box.querySelectorAll(".sv-pt").forEach((cell) => {
+      const label = cell.dataset.label;
+      const s = episodeOf(p, label, busy);
+      const tick = cell.querySelector("input");
+      tick.disabled = s.left <= 0;
+      tick.checked = !tick.disabled && p.episodes.has(label);
+      cell.classList.toggle("on", tick.checked);
+      cell.classList.toggle("off", tick.disabled);
+      cell.querySelector(".sv-pt-tick").textContent = tick.checked ? "✓" : "";
+      const sub = !some ? "" : !s.files ? "нет" : s.left > 0 ? (s.had ? s.had + "/" + s.files : "")
+        : s.now ? "качается" : s.had ? "есть" : "нельзя";
+      cell.querySelector(".sv-pt-sub").textContent = sub;
+      const said = { "нет": "у выбранных её нет", "есть": "уже в папке", "качается": "скачивается сейчас",
+                     "нельзя": "её файлы не скачать" }[sub] || (sub ? "в папке " + s.had + " из " + s.files : "");
+      tick.setAttribute("aria-label", "Серия " + label + (said ? ", " + said : ""));
+      cell.title = "Серия " + label + (said ? " — " + said : "");
+    });
+    const counted = box.querySelector("[data-sv-get-counted]");
+    if (counted) {
+      counted.textContent = some ? "отмечено " + ticked + " из " + p.labels.length
+        + (p.dubs ? " · выбрано: " + plural(p.chosen.size, ["релиз", "релиза", "релизов"]) : "")
+        : p.dubs ? "выберите озвучку — серии покажут, что у неё есть" : "";
+    }
+    const files = picked();
+    const again = againCount(p);       // (v5.44.150) nothing ticked, «Заменить картинку…» is: the pictures alone
+    const go = box.querySelector("[data-sv-get-go]");
+    const later = !!(going && (going.going || going.other));
+    if (go) {
+      go.disabled = (!files.length && !again) || p.busy;
+      go.querySelector("span").textContent = p.busy ? "Начинаю…" : files.length
+        ? (later ? "В очередь: " : "Скачать ") + plural(files.length, FILES)
+        : again ? (later ? "В очередь: " : "") + "Заменить картинку у " + plural(again, ["серии", "серий", "серий"])
+          : some || !p.dubs ? "Отметьте серии" : "Выберите озвучку";
+    }
+    const sum = box.querySelector("[data-sv-get-sum]");
+    if (sum) {
+      const [bytes, approx] = weight(files);
+      const words = [];
+      if ((files.length || again) && bytes) words.push((approx ? "≈ " : "") + bytesWords(bytes) + " на диске");
+      words.push("в папку «" + folderName(p.found.folder) + "» — " + (p.found.new_folder ? "новая" : "уже есть, новые серии лягут в неё"));
+      if (later) words.push(going.going ? "начнётся после текущего скачивания" : "начнётся после «" + going.other + "»");
+      if (!phone) words.push("ход — на плитках и в «Скачать → Загрузки»");
+      sum.textContent = words.join(" · ");
+      sum.classList.remove("bad");
+    }
+  }
+  async function getGo() {
+    const p = picker;
+    if (!p || p.busy) return;
+    let files = picked();
+    const again = againCount(p) > 0;
+    if (!files.length && !again) return;
+    p.busy = true;
+    paintGet();
+    const body = () => ({ find: p.find, files, quality: p.dubs ? p.quality : "", merge: !!(p.dubs && p.merge),
+                          repicture: again });
+    try {
+      let reply;
+      try {
+        reply = await post("/api/videos/download", body());
+      } catch (err) {
+        if (!/устарел/i.test(err.message)) throw err;
+        // the list is another page's now (one list at a time for the program): found again, the same episodes of the
+        // same releases chosen
+        const wanted = new Set(files.map((i) => { const x = p.found.files[i]; return (x.label || "") + "\u0000" + (x.group || ""); }));
+        const started = await post("/api/videos/find", { url: M.get.url });
+        const state = await waitFind(started.id, null);
+        p.find = state.id;
+        p.found = state.found;
+        p.files = (state.found.files || []).filter((x) => x.kind !== "audio");
+        files = p.files.filter((x) => wanted.has((x.label || "") + "\u0000" + (x.group || "")) && x.have !== "whole" &&
+          x.have !== "other" && !x.blocked).map((x) => x.i);
+        if (!files.length && !again) throw new Error("Эти серии уже в папке");
+        reply = await post("/api/videos/download", body());
+      }
+      closeGet();
+      tell(reply.queued ? "В очереди скачивания" + (reply.queued > 1 ? " " + reply.queued + "-м" : " следующим")
+        + " — начнётся само; его видно на плитках" : "Скачивание началось — его видно на плитках и в «Загрузках»");
+      pollGoing();
+    } catch (err) {
+      if (picker === p) {                // said by the button too (the line over the card may be out of sight)
+        p.busy = false;
+        paintGet();
+        const sum = getBox().querySelector("[data-sv-get-sum]");
+        if (sum) { sum.textContent = err.message; sum.classList.add("bad"); }
+      }
+      tell(err.message, true);
+    }
   }
 
   // ── the choices of the series ──────────────────────────────────────────────────────────────────────────────────
@@ -1051,26 +2005,23 @@
     if (navigates()) { location.href = address(current, true); return; }
     choose(current, { autoplay: !!video && !video.paused, at: position });
   }
+  // the phone's page of an episode: the episodes under its player, six a row (the computer — the tiles of «Серии» over
+  // the player, list())
   function strip() {
     const holder = $("[data-sv-strip]");
     if (!holder || M.single) { if (holder) holder.hidden = true; return; }
     holder.textContent = "";
-    if (phone) {
-      const head = el("div", "sv-eps-head");
-      head.append(el("h3", "", "Серии"));
-      const legend = el("span", "", "✓ досмотрена");
-      if ((M.counts || {}).site) legend.append(" · ", el("span", "sv-site-word", "• с сайта"));
-      head.append(legend);
-      holder.append(head);
-    } else {
-      holder.append(el("span", "sv-strip-label", "Серии"));
-    }
-    // the tabs of the episode the player shows (the row of numbers of the page of before: .vepisodes, .vep)
-    const box = el("div", phone ? "sv-eps-grid" : "sv-eptabs vepisodes");
+    const head = el("div", "sv-eps-head");
+    head.append(el("h3", "", "Серии"));
+    const legend = el("span", "", "✓ досмотрена");
+    if ((M.counts || {}).site) legend.append(" · ", el("span", "sv-site-word", "• с сайта"));
+    head.append(legend);
+    holder.append(head);
+    const box = el("div", "sv-eps-grid");
     box.setAttribute("role", "tablist");
     box.setAttribute("aria-label", "Серии");
     episodes().forEach((e) => {
-      const b = el("a", "sv-ep vep" + (e.key === current ? " now" : e.done ? " done" : !e.disk.length ? " site" : ""), e.label);
+      const b = el("a", "sv-ep" + (e.key === current ? " now" : e.done ? " done" : !e.disk.length ? " site" : ""), e.label);
       b.setAttribute("role", "tab");
       b.setAttribute("aria-selected", e.key === current ? "true" : "false");
       b.href = address(e.key, true);
@@ -1086,11 +2037,6 @@
       box.append(b);
     });
     holder.append(box);
-    if (!phone) {
-      const legend = el("span", "sv-strip-legend", "✓ досмотрена");
-      if ((M.counts || {}).site) legend.append(el("span", "sv-site-word", " • с сайта, онлайн"));
-      holder.append(legend);
-    }
   }
   function under() {
     const holder = $("[data-sv-under]");
@@ -1171,7 +2117,7 @@
       try { history.replaceState(history.state, "", address(e.key, true).replace(/#player$/, "")); } catch (_) { /* the address */ }
     }
     renderPlayer();
-    list();
+    markCurrent();
     let reply;
     try {
       reply = await post("/api/series/play", Object.assign(ref(), { ep: e.key, phone, variant: opts.variant || null,
@@ -1558,7 +2504,7 @@
       if (after && M.autonext !== "off") { goTo(after, true); return; }
     }
     endCard(true, fullSize);
-    list();
+    markCurrent();
     strip();
   }
 
@@ -1736,9 +2682,8 @@
     hero();
     numbers();
     actions();
-    downloads();
-    sources();
     list();
+    sources();
     renderPlayer();
   }
 
@@ -1746,6 +2691,7 @@
   if (M.site && M.site.hidden && !M.series && hiddenByMode()) return;      // a title the mode hides (known already)
   render();
   if (M.site && M.site.pending) waitSite(false);
+  pollGoing();                                   // (v5.44.142) what downloads for the series — on its tiles
   const asked = page.dataset.play === "1";
   // the variant the page plays: the file its address names (an address of before, the next one in the same variant)
   const playedVariant = (e) => {

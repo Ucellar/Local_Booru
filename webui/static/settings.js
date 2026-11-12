@@ -1,7 +1,10 @@
-// Local Booru page «Настройки»: tabs, one part at a time (a section's anchor #set-… opens its tab); a change in any
-// section shows the bar «Сохранить / Отменить изменения» — it saves every changed section (each on its own,
-// as the program checks them); «Выбрать…» asks the program window for a folder or a file; actions of a section
-// (a copy now, a pairing code, …) are buttons with data-action="settings-act".
+// Local Booru page «Настройки» (v5.44.161, the mockup approved 11.11.2026): the sections on the left, one shown at
+// a time (the address says which: #look, #manga…; a block's anchor #set-… opens its section; the tabs' addresses of
+// before — #tab-… — the sections their blocks went to); the field «Найти настройку» leaves the rows with the typed
+// words — of every section — and each row can be changed right there; a change in any section shows the bar
+// «Изменено: … — Отменить / Сохранить»: it saves every changed form (each on its own, as the program checks them;
+// the forms of «Парсер и сайты» say where they are saved — data-save); «Выбрать…» asks the program window for a
+// folder or a file; actions of a section (a copy now, a pairing code, …) are buttons with data-action="settings-act".
 (() => {
   "use strict";
 
@@ -15,74 +18,93 @@
     const out = {};
     Array.from(form.elements).forEach((el) => {
       if (!el.name) return;
+      if (el.type === "radio") { if (el.checked) out[el.name] = el.value; return; }
       out[el.name] = el.type === "checkbox" ? el.checked : el.value;
     });
     return out;
   }
 
-  // ── tabs ─────────────────────────────────────────────────────────────
-  const tabBar = page.querySelector(".settings-tabs");
-  const panes = Array.from(page.querySelectorAll(".settings-pane[data-tab]"));
-  const tabButtons = tabBar ? Array.from(tabBar.querySelectorAll("[role=tab]")) : [];
+  // ── the sections ─────────────────────────────────────────────────────
+  const nav = page.querySelector(".sx-nav");
+  const panes = Array.from(page.querySelectorAll(".sx-pane[data-pane]"));
+  const links = nav ? Array.from(nav.querySelectorAll("a[data-pane]")) : [];
+  let oldTabs = {};
+  try { oldTabs = JSON.parse(page.dataset.oldTabs || "{}"); } catch (_) { oldTabs = {}; }
+  let shownPane = "";
 
-  function showTab(id, { focus = false, remember = true } = {}) {
-    if (!tabBar || !panes.some((p) => p.dataset.tab === id)) return;
-    panes.forEach((p) => { p.hidden = p.dataset.tab !== id && p.dataset.tab !== "other"; });
-    tabButtons.forEach((b) => {
-      const on = b.dataset.tab === id;
-      b.setAttribute("aria-selected", on ? "true" : "false");
-      b.tabIndex = on ? 0 : -1;
-      if (on && focus) b.focus();
+  function showPane(id, { remember = true } = {}) {
+    if (!panes.some((p) => p.dataset.pane === id)) return false;
+    shownPane = id;
+    panes.forEach((p) => { p.hidden = p.dataset.pane !== id && p.dataset.pane !== "other"; });
+    links.forEach((a) => {
+      const on = a.dataset.pane === id;
+      a.classList.toggle("on", on);
+      if (on) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
     });
+    page.dataset.pane = id;
     if (remember) {
-      try { localStorage.setItem("lb.settings-tab", id); } catch (_) { /* only this time */ }
-      if (history.replaceState) history.replaceState(null, "", "#tab-" + id);
+      try { localStorage.setItem("lb.settings-pane", id); } catch (_) { /* only this time */ }
+      // the address says which section is shown — a reload opens the same one; opened by a section's own address
+      // (/sites) and switched to another, the page is «Настройки» at that one
+      if (history.replaceState) history.replaceState(null, "", "/settings#" + id);
     }
+    return true;
   }
 
-  function tabOf(el) {
-    const pane = el && el.closest(".settings-pane[data-tab]");
-    return pane ? pane.dataset.tab : "";
+  function paneOf(el) {
+    const pane = el && el.closest(".sx-pane[data-pane]");
+    return pane ? pane.dataset.pane : "";
   }
 
   function openFromAddress() {
-    const hash = decodeURIComponent(location.hash || "").slice(1);
-    if (hash.startsWith("tab-")) { showTab(hash.slice(4), { remember: false }); return true; }
-    const target = hash ? document.getElementById(hash) : null;
-    if (target && tabOf(target)) {
-      showTab(tabOf(target), { remember: false });
+    let hash = "";
+    try { hash = decodeURIComponent(location.hash || "").slice(1); } catch (_) { hash = ""; }
+    if (!hash) return false;
+    if (hash.startsWith("tab-")) return showPane(oldTabs[hash.slice(4)] || hash.slice(4), { remember: false });
+    if (showPane(hash, { remember: false })) return true;
+    const target = document.getElementById(hash);
+    if (target && paneOf(target)) {
+      showPane(paneOf(target), { remember: false });
       target.scrollIntoView({ block: "start" });
       return true;
     }
     return false;
   }
 
-  if (tabBar && panes.length) {
-    tabBar.hidden = false;
-    let first = panes[0].dataset.tab;
-    try { first = localStorage.getItem("lb.settings-tab") || first; } catch (_) { /* the first tab */ }
-    if (!openFromAddress()) showTab(panes.some((p) => p.dataset.tab === first) ? first : panes[0].dataset.tab, { remember: false });
-    tabBar.addEventListener("click", (event) => {
-      const b = event.target.closest("[role=tab]");
-      if (b) showTab(b.dataset.tab);
-    });
-    tabBar.addEventListener("keydown", (event) => {
-      const i = tabButtons.indexOf(document.activeElement);
-      if (i < 0) return;
-      let next = -1;
-      if (event.key === "ArrowRight") next = (i + 1) % tabButtons.length;
-      if (event.key === "ArrowLeft") next = (i - 1 + tabButtons.length) % tabButtons.length;
-      if (event.key === "Home") next = 0;
-      if (event.key === "End") next = tabButtons.length - 1;
-      if (next < 0) return;
-      event.preventDefault();
-      showTab(tabButtons[next].dataset.tab, { focus: true });
-    });
-    window.addEventListener("hashchange", openFromAddress);
+  if (panes.length) {
+    if (!openFromAddress()) {
+      let first = page.dataset.open || panes[0].dataset.pane;
+      if (location.pathname === "/settings") {          // the section seen last (a page of a section opens its own)
+        try { first = localStorage.getItem("lb.settings-pane") || first; } catch (_) { /* the first one */ }
+      }
+      if (!showPane(first, { remember: false })) showPane(panes[0].dataset.pane, { remember: false });
+    }
+    if (nav) {
+      nav.addEventListener("click", (event) => {
+        const a = event.target.closest("a[data-pane]");
+        if (!a) return;
+        event.preventDefault();
+        stopFinding();
+        showPane(a.dataset.pane);
+        window.scrollTo({ top: 0 });
+      });
+      // ↑ ↓ (Home, End) walk the sections as a list; Enter opens the one in focus as any link
+      nav.addEventListener("keydown", (event) => {
+        const all = Array.from(nav.querySelectorAll("a"));
+        const at = all.indexOf(document.activeElement);
+        const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: all.length - 1 }[event.key];
+        if (at < 0 || to === undefined || !all[to]) return;
+        event.preventDefault();
+        all[to].focus();
+      });
+    }
+    // an address clicked while a setting is being looked for (a row that points at a section): the search ends,
+    // then the section opens — its place is counted on the page as it is without the search
+    window.addEventListener("hashchange", () => { stopFinding(); openFromAddress(); });
   }
 
-  // ── one «Сохранить» for the page: the changed sections ─────────────────
-  const forms = Array.from(page.querySelectorAll('form[data-form="settings"]'));
+  // ── one «Сохранить» for the page: the changed forms ────────────────────
+  const forms = Array.from(page.querySelectorAll('form[data-form="settings"], form[data-save]'));
   const bar = page.querySelector(".settings-savebar");
   const saved = new Map();              // form → its values as last saved (or as the page came)
 
@@ -91,19 +113,36 @@
 
   function dirtyForms() { return forms.filter((form) => valuesKey(form) !== JSON.stringify(saved.get(form))); }
 
+  // the names of the settings changed (the rows' own names)
+  function dirtyNames(dirty) {
+    const names = [];
+    dirty.forEach((form) => {
+      const now = valuesOf(form), was = saved.get(form) || {};
+      Object.keys(now).forEach((key) => {
+        if (JSON.stringify(now[key]) === JSON.stringify(was[key])) return;
+        const row = form.querySelector(`.sx-row[data-key="${CSS.escape(key)}"]`);
+        const name = row ? row.querySelector(".sx-name") : null;
+        const field = form.querySelector(`[name="${CSS.escape(key)}"]`);       // a field that is not a row: its label
+        names.push(name ? name.textContent.trim() : (field && field.getAttribute("aria-label")) || key);
+      });
+    });
+    return names;
+  }
+
   let flash = "";                        // what the bar says for a moment after saving
   let flashTimer = 0;
 
   function refreshBar() {
     const dirty = dirtyForms();
     forms.forEach((form) => form.closest(".settings-block").classList.toggle("changed", dirty.includes(form)));
-    tabButtons.forEach((b) => b.classList.toggle("changed", dirty.some((form) => tabOf(form) === b.dataset.tab)));
+    links.forEach((a) => a.classList.toggle("changed", dirty.some((form) => paneOf(form) === a.dataset.pane)));
     if (!bar) return;
     bar.hidden = dirty.length === 0 && !flash;
     bar.classList.toggle("saved", dirty.length === 0 && !!flash);
-    bar.querySelector("[data-bar-text]").textContent = dirty.length ? "Есть несохранённые изменения" : flash;
-    const names = dirty.map((form) => form.closest(".settings-block").querySelector("h2").textContent);
-    bar.querySelector("[data-dirty-list]").textContent = names.length ? ": " + names.join(", ") : "";
+    bar.querySelector("[data-bar-text]").textContent = dirty.length ? "Изменено:" : flash;
+    const names = dirtyNames(dirty);
+    bar.querySelector("[data-dirty-list]").textContent = names.length > 4 ? names.slice(0, 4).join(", ") + ` и ещё ${names.length - 4}`
+      : names.join(", ");
     bar.querySelectorAll("button").forEach((b) => { b.hidden = dirty.length === 0; });
     if (dirty.length) {
       const status = bar.querySelector(".action-status");
@@ -121,8 +160,29 @@
   function setValues(form, values) {
     Array.from(form.elements).forEach((el) => {
       if (!el.name || !(el.name in values)) return;
-      if (el.type === "checkbox") el.checked = !!values[el.name];
+      const was = el.type === "radio" || el.type === "checkbox" ? el.checked : el.value;
+      if (el.type === "radio") el.checked = String(values[el.name]) === el.value;
+      else if (el.type === "checkbox") el.checked = !!values[el.name];
       else el.value = values[el.name];
+      // what follows a field on the page (a site's address in its row, …) hears of the change as if it were typed
+      if (was !== (el.type === "radio" || el.type === "checkbox" ? el.checked : el.value)) {
+        el.dispatchEvent(new Event(el.type === "text" || el.type === "number" ? "input" : "change", { bubbles: true }));
+      }
+    });
+  }
+
+  // the fields the program refused, each with its words ({name: words}); none — the marks of before go
+  function markWrong(form, wrong) {
+    form.querySelectorAll('[aria-invalid="true"]').forEach((el) => el.removeAttribute("aria-invalid"));
+    form.querySelectorAll(".field-wrong").forEach((note) => note.remove());
+    Object.keys(wrong || {}).forEach((name) => {
+      const field = form.querySelector(`[name="${CSS.escape(name)}"]`);
+      if (!field) return;
+      field.setAttribute("aria-invalid", "true");
+      const note = document.createElement("small");
+      note.className = "field-wrong";
+      note.textContent = wrong[name];
+      field.insertAdjacentElement("afterend", note);
     });
   }
 
@@ -130,8 +190,10 @@
     const box = form.querySelector(".form-error");
     if (box) { box.textContent = text; box.hidden = !text; }
     if (!text) return;
-    showTab(tabOf(form));
-    const input = field ? form.elements.namedItem(field) : null;
+    stopFinding();
+    showPane(paneOf(form));
+    const input = field ? form.querySelector(`[name="${CSS.escape(field)}"]`) : null;
+    for (let fold = input && input.closest("details"); fold; fold = fold.parentElement.closest("details")) fold.open = true;
     if (input && input.focus) input.focus();
     else form.closest(".settings-block").scrollIntoView({ block: "center" });
   }
@@ -142,31 +204,41 @@
     const button = bar ? bar.querySelector('[data-action="settings-save-all"]') : null;
     if (button) button.disabled = true;
     let ok = 0;
-    let reload = false;                     // this page's own look was changed («Оформление страниц»)
+    let reload = false;                     // this page's own look was changed («Оформление»)
     try {
       for (const form of dirty) {
         showError(form, "");
+        markWrong(form, null);
         if (!form.checkValidity()) {          // a number outside its bounds: the browser says what is wrong
-          showTab(tabOf(form));
+          stopFinding();
+          showPane(paneOf(form));
           form.reportValidity();
           say(el || button, (ok ? `Сохранено разделов: ${ok}; ` : "") + "исправьте отмеченное поле", true);
           return false;
         }
         try {
           const values = valuesOf(form);
-          const reply = await postJson("/api/settings/save", { section: form.dataset.section, values });
+          // a form of «Парсер и сайты» is saved where it says (its own address and its own shape)
+          const reply = form.dataset.save ? await postJson(form.dataset.save, values)
+            : await postJson("/api/settings/save", { section: form.dataset.section, values });
           reload = reload || !!(reply && reply.reload);
           saved.set(form, values);
+          if (reply && reply.values) {          // as the program keeps them («site.org» became «https://site.org»)
+            setValues(form, reply.values);
+            saved.set(form, valuesOf(form));
+          }
           ok += 1;
-          form.querySelectorAll('input[type="password"]').forEach((input) => {   // a key is not shown back
+          form.querySelectorAll('input[type="password"][name]').forEach((input) => {   // a key is not shown back
             if (input.value) {
               input.value = "";
-              input.placeholder = "сохранено — оставьте пустым, чтобы не менять";
+              input.placeholder = form.dataset.save ? "ключ сохранён — оставьте пустым, чтобы не менять"
+                : "сохранено — оставьте пустым, чтобы не менять";
               const v = saved.get(form);
               v[input.name] = "";
             }
           });
         } catch (err) {
+          markWrong(form, err.data && err.data.wrong);
           showError(form, err.message, err.data && err.data.field);
           say(el || button, (ok ? `Сохранено разделов: ${ok}; ` : "") + "не сохранено: " + err.message, true);
           return false;
@@ -195,10 +267,145 @@
 
   actions["settings-save-all"] = (el) => { saveAll(el); };
   actions["settings-revert"] = (el) => {
-    dirtyForms().forEach((form) => { setValues(form, saved.get(form)); showError(form, ""); });
+    dirtyForms().forEach((form) => { setValues(form, saved.get(form)); showError(form, ""); markWrong(form, null); });
     refreshBar();
     say(el, "Изменения отменены");
   };
+  // «изменить по страницам» of «Оформление»: the lists of the pages
+  actions["looks-pages"] = (el) => {
+    const box = document.getElementById("looks-pages");
+    if (!box) return;
+    box.hidden = !box.hidden;
+    el.setAttribute("aria-expanded", box.hidden ? "false" : "true");
+  };
+
+  // ── «Найти настройку»: the rows with the typed words, of every section ──
+  const findField = nav ? nav.querySelector('.sx-search input[type="search"]') : null;
+  const found = page.querySelector("[data-found]");       // «Найдено: N» above what was found
+  const also = page.querySelector("[data-also]");         // below it: what is not a setting but is looked for here
+  const plain = (text) => String(text || "").toLowerCase().replace(/ё/g, "е");   // «ё» is typed as «е» as often as not
+  // what can be found: the rows of settings, and what says by which words it is found (data-find: a site of manga —
+  // by its name and addresses, not by the words every site's row has)
+  const FOUND = ".sx-row:not([data-miss]), [data-find]:not([data-miss])";
+  const rows = Array.from(page.querySelectorAll(".sx-row, [data-find]")).map((row) => {
+    const block = row.closest(".sx-block, .sx-pointers");
+    const pane = row.closest(".sx-pane");
+    const where = [pane ? pane.dataset.title : "", block ? block.dataset.title : ""]
+      .filter((part, i, all) => part && all.indexOf(part) === i);
+    const own = row.hasAttribute("data-find");
+    const what = own ? row : row.querySelector(".sx-what");
+    if (what && where.length && !what.querySelector(":scope > .sx-where")) {   // where it is: said above it when found
+      const line = document.createElement("small");
+      line.className = "sx-where";
+      line.textContent = where.join(" → ");
+      what.prepend(line);
+    }
+    if (own) {
+      const name = row.querySelector(".ms-name");
+      return { row, text: plain((name ? name.textContent : "") + " " + row.dataset.find + " " + where.join(" ")) };
+    }
+    const options = Array.from(row.querySelectorAll("option, .sx-seg span")).map((o) => o.textContent).join(" ");
+    return { row, text: plain((what ? what.textContent : row.textContent) + " " + options) };
+  });
+  const marked = [];
+  const unfolded = [];                   // «Подробнее» opened by the search: the words were found in it
+
+  function unmark() {
+    marked.splice(0).forEach((mark) => {
+      const parent = mark.parentNode;
+      if (!parent) return;
+      parent.replaceChild(document.createTextNode(mark.textContent), mark);
+      parent.normalize();
+    });
+    unfolded.splice(0).forEach((more) => { more.open = false; });
+  }
+
+  function markIn(el, words) {            // the typed words marked in a row's name and its line
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    nodes.forEach((node) => {
+      const text = plain(node.nodeValue);
+      let at = -1, len = 0;
+      words.forEach((word) => {
+        const i = text.indexOf(word);
+        if (i >= 0 && (at < 0 || i < at)) { at = i; len = word.length; }
+      });
+      if (at < 0) return;
+      const rest = node.splitText(at);
+      rest.splitText(len);
+      const mark = document.createElement("mark");
+      rest.parentNode.replaceChild(mark, rest);
+      mark.appendChild(rest);
+      marked.push(mark);
+    });
+  }
+
+  function stopFinding() {
+    if (!page.hasAttribute("data-finding")) return;
+    page.removeAttribute("data-finding");
+    unmark();
+    page.querySelectorAll("[data-miss]").forEach((el) => el.removeAttribute("data-miss"));
+    if (found) found.hidden = true;
+    if (also) also.hidden = true;
+    if (findField) findField.value = "";
+    // asked by the address (/settings?q=…): the words leave it with the search
+    if (location.search && history.replaceState) history.replaceState(null, "", location.pathname + location.hash);
+    showPane(shownPane || panes[0].dataset.pane, { remember: false });
+  }
+
+  function find() {
+    const words = plain(findField.value).split(/\s+/).filter(Boolean);
+    if (!words.length) { stopFinding(); return; }
+    unmark();
+    page.setAttribute("data-finding", words.join(" "));       // (the words looked for now: the checks wait for them)
+    let count = 0;
+    rows.forEach(({ row, text }) => {
+      const fits = words.every((word) => text.includes(word));
+      if (fits) { row.removeAttribute("data-miss"); count += 1; } else row.setAttribute("data-miss", "1");
+      if (!fits) return;
+      row.querySelectorAll(".sx-name, .sx-hint, .ms-name, .ms-addr").forEach((el) => markIn(el, words));
+      // a word that is only in the long explanation: «Подробнее» opens, the word is marked there
+      const more = row.querySelector(".sx-more");
+      const seen = plain(Array.from(row.querySelectorAll(".sx-name, .sx-hint")).map((el) => el.textContent).join(" "));
+      if (more && !more.open && words.some((word) => !seen.includes(word) && plain(more.textContent).includes(word))) {
+        more.open = true;
+        unfolded.push(more);
+        more.querySelectorAll("p").forEach((el) => markIn(el, words));
+      }
+    });
+    // a group, a block, a section with nothing found is not shown at all
+    page.querySelectorAll(".sx-group, .sx-pages-edit").forEach((group) => {
+      if (group.querySelector(FOUND)) group.removeAttribute("data-miss");
+      else group.setAttribute("data-miss", "1");
+    });
+    page.querySelectorAll(".sx-block").forEach((block) => {
+      if (block.querySelector(FOUND)) block.removeAttribute("data-miss");
+      else block.setAttribute("data-miss", "1");
+    });
+    panes.forEach((pane) => {
+      pane.hidden = false;
+      if (pane.querySelector(FOUND)) pane.removeAttribute("data-miss");
+      else pane.setAttribute("data-miss", "1");
+    });
+    links.forEach((a) => { a.classList.remove("on"); a.removeAttribute("aria-current"); });
+    if (found) {
+      found.hidden = false;
+      found.querySelector("[data-found-title]").textContent = count ? `Найдено: ${count}` : "Ничего не найдено";
+      found.querySelector("[data-found-none]").hidden = count > 0;
+    }
+    if (also) also.hidden = !also.querySelector(FOUND);
+  }
+
+  if (findField) {
+    let timer = 0;
+    findField.closest("form").addEventListener("submit", (event) => { event.preventDefault(); find(); });
+    findField.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(find, 120); });
+    findField.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && findField.value) { event.preventDefault(); stopFinding(); }
+    });
+    if (findField.value.trim()) find();          // asked from another page of the frame (/settings?q=…)
+  }
 
   // a settings profile: the file goes as it is (the server checks it before anything changes)
   const profile = page.querySelector('form[data-form="profile-import"]');

@@ -249,6 +249,7 @@ def parse_page(html: str, page_url: str = "") -> dict:
     _json_ld(soup, meta)
     _generic_rows(soup, meta)
     _chip_rows(soup, meta)
+    _xf_chips(soup, meta)
     _title(soup, meta, tags)
     _alt_titles(soup, meta)
     _site_rating(soup, meta, tags, url or page_url)
@@ -600,6 +601,19 @@ def _chip_rows(soup, meta: _Meta) -> None:
             continue
         meta.labeled(own, ", ".join(links), links)
         meta.lines.append(row)
+
+
+def _xf_chips(soup, meta: _Meta) -> None:
+    """(v5.44.139) The genres of a DataLife Engine page as chips of its field — one text, by commas (HFShare:
+    ``<div class="xf-chips" data-xf="janre">Big tits, Oral sex</div>``; its manga's field — ``manj``): when nothing
+    before said them (its structured data says them on most of its pages)."""
+    if meta.data.get("genres"):
+        return
+    for el in soup.select("[data-xf=janre], [data-xf=manj]"):
+        text = _clean(el.get_text(" ", strip=True))
+        if text and el.find("a") is None and len(text) <= 1000:
+            meta.put("genres", [x.strip(" .") for x in text.split(",") if x.strip(" .")])
+            return
 
 
 _RATING = re.compile(r"(?:средний\s+)?(?:рейтинг|rating|оценка)\s*:?\s*(\d+(?:[.,]\d+)?)\s*(?:из|of|/)\s*(\d+)", re.I)

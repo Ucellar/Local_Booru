@@ -34,6 +34,7 @@ TWINS = ((re.compile(r"/"), "/m/", False), (re.compile(r"/posts"), "/m/posts", T
          (re.compile(r"/videos"), "/m/videos", True),                                   # (v5.44.68) the videos
          (re.compile(r"/videos/s/([0-9a-f]{12})"), "series", False),
          (re.compile(r"/online"), "/m/online", True),                     # (v5.44.82) a chapter read from a site
+         (re.compile(r"/manga/read"), "/m/manga/read", True),             # (v5.44.148) a gallery of nhentai read so
          (re.compile(r"/(manga|manhwa|videos)/feed"), r"/m/\1/feed", True),           # (v5.44.105) «Лента»
          (re.compile(r"/(manga|manhwa)/title"), r"/m/\1/title", True),               # and the title's page
          (re.compile(r"/title"), "/m/title", True),                     # (v5.44.119) any way in to the title's page

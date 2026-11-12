@@ -187,19 +187,40 @@ def _mode_empty(items: list) -> str:
 
 
 # ── search ──────────────────────────────────────────────────────────────────
+def _plain(text) -> str:
+    """(v5.44.135) Text as a search compares it: small letters, «ё» as «е», «_» as a space, one space."""
+    return " ".join(str(text or "").lower().replace("ё", "е").replace("_", " ").split())
+
+
+def search_text(manga: M.Manga) -> str:
+    """(v5.44.135) Everything a search of the folder looks in: its titles and other names, its tags of every group,
+    its authors, type, status and year — one line per thing (a word does not run from one into the next)."""
+    things = [manga.title, manga.title_japanese, manga.title_pretty, *manga.others, *manga.tags, *manga.authors,
+              *manga.facts]
+    return "\n".join(_plain(t) for t in things if t)
+
+
 def _matches(manga: M.Manga, query: str) -> bool:
-    """nhentai-like: words must all match; ``-word`` must not; ``artist:name`` looks in one group;
-    a word matches a tag exactly or the title as a piece of text."""
-    title = manga.title.lower() + " " + manga.title_japanese.lower()
+    """nhentai-like: words must all match; ``-word`` must not; ``artist:name`` looks in one group of tags.
+    (v5.44.135; the owner: «не ищет по тегам нормально») A word is a piece of text, as «Манхва» searches: of a tag
+    («фэнт» — «фэнтези»; «система уровней» and «система_уровней» — the tag «система_уровней»), of a title or another
+    name, of an author, the type, the status, the year (:func:`search_text`); ``group:name`` — a piece of a tag of the
+    group (a chip's whole tag still finds its own)."""
+    text = None
     for raw in query.split():
         neg = raw.startswith("-") and len(raw) > 1
         word = raw[1:] if neg else raw
         group, _, value = word.partition(":")
         if value and M._group(group) != "general" or group in {"general", "tag", "tags"} and value:
-            hit = M.norm_tag(value) in manga.groups.get(M._group(group), [])
+            want = _plain(value)
+            names = list(manga.groups.get(M._group(group), []))
+            if M._group(group) == "artist":
+                names += manga.authors                         # the site's authors are its artists too
+            hit = bool(want) and any(want in _plain(name) for name in names)
         else:
-            norm = M.norm_tag(word)
-            hit = norm in manga.tags or word.lower() in title
+            if text is None:
+                text = search_text(manga)
+            hit = _plain(word) in text
         if hit == neg:
             return False
     return True
@@ -551,6 +572,10 @@ def _tag_rows(manga: M.Manga, counts: dict) -> str:
             f'<span class="mcount">{human_count(counts.get((group, t), 0))}</span></a>' for t in tags)
         rows.append(f'<div class="tag-row"><span class="tr-name">{esc(M.GROUP_TITLES[group])}:</span>'
                     f'<span class="tr-tags">{links}</span></div>')
+    if manga.authors:                     # (v5.44.135) the site's authors («Скачать» writes them) — a search by each
+        links = "".join(f'<a class="mtag mtag-artist" href="{esc(url("/manga", q=name))}">{esc(name)}</a>'
+                        for name in manga.authors[:12])
+        rows.append(f'<div class="tag-row"><span class="tr-name">Авторы:</span><span class="tr-tags">{links}</span></div>')
     rows.append(f'<div class="tag-row"><span class="tr-name">Страниц:</span><span class="tr-tags">'
                 f'<span class="mtag plain">{manga.page_count}</span></span></div>')
     if manga.mtime:

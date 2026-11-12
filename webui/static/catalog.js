@@ -1,6 +1,8 @@
 /* Local Booru «Лента» of «Манга», «Манхва», «Видео» (v5.44.90, webui/pages/catalog.py, core/catalog.py).
    The filters are one GET form; this script only makes it pleasant: a genre or tag chip of three states (a click —
-   «да», another — «нет», another — neither: hidden fields g/x, tg/tx), «все жанры», «Найти тег», «Порядок» applied at
+   «да», another — «нет», another — neither: hidden fields g/x, tg/tx), «все жанры», «Найти тег» (v5.44.148: by a
+   tag's other names too — data-also; the sites' own tags, artists, characters — /api/catalog/tags as the words are
+   typed: chips of the same three states, hidden fields sg/sx), «Порядок» applied at
    once, empty fields left out of the address; «… отвечает» and «Показать ещё» ask ?part=1 (JSON); (v5.44.103) back
    from a title's page — the list as it was left (sessionStorage «lb-feed-kept»). */
 (() => {
@@ -19,7 +21,11 @@
     const state = chip.dataset.state || "";
     const mark = chip.querySelector(".cat-mark");
     if (mark) mark.textContent = MARKS[state];
-    chip.setAttribute("aria-label", `${chip.dataset.name}: ${WORDS[state]}`);
+    chip.setAttribute("aria-label", `${chip.dataset.label || chip.dataset.name}: ${WORDS[state]}`);
+    if (chip.dataset.one) {                         // (v5.44.149) one of its kind at a time, no «нет»
+      chip.title = state ? "выбран — нажмите ещё раз, чтобы убрать" : "нажмите — показать его тайтлы (один за раз)";
+      return;
+    }
     chip.title = state ? `${WORDS[state]} — нажмите ещё раз, чтобы сменить` : "нажмите — да, ещё раз — нет";
   }
 
@@ -49,8 +55,20 @@
   form.addEventListener("click", (event) => {
     const chip = event.target.closest(".cat-tri-chip");
     if (chip) {
-      const now = STATES.indexOf(chip.dataset.state || "");
-      chip.dataset.state = STATES[(now + 1) % STATES.length];
+      if (chip.dataset.one) {
+        // (v5.44.149) an author of MangaLib: its list takes one — «да» or nothing, and the one chosen before goes
+        const on = chip.dataset.state !== "yes";
+        for (const other of chip.closest(".cat-tri").querySelectorAll(".cat-tri-chip[data-one]")) {
+          if (other !== chip && other.dataset.one === chip.dataset.one && other.dataset.state) {
+            other.dataset.state = "";
+            paint(other);
+          }
+        }
+        chip.dataset.state = on ? "yes" : "";
+      } else {
+        const now = STATES.indexOf(chip.dataset.state || "");
+        chip.dataset.state = STATES[(now + 1) % STATES.length];
+      }
       paint(chip);
       fields(chip.closest(".cat-tri"));
       form.classList.add("changed");
@@ -83,39 +101,153 @@
     if (event.target.closest(".cat-side")) form.classList.add("changed");
   });
 
-  // «Найти тег»: the tags whose names hold the words (the chosen ones are always there)
+  // «Найти тег»: the tags whose names hold the words (the chosen ones are always there); (v5.44.148) a tag's other
+  // names too («tentacles» — «Тентакли»: data-also), and the sites' own tags — asked as the words are typed
   const finder = form.querySelector("[data-cat-tagfind]");
   if (finder) {
     const tri = finder.closest(".cat-group").querySelector(".cat-tri");
+    const own = finder.closest(".cat-group").querySelector("[data-cat-own]");
+    const ownHint = finder.closest(".cat-group").querySelector("[data-cat-own-hint]");
+    const hintWords = ownHint ? ownHint.textContent : "";
+    const who = (ownHint && ownHint.dataset.sites) || "Сайт";
     const limit = Number(finder.dataset.limit) || 24;
+    const OWN_SHOWN = 12;
     // how well a name fits the words: 1 — it is them, 2 — it begins with them, 3 — it holds them (0 — not)
     const fit = (name, words) => (name === words ? 1 : name.startsWith(words) ? 2 : name.includes(words) ? 3 : 0);
+    // …a chip by its name, else by the closest of its other names (a step further: its own name first)
+    const fitChip = (chip, words) => {
+      const rank = fit(norm(chip.dataset.name), words);
+      if (rank) return [rank, ""];
+      let best = 0;
+      let by = "";
+      for (const other of String(chip.dataset.also || "").split("|")) {
+        const r = other ? fit(norm(other), words) : 0;
+        if (r && (!best || r < best)) { best = r; by = other; }
+      }
+      return [best ? best + 3 : 0, by];
+    };
+    let local = 0;
+    // what the line under the sites' own tags says: remote — null (asked now), -1 (no answer), else how many shown;
+    // (v5.44.149) silent — the sites that did not answer (the others' tags are shown)
+    const say = (remote, all, silent) => {
+      const words = finder.value.trim();
+      const late = silent && silent.length ? ` ${silent.join(", ")}: нет ответа — попробуйте ещё раз.` : "";
+      if (ownHint) {
+        if (words.length < 2) ownHint.textContent = hintWords;
+        else if (remote === null) ownHint.textContent = `${who}: ищу «${words}»…`;
+        else if (remote < 0) ownHint.textContent = `${who}: нет ответа — теги и авторы сайтов сейчас не показаны.`;
+        else if (remote === 0) {
+          ownHint.textContent = (late ? "" : local ? `${who}: своих тегов и авторов на «${words}» нет.`
+            : `Ничего не найдено по «${words}».`) + late;
+        } else {
+          ownHint.textContent = `${who}: ${remote}${all > remote ? ` из ${all}` : ""} — нажмите нужное.${late}`;
+        }
+        ownHint.textContent = ownHint.textContent.trim();
+      }
+      finder.setAttribute("aria-description", words ? `найдено: ${local + Math.max(0, remote || 0)}` : "");
+    };
     const look = () => {
       const words = norm(finder.value.trim());
       const found = [];
       for (const chip of tri.querySelectorAll(".cat-tri-chip[data-rest]")) {
-        const rank = words ? fit(norm(chip.dataset.name), words) : 0;
+        const [rank, by] = words ? fitChip(chip, words) : [0, ""];
         chip.classList.remove("found");
         chip.style.order = "";
-        if (rank) found.push([rank, chip]);
+        if (rank) found.push([rank, chip, by]);
       }
       found.sort((a, b) => a[0] - b[0]);
-      for (const [rank, chip] of found.slice(0, limit)) {
+      for (const [rank, chip, by] of found.slice(0, limit)) {
         chip.classList.add("found");
         chip.style.order = String(rank);            // the closest first (the chosen ones stay before them)
+        if (by) chip.title = `другое название: ${by}`;
       }
-      finder.setAttribute("aria-description", words ? `найдено: ${Math.min(found.length, limit)}` : "");
+      local = Math.min(found.length, limit);
+      return words;
     };
-    finder.addEventListener("input", look);
+
+    // a site's own tag as a chip (the same as ``own_chip`` of webui/pages/catalog.py)
+    const ownChip = (row) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "cat-tri-chip cat-own-chip found";
+      chip.dataset.name = row.value;
+      chip.dataset.label = `${row.word}: ${row.name} · ${row.site}`;
+      chip.dataset.state = "";
+      if (row.one) chip.dataset.one = String(row.value).split(":")[0];
+      const mark = document.createElement("span");
+      mark.className = "cat-mark";
+      mark.setAttribute("aria-hidden", "true");
+      const kind = document.createElement("span");
+      kind.className = "cat-own-kind";
+      kind.textContent = row.word;
+      const site = document.createElement("span");
+      site.className = "cat-own-site";
+      site.textContent = row.count ? `${row.site} · ${row.count}` : row.site;
+      const name = document.createElement("span");
+      name.className = "cat-own-name";
+      name.textContent = row.name;
+      chip.append(mark, kind, name, site);
+      paint(chip);
+      return chip;
+    };
+    const clearOwn = () => {
+      if (!own) return;
+      for (const chip of own.querySelectorAll('.cat-own-chip.found[data-state=""]')) chip.remove();
+    };
+    let asking = 0;
+    let timer = 0;
+    const askOwn = async (words) => {
+      const mine = ++asking;
+      say(null, 0);
+      let reply = null;
+      try {
+        const response = await fetch(`${finder.dataset.catSuggest}&q=${encodeURIComponent(words)}`,
+          { credentials: "same-origin" });
+        reply = await response.json();
+      } catch (_) { reply = null; }
+      if (mine !== asking) return;                  // newer words were typed meanwhile
+      clearOwn();
+      if (!reply || !reply.ok) { say(-1, 0); return; }
+      const have = new Set([...own.querySelectorAll(".cat-own-chip")].map((chip) => chip.dataset.name));
+      const rows = (reply.found || []).filter((row) => !have.has(row.value));
+      const fields = own.querySelector(".cat-tri-fields");
+      for (const row of rows.slice(0, OWN_SHOWN)) own.insertBefore(ownChip(row), fields);
+      say(Math.min(rows.length, OWN_SHOWN), rows.length, reply.silent || []);
+      // (v5.44.149) the words came with the address (an author of a title's page): the person of exactly that name is
+      // chosen at once, and the list of their titles replaces this page («назад» returns to the title, not here)
+      const pick = finder.dataset.catPick;
+      if (pick) {
+        delete finder.dataset.catPick;
+        const exact = rows.find((row) => row.exact && String(row.value).startsWith(`${pick}:`));
+        if (exact) {
+          const order = form.querySelector("[data-cat-order]");
+          const go = new URLSearchParams();
+          go.set("order", (order && order.value) || "popular");
+          go.set("sg", exact.value);
+          location.replace(`${location.pathname}?${go.toString()}`);
+        }
+      }
+    };
+    const lookAll = () => {
+      const words = look();
+      clearTimeout(timer);
+      if (!own || !finder.dataset.catSuggest) { say(0, 0); return; }
+      if (words.length < 2) { asking += 1; clearOwn(); say(0, 0); return; }
+      timer = setTimeout(() => askOwn(finder.value.trim()), 280);
+    };
+    finder.addEventListener("input", lookAll);
+    if (finder.value.trim()) lookAll();             // (v5.44.149) words the address put there (``find``)
     finder.addEventListener("keydown", (event) => {
       if (event.key !== "Enter") return;
       event.preventDefault();                       // Enter here picks the closest tag found, not the whole form
       const best = [...tri.querySelectorAll(".cat-tri-chip.found")]
-        .sort((a, b) => Number(a.style.order) - Number(b.style.order))[0];
+        .sort((a, b) => Number(a.style.order) - Number(b.style.order))[0]
+        || (own && own.querySelector('.cat-own-chip.found[data-state=""]'));
       if (best) {
         best.click();
+        best.classList.remove("found");             // chosen: it stays when the words are cleared
         finder.value = "";
-        look();
+        lookAll();
       }
     });
   }
@@ -165,6 +297,14 @@
     return p;
   }
 
+  // (v5.44.158) tiles added to a list come one after another from the first of them, not after the turn of every
+  // tile before them (booru.css: --m-i; nothing moves when «Плавные переходы» are off)
+  function addTiles(grid, html) {
+    const had = grid.children.length;
+    grid.insertAdjacentHTML("beforeend", html || "");
+    Array.from(grid.children).slice(had).forEach((tile, n) => tile.style.setProperty("--m-i", String(Math.min(n, 16))));
+  }
+
   // (v5.44.98) a site that was late: the others' tiles are shown, its own are asked for and added to the grid
   function gridOf() {
     let grid = form.querySelector(".cat-grid");
@@ -189,7 +329,7 @@
         note.textContent = "Сайт так и не ответил — обновите страницу чуть позже.";
         return;
       }
-      if (reply.html) gridOf().insertAdjacentHTML("beforeend", reply.html);
+      if (reply.html) addTiles(gridOf(), reply.html);
       const words = document.createElement("div");
       words.innerHTML = reply.notes || "";
       if (note.isConnected) note.replaceWith(...words.childNodes);
@@ -310,6 +450,7 @@
     notes.innerHTML = kept.notes || "";
     const grid = document.createElement("div");
     grid.className = "cat-grid";
+    grid.dataset.still = "";                 // (v5.44.158) the list as it was left: it stands, it does not come anew
     if (kept.page) grid.dataset.page = kept.page;
     grid.innerHTML = kept.grid;
     notes.after(grid);
@@ -383,7 +524,7 @@
       grid.className = "cat-grid";
       link.closest(".cat-more").before(grid);
     }
-    grid.insertAdjacentHTML("beforeend", reply.html || "");
+    addTiles(grid, reply.html);
     const notes = form.querySelector(".cat-notes");
     if (notes) {
       notes.innerHTML = reply.notes || "";

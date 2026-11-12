@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
+import os
 import sys
 import threading
 import time
@@ -34,12 +35,20 @@ class MaintenanceCoordinator:
         self._blockers: Counter[str] = Counter()
         self._paused = False
         self._last_user_activity = time.monotonic()
+        self._noted = False                      # the person has done something in the program since its start
         self._active_maintenance_job = ""
 
     def note_user_activity(self) -> None:
         with self._condition:
             self._last_user_activity = time.monotonic()
+            self._noted = True
             self._condition.notify_all()
+
+    def idle_seconds(self) -> float:
+        """(v5.44.151) How long the person has done nothing in the program — a key or the mouse in its window, a
+        page opened (``note_user_activity``); endless when nothing was done since its start."""
+        with self._lock:
+            return max(0.0, time.monotonic() - self._last_user_activity) if self._noted else float("inf")
 
     def set_paused(self, paused: bool) -> None:
         with self._condition:
@@ -231,6 +240,43 @@ class MaintenanceCoordinator:
 
 _COORDINATOR = MaintenanceCoordinator()
 _QT_ACTIVITY_FILTER = None
+PERSON_IDLE: Callable[[], float] | None = None       # the checks: what ``person_idle_seconds`` answers
+
+
+def _system_idle() -> float | None:
+    """Seconds since a key or the mouse was touched on this computer — anywhere, not in the program only (Windows:
+    ``GetLastInputInfo``); None where the system does not say."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        class _LastInput(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = _LastInput()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        tick = ctypes.windll.kernel32.GetTickCount()
+        return ((int(tick) - int(info.dwTime)) & 0xFFFFFFFF) / 1000.0       # both go round in 49 days
+    except Exception:  # noqa: BLE001 - no such call on this system: not known
+        return None
+
+
+def person_idle_seconds() -> float:
+    """(v5.44.151) How long the person has been away from the keys and the mouse: of this computer (Windows), and
+    of the program — its window, its pages (``note_user_activity``: the web server notes every page opened, the
+    phone's too).  The heavy things the program does by itself (``core/background_duties``: openings and endings,
+    «фото или рисунок») wait for it: the owner — «проц долбится в 100%».  ``LOCAL_BOORU_PERSON=away`` (the checks:
+    they run on the owner's computer while he works at it) — nobody is here, whatever the keys say."""
+    if PERSON_IDLE is not None:
+        return float(PERSON_IDLE())
+    if os.environ.get("LOCAL_BOORU_PERSON", "").strip().lower() == "away":
+        return float("inf")
+    own = _COORDINATOR.idle_seconds()
+    system = _system_idle()
+    return own if system is None else min(own, system)
 
 
 def get_maintenance_coordinator() -> MaintenanceCoordinator:
@@ -279,6 +325,7 @@ def install_qt_activity_filter(app=None) -> bool:
 
 
 def _reset_for_tests() -> None:
-    global _COORDINATOR, _QT_ACTIVITY_FILTER
+    global _COORDINATOR, _QT_ACTIVITY_FILTER, PERSON_IDLE
     _COORDINATOR = MaintenanceCoordinator()
     _QT_ACTIVITY_FILTER = None
+    PERSON_IDLE = None

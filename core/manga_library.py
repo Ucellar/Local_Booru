@@ -22,6 +22,7 @@ import hashlib
 import html
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -134,6 +135,11 @@ class Manga:
     set_place: int = 0
     info: dict = field(default_factory=dict)           # (v5.44.126) ``chapter.json`` of a chapter «Скачать» brought:
     #                                                    ``downloaded_at``, ``source`` (its site) — as a manhwa one's
+    # (v5.44.135) what a search finds it by besides its titles and tags (the description of its site, ``info.json``):
+    # its other names, its authors, its type, status and year
+    others: list = field(default_factory=list)
+    authors: list = field(default_factory=list)
+    facts: list = field(default_factory=list)
 
     @property
     def is_series(self) -> bool:
@@ -326,6 +332,14 @@ def _apply_meta(manga: Manga, data) -> None:
                 _add(manga.groups, "general", part)
     if isinstance(data.get("source_url"), str) and data["source_url"].startswith("http") and not manga.source_url:
         manga.source_url = data["source_url"]               # (v5.44.76) the description of a site's title
+    # (v5.44.135) the other names, the authors and the facts a site says («Скачать» writes them; nhentai's own meta has
+    # its artists as tags) — for the search of the folder (``webui/pages/manga._matches``) and the page
+    for key in ("alt_titles", "other_names", "otherNames", "alt_names", "synonyms"):
+        _words_into(manga.others, data.get(key))
+    for key in ("authors", "author", "mangaka"):
+        _words_into(manga.authors, data.get(key))
+    for key in ("type", "status", "year"):
+        _words_into(manga.facts, data.get(key))
     for key, value in data.items():
         group = _RU_GROUP_KEYS.get(str(key)) or (_group(key) if _group(key) != "general" or key in (
             "general", "genres", "genre") else "")
@@ -338,6 +352,20 @@ def _apply_meta(manga: Manga, data) -> None:
             for part in value:
                 if not isinstance(part, dict):
                     _add(manga.groups, group, part)
+
+
+def _words_into(bucket: list, value) -> None:
+    """(v5.44.135) A description's names (a string — split by «,», «;», lines; a list of strings or of {"name": …}) into
+    ``bucket``, each once."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = str(int(value)) if float(value).is_integer() else str(value)
+    items = re.split(r"[,;\n]+", value) if isinstance(value, str) else value if isinstance(value, list) else []
+    for item in items[:40]:
+        if isinstance(item, dict):
+            item = item.get("name") or item.get("title") or ""
+        text = html.unescape(str(item or "")).strip()[:200]
+        if text and text not in bucket:
+            bucket.append(text)
 
 
 def _adult_flag(data: dict) -> str:
@@ -379,7 +407,54 @@ def _linked(folder: Path) -> bool:
     return (folder / LB_DIR / "source.json").is_file()
 
 
-def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
+def _listing(folder: Path) -> tuple[list, list] | None:
+    """(the folders, the files — ``os.DirEntry``) right in ``folder``, read once; None — it cannot be read.
+    (v5.44.151) An entry of a folder's listing says what it is itself: the folder was read name by name and the disk
+    asked of every picture whether it is a file — 39 thousand questions for 400 titles at every reading (once a
+    minute while the pages are open, and before the first of them after a start)."""
+    dirs, files = [], []
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    (dirs if entry.is_dir() else files if entry.is_file() else []).append(entry)
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    return dirs, files
+
+
+def _files_in(folder: Path, recursive: bool, listed: tuple | None = None) -> tuple[list, dict]:
+    """(the files in ``folder`` — and, ``recursive``, in the folders inside it, the program's own ``.lb`` left out —,
+    {the name without the case of a file right in it: its path}); ``listed`` — the folder's own listing when it is
+    read already."""
+    out, own = [], {}
+    first = listed if listed is not None else _listing(folder)
+    todo = [(folder, first)]
+    while todo:
+        place, got = todo.pop()
+        if got is None:
+            got = _listing(place)
+            if got is None:
+                continue
+        dirs, files = got
+        for entry in files:
+            path = Path(entry.path)
+            out.append(path)
+            if place is folder:
+                own[entry.name.lower()] = path
+        if recursive:
+            for entry in dirs:
+                try:
+                    if entry.name != LB_DIR and not entry.is_symlink():
+                        todo.append((Path(entry.path), None))
+                except OSError:
+                    continue
+    return out, own
+
+
+def _read_folder(root: Path, folder: Path, *, recursive: bool = True, listed: tuple | None = None) -> Manga:
     title, source = _title_from_name(folder.name)
     manga = Manga(id=_id_for(root, folder), title=title, path=str(folder), source_url=source)
     try:
@@ -387,16 +462,14 @@ def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
     except OSError:
         pass
     manga.linked = _linked(folder)
-    files = folder.rglob("*") if recursive else folder.iterdir()
+    files, own = _files_in(folder, recursive, listed)
     pages = []
     from core.title_covers import is_aside
     for p in files:
         try:
-            if LB_DIR in p.relative_to(folder).parts[:-1] or p.name == LB_DIR:
-                continue                                  # (v5.44.76) the program's own: a chapter half-downloaded
             if p.parent == folder and is_aside(p.name):
                 continue                                  # (v5.44.123) a cover put aside («cover.old-…»): no page
-            if p.suffix.lower() in PAGE_EXTS and p.is_file():
+            if p.suffix.lower() in PAGE_EXTS:
                 if manga.linked and p.parent == folder and p.stem.lower() == COVER_STEM:
                     manga.cover_page = PageRef(str(p))
                     continue
@@ -406,21 +479,21 @@ def _read_folder(root: Path, folder: Path, *, recursive: bool = True) -> Manga:
     pages.sort(key=lambda p: natural_key(p.relative_to(folder).as_posix()))
     manga.pages = _expand_pdfs([PageRef(str(p)) for p in pages])
     for name in sorted(META_NAMES):
-        meta = folder / name
-        if meta.is_file():
+        meta = own.get(name)
+        if meta is not None:
             try:
                 _apply_meta(manga, _json_from_bytes(meta.read_bytes()))
             except OSError as exc:
                 _LOG.warning("manga metadata %s unreadable: %s", meta, exc)
     for name in ("tags.txt", ".tags.txt"):
-        txt = folder / name
-        if txt.is_file():
+        txt = own.get(name)
+        if txt is not None:
             try:
                 for part in re.split(r"[,\n]+", txt.read_text(encoding="utf-8", errors="ignore")):
                     _add(manga.groups, "general", part)
             except OSError as exc:
                 _LOG.warning("manga tags %s unreadable: %s", txt, exc)
-    manga.info = _chapter_info(folder)
+    manga.info = _chapter_info(folder) if CHAPTER_INFO in own else {}
     _bracket_tags(manga)
     return manga
 
@@ -472,11 +545,21 @@ def _read_archive(root: Path, archive: Path) -> Manga:
     return manga
 
 
-def _has_direct_pages(folder: Path) -> bool:
+def _has_direct_pages(folder: Path, listed: tuple | None = None) -> bool:
+    """A picture or a PDF right in the folder (``listed`` — its listing when it is read already)."""
+    if listed is not None:
+        return any(os.path.splitext(entry.name)[1].lower() in PAGE_EXTS for entry in listed[1])
     try:
-        return any(p.suffix.lower() in PAGE_EXTS and p.is_file() for p in folder.iterdir())
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                try:
+                    if os.path.splitext(entry.name)[1].lower() in PAGE_EXTS and entry.is_file():
+                        return True
+                except OSError:
+                    continue
     except OSError:
         return False
+    return False
 
 
 def _looks_like_chapter(name: str) -> bool:
@@ -484,8 +567,8 @@ def _looks_like_chapter(name: str) -> bool:
     return bool(re.fullmatch(r"(chapter|chap|ch|c|глава|гл)?[ _\-.]*\d+([ _\-.].*)?", name))
 
 
-def _series(root: Path, folder: Path, chapters: list[Manga]) -> Manga:
-    series = _read_folder(root, folder, recursive=False)
+def _series(root: Path, folder: Path, chapters: list[Manga], listed: tuple | None = None) -> Manga:
+    series = _read_folder(root, folder, recursive=False, listed=listed)
     if series.cover_page is None:                      # (v5.44.76) «cover.*» of a series is its cover, not a page
         cover = next((p for p in series.pages if Path(p.path).parent == folder and
                       Path(p.path).stem.lower() == COVER_STEM), None)
@@ -499,6 +582,9 @@ def _series(root: Path, folder: Path, chapters: list[Manga]) -> Manga:
         for group, tags in chapter.groups.items():
             for tag in tags:
                 _add(series.groups, group, tag)
+        for mine, theirs in ((series.others, chapter.others), (series.authors, chapter.authors),
+                             (series.facts, chapter.facts)):
+            _words_into(mine, theirs)           # (v5.44.135) a series is found by what its chapters' descriptions say
     return series
 
 
@@ -511,8 +597,9 @@ def _chapter_title(series_name: str, entry: Path, number: int, title: str) -> st
     return title
 
 
-def _mixed_series(root: Path, folder: Path, archives: list, subdirs: list) -> Manga:
-    """(v5.44.76) A series of archives, folders of pages and (as one chapter, first) the pictures right in its folder."""
+def _mixed_series(root: Path, folder: Path, archives: list, subdirs: list, listed: tuple | None = None) -> Manga:
+    """(v5.44.76) A series of archives, folders of pages and (as one chapter, first) the pictures right in its folder
+    (``listed`` — the folder's listing when it is read already)."""
     from core.manhwa_library import parse_name
 
     def order(entry: Path) -> tuple:
@@ -524,18 +611,19 @@ def _mixed_series(root: Path, folder: Path, archives: list, subdirs: list) -> Ma
         return (tome or 0, value, natural_key(entry.name))
     chapters = []
     entries = sorted([*archives, *subdirs], key=order)
-    if _has_direct_pages(folder):
-        loose = _read_folder(root, folder, recursive=False)
+    if _has_direct_pages(folder, listed):
+        loose = _read_folder(root, folder, recursive=False, listed=listed)
         loose.id = _id_for(root, folder / "__pages__")
         if loose.pages:
             loose.title = f"{_title_from_name(folder.name)[0]} — 1"
             chapters.append(loose)
+    files = {str(path) for path in archives}
     for n, entry in enumerate(entries, len(chapters) + 1):
-        chapter = _read_archive(root, entry) if entry.is_file() else _read_folder(root, entry)
+        chapter = _read_archive(root, entry) if str(entry) in files else _read_folder(root, entry)
         if chapter.pages:
             chapter.title = _chapter_title(folder.name, entry, n, chapter.title)
             chapters.append(chapter)
-    return _series(root, folder, chapters)
+    return _series(root, folder, chapters, listed)
 
 
 def scan(root) -> list[Manga]:
@@ -543,14 +631,16 @@ def scan(root) -> list[Manga]:
     if not str(root) or not root.is_dir():
         return []
     out = []
-    try:
-        entries = sorted(root.iterdir(), key=lambda p: natural_key(p.name))
-    except OSError as exc:
-        _LOG.warning("manga folder %s unreadable: %s", root, exc)
+    top = _listing(root)
+    if top is None:
+        _LOG.warning("manga folder %s unreadable", root)
         return []
-    for entry in entries:
+    entries = sorted([(entry, True) for entry in top[0]] + [(entry, False) for entry in top[1]],
+                     key=lambda item: natural_key(item[0].name))
+    for found, is_dir in entries:
+        entry = Path(found.path)
         try:
-            if entry.is_file():
+            if not is_dir:
                 if entry.suffix.lower() in ARCHIVE_EXTS:
                     manga = _read_archive(root, entry)
                     if manga.pages:
@@ -562,16 +652,18 @@ def scan(root) -> list[Manga]:
                     _bracket_tags(manga)
                     out.append(manga)
                 continue
-            if not entry.is_dir():
-                continue
-            archives = sorted((p for p in entry.iterdir() if p.is_file() and p.suffix.lower() in ARCHIVE_EXTS),
+            listed = _listing(entry)
+            if listed is None:
+                raise OSError(f"{entry.name} cannot be read")
+            archives = sorted((Path(e.path) for e in listed[1] if os.path.splitext(e.name)[1].lower() in ARCHIVE_EXTS),
                               key=lambda p: natural_key(p.name))
-            subdirs = sorted((p for p in entry.iterdir() if p.is_dir() and p.name != LB_DIR and _has_direct_pages(p)),
+            subdirs = sorted((Path(e.path) for e in listed[0] if e.name != LB_DIR and _has_direct_pages(Path(e.path))),
                              key=lambda p: natural_key(p.name))
-            if archives and subdirs or (archives or subdirs) and _has_direct_pages(entry) and _linked(entry):
+            direct = _has_direct_pages(entry, listed)
+            if archives and subdirs or (archives or subdirs) and direct and _linked(entry):
                 # (v5.44.76) a title of the archive the program added chapters to: its archives, folders of pages and
                 # pictures right in it — all its chapters, in the order of their tomes and numbers
-                out.append(_mixed_series(root, entry, archives, subdirs))
+                out.append(_mixed_series(root, entry, archives, subdirs, listed))
                 continue
             if archives:
                 chapters = []
@@ -581,7 +673,7 @@ def scan(root) -> list[Manga]:
                         chapter.title = _chapter_title(entry.name, arc, n, chapter.title)
                         chapters.append(chapter)
                 if chapters:
-                    out.append(_series(root, entry, chapters))
+                    out.append(_series(root, entry, chapters, listed))
                 continue
             if subdirs:
                 chapters = []
@@ -591,10 +683,10 @@ def scan(root) -> list[Manga]:
                         chapter.title = _chapter_title(entry.name, sub, n, chapter.title)
                         chapters.append(chapter)
                 if chapters:
-                    out.append(_series(root, entry, chapters))
+                    out.append(_series(root, entry, chapters, listed))
                 continue
-            if _has_direct_pages(entry):
-                manga = _read_folder(root, entry)
+            if direct:
+                manga = _read_folder(root, entry, listed=listed)
                 if manga.pages:
                     out.append(manga)
         except OSError as exc:            # one unreadable entry must not hide the whole library

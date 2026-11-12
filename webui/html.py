@@ -13,14 +13,17 @@ CATEGORY_TITLES = {
 
 # The pages of the main menu: (the page — ``page_frame``'s ``active`` —, its name, its address).  (v5.44.75) «Скачать»
 # — the grabber renamed; (v5.44.87) its parts: «По ссылке» (every kind by one field) and «Галерея (booru)» —
-# ``webui/pages/get_hub.py``.
+# ``webui/pages/get_hub.py``.  (v5.44.161, the mockup «Меню» approved 11.11.2026) Seven items — four to look at,
+# three to take from: «Сайты» and «Диагностика» are sections of «Настройки» now, «Дубли» — a tab of the gallery.
+# Their addresses are the same (/sites, /diag, /dupes).
 MENU = (("posts", "Галерея", "/posts"), ("manga", "Манга", "/manga"), ("manhwa", "Манхва", "/manhwa"),
         ("videos", "Видео", "/videos"), ("get", "Скачать", "/get"), ("parser", "Парсер", "/parser"),
-        ("subs", "Подписки", "/subs"), ("sites", "Сайты", "/sites"), ("dupes", "Дубли", "/dupes"),
-        ("diag", "Диагностика", "/diag"))
+        ("subs", "Подписки", "/subs"))
 # Pages that live inside a menu item (v5.39: «Теги» are the gallery's tags — a tab of «Галерея» after its sections,
-# not a menu item of their own).  The page keeps its own look (``prefs.look("tags")``).
-MENU_OF = {"tags": "posts"}
+# not a menu item of their own; v5.44.161: «Дубли» — the same) or inside «Настройки» (its gear in the header is the
+# one marked: «Сайты», «Диагностика»).  «Теги» keep their own look (``prefs.look("tags")``); the others take the look
+# of where they live (``prefs.LOOK_OF``).
+MENU_OF = {"tags": "posts", "dupes": "posts", "sites": "settings", "diag": "settings"}
 PAGE_NAMES = {**{key: name for key, name, _href in MENU}, "tags": "Теги", "settings": "Настройки"}
 
 # Sections of the gallery (the bucket filter of the old gallery), in menu order.
@@ -89,15 +92,19 @@ def _skin_item(choice: str, name: str, description: str, swatches, on: bool, ext
 
 
 def _motion_item(motion: str) -> str:
-    """(v5.44.55) «Плавные переходы» at the foot of the menu «Оформление»: on every page at once (``prefs.motion``)."""
-    on = motion != "off"
-    said = ("включены — страницы и картинки появляются мягко" if on else "выключены — всё сменяется сразу")
-    return (f'<button type="button" role="menuitemcheckbox" aria-checked="{"true" if on else "false"}" '
-            f'class="skin-item skin-motion" data-action="motion"><span class="skin-text"><b>Плавные переходы</b>'
-            f'<small>{esc(said)}</small></span></button>')
+    """(v5.44.55) «Плавные переходы» at the foot of the menu «Оформление»: on every page at once (``prefs.motion``);
+    (v5.44.158) three positions — «Нет», «Спокойные», «Заметные»."""
+    from webui import prefs
+    buttons = "".join(
+        f'<button type="button" class="skin-vbtn{" active" if motion == level else ""}" data-action="motion" '
+        f'data-level="{level}" aria-pressed="{"true" if motion == level else "false"}">{esc(prefs.MOTION_WORDS[level])}'
+        f'</button>' for level in ("none", "calm", "vivid"))
+    return (f'<div class="skin-motion" role="group" aria-label="Плавные переходы">'
+            f'<span class="skin-text"><b>Плавные переходы</b><small>страницы, меню, плитки под курсором, ход загрузок'
+            f'</small></span><span class="skin-levels">{buttons}</span></div>')
 
 
-def _skin_menu(look: dict, page: str, motion: str = "on") -> str:
+def _skin_menu(look: dict, page: str, motion: str = "vivid") -> str:
     """The menu «Оформление»: the look of this page only (``prefs.look``); «как у галереи» on the other pages; one
     look for all pages; (v5.44.55) «Плавные переходы» for all pages."""
     from webui.skins import BY_ID, SKINS
@@ -140,7 +147,7 @@ _GEAR = ('<svg class="gear-icon" viewBox="0 0 16 16" aria-hidden="true" focusabl
 
 
 def _settings_link(active: str) -> str:
-    on = active == "settings"
+    on = MENU_OF.get(active, active) == "settings"       # (v5.44.161) its sections «Сайты» and «Диагностика» too
     current = ' aria-current="page"' if on else ""
     return (f'<a class="skin-button settings-link{" active" if on else ""}" href="/settings" title="Настройки"'
             f'{current}>{_GEAR}<span class="skin-label">Настройки</span></a>')
@@ -160,6 +167,24 @@ def _back_button() -> str:
             '<span class="skin-label">Назад</span></button>')
 
 
+# (v5.44.153) «?» of the header: a line mark in the colour of the buttons beside it, as the gear and the arrow
+_HELP = ('<svg class="help-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M5.2 5.6a2.9 2.9 0 '
+         '1 1 4.5 2.4C8.6 8.7 8 9.3 8 10.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+         'stroke-linejoin="round"/><circle cx="8" cy="13.7" r="1.25" fill="currentColor"/></svg>')
+
+
+def _help_link(active: str, kind: str = "", mode: str = "all") -> str:
+    """(v5.44.153; the owner: «нет инструкции по использованию программы») «?» — the help, at the section about this
+    page (``webui/pages/help.py``: ``address``): the button of «Настройки» with a question mark."""
+    from webui.pages import help as help_page
+    on = active == "help"
+    said = "Справка" if on else "Справка: как пользоваться этой страницей"
+    current = ' aria-current="page"' if on else ""
+    href = esc(help_page.address(active, kind, mode))
+    return (f'<a class="skin-button help-link{" active" if on else ""}" href="{href}" title="{said}" '
+            f'aria-label="Справка"{current}>{_HELP}<span class="skin-label">Справка</span></a>')
+
+
 # The stylesheet and the script of a page of the menu (``page_frame``'s ``assets``, else its ``active``)
 PAGE_CSS = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
             "manhwa": '\n<link rel="stylesheet" href="/static/manhwa.css">',
@@ -173,7 +198,8 @@ PAGE_CSS = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
             "title": '\n<link rel="stylesheet" href="/static/title.css">',        # (v5.44.102) a title of «Лента»
             "watch": '\n<link rel="stylesheet" href="/static/watch.css">',       # (v5.44.106) «Смотреть» a series
             "covers": '\n<link rel="stylesheet" href="/static/covers.css">',     # (v5.44.123) the menu of covers
-            "downloads": '\n<link rel="stylesheet" href="/static/downloads.css">'}  # (v5.44.120) «Скачать → Загрузки»
+            "downloads": '\n<link rel="stylesheet" href="/static/downloads.css">',  # (v5.44.120) «Скачать → Загрузки»
+            "help": '\n<link rel="stylesheet" href="/static/help.css">'}           # (v5.44.153) «Справка»
 PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            "manga": '\n<script src="/static/manga.js" defer></script>',
            "manhwa": '\n<script src="/static/manhwa.js" defer></script>',
@@ -193,6 +219,7 @@ PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            "dupes": '\n<script src="/static/dupes.js" defer></script>',
            "downloads": '\n<script src="/static/downloads.js" defer></script>',   # (v5.44.120) «Загрузки»
            "diag": '\n<script src="/static/diag.js" defer></script>',
+           "help": '\n<script src="/static/help.js" defer></script>',            # (v5.44.153) «Справка»
            "settings": '\n<script src="/static/settings.js" defer></script>'
                        '\n<script src="/static/phone-relay.js" defer></script>'
                        '\n<script src="/static/manga-sites.js" defer></script>'}
@@ -230,6 +257,9 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
             links.append(f'<a href="{esc(url("/posts", tags=search, section=key))}"{cls}>{label}</a>')
         tags_on = ' class="sections-tags active" aria-current="page"' if active == "tags" else ' class="sections-tags"'
         links.append(f'<span class="sections-sep" aria-hidden="true"></span><a href="/tags"{tags_on}>Теги</a>')
+        # (v5.44.161) «Дубли» — the gallery's tool, among its tabs (it was an item of the menu)
+        dupes_on = ' active" aria-current="page' if active == "dupes" else ""
+        links.append(f'<a href="/dupes" class="sections-dupes{dupes_on}">Дубли</a>')
         sections = f'<nav class="sections" aria-label="Разделы галереи">{"".join(links)}</nav>'
     elif tabs:
         links = [f'<a href="{esc(href)}" class="active" aria-current="page">{esc(label)}</a>' if current
@@ -268,7 +298,7 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
   <a class="brand" href="{content_mode.home(mode)}"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name"><span class="bn-1">Local</span> <span class="bn-2">Booru</span></span></a>
   <nav class="main-nav" aria-label="Основное меню">{"".join(nav)}</nav>
   {top_search}
-  <div class="top-tools">{_back_button()}{drawer_button}{_downloads_badge()}{content_mode.switch(mode)}{_settings_link(active)}{_skin_menu(look, active, motion)}<span class="tray-clock" aria-hidden="true"></span></div>
+  <div class="top-tools">{_back_button()}{drawer_button}{_downloads_badge()}{content_mode.switch(mode)}{_help_link(active, kind, mode)}{_settings_link(active)}{_skin_menu(look, prefs.LOOK_OF.get(active, active), motion)}<span class="tray-clock" aria-hidden="true"></span></div>
 </header>
 {sections}
 <div class="{layout_cls}">
@@ -301,7 +331,7 @@ def _reset_notice() -> str:
 
 
 def _archive_notice() -> str:
-    """Another archive was chosen on «Настройки → Папки»: every page says it opens at the next start."""
+    """Another archive was chosen on «Настройки → Хранение и копии»: every page says it opens at the next start."""
     from core.archive_switch import pending
     nxt = pending()                               # the choice of this run: no disk is looked at
     if nxt is None:

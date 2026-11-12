@@ -33,6 +33,7 @@ The pages: ``/get/downloads`` (a part of «Скачать», ``get_hub.PARTS``) 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import re
 import threading
@@ -48,8 +49,11 @@ ADDRESS = "/get/downloads"
 PHONE_ADDRESS = "/m/get/downloads"
 RUNNING = ("starting", "running", "stopping")
 BIG = 10 ** 9                       # «after» of a journal: no lines
-DONE_SHOWN = 8                      # lines of «Готово» shown before «Вся история за 7 дней»
+DONE_SHOWN = 8                      # titles of «Готово» shown before «Вся история за 7 дней»
 FAILS_SHOWN = 6                     # what did not come, named under a line of «Готово»
+EARLIER_SHOWN = 12                  # a title's earlier downloads named under its last one
+DOWNLOADS = ("скачивание", "скачивания", "скачиваний")
+CHECKS = ("проверка", "проверки", "проверок")
 CHAPTERS = ("глава", "главы", "глав")
 GALLERIES = ("галерея", "галереи", "галерей")
 FILES = ("файл", "файла", "файлов")
@@ -211,8 +215,10 @@ def _subs_raw() -> dict:
         return {"status": "idle"}
     snap = job.snapshot(after=BIG)
     sub = job.subs[0] if job.subs else {}
-    snap.update(can_skip=job.can_skip(), cards=int(sub.get("cards") or 0) if job.kind == "grab" else 0,
-                query=str(sub.get("query") or "") if job.kind == "grab" else "", going=not job.finished_at)
+    one_off = job.kind in ("grab", "favorites")          # (v5.44.141) an account's favorites: as the grabber's
+    snap.update(can_skip=job.can_skip(), cards=int(sub.get("cards") or 0) if one_off else 0,
+                query=str(sub.get("query") or "") if job.kind == "grab" else "",
+                name=str(sub.get("name") or "") if job.kind == "favorites" else "", going=not job.finished_at)
     return snap
 
 
@@ -282,15 +288,26 @@ def _manhwa_rows(st: dict, out: dict) -> None:
         title = str(m.get("title") or "") or _unquote(st.get("label"), r"^Скачать:\s*")
         current = HIDDEN if hidden else title
         paused = bool(st.get("paused"))
+        # (v5.44.163) the round of new chapters waits for the person to leave the computer: a pause of the program's
+        # own — its words, «Продолжить» lets it go on now (``manhwa_run.wait_away``, ``go_on``)
+        held = bool(st.get("held")) and not paused and st.get("status") != "stopping"
         now = m.get("now") if isinstance(m.get("now"), dict) else None
         total = int(m.get("total") or 0)
         done, failed = int(m.get("done") or 0), int(m.get("failed") or 0)
         manga = m.get("kind") == "manga"
         row = _row("manhwa", st.get("what") or "Манхва", title or ("Новые главы" if night else ""), task=st.get("id"),
-                   dest="в папку манги" if manga else "в папку манхвы", state="paused" if paused else "running",
-                   pause=not paused and st.get("status") != "stopping", resume=paused)
+                   dest="в папку манги" if manga else "в папку манхвы",
+                   state="paused" if paused or held else "running",
+                   pause=not paused and not held and st.get("status") != "stopping", resume=paused or held)
         if st.get("status") == "stopping":
             row.update(state="stopping", text="Останавливаю…")
+        elif held:
+            from core.manhwa_run import HELD_ROW
+            row["text"] = HELD_ROW
+            row["sub"] = " · ".join(x for x in (f"Глав: {done} из {total}" if total else "",
+                                                "ночная проверка новых глав") if x)
+            if total:
+                row["part"] = min(1.0, (done + failed) / total)
         elif total:
             part = now["got"] / now["pages"] if now and now.get("pages") else 0
             row["part"] = min(1.0, (done + failed + part) / total)
@@ -312,7 +329,10 @@ def _manhwa_rows(st: dict, out: dict) -> None:
             row["text"] = ("Пауза" + (" — " if bits else "") if paused else "") + " · ".join(bits)
             sub = [f"Глав: {done} из {total}"]
             retry = [x for x in st.get("items") or [] if x.get("state") == "retry"]
-            if m.get("retrying"):
+            seeking = [x for x in retry if x.get("seek")]      # (v5.44.146) the other sites asked once more
+            if seeking:
+                sub.append("ищу на других сайтах" + ("" if hidden else f": {seeking[0].get('label')}"))
+            elif m.get("retrying"):
                 first = retry[0] if retry and not hidden else None
                 sub.append(f"ждёт повтора: {m['retrying']}" + (f" — {first.get('label')}, через {first.get('again', 0)} с"
                                                                if first else ""))
@@ -478,12 +498,17 @@ def _manga_rows(st: dict, out: dict) -> None:
 def _subs_rows(st: dict, out: dict, sfw: bool) -> None:
     if not st.get("going") or st.get("status") not in ("starting", "running", "waiting", "stopping"):
         return
-    grab = st.get("kind") == "grab"
+    favorites = st.get("kind") == "favorites"            # (v5.44.141) an account's favorites — as the grabber's
+    grab = st.get("kind") == "grab" or favorites
     paused = bool(st.get("paused"))
     got = int(st.get("downloaded") or 0)
-    row = _row("subs", "Галерея (booru)" if grab else "Подписки",
-               str(st.get("query") or "выбранное") if grab else str(st.get("label") or "Подписки"),
-               task=st.get("id"), dest="в галерею", state="paused" if paused else "running",
+    if favorites:
+        word, title = "Избранное", str(st.get("name") or st.get("label") or "Избранное").replace("Избранное: ", "", 1)
+    elif grab:
+        word, title = "Галерея (booru)", str(st.get("query") or "выбранное")
+    else:
+        word, title = "Подписки", str(st.get("label") or "Подписки")
+    row = _row("subs", word, title, task=st.get("id"), dest="в галерею", state="paused" if paused else "running",
                pause=not paused and st.get("status") != "stopping", resume=paused)
     if st.get("status") == "stopping":
         row.update(state="stopping", text="Останавливаю: докачиваю текущий файл…")
@@ -596,7 +621,7 @@ def _board(phone: bool) -> str:
         <ol class="dl-queue"></ol>
       </section>
       <section class="dl-panel dl-done-panel" aria-labelledby="dl-done-title">
-        <h2 id="dl-done-title">Готово <small>что пришло и что нет — последние результаты</small></h2>
+        <h2 id="dl-done-title">Готово <small>что пришло и что нет — последнее по каждому тайтлу</small></h2>
         <ol class="dl-done"></ol>
         <p class="dl-empty dl-done-empty" hidden>За последние 7 дней загрузок не было.</p>
         <button type="button" class="dl-link dl-more" data-done-all hidden>Вся история за 7 дней</button>
@@ -608,7 +633,8 @@ def _board(phone: bool) -> str:
         <p class="dl-lead">Что программа делает без вас, пока она открыта. Выключатели — те же, что в «Настройках».</p>
         <ol class="dl-duties"></ol>
         <p class="dl-foot">Мелкие дела — длина видео, опенинги и эндинги серий, категории тегов, «фото или рисунок» —
-          идут сами и здесь не показываются.</p>
+          идут сами и здесь не показываются. Тяжёлые дела (проверка новых глав, опенинги и эндинги, «фото или
+          рисунок») работают, только пока за компьютером никого нет: стоит тронуть мышь или клавишу — ждут.</p>
       </section>
     </aside>
   </div>
@@ -718,7 +744,29 @@ def _entry_hidden(entry: dict, settings: dict) -> bool:
     return False
 
 
-def _done_row(entry: dict, settings: dict, sfw: bool, now: float) -> dict:
+def _earlier(entries: list, hidden: bool, now: float) -> dict:
+    """(v5.44.151) A title's downloads before its last one, for the fold under it: {"words": «Раньше — ещё 3
+    скачивания за 7 дней (1 — не полностью)», "lines": [{"sign", "when", "what"}]} — {} when there were none."""
+    if not entries:
+        return {}
+    checks = all(x.get("kind") == "subs" or x.get("summary") for x in entries)
+    amiss = sum(1 for x in entries if x.get("sign") in ("part", "fail"))
+    words = f"Раньше — ещё {plural(len(entries), CHECKS if checks else DOWNLOADS)} за 7 дней"
+    if amiss:
+        words += f" ({amiss} — не полностью)" if not checks else f" ({amiss} — с ошибками)"
+    lines = []
+    for entry in entries[:EARLIER_SHOWN]:
+        said = re.sub(r":\s*$", ".", str(entry.get("said") or ""))
+        if hidden:
+            said = re.sub(r"«[^»]*»", "", said).strip()
+        when = _when(float(entry.get("at") or 0), now) + (" · ночная проверка" if entry.get("night") else "")
+        lines.append({"sign": entry.get("sign") or "ok", "when": when, "what": said})
+    if len(entries) > EARLIER_SHOWN:
+        lines.append({"sign": "", "when": "", "what": f"…и ещё {len(entries) - EARLIER_SHOWN}"})
+    return {"words": words, "lines": lines}
+
+
+def _done_row(entry: dict, settings: dict, sfw: bool, now: float, earlier: list | None = None) -> dict:
     from webui.pages.manhwa_get import HIDDEN, HIDDEN_KIND
     hidden = sfw and _entry_hidden(entry, settings)
     fails = list(entry.get("fails") or [])
@@ -727,7 +775,7 @@ def _done_row(entry: dict, settings: dict, sfw: bool, now: float) -> dict:
     if retry and entry.get("kind") == "video" and retry.get("url"):
         from webui.pages.get_link import link_of
         tool = {"label": "Повторить не скачавшееся", "href": link_of(str(retry["url"])), "count": len(fails)}
-    elif retry and entry.get("kind") == "grab":
+    elif retry and entry.get("kind") in ("grab", "favorites"):
         tool = {"label": f"Докачать остальные ({int(retry.get('count') or 0)})", "id": entry["id"]}
     elif retry:
         count = len(retry.get("chapters") or retry.get("numbers") or [])
@@ -741,25 +789,33 @@ def _done_row(entry: dict, settings: dict, sfw: bool, now: float) -> dict:
            "fails": [f"{f.get('label')} — {f.get('why')}" if f.get("why") else str(f.get("label") or "")
                      for f in fails[:FAILS_SHOWN]] + ([f"…и ещё {len(fails) - FAILS_SHOWN}"]
                                                        if len(fails) > FAILS_SHOWN else []),
-           "retry": tool, "open": can_open}
+           "note": str(entry.get("note") or ""),       # (v5.44.146) where the chapters were looked for
+           "retry": tool, "open": can_open,
+           "earlier": _earlier(earlier or [], hidden, now)}     # (v5.44.151) the title's downloads before this one
     if hidden:
         numbers = re.sub(r":\s*$", ".", str(entry.get("said") or ""))
         numbers = re.sub(r"«[^»]*»", "", numbers).strip()
-        row.update(title=HIDDEN, kind=HIDDEN_KIND, fails=[], open=False, what=numbers)
+        row.update(title=HIDDEN, kind=HIDDEN_KIND, fails=[], open=False, what=numbers, note="")
         if tool and tool.get("href"):
             row["retry"] = None                       # a link would name the title's page
     return row
 
 
 def done_api(req: Request) -> Response:
-    """«Готово»: the newest lines (``all=1`` — the whole 7 days)."""
+    """«Готово»: a row a title — its last download, the earlier ones folded under it (``download_history.grouped``);
+    the titles downloaded last (``all=1`` — of the whole 7 days)."""
     from core import download_history
     sfw = _sfw()
     now = time.time()
-    items = download_history.entries(now)
-    shown = items if req.arg("all") == "1" else items[:DONE_SHOWN]
-    return Response.json({"ok": True, "rev": download_history.revision(), "total": len(items),
-                          "rows": [_done_row(x, req.settings, sfw, now) for x in shown]})
+    groups = download_history.grouped(now)
+    shown = groups if req.arg("all") == "1" else groups[:DONE_SHOWN]
+    rows = []
+    for group in shown:
+        row = _done_row(group[0], req.settings, sfw, now, group[1:])
+        # what the page remembers an unfolded title by (not its name: a row hidden by «SFW» has none)
+        row["key"] = hashlib.md5(download_history.title_key(group[0]).encode("utf-8")).hexdigest()[:12]
+        rows.append(row)
+    return Response.json({"ok": True, "rev": download_history.revision(), "total": len(groups), "rows": rows})
 
 
 def _task_of(key: str):
@@ -1007,13 +1063,19 @@ def _retry(settings: dict, entry: dict, retry: dict) -> str:
         except page_jobs.TaskBusy as exc:
             raise _Refused(f"{exc}. Дождитесь конца.") from exc
         return f"Скачиваю снова: {plural(len(numbers), GALLERIES)}"
-    if kind == "grab" and isinstance(retry.get("sub"), dict):
+    if kind in ("grab", "favorites") and isinstance(retry.get("sub"), dict):
         from core import subscription_jobs as J
+        # the posts found before wait in the seed cache: no scan («given_posts» empty), only their download
         sub = dict(retry["sub"], given_posts={}, max_pages=1, run_mode="all", one_off=True)
+        sub.pop("given_ids", None)
         sub["run_direction"] = sub.get("run_direction") or "newest_to_oldest"
+        label = (f"{sub.get('name') or 'Избранное'}: докачать" if kind == "favorites"
+                 else f"Галерея (booru): докачать — {sub.get('query') or ''}")
         try:
-            J.start(dict(settings), [sub], label=f"Галерея (booru): докачать — {sub.get('query') or ''}", kind="grab",
-                    forget_seeds=True)
+            if kind == "favorites":
+                from core import favorites
+                favorites.register()                  # its files go to the parser after it
+            J.start(dict(settings), [sub], label=label, kind=kind, forget_seeds=True)
         except J.SubscriptionsBusy as exc:
             raise _Refused(f"{exc}. Когда это закончится, нажмите ещё раз.") from exc
         return "Докачиваю остальные"
@@ -1098,12 +1160,21 @@ def duties(settings: dict) -> list:
     task = page_jobs.current(D.TASK)
     round_going = task is not None and task.running and task.label == B.ROUND_LABEL
     last = download_history.last_round()
+    night_action = None                              # (v5.44.163) «Проверить сейчас» / «Продолжить сейчас»
     if round_going:
         meter = D.R.meter(since=10 ** 12, run=-1)[0]
         state, status = "running", "идёт сейчас" + (f" — «{meter['title']}»" if meter.get("title") and not sfw else "")
+        if D.R.held():                               # it waits for the person to leave the computer
+            status = "ждёт, пока вы отойдёте от компьютера, — чтобы не занимать процессор"
+            night_action = {"act": "night", "label": "Продолжить сейчас"}
     elif not on:
         state, status = "off", "выключено — новые главы сами не скачиваются"
+    elif B.waits("manhwa"):                          # its time has come: it begins when the person has left
+        state, status = "idle", ("пора проверить — начнётся, когда вы отойдёте от компьютера (так проверка не "
+                                 "занимает процессор, пока он вам нужен)")
+        night_action = {"act": "night", "label": "Проверить сейчас"}
     else:
+        night_action = {"act": "night", "label": "Проверить сейчас"}
         if last.get("at"):
             when, titles, got = last["at"], last.get("titles", 0), last.get("got", 0)
         else:
@@ -1123,7 +1194,8 @@ def duties(settings: dict) -> list:
             state, status = "idle", "ещё не было — будет ночью (компьютер был выключен ночью — после запуска)"
     rows.append(_duty("night", "Новые главы — ночью",
                       f"Тайтлы с галочкой «Новые главы — скачивать самой» (сейчас {_followed(settings)}) проверяются "
-                      "раз в сутки, ночью.", setting=_switch(settings, "night"), state=state, status=status))
+                      "раз в сутки, ночью — или днём, когда вы отошли от компьютера.",
+                      setting=_switch(settings, "night"), state=state, status=status, action=night_action))
     # the comics of the gallery to the manga folder
     from core import comic_manga
     on = bool(settings.get("comic_manga_auto", True))
@@ -1267,8 +1339,30 @@ def duty_api(req: Request) -> Response:
 
 def duty_act_api(req: Request) -> Response:
     """«Проверить сейчас» of «Сама программа» — where it is there already: the comics (``comic_manga.check_now``), the
-    subscriptions (every one switched on, as «Проверить все» of «Подписки»)."""
+    subscriptions (every one switched on, as «Проверить все» of «Подписки»); (v5.44.163) the round of new chapters —
+    begun now whoever is at the computer (``background_duties.start_round`` ``asked``), or, when it goes and waits
+    for the person to leave, let go on («Продолжить сейчас»: ``manhwa_run.go_on``)."""
     key = str(req.json().get("key") or "")
+    if key == "night":
+        from core import background_duties as B, manhwa_download as D, manhwa_queue as Q, page_jobs
+        task = page_jobs.current(D.TASK)
+        if task is not None and task.running:
+            if task.label != B.ROUND_LABEL:
+                return Response.json({"ok": False, "error": "Сейчас идёт скачивание — дождитесь его конца"}, 409)
+            if not D.R.held():
+                return Response.json({"ok": False, "error": "Проверка уже идёт"}, 409)
+            D.R.go_on()
+            task._say("ПРОДОЛЖАЮ: вы сказали не ждать — новые главы проверяются сейчас")
+            return Response.json({"ok": True, "message": "Продолжаю — проверка идёт"})
+        if Q.waiting():
+            return Response.json({"ok": False, "error": "В очереди есть скачивание — дождитесь его конца"}, 409)
+        duties_now = B.current()
+        live = duties_now._settings if duties_now is not None else (lambda settings=dict(req.settings): settings)
+        try:
+            B.start_round(live, asked=True)
+        except page_jobs.TaskBusy:
+            return Response.json({"ok": False, "error": "Проверка уже идёт"}, 409)
+        return Response.json({"ok": True, "message": "Проверка новых глав идёт — её видно в «Загрузках»"})
     if key == "comics":
         from core import comic_manga, page_jobs
         try:

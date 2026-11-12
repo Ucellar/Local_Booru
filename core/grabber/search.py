@@ -155,12 +155,15 @@ class GrabberSearch:
             return out
 
     def _page(self, site) -> list:
-        from core.parser.http import HttpFailure
+        from core.parser.http import Cancelled, HttpFailure
         from core.parser.sites import SiteUnavailable
         from core.redaction import sanitize_text
         lane = self.lanes[site.host]
         try:
             pairs = self._ask(site, lane["page"])
+        except Cancelled:                     # the one asking would wait no longer (``_GrabberHttp.hurry``)
+            self._failed(lane, "не ответил вовремя")
+            return []
         except SiteUnavailable as exc:
             if site.disabled_reason or not exc.transient:      # a key, Cloudflare, a refusal: for good
                 lane["error"] = sanitize_text(site.disabled_reason or str(exc))
@@ -285,9 +288,19 @@ class GrabberSearch:
 
 class _GrabberHttp(HttpClient):
     """The parser's client with fewer tries: a page of results waits for its slowest site."""
+    attempts = ATTEMPTS
+
+    def hurry(self, timeout: tuple, attempts: int, over) -> None:
+        """A question a page shown already waits for (``core/set_remote.py``, v5.44.152): shorter waits for the site,
+        ``attempts`` tries of a request, and once ``over()`` — nothing more is sent, the request waiting for its turn at
+        the site (the program's throttle, a pause the site asked for) gives up."""
+        self.timeout = (float(timeout[0]), float(timeout[1]))
+        self.attempts = max(1, int(attempts))
+        self.cancel_check = over
+        self._limiter_settings["_cancel_callback"] = over
 
     def request(self, method, url, **kwargs):
-        kwargs["attempts"] = min(int(kwargs.get("attempts", 3) or 3), ATTEMPTS)
+        kwargs["attempts"] = min(int(kwargs.get("attempts", 3) or 3), self.attempts)
         return super().request(method, url, **kwargs)
 
 
@@ -308,11 +321,12 @@ def open_link(settings: dict, url: str) -> GrabberSearch:
     if not search.sites:
         search.close()
         raise LinkError(f"С сайта {host} «Галерея (booru)» брать не умеет: только с booru-сайтов (Danbooru, Gelbooru, "
-                        "rule34, e621, Moebooru, rule34.us…). Свой booru-сайт можно добавить на странице «Сайты».")
+                        "rule34, e621, Moebooru, rule34.us…). Свой booru-сайт можно добавить: «Настройки → Парсер и "
+                        "сайты».")
     reason = search.sites[0].disabled_reason
     if reason:
         search.close()
-        raise LinkError(f"{reason} — впишите это на странице «Сайты»")
+        raise LinkError(f"{reason} — впишите это: «Настройки → Парсер и сайты»")
     with _LOCK:
         _SEARCHES[search.id] = search
         _drop_old()

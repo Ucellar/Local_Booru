@@ -63,6 +63,9 @@ class ReverseOutcome:
     source_only: list = field(default_factory=list)   # dicts: url, label, similarity
     retry_after: float = 0.0
     detail: str = ""
+    # (v5.44.164) SauceNAO alone: the manga its answer names (``manga_pictures.manga_hits`` — the title, the chapter,
+    # how alike): a picture no booru site has may be a page of one (``core/parser_loose.py``)
+    manga: list = field(default_factory=list)
 
 
 @dataclass

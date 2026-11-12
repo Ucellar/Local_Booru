@@ -205,7 +205,10 @@ html:has(.rd[data-mode="strip"]) { overflow-anchor: none; }      /* the strip ke
   box-shadow: var(--shadow);
   text-align: left;
 }
-:where(:root[data-motion="on"]) .rd .rd-list:not([hidden]) { animation: lb-drop 0.15s cubic-bezier(0.2, 0.8, 0.2, 1); }
+/* (v5.44.158) the list drops from under its button: by translate and scale of its own, so the transform that
+   centres it stays (the keyframes of the menus set transform — the list came sliding from half its width aside) */
+:where(:root[data-motion="on"]) .rd .rd-list:not([hidden]) { transform-origin: top center; animation: rd-drop var(--m-menu) var(--m-ease); }
+@keyframes rd-drop { from { opacity: 0; translate: 0 var(--m-menu-y); scale: var(--m-menu-s); } }
 .rd .rd-list-head { display: flex; justify-content: space-between; gap: 10px; margin: 2px 6px 6px; color: var(--muted);
   font-size: 12.5px; }
 .rd .rd-list-head a { color: var(--accent-text, var(--accent)); }

@@ -139,6 +139,19 @@ class Online:
             self._pictures.clear()
             self._bytes = 0
 
+    def forget_title(self, found) -> None:
+        """(v5.44.146) ``found`` (``manhwa_download.Found``) has more sites now — a download asked the ones that had
+        not answered when it was found: what is kept of it here is let go.  A chapter's address is its place in the
+        list (``takes``), and with a site more that place may be another chapter's."""
+        with self._lock:
+            keys = {key for key, reading in self._titles.items() if reading.found is found}
+            for key in keys:
+                del self._titles[key]
+            for ckey in [c for c in self._chapters if c[0] in keys]:
+                del self._chapters[ckey]
+            for pkey in [x for x in self._pictures if x[0] in keys]:
+                self._bytes -= len(self._pictures.pop(pkey)[0])
+
     # ── the title ───────────────────────────────────────────────────────────────────────────────────────────────
     def _card(self, key: str):
         """The card's own search, when it found this title (``manhwa_get``'s task «Найти»: the same title — by its
@@ -222,9 +235,12 @@ class Online:
                 return reading, kept
         net = self.net()
         why = ""
-        for candidate in (take, take.alt):
-            if candidate is None or candidate.source is None:
-                continue
+        from core.manhwa_run import options_of
+        # (v5.44.146) every site that has the chapter (each take's ``alt``), not two; (v5.44.136) one that gives the
+        # program no pictures lately — after the others
+        candidates = sorted((c for c in options_of(take) if c.source is not None),
+                            key=lambda c: bool(S.withheld(c.source.label)))
+        for candidate in candidates:
             try:
                 pictures = candidate.source.pictures(net, candidate.title, candidate.ref)
             except S.SourceError as exc:
@@ -278,6 +294,13 @@ class Online:
         except S.SourceError as exc:
             with self._lock:                         # the addresses may have gone stale: asked anew next time
                 self._chapters.pop((pkey[0], n), None)
+            if isinstance(exc, S.Withheld):          # (v5.44.136) its site gives the program no pictures
+                from core.manhwa_run import options_of
+                take = reading.takes[n - 1] if 1 <= n <= len(reading.takes) else None
+                other = next((c for c in options_of(take) if c.source is not None and c.source is not pages.source),
+                             None)
+                raise OnlineError(str(exc) + (f". Откройте главу заново — она откроется с {other.source.label}"
+                                              if other is not None else "")) from exc
             raise OnlineError(f"{pages.source.label}: страница не пришла — {exc}") from exc
         from core.manhwa_download import _picture_type
         ext = _picture_type(data, ctype)
@@ -491,6 +514,41 @@ class Progress:
             return {}
         value = self.read().get(key)
         return value if isinstance(value, dict) else {}
+
+    # (v5.44.148) what is read without downloading and is not a title of a manga site — a gallery of nhentai
+    # (``core/gallery_read.py``): the same file, a key of its own («nhentai:<number>»)
+    def record(self, key: str) -> dict:
+        """The record kept under ``key`` ({} — none)."""
+        value = self.read().get(str(key))
+        return value if isinstance(value, dict) else {}
+
+    def put_record(self, key: str, fields: dict) -> None:
+        """``fields`` over the record kept under ``key`` (its ``mode`` stays), ``at`` — now; the records read longest
+        ago go past :data:`PROGRESS_KEPT`, as the titles' do."""
+        from core.file_safety import write_json_kept
+        with self._lock:
+            data = self.read()
+            old = data.get(str(key)) if isinstance(data.get(str(key)), dict) else {}
+            data[str(key)] = {**fields, "at": int(time.time()),
+                              **({"mode": old["mode"]} if old.get("mode") in MODES else {})}
+            if len(data) > PROGRESS_KEPT:
+                for gone in sorted(data, key=lambda k: data[k].get("at", 0) if isinstance(data[k], dict) else 0)[
+                        :len(data) - PROGRESS_KEPT]:
+                    data.pop(gone, None)
+            write_json_kept(self.file(), json.dumps(data, ensure_ascii=False, indent=1), dict)
+
+    def put_record_mode(self, key: str, mode: str) -> None:
+        """The way the thing under ``key`` is read, as the owner chose it ("" — «авто»)."""
+        from core.file_safety import write_json_kept
+        with self._lock:
+            data = self.read()
+            record = data.get(str(key)) if isinstance(data.get(str(key)), dict) else {"at": int(time.time())}
+            if mode in MODES:
+                record["mode"] = mode
+            else:
+                record.pop("mode", None)
+            data[str(key)] = record
+            write_json_kept(self.file(), json.dumps(data, ensure_ascii=False, indent=1), dict)
 
 
 PROGRESS = Progress()

@@ -1,4 +1,5 @@
 """(v5.44.120) «Загрузки → Готово» — what each download brought and what it did not, and why, for 7 days.
+(v5.44.151) A title is one row there: its last download, the earlier ones folded under it (:func:`grouped`).
 
 The owner approved the plan's mockup C («Норм»): one «Загрузки» for everything that downloads, and under it «Готово» —
 «Пришли 2 главы: 40 и 41», «Скачано 10 глав из 12. Не скачались 2: Глава 51 — сайт убрал главу (ответ 404)…»,
@@ -110,7 +111,29 @@ def entries(now: float | None = None) -> list:
     now = time.time() if now is None else now
     with _LOCK:
         items = _fresh(_read(), now)
-    return sorted(items, key=lambda x: float(x.get("at") or 0), reverse=True)
+    return sorted(items, key=_order, reverse=True)
+
+
+def _order(entry: dict) -> tuple:
+    """When a line was noted, and — for two of one moment (the clock of Windows steps by 16 ms) — which was first."""
+    serial = str(entry.get("id") or "").rpartition("-")[2]
+    return float(entry.get("at") or 0), int(serial) if serial.isdigit() else 0
+
+
+def title_key(entry: dict) -> str:
+    """Whose download a line is: the kind of the download and its title, as it is written (without the case)."""
+    return f"{entry.get('kind') or ''}|{str(entry.get('title') or '').strip().casefold()}"
+
+
+def grouped(now: float | None = None) -> list:
+    """(v5.44.151) The lines of «Готово» a title: [[its newest line, the ones before it…], …] — the titles in the
+    order of their newest lines.  A title downloaded again, stopped and gone on with, its new chapters every night,
+    the subscriptions checked every hour were a line each — one name five times, «не понятно скачало или нет» (the
+    owner, 10.11.2026): the page shows a title once, with what its last download did, the earlier ones under it."""
+    groups: dict = {}
+    for entry in entries(now):                           # the newest first
+        groups.setdefault(title_key(entry), []).append(entry)
+    return list(groups.values())
 
 
 def get(entry_id: str) -> dict | None:
@@ -182,7 +205,8 @@ def _manhwa_ended(found, result: dict) -> None:
     _meter, items = R.meter(since=0, run=-1)
     came = int(result.get("got") or 0)
     why = {str(x.get("id")): x for x in result.get("failed_chapters") or [] if isinstance(x, dict)}
-    left = "отложена: сайт перестал отдавать главы — скачается в следующий раз" if result.get("gave_up") else LEFT
+    # (v5.44.146) «скачается в следующий раз» was a promise the program could not keep (chapters no site has)
+    left = "отложена: главы перед ней подряд не пришли — попробую в следующий раз" if result.get("gave_up") else LEFT
     fails, ids = [], []
     for item in items:
         if item.get("state") == "done":
@@ -199,7 +223,10 @@ def _manhwa_ended(found, result: dict) -> None:
     stopped = bool(result.get("stopped"))
     wanted = came + len(fails)
     names = [_short(n) for n in result.get("chapters") or []]
-    if stopped:
+    if stopped and result.get("gave_way"):            # (v5.44.163) the round gave way to the person's download
+        said, sign = (f"Отложено — проверка новых глав уступила вашему скачиванию: {agree(came, GOT).lower()} "
+                      f"{plural(came, CHAPTERS)} из {wanted}."), "stop"
+    elif stopped:
         said, sign = f"Остановлено: {agree(came, GOT).lower()} {plural(came, CHAPTERS)} из {wanted}.", "stop"
     elif fails and came:
         said, sign = (f"{agree(came, GOT)} {plural(came, CHAPTERS)} из {wanted}. "
@@ -211,8 +238,8 @@ def _manhwa_ended(found, result: dict) -> None:
         said, sign = f"{agree(came, CAME)} {plural(came, CHAPTERS)}" + (f": {shown}." if shown else "."), "ok"
     else:
         said, sign = "Новых глав нет — всё уже в папке.", "ok"
-    if result.get("gave_up"):
-        said += " " + _clean(result["gave_up"])
+    if result.get("gave_up"):                         # (v5.44.163) …with its full stop: «С других сайтов» follows
+        said += " " + _clean(result["gave_up"]).rstrip(". ") + "."
     if result.get("helped"):
         said += f" С других сайтов: {plural(int(result['helped']), CHAPTERS)}."
     site = found.title.site
@@ -229,6 +256,8 @@ def _manhwa_ended(found, result: dict) -> None:
                  "helpers": bool(found.helpers_on), "chapters": ids, "title": found.title.title}
     add({"kind": "manhwa", "what": "Хентай" if adult else ("Манга" if result.get("kind") == "manga" else "Манхва"),
          "title": found.title.title, "night": _night(), "sign": sign, "said": said, "fails": fails, "retry": retry,
+         # (v5.44.146) where its chapters were looked for besides its site (``manhwa_download._looked``)
+         "note": _clean(result.get("looked") or "") if fails and not stopped else "",
          "hentai": hentai, "site": site, "folder": folder, "folder_kind": str(result.get("kind") or found.kind)})
 
 
@@ -253,11 +282,12 @@ def _round_ended(task, result: dict) -> None:
     """The nightly round: its sum for «Сама программа»; a line of «Готово» when sites did not answer (the titles it
     downloaded have their own lines)."""
     problems = [_clean(p) for p in result.get("problems") or []]
-    with _LOCK:
-        _ROUND.update(at=time.time(), titles=int(result.get("titles") or 0), got=int(result.get("got") or 0),
-                      problems=len(problems), stopped=bool(result.get("stopped")) or task.status == "stopped",
-                      failed=_clean(task.error) if task.status == "failed" else "")
-    if problems:
+    if not result.get("gave_way"):                    # (v5.44.163) a round that gave way to the person's download has
+        with _LOCK:                                   # not been through its titles: «было … — проверены N» is not said
+            _ROUND.update(at=time.time(), titles=int(result.get("titles") or 0), got=int(result.get("got") or 0),
+                          problems=len(problems), stopped=bool(result.get("stopped")) or task.status == "stopped",
+                          failed=_clean(task.error) if task.status == "failed" else "")
+    if problems and not result.get("gave_way"):
         titles = int(result.get("titles") or 0)
         add({"kind": "manhwa", "what": "Манга и манхва", "title": "Новые главы", "night": True, "sign": "part",
              "said": f"{agree(titles, CHECKED_TITLES)} {plural(titles, TITLES)}, новых глав: "
@@ -336,20 +366,24 @@ def _video_ended(task, result: dict) -> None:
 def _subs_ended(job) -> None:
     """«Галерея (booru)» and the subscriptions (their world is hidden in «SFW»)."""
     stopped = bool(getattr(job, "_stop_requested", False))
-    if job.kind == "grab":
+    if job.kind in ("grab", "favorites"):              # (v5.44.141) an account's favorites — as the grabber's
         sub = job.subs[0] if job.subs else {}
         cards = int(sub.get("cards") or 0)
         got = int(job.downloaded or 0)
         error = next((r.get("error") for r in job.results if r.get("error")), "")
+        error = re.sub(r"^[A-Za-z_]+(?:Error|Exception): ", "", str(error or ""))   # the reason, not the class
         if stopped:
             said, sign = f"Остановлено: {agree(got, GOT).lower()} {plural(got, PICTURES)}" + (
                 f" из {cards}." if cards else "."), "stop"
         elif error or job.status == "failed":
             said, sign = "Не скачалось: " + _clean(error or job.error), "fail"
         else:
+            chosen = " выбранных" if job.kind == "grab" else ""
             said = f"{agree(got, GOT)} {plural(got, PICTURES)}" + (
-                f" из {cards} выбранных — остальные уже были в библиотеке или пропущены." if cards and got < cards
+                f" из {cards}{chosen} — остальные уже были в библиотеке или пропущены." if cards and got < cards
                 else ".")
+            if job.kind == "favorites" and got:
+                said += " Потом — парсер по всем сайтам."
             sign = "ok"
         retry = None
         if stopped and sub.get("id"):
@@ -362,8 +396,14 @@ def _subs_ended(job) -> None:
             pending = sum(int(v or 0) for k, v in stats.items()
                           if k in ("pending", "downloading", "failed", "failed_temp", "auth_required"))
             if pending:
-                retry = {"sub": {k: sub.get(k) for k in ("id", "name", "query", "sites", "run_direction", "cards")},
+                retry = {"sub": {k: sub.get(k) for k in ("id", "name", "query", "sites", "run_direction", "cards",
+                                                         "favorites") if k in sub},
                          "count": pending}
+        if job.kind == "favorites":
+            title = str(sub.get("name") or job.label).replace("Избранное: ", "", 1)
+            add({"kind": "favorites", "what": "Избранное", "title": title, "sign": sign, "said": said, "fails": [],
+                 "retry": retry, "gallery": True})
+            return
         add({"kind": "grab", "what": "Галерея (booru)", "title": str(sub.get("query") or job.label), "sign": sign,
              "said": said, "fails": [], "retry": retry, "gallery": True})
         return

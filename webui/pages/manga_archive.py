@@ -7,7 +7,7 @@ from, «Докачать» (the title's card of «Скачать → Манга 
 (v5.44.81) The ways a title was known (``how``, ``by``) and what was tried for one «не нашлось» (``tried``); a round of
 the background shown as the page's own work, its buttons free (the page's work stops it first).  (v5.44.116) Its
 switches «Узнавать само, в фоне» and «…и по картинкам (SauceNAO)» (``manga_archive_auto``, ``manga_archive_pictures``)
-are normal fields of «Настройки → Сайты манги» now (the owner's review): here — a line of what they are and the way
+are normal fields of «Настройки → Манга и манхва» now (the owner's review): here — a line of what they are and the way
 there.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ def register(router) -> None:
     router.add("POST", r"/api/archive/not-manga", not_manga)
 
 
-SETTINGS_LINK = "/settings#set-manga_auto"   # (v5.44.116) «Настройки → Сайты манги → Что программа делает сама»
+SETTINGS_LINK = "/settings#set-manga_auto"   # «Настройки → Манга и манхва → Что программа делает сама»
 
 
 def _switches(settings: dict) -> str:
@@ -46,8 +46,8 @@ def _switches(settings: dict) -> str:
         now = "программа узнаёт тайтлы сама, в фоне, — и по картинкам (SauceNAO)"
     else:
         now = "программа узнаёт тайтлы сама, в фоне, — по картинкам нет"
-    return (f'<p class="ar-auto">Сейчас {esc(now)}. Это меняется в <a href="{SETTINGS_LINK}">«Настройки → Сайты '
-            'манги»</a>.</p>')
+    return (f'<p class="ar-auto">Сейчас {esc(now)}. Это меняется в <a href="{SETTINGS_LINK}">«Настройки → Манга и '
+            'манхва»</a>.</p>')
 
 
 def stop_background() -> bool:
@@ -68,7 +68,7 @@ def _folder_line(settings: dict) -> str:
     root = str(settings.get("root") or "").strip()
     if not root:
         return ('<p class="ar-note" role="note">Папка, из которой парсер booru берёт файлы, не выбрана — её выбирают в '
-                '«Настройки → Папки».</p>')
+                '«Настройки → Хранение и копии».</p>')
     data = MD.STORE.read()
     seen = int(data.get("at") or 0) if MD.STORE.titles(root) or data.get("root") == root else 0
     when = _time.strftime("%d.%m.%Y %H:%M", _time.localtime(seen)) if seen else "ещё не просматривалась"
@@ -84,7 +84,7 @@ def page(req: Request) -> Response:
     <p class="ar-lead">Тайтлы папок манги и манхвы программы, которые лежат в папке парсера booru, и копии манги,
       которую программа взяла из папки парсера: туда попадает только манга, которую подтвердил сайт манги, —
       ComicInfo.xml, ссылка в файлах, тайтл с теми же страницами или SauceNAO; пул e621 сам по себе мангу не
-      подтверждает (блок «Манга в исходной папке» на странице «<a href="/parser">Парсер</a>»). Здесь
+      подтверждает (вкладка «<a href="/parser#manga">Манга из папки</a>» страницы «Парсер»). Здесь
       программа узнаёт, что это за тайтл, — по ссылке на сайт в файлах папки, по названию из файлов, по имени папки (если
       это название, а не «Новая папка» или «123») и по картинкам; узнанный привязывает, берёт обложку и описание с
       тегами и докачивает главы, которых в папке нет. Файлы самой папки парсера не трогаются — всё делается в копии.

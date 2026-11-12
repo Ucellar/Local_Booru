@@ -95,8 +95,8 @@ def summary(settings: dict, *, source: str = "all") -> list:
     where, params = "", []
     host = str(source or "all").lower().replace("www.", "")     # as the gallery search takes it
     if host != "all":
-        where = (" AND EXISTS(SELECT 1 FROM image_sources x JOIN sources s ON s.id=x.source_id "
-                 "WHERE x.image_id=i.id AND s.host=?)")
+        from core.database.repository import SOURCE_CARDS      # (v5.44.152) asked once, not of every trashed card
+        where = " AND " + SOURCE_CARDS
         params = [host]
     with db(settings, readonly=True) as con:
         rows = con.execute(

@@ -84,9 +84,25 @@
 .cat .cat-meta { color: var(--muted); font-size: 12px; line-height: 1.35; }
 
 /* ── «отвечает», «Показать ещё» ── */
-.cat .cat-wait { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border: 1px dashed var(--cat-line);
-  border-radius: var(--cat-r); color: var(--muted); }
-.cat .cat-wait.bad { border-color: var(--danger, #b8615c); color: var(--text); }
+.cat .cat-wait { display: flex; flex-direction: column; gap: 18px; color: var(--muted); }
+.cat .cat-wait-said { display: flex; align-items: center; gap: 10px; margin: 0; padding: 12px 16px;
+  border: 1px dashed var(--cat-line); border-radius: var(--cat-r); }
+.cat .cat-wait.bad { display: block; padding: 18px 20px; border: 1px dashed var(--danger, #b8615c);
+  border-radius: var(--cat-r); color: var(--text); }
+/* (v5.44.158) the places of the tiles to come, laid out as the tiles will be; they shimmer while «Плавные переходы»
+   are on (the mockup «Анимации»), stand still otherwise */
+.cat .cat-skel { display: grid; grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); gap: 22px 16px; }
+.cat .cat-skel > span { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cat .cat-skel :is(i, b, u) { display: block; border-radius: 4px; background: var(--panel-2, var(--panel)); }
+.cat .cat-skel i { aspect-ratio: 2 / 3; border-radius: 10px; }
+.cat .cat-skel b { height: 13px; width: 86%; }
+.cat .cat-skel u { height: 10px; width: 52%; }
+:root[data-motion="on"] .cat .cat-skel :is(i, b, u) {
+  background-image: linear-gradient(100deg, transparent 30%, color-mix(in srgb, var(--text) 13%, transparent) 50%, transparent 70%);
+  background-size: 220% 100%;
+  animation: cat-shimmer 1.15s linear infinite;
+}
+@keyframes cat-shimmer { from { background-position: 120% 0; } to { background-position: -100% 0; } }
 .cat .cat-spin { flex: 0 0 auto; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--cat-line);
   border-top-color: var(--accent); animation: cat-spin 0.8s linear infinite; }
 @keyframes cat-spin { to { transform: rotate(360deg); } }
@@ -130,12 +146,29 @@
 .cat .cat-mark:empty { display: none; }
 .cat .cat-tri-chip[data-rest][data-state=""]:not(.found) { display: none; }
 .cat .cat-tri.open .cat-tri-chip[data-rest] { display: inline-flex; }
+/* (v5.44.148) a site's own tags (nhentai's tags, artists, characters…): chosen ones and the ones it found for the
+   words typed — «автор  name  nhentai · 703»: what it is before the name, whose it is after, both quieter */
+.cat .cat-own:empty, .cat .cat-own:not(:has(.cat-own-chip)) { display: none; }
+.cat .cat-own { padding-top: 8px; border-top: 1px dashed var(--border); }
+/* (v5.44.149) a long name with a long «whose» (an author of MangaLib + HentaiLib): the site goes to a line of its
+   own instead of squeezing the name into a column of letters; such a chip is a rounded box, not a tall pill */
+.cat .cat-own-chip { gap: 1px 6px; max-width: 100%; text-align: left; flex-wrap: wrap;
+  border-radius: min(999px, calc(var(--radius, 8px) * 2 + 6px)); }
+.cat .cat-own-kind, .cat .cat-own-site { color: var(--muted); font-size: 11px; line-height: 1.3; white-space: nowrap;
+  text-decoration: none; }
+.cat .cat-own-name { overflow-wrap: anywhere; }
+/* «нет» — the name alone is struck out (the chip's own line would cross «автор» and the site's name too) */
+.cat .cat-own-chip[data-state="no"], .cat .cat-own-chip[data-state="no"]:hover { text-decoration: none; }
+.cat .cat-own-chip[data-state="no"] .cat-own-name { text-decoration: line-through; text-decoration-thickness: 1px; }
+.cat .cat-own-hint { min-height: 1.45em; }
 .cat .cat-link { align-self: flex-start; margin: 0; padding: 2px 0; border: 0; background: none; box-shadow: none;
   color: var(--accent-text, var(--accent)); font: inherit; font-size: 13px; cursor: pointer; }
 .cat .cat-link:hover { background: none; color: var(--accent-text, var(--accent)); text-decoration: underline; }
 .cat .cat-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .cat .cat-check { display: inline-flex; align-items: center; gap: 6px; color: var(--text); cursor: pointer; }
 .cat .cat-check input { margin: 0; accent-color: var(--accent); }
+/* (v5.44.149) a site not asked while a site's own tag is chosen (its box stays as the owner left it) */
+.cat .cat-check.idle { opacity: .5; }
 .cat .cat-range { display: flex; gap: 8px; }
 .cat .cat-field { flex: 1 1 0; min-width: 0; box-sizing: border-box; margin: 0; padding: 9px 12px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--field-bg, var(--bg)); box-shadow: none; color: var(--text); font: inherit; }
@@ -152,5 +185,5 @@
   .cat .cat-side h2::after { content: " ▾"; color: var(--muted); }
   .cat .cat-side.closed h2::after { content: " ▸"; }
   .cat .cat-side.closed > :not(h2) { display: none; }
-  .cat .cat-grid { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 18px 12px; }
+  .cat .cat-grid, .cat .cat-skel { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 18px 12px; }
 }

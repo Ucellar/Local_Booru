@@ -59,9 +59,11 @@ ABANDONED = 20.0                      # a search going that no page has asked of
 FIND_WAIT_MORE = 15.0                 # «Скачать» while the other sites still answer: their time and this much more
 STALE = "Найденное устарело — нажмите «Найти» ещё раз"
 SITES = ("remanga.org", "recomics.org", "mangalib.me", "mangabuff.ru", "readmanga (a.zazaza.me)", "desu.uno",
-         "com-x.life", "mangadex.org")         # (v5.44.77) ReadManga and Desu, (v5.44.79) MangaDex
-# (v5.44.85) the sites of hentai alone: named only where hentai is shown; (v5.44.99) HentaiLib, AllHentai
-ADULT_SITES = ("hentaichan.live", "hentailib.me", "allhentai (20.allhen.online)")
+         "com-x.life", "mangaonelove.space", "mangadex.org")   # (v5.44.77) ReadManga and Desu, (v5.44.79) MangaDex,
+#                                                                (v5.44.143) Manga One Love
+# (v5.44.85) the sites of hentai alone: named only where hentai is shown; (v5.44.99) HentaiLib, AllHentai; (v5.44.131)
+# Nude-Moon
+ADULT_SITES = ("hentaichan.live", "hentailib.me", "allhentai (20.allhen.online)", "nude-moon.org")
 # (v5.44.75) not searched by a name (their search goes through the window's browser: a check for browsers first)
 LINK_ONLY = ("com-x.life", "mangadex.org")
 # (v5.44.116) a download of hentai in «Загрузки» while «SFW» is on: these words for its name, no cover
@@ -420,7 +422,9 @@ def find_state(req: Request) -> Response:
         public = found.public()
         from webui import content_mode
         from types import SimpleNamespace
-        from webui.pages.title import hand_mark
+        from webui.pages.title import chips_of, hand_mark, people_of
+        public["chips"] = chips_of(found)          # (v5.44.129) the genres and tags — each a search of «Лента»
+        public["people"] = people_of(found)        # (v5.44.149) the authors — each the feed's list of their titles
         hentai = bool(content_marks.manhwa_reason(SimpleNamespace(info=found.title.info())))
         hand = hand_mark(found, req.settings)        # (v5.44.122) «Это хентай» / «Это не хентай» of its folder wins
         if hand:
@@ -488,7 +492,7 @@ def download(req: Request) -> Response:
     roots = D.roots(req.settings)
     root = roots.get(where) or ""
     if not root:
-        return Response.json({"ok": False, "error": "Папка манги не выбрана — выберите её в «Настройки → Папки» или "
+        return Response.json({"ok": False, "error": "Папка манги не выбрана — выберите её в «Настройки → Хранение и копии» или "
                                                     "положите тайтл в папку манхвы"}, 409)
     try:
         Path(root).mkdir(parents=True, exist_ok=True)
@@ -568,10 +572,12 @@ def download_state(req: Request) -> Response:
     state["what"] = what_of(meter)                   # (v5.44.87) «Хентай» / «Манга» / «Манхва»
     state["items"] = [] if req.arg("items") == "none" else items
     state["paused"] = bool(meter.get("paused")) and task.running
+    # (v5.44.163) the round of new chapters waits for the person to leave the computer (``manhwa_run.wait_away``)
+    state["held"] = bool(meter.get("held")) and task.running
     result = task.result if isinstance(task.result, dict) else {}
     if result:
         state["result"] = {k: result.get(k) for k in ("title", "got", "paid", "stopped", "open", "kind", "helped",
-                                                      "gave_up", "skipped")}
+                                                      "gave_up", "skipped", "looked")}
         state["result"]["failed"] = list(result.get("failed_chapters") or [])   # the chapters that did not come
     if sfw and hentai_download(req.settings, meter, Q.current_record() if task.running else None):
         _hide(state)
@@ -678,7 +684,8 @@ def download_stop(req: Request) -> Response:
 
 def download_pause(req: Request) -> Response:
     """(v5.44.74) «Пауза» / «Продолжить» of the download going: its chapter stops where it is and waits (the queue
-    waits too)."""
+    waits too).  (v5.44.163) «Продолжить» of the round of new chapters that waits for the person to leave the
+    computer (``manhwa_run.wait_away``): it goes on now, to its end (``manhwa_run.go_on``)."""
     from core import manhwa_queue as Q, manhwa_run as R, page_jobs
     task = page_jobs.current(GET)
     if task is None or not task.running:
@@ -687,9 +694,13 @@ def download_pause(req: Request) -> Response:
         if not R.paused():
             R.pause()
             task._say("ПАУЗА: глава остановится, где она есть, — «Продолжить» докачает её с этого места")
-    elif R.paused():
-        R.resume()
-        task._say("ПРОДОЛЖАЮ")
+    else:
+        if R.paused():
+            R.resume()
+            task._say("ПРОДОЛЖАЮ")
+        if R.held():
+            R.go_on()
+            task._say("ПРОДОЛЖАЮ: вы сказали не ждать — новые главы проверяются сейчас")
     Q.note_paused(R.paused())
     return Response.json({"ok": True, "paused": R.paused()})
 

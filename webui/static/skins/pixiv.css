@@ -141,12 +141,13 @@ body { font: 400 var(--font-size)/22px var(--font); }
   transition: background-color 0.2s;
 }
 .skin-button:hover, .drawer-toggle:hover { background: var(--panel-2); color: var(--text); }
-.settings-link.skin-button, .top-back.skin-button {
+.settings-link.skin-button, .top-back.skin-button, .help-link.skin-button {
   width: 32px; padding: 0; justify-content: center; background: transparent;
 }
-.settings-link.skin-button:hover, .settings-link.active, .top-back.skin-button:hover { background: var(--panel); }
+.settings-link.skin-button:hover, .settings-link.active, .top-back.skin-button:hover,
+.help-link.skin-button:hover, .help-link.active { background: var(--panel); }
 .settings-link .skin-label { display: none; }
-.settings-link .gear-icon, .top-back .back-icon { width: 18px; height: 18px; }   /* (v5.44.116) «←» as the gear */
+.settings-link .gear-icon, .top-back .back-icon, .help-link .help-icon { width: 18px; height: 18px; }   /* (v5.44.116) «←», (v5.44.153) «?» as the gear */
 .skin-icon { box-shadow: none; }
 
 /* the menu «Оформление»: pixiv's pop-up */
@@ -162,6 +163,8 @@ body { font: 400 var(--font-size)/22px var(--font); }
 .skin-item.active b { color: var(--link); }
 .skin-text small { color: var(--muted); font: 400 12px/20px var(--font); }
 .skin-item.skin-all { padding-left: 16px; border-top: 1px solid var(--border); border-radius: 0; }
+.skin-motion { padding: 10px 16px 8px; }                       /* (v5.44.158) «Плавные переходы»: as the menu's rows */
+.skin-levels { gap: 0; border-radius: 16px; background: var(--panel); }
 
 /* ── the menu down the left side: small icons, the names beside them, groups apart ───────────────────────── */
 .main-nav {

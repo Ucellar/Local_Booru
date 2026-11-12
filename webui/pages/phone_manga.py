@@ -77,7 +77,7 @@ def _hidden(req: Request, manga: M.Manga) -> Response | None:
 def _no_folder(root: str) -> str:
     if not root or not Path(root).is_dir():
         return ('<div class="m-empty"><h2>Папки манги нет</h2><p>Папку с мангой выбирают на компьютере: «Манга» или '
-                '«Настройки → Папки»; если она на отдельном диске — он должен быть подключён.</p></div>')
+                '«Настройки → Хранение и копии»; если она на отдельном диске — он должен быть подключён.</p></div>')
     return ""
 
 
@@ -252,6 +252,11 @@ def _tag_rows(manga: M.Manga) -> str:
         chips = "".join(f'<a class="m-tag m-cat-{esc(kind)}" href="{esc(url("/m/manga", q=f"{group}:{t}"))}">'
                         f'{esc(t.replace("_", " "))}</a>' for t in tags)
         rows.append(f'<div class="m-tag-row"><span class="m-tag-kind">{esc(M.GROUP_TITLES[group])}</span>'
+                    f'<div class="m-tag-list">{chips}</div></div>')
+    if manga.authors:                     # (v5.44.135) the site's authors — a search by each, as the computer's page
+        chips = "".join(f'<a class="m-tag m-cat-artist" href="{esc(url("/m/manga", q=name))}">{esc(name)}</a>'
+                        for name in manga.authors[:12])
+        rows.append(f'<div class="m-tag-row"><span class="m-tag-kind">Авторы</span>'
                     f'<div class="m-tag-list">{chips}</div></div>')
     return f'<div class="m-tags m-pad">{"".join(rows)}</div>' if rows else ""
 

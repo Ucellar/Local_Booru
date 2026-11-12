@@ -59,24 +59,28 @@ html, body { background: var(--sp-desk); }
 body { font: var(--font-size)/1.5 var(--font); }
 
 /* ── the title of the album: in the middle, with fleurons; the menu under it in small capitals ───────────── */
+/* (v5.44.144) The title and the buttons at its right are columns of one grid.  The buttons used to lie over the title's
+   row (position: absolute): with «←» (5.44.116) and «Загрузки» (5.44.120) they reached the title in a window of
+   1280 px — Windows' letters are wider, the check saw it there first.  Now the title stays in the middle while the
+   buttons fit their half, and moves left when they do not. */
 .top {
   position: relative;
-  flex-direction: column;
-  flex-wrap: nowrap;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 4px;
+  gap: 4px 12px;
   padding: 22px 26px 6px;
   background: var(--sp-desk);
   border-bottom: 0;
 }
-.brand { gap: 14px; padding: 0; font: italic 700 34px/1.15 var(--font-head); letter-spacing: 0.2px; color: var(--text); }
+.brand { grid-column: 2; grid-row: 1; gap: 14px; padding: 0; font: italic 700 34px/1.15 var(--font-head); letter-spacing: 0.2px; color: var(--text); }
 .brand:hover { color: var(--text); }
 .brand::before, .brand::after { content: "❦"; font: normal 400 20px/1 "Segoe UI Symbol", var(--font); color: var(--accent); }
 .brand::before { transform: scaleX(-1); }
 .brand-mark { display: none; }
 .bn-1 { color: var(--text); }
 .bn-2 { color: var(--accent); }
-.main-nav { justify-content: center; align-items: center; gap: 2px 22px; }
+.main-nav { grid-column: 1 / -1; grid-row: 2; justify-content: center; align-items: center; gap: 2px 22px; }
 .main-nav a {
   padding: 4px 2px;
   border-radius: 0;
@@ -87,7 +91,7 @@ body { font: var(--font-size)/1.5 var(--font); }
 }
 .main-nav a:hover { background: none; color: var(--text); text-decoration: none; }
 .main-nav a.active, .main-nav a.active:hover { background: none; color: var(--accent); box-shadow: inset 0 -3px 0 -2px var(--accent), 0 1px 0 var(--accent); }
-.top-tools { position: absolute; top: 16px; right: 22px; margin: 0; gap: 8px; }
+.top-tools { grid-column: 3; grid-row: 1; justify-self: end; align-self: start; margin: -6px -4px 0 0; gap: 8px; }
 .skin-button, .drawer-toggle {
   border-radius: 4px;
   padding: 5px 12px;
@@ -243,8 +247,8 @@ table.info th { color: var(--muted); font-style: italic; }
 .manga-sorts a.active { background: var(--accent); color: var(--accent-ink); }
 
 @media (max-width: 760px) {
-  .top { padding: 14px 12px 4px; }
-  .top-tools { position: static; }
+  .top { display: flex; flex-direction: column; flex-wrap: nowrap; padding: 14px 12px 4px; }
+  .top-tools { margin: 0; align-self: center; }
   .brand { font-size: 26px; }
   .layout { margin: 0 6px 24px; padding: 14px 12px 36px; }
   .sections { padding: 10px 6px 0; }

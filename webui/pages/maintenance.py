@@ -499,7 +499,7 @@ def maintenance_page(req: Request) -> Response:
   <header class="tool-head">
     <h1>Обслуживание</h1>
     <p class="tool-lead">Работа над базой, файлами и тегами — по одной за раз, вместе с проверкой и починкой
-    «Диагностики»: общий журнал и «Остановить». Что меняет базу, сначала делает её копию.</p>
+    на вкладке «Проверка»: общий журнал и «Остановить». Что меняет базу, сначала делает её копию.</p>
     <div class="tool-actions head-actions">
       <button type="button" class="danger" data-action="diag-stop"{"" if diag._can_stop() else " disabled"}>Остановить</button>
       <span class="action-status" role="status"></span>
@@ -513,8 +513,10 @@ def maintenance_page(req: Request) -> Response:
   <div class="maint-groups">{"".join(groups)}</div>
   {diag._history_html(history)}
 </section>"""
-    return Response.html(page_frame("Обслуживание", body, active="diag", subnav=False, kind="tool",
-                                    body_data={"tool": "diag"}, tabs=diag.tabs("maintenance"), **diag._prefs()))
+    from webui.pages import settings                # (v5.44.161) inside «Настройки»: «Проверка и починка»
+    return Response.html(page_frame("Обслуживание", settings.in_frame("diag", body, diag.tabs("maintenance")),
+                                    active="diag", subnav=False, kind="tool", body_data={"tool": "diag"},
+                                    **diag._prefs()))
 
 
 # ── starting a job ─────────────────────────────────────────────────────────

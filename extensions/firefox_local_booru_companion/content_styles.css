@@ -206,3 +206,63 @@
 .lb-dock-sub-note { color: #aab1c2 !important; font-size: 10.5px !important; }
 .lb-dock-sub[data-state="subscribed"] .lb-dock-sub-note { color: #7ee787 !important; }
 .lb-dock-blocked { color: #ff8b81 !important; font-size: 11px !important; }
+
+/* (0.11.0) «Скачать избранное»: the block on an account's page — its profile, its favorites — of a booru site; the
+   numbers of the account's favorite posts go to the program, which downloads and parses them. */
+.lb-fav {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  box-sizing: border-box !important;
+  max-width: 760px !important;
+  margin: 8px 0 14px !important;
+  padding: 10px 12px !important;
+  border: 1px solid #3c4252 !important;
+  border-radius: 10px !important;
+  background: #15171d !important;
+  color: #f2f3f5 !important;
+  font: 13px/1.4 system-ui, "Segoe UI", Arial, sans-serif !important;
+  text-align: left !important;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25) !important;
+}
+.lb-fav * { box-sizing: border-box !important; font: inherit !important; letter-spacing: normal !important; }
+.lb-fav-logo {
+  flex: none !important;
+  display: grid !important;
+  place-items: center !important;
+  width: 34px !important;
+  height: 34px !important;
+  border-radius: 8px !important;
+  background: #0a84ff !important;
+  color: #fff !important;
+  font-weight: 800 !important;
+}
+.lb-fav-main { flex: 1 1 auto !important; display: grid !important; gap: 3px !important; min-width: 0 !important; }
+.lb-fav-title { color: #f2f3f5 !important; font-weight: 700 !important; overflow-wrap: anywhere !important; }
+.lb-fav-note { color: #aab1c2 !important; font-size: 12px !important; overflow-wrap: anywhere !important; }
+.lb-fav[data-state="ok"] .lb-fav-note { color: #7ee787 !important; }
+.lb-fav[data-state="bad"] .lb-fav-note { color: #ff8b81 !important; }
+.lb-fav-bar { height: 4px !important; margin-top: 3px !important; border-radius: 2px !important; background: #2c303a !important; overflow: hidden !important; }
+.lb-fav-bar[hidden] { display: none !important; }
+.lb-fav-bar i { display: block !important; width: var(--lb-fav-p, 30%) !important; height: 100% !important; background: #0a84ff !important; }
+.lb-fav-bar.lb-fav-bar-any i { width: 30% !important; animation: lb-fav-any 1.3s ease-in-out infinite !important; }
+@keyframes lb-fav-any { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.lb-fav-buttons { flex: none !important; display: flex !important; gap: 6px !important; }
+.lb-fav-buttons button {
+  padding: 7px 12px !important;
+  border: 1px solid #2ea043 !important;
+  border-radius: 7px !important;
+  background: #238636 !important;
+  color: #fff !important;
+  font-weight: 700 !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+}
+.lb-fav-buttons button:hover { background: #2ea043 !important; }
+.lb-fav-buttons button:focus-visible { outline: 2px solid #79c0ff !important; outline-offset: 2px !important; }
+.lb-fav-buttons button:disabled { opacity: 0.6 !important; cursor: default !important; }
+.lb-fav-buttons .lb-fav-stop { border-color: #4a5060 !important; background: #2c303a !important; }
+.lb-fav-buttons .lb-fav-stop:hover { background: #3b4250 !important; }
+.lb-fav-buttons button[hidden] { display: none !important; }
+@media (max-width: 560px) { .lb-fav { flex-wrap: wrap !important; } .lb-fav-buttons { width: 100% !important; } }
+@media (prefers-reduced-motion: reduce) { .lb-fav-bar.lb-fav-bar-any i { animation: none !important; } }

@@ -999,7 +999,10 @@
     box.classList.toggle("all", !!all);
     list.forEach(function (pair, k) {
       var cat = String(pair[1] || "general").replace(/[^a-z]/g, "");
-      var tag = el("span", "m-tag m-cat-" + cat, String(pair[0]).replace(/_/g, " "));
+      // (v5.44.130) a tag — the gallery searched by it, as the gallery's own card has them (the phone has no
+      // search of booru sites)
+      var tag = el("a", "m-tag m-cat-" + cat, String(pair[0]).replace(/_/g, " "));
+      tag.href = "/m/posts?tags=" + encodeURIComponent(String(pair[0]));
       if (!all && k >= TAGS_SHOWN) { tag.hidden = true; }
       box.append(tag);
     });

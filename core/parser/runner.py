@@ -33,7 +33,7 @@ from core.parser.engine import FileJob, ParserEngine, ReverseTicket
 from core import work_timing
 from core.parser.http import Cancelled, HttpClient, HttpFailure
 from core.parser.lanes import (ASKING_AGAIN, OFF_HOW, Files, Open as _Open, ReverseLane, Share, SiteLane as _Lane,
-                               WorkStage, estimate)
+                               WorkStage, breakdown, estimate)
 from core.parser.models import FileResult, Match
 from core.parser.pool import READ, PriorityPool
 from core.parser.reverse import build_reverse
@@ -71,6 +71,7 @@ class ParserRunner:
         self._files: Files | None = None      # the files' own stages of the pass going now: reading…
         self._stages: tuple = ()              # …writing, the stages after the sites (``WorkStage``)
         self._flow: dict = {}                 # what ``estimate`` needs of the pass going now
+        self._open_now: dict = {}             # (v5.44.160) the files read and not answered yet, by path (``waits``)
         self._engine: ParserEngine | None = None      # the run going now (``site_again``)
         self._http: HttpClient | None = None
         self._again_lock = threading.Lock()
@@ -352,7 +353,13 @@ class ParserRunner:
         flow = {"unread": len(jobs), "at_sites": 0, "read_share": read_share, "reverse_share": reverse_share,
                 "after_share": after_share, "writing": 0}     # writing — files whose writes are not over yet
         self._flow = flow
+        self._open_now = {}                       # (v5.44.160) the open files by path: what a page says of each
         told = [time.monotonic()]                 # when the time of the steps was said last (``_say_time``)
+
+        def gone(entry: "_Open") -> None:
+            """The file has its answer: it is open no more."""
+            open_files.discard(entry)
+            self._open_now.pop(str(entry.job.path), None)
 
         def submit(pool, kind: str, entry, fn, *args, mark: bool = False, counted: bool = True):
             """``counted`` — a task of the stage of its pool (writing, after the sites): no — another's on its threads
@@ -505,6 +512,7 @@ class ParserRunner:
                         continue
                     entry = _Open(item, first, {site.host for site in sites})
                     open_files.add(entry)
+                    self._open_now[str(item.path)] = entry
                     flow["writing"] += 1
                     in_lanes += 1
                     flow["at_sites"] = in_lanes
@@ -543,7 +551,7 @@ class ParserRunner:
                         entry.ticket = result
                         submit(slow_pool, "prepared", entry, engine.reverse_prepare, result)
                         continue
-                    open_files.discard(entry)
+                    gone(entry)
                     settle(entry.job, result)
                 elif kind == "prepared":                      # the picture for the services is made
                     tasks -= 1
@@ -573,13 +581,14 @@ class ParserRunner:
                         next_service(item)
                 elif kind == "found":                         # reverse search is over: the file's answer
                     tasks -= 1
-                    open_files.discard(item)
+                    gone(item)
                     settle(item.job, payload.result())
                 elif kind == "closed":
                     tasks -= 1
                     writes_over(item)                         # (a reverse file's writing was over before)
-                    open_files.discard(item)
+                    gone(item)
         finally:
+            self._open_now = {}
             self._say_time(told, force=True)
             fed_all.set()
             for lane in list(lanes.values()) + list(rlanes.values()):
@@ -595,6 +604,13 @@ class ParserRunner:
         matches = engine.reverse_take(service, ticket, outcome)
         if lane is not None:
             lane.passed.note(not matches)
+        # (v5.44.160) the file's card on the page «Парсер»: what the service has said of it
+        word = ("найдено" if matches else "ошибка" if outcome.status == "failed"
+                else "отложено" if outcome.status in {"deferred", "paused"} else "нет")
+        try:
+            engine.ctx.activity(service.name, word, str(ticket.state.path))
+        except Exception:  # the page's view of the run, not the run
+            pass
         return matches
 
     def estimate(self) -> tuple[int | None, str]:
@@ -622,11 +638,57 @@ class ParserRunner:
 
     def lanes(self) -> list:
         """The queues of the pass going now, for a page: the files' own (read and written), the sites' (MD5), then
-        the reverse-search services' — name, how it asks, files waiting, answered, its pace."""
-        files = [self._files.snapshot()] if self._files is not None else []
+        the reverse-search services' — name, how it asks, files waiting, answered, its pace; (v5.44.160) ``left`` —
+        seconds its work still takes with the files not read yet (``breakdown``: 0 — nothing to do or it keeps up,
+        None — not known yet), the number the run's own estimate is the largest of; ``name`` — as ``estimate`` names
+        it when it is the slowest."""
+        files_now, site_lanes, reverse_lanes = self._files, list(self._lanes), list(self._rlanes)
         flow = self._flow
-        stages = [stage.snapshot(to_come) for stage, to_come in self._stage_work(flow)] if flow else []
-        return files + stages + [lane.snapshot() for lane in list(self._lanes) + list(self._rlanes)]
+        work = self._stage_work(flow) if flow else ()
+        left = {}
+        if flow:
+            try:
+                parts = breakdown(site_lanes, reverse_lanes, unread=max(0, int(flow.get("unread", 0))),
+                                  at_sites=max(0, int(flow.get("at_sites", 0))),
+                                  to_reverse=flow["reverse_share"].fraction(0.0),
+                                  read_share=flow["read_share"].fraction(1.0), files=files_now, stages=work)
+                left = {id(part): seconds for part, seconds in parts}
+            except Exception:  # the page's view of the run, not the run
+                left = {}
+
+        def row(part, snapshot: dict) -> dict:
+            seconds = left.get(id(part), 0.0)
+            snapshot["left"] = int(seconds) if seconds is not None else None
+            snapshot["name"] = str(part.name)         # as ``estimate`` names the slowest
+            return snapshot
+
+        rows = [row(files_now, files_now.snapshot())] if files_now is not None else []
+        rows += [row(stage, stage.snapshot(to_come)) for stage, to_come in work]
+        return rows + [row(lane, lane.snapshot()) for lane in site_lanes + reverse_lanes]
+
+    def waits(self, path: str) -> dict | None:
+        """(v5.44.160) For a page — where a file read and not answered yet is: ``waiting`` — the sites that have not
+        answered about it (their names, in the order of the run), ``found`` — a find of it is in the library already,
+        ``stage`` — «sites» (some site is still to answer), «write» (found: being written), «after» (no site had it:
+        the checks after the sites), «reverse» (reverse search).  None — the file is not open now (being read, or it
+        has its answer)."""
+        entry = self._open_now.get(str(path))
+        if entry is None:
+            return None
+        try:
+            hosts = set(entry.waiting)
+        except RuntimeError:              # the set changed while it was copied: said at the next look
+            hosts = set()
+        names = [lane.site.label for lane in list(self._lanes) if lane.site.host in hosts]
+        if names:
+            stage = "sites"
+        elif entry.ticket is not None:
+            stage = "reverse"
+        elif entry.found or entry.failed or entry.saving or entry.pending:
+            stage = "write"
+        else:
+            stage = "after"
+        return {"waiting": names, "found": bool(entry.found), "stage": stage}
 
     # ── a site switched off for the run, asked again («Проверить снова» on the page «Парсер») ──
     def site_again(self, host: str) -> str:

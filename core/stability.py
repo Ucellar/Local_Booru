@@ -656,6 +656,17 @@ def run_deferred_db_health_check(settings: dict, log: Callable | None = None) ->
     results = {}
     bad_shutdown = was_last_shutdown_bad(settings)
     try:
+        # (v5.44.152) the base read in a row first (core/base_warm.py): quick_check reads all of it in the order of
+        # its trees — from a disk that has not given the file yet that is minutes, and the first pages wait for the
+        # same disk; after the reading it is a second, from memory
+        try:
+            from core import base_warm
+            from core.shutdown import is_shutting_down
+            warmed = base_warm.read_base(settings, stop=is_shutting_down)
+            if warmed.get("bytes"):
+                log(f"[Stability] База прочитана с диска: {warmed['bytes'] / 1048576:.0f} МБ за {warmed['seconds']:.1f} с")
+        except Exception as warm_error:                 # not read through: the check reads it itself, as before
+            log(f"[Stability] База не прочитана заранее: {warm_error}")
         log("[Stability] Background DB quick_check started...")
         ok = check_db_quick(settings)
         results["db_ok"] = ok

@@ -6,7 +6,7 @@ The owner (7.11.2026), of a comic whose pages the parser found on e621 one by on
 - ``site_posts.pools`` — the pools a post is in, as the site said («15766,3001»; "" — none; NULL — not asked yet: the
   posts kept before this version are asked again in the background, ``core/site_posts.py``);
 - ``site_posts.rating`` — the post's rating as the site said it, by its first letter («s», «q», «e», «g»; NULL — not
-  said): a comic is not taken to the manga folder when the program's rule forbids it (``core/comic_manga.py``);
+  said): what the base says of a comic's pages when it is taken to the manga folder (``core/comic_manga.py``);
 - ``site_pools`` — a pool as its site describes it: ``name``, ``category`` (e621: «series» — one work, a comic;
   «collection» — a theme), ``post_ids`` (JSON, the pages in their order), ``state`` («ok», «gone» — the site has it no
   more), ``checked_at``.

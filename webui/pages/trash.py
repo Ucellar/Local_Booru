@@ -55,11 +55,28 @@ def bar(settings: dict, ctx: dict) -> str:
         line = (f'<p class="trash-total">В корзине файлов: {files} ({esc(human_size(size))}) — всё это ещё можно '
                 f'вернуть. {_purge_words(settings)}</p>'
                 f'<nav class="brak-filters" aria-label="Почему в корзине">Почему: {" · ".join(links)}</nav>')
-    return (f'<section class="trash-bar" id="trash-bar">{line}'
-            '<div class="job" data-job hidden>'
-            '<div class="job-head"><b class="job-title"></b> <span class="job-status"></span> '
-            '<button type="button" class="link" data-action="trash-restore-stop" hidden>Остановить</button></div>'
-            '<pre class="job-log" tabindex="0" aria-label="Журнал"></pre></div></section>')
+    from core import trash_tools as tools
+    return f'<section class="trash-bar" id="trash-bar">{line}{_job_box(tools.RESTORE_KIND, "trash-restore-stop")}</section>'
+
+
+def _job_box(kind: str, stop_action: str) -> str:
+    """The journal of a task of the page (the script fills it and keeps it going: ``LB.watchTask``).  (v5.44.161) A
+    task going now or just ended — the one the page shows (:data:`SHOW_ENDED`) — is drawn with the page: its title
+    and its lines.  The gallery counts the pictures that fit the window as the page is drawn; a journal that came a
+    moment later pushed the last row and the page numbers under the window's edge."""
+    from core import page_jobs
+    task = page_jobs.current(kind)
+    fresh = task is not None and (task.running or (task.finished_at and time.time() - task.finished_at < SHOW_ENDED))
+    stop = f'<button type="button" class="link" data-action="{stop_action}" hidden>Остановить</button>'
+    if not fresh:
+        return ('<div class="job" data-job hidden><div class="job-head"><b class="job-title"></b> '
+                f'<span class="job-status"></span> {stop}</div>'
+                '<pre class="job-log" tabindex="0" aria-label="Журнал"></pre></div>')
+    state = task.snapshot()
+    lines = "\n".join(esc(line["text"]) for line in state["log"])
+    return (f'<div class="job" data-job data-status="{esc(state["status"])}"><div class="job-head">'
+            f'<b class="job-title">{esc(state["label"])}</b> <span class="job-status"></span> {stop}</div>'
+            f'<pre class="job-log" tabindex="0" aria-label="Журнал">{lines}</pre></div>')
 
 
 def purge_sentence(settings: dict) -> str:
@@ -77,7 +94,7 @@ def purge_sentence(settings: dict) -> str:
 
 def _purge_words(settings: dict) -> str:
     """(v5.44.116) :func:`purge_sentence` with a link to the setting: the trash said nothing of it (the review)."""
-    return f'{purge_sentence(settings)} (<a href="/settings#set-library">Настройки → Библиотека</a>).'
+    return f'{purge_sentence(settings)} (<a href="/settings#set-library">Настройки → Галерея</a>).'
 
 
 def restore_button(ctx: dict, total: int) -> str:
@@ -123,10 +140,8 @@ def move_buttons(ctx: dict, files_total: int) -> tuple[str, str]:
 
 def move_job() -> str:
     """The journal of «В корзину…» under the select bar (shown while it goes and a moment after its end)."""
-    return ('<section class="trash-move" id="trash-move"><div class="job" data-job hidden>'
-            '<div class="job-head"><b class="job-title"></b> <span class="job-status"></span> '
-            '<button type="button" class="link" data-action="trash-move-stop" hidden>Остановить</button></div>'
-            '<pre class="job-log" tabindex="0" aria-label="Журнал"></pre></div></section>')
+    from core import trash_tools as tools
+    return f'<section class="trash-move" id="trash-move">{_job_box(tools.MOVE_KIND, "trash-move-stop")}</section>'
 
 
 # ── the API ────────────────────────────────────────────────────────────────

@@ -22,6 +22,13 @@ extension).
 Only a site of the parser's table that searches by tags is asked (``grabber.search.searchable_sites``).  The
 uploader's posts — where a search can name the uploader: rule34.xxx, Gelbooru and the like, Moebooru (a name), e621
 (``user:!N``); Danbooru tells only the uploader's number and searches by a name.
+
+(v5.44.152) The card's page is shown already and waits for this answer, every card's page asks, and the parser may be
+holding the same site: the question is short.  One try of a request, :data:`ASK_TIMEOUT`; no request more is sent once
+the question has gone on for :data:`ASK_MOST` (the site's turn in the program's own throttle counts: a pause the parser
+got from the site may be minutes long); a site that did not answer the first question is not asked the second.  Such a
+site is remembered (:data:`SILENT_FOR`): the families and parts of other cards on it are answered from memory, in
+words, without a request — and what it did not answer is asked again when that time is over, not kept as an answer.
 """
 from __future__ import annotations
 
@@ -38,9 +45,14 @@ KEEP = 48                       # families and сборки kept at once (v5.44.
 PAGES = 3                       # pages of ``parent:P`` asked (the grabber's ``per_site`` each)
 PER_PAGE = 100
 SHOWN_MAX = 60                  # missing parts shown at most (a parent with hundreds of children: the first ones)
+ASK_TIMEOUT = (6.0, 20.0)       # seconds a request of this question waits for the site: to connect, for the answer
+ASK_ATTEMPTS = 1                # tries of a request (asked again later instead: the page is shown already)
+ASK_MOST = 25.0                 # seconds the whole question may go on before no request more is sent
+SILENT_FOR = 180                # seconds a site that did not answer is not asked again (answered from memory)
 _KEY_RE = re.compile(r"[a-z0-9][a-z0-9.-]{1,98}")
 _LOCK = threading.Lock()
 _FAMILIES: OrderedDict = OrderedDict()           # key -> Family (``site:parent``) or SetParts (``set-N``)
+_SILENT: dict = {}                               # site -> (time.time() it is asked again, what happened — words)
 
 
 class FamilyError(Exception):
@@ -71,46 +83,131 @@ def post_id_of(card: dict, site: str = "") -> int:
     return 0
 
 
+class _Patience:
+    """How long one question to a site may go on (:data:`ASK_MOST`): ``over()`` — no request more is sent, the one
+    waiting for its turn at the site gives up.  ``rest()`` — the question is answered: the searches kept for their
+    parts (their pictures, a download) are held by nothing."""
+
+    def __init__(self):
+        self.until: float | None = time.monotonic() + ASK_MOST
+
+    def over(self) -> bool:
+        return self.until is not None and time.monotonic() > self.until
+
+    def rest(self) -> None:
+        self.until = None
+
+
+def _search(settings: dict, query: str, site: str, per_site: int, patience: _Patience):
+    """The grabber's search of one site, asked the short way (v5.44.152)."""
+    from core.grabber.search import GrabberSearch
+    search = GrabberSearch(settings, query, [site], per_site=per_site)
+    search.http.hurry(ASK_TIMEOUT, ASK_ATTEMPTS, patience.over)
+    return search
+
+
+def _unheard(search) -> bool:
+    """The site did not answer this search (the network, its limit, a server error, not in time) — not «nothing
+    found», and not a refusal for good (a key, a check for robots: said at once, nothing waits for those)."""
+    return any(lane.get("failures") for lane in search.lanes.values())
+
+
+def _span(seconds: float) -> str:
+    seconds = max(1, int(round(seconds)))
+    return f"{-(-seconds // 60)} мин" if seconds >= 60 else f"{seconds} с"
+
+
+def _quiet(site: str, now: float) -> str:
+    """Words when ``site`` did not answer a short while ago and is not asked yet ("" — it is asked).  Under _LOCK."""
+    held = _SILENT.get(site)
+    if held is None:
+        return ""
+    if now >= held[0]:
+        del _SILENT[site]
+        return ""
+    return f"{site} не ответил ({held[1]}) — о недостающих частях спрошу снова через {_span(held[0] - now)}"
+
+
+def _heard(found) -> None:
+    """After a question: a site that answered nothing is not asked for :data:`SILENT_FOR`; one that answered is."""
+    site = getattr(found, "site", "")
+    if not site:
+        return
+    with _LOCK:
+        if found.unheard and not found.cards:
+            _SILENT[site] = (found.asked + SILENT_FOR, found.error or "нет ответа")
+        elif not found.error:
+            _SILENT.pop(site, None)
+
+
+def _forget_old(now: float) -> None:
+    """What was asked long ago is asked again; what a site did not answer whole (``unheard``: nothing, or a part) —
+    as soon as the site is asked again.  Under _LOCK."""
+    for key in [k for k, f in _FAMILIES.items()
+                if now - f.asked > (SILENT_FOR if getattr(f, "unheard", False) else FAMILY_TTL)]:
+        _FAMILIES.pop(key).close()
+
+
+def silent_sites() -> dict:
+    """{site: seconds until it is asked again} — the sites that did not answer a short while ago."""
+    now = time.time()
+    with _LOCK:
+        return {site: until - now for site, (until, _words) in _SILENT.items() if until > now}
+
+
 class Family:
     """A parent post and its children on one site, as the grabber's searches found them.  ``children_only`` — the
     parent is the library's own card (a lone card asking whether its post has children, v5.44.1): ``id:P`` is not
-    asked."""
+    asked.  ``patience`` — of the сборка's question this family is a part of (its own otherwise)."""
 
-    def __init__(self, settings: dict, site: str, parent: int, *, children_only: bool = False):
-        from core.grabber.search import GrabberSearch
+    def __init__(self, settings: dict, site: str, parent: int, *, children_only: bool = False,
+                 patience: _Patience | None = None):
         self.site, self.parent = site, int(parent)
         self.key = family_key(site, parent)
         self.asked = time.time()
         self.error = ""
+        self.unheard = False                  # the site left a question unanswered (asked again soon: SILENT_FOR)
         self.children_only = bool(children_only)
-        self.searches = [GrabberSearch(settings, f"parent:{self.parent}", [site], per_site=PER_PAGE)]
+        self._own_patience = patience is None
+        self.patience = patience or _Patience()
+        self.searches = [_search(settings, f"parent:{self.parent}", site, PER_PAGE, self.patience)]
         if not self.children_only:
-            self.searches.append(GrabberSearch(settings, f"id:{self.parent}", [site], per_site=5))
+            self.searches.append(_search(settings, f"id:{self.parent}", site, 5, self.patience))
         self.cards: list = []                 # the family: the parent first, then by post number
         self._found: dict = {}                # card key -> (search, card)
         self._loaded = False
         self._lock = threading.Lock()
 
     def load(self) -> None:
-        """Ask the site (once): every page of the children, the parent itself."""
+        """Ask the site (once): every page of the children, the parent itself.  A site that did not answer about the
+        children is not asked about the parent (v5.44.152: the page waits for both)."""
         with self._lock:
             if self._loaded:
                 return
             errors = []
-            for search in self.searches:
-                for _page in range(PAGES):
-                    if not search.has_more:
+            unheard = False
+            try:
+                for search in self.searches:
+                    for _page in range(PAGES):
+                        if not search.has_more:
+                            break
+                        before = sum(lane["posts"] for lane in search.lanes.values())
+                        search.more()
+                        if sum(lane["posts"] for lane in search.lanes.values()) - before < search.per_site:
+                            break                     # a page not full: the family is all there (no request more)
+                    errors += [lane["error"] for lane in search.lanes.values() if lane.get("error")]
+                    for card in search.cards:
+                        self._found.setdefault(card["key"], (search, card))
+                    if _unheard(search):
+                        unheard = True
                         break
-                    before = sum(lane["posts"] for lane in search.lanes.values())
-                    search.more()
-                    if sum(lane["posts"] for lane in search.lanes.values()) - before < search.per_site:
-                        break                     # a page not full: the family is all there (no request more)
-                errors += [lane["error"] for lane in search.lanes.values() if lane.get("error")]
-                for card in search.cards:
-                    self._found.setdefault(card["key"], (search, card))
+            finally:
+                if self._own_patience:
+                    self.patience.rest()
             self.cards = sorted((card for _s, card in self._found.values()), key=self.rank)
             if not self.cards and errors:
                 self.error = errors[0]
+            self.unheard = unheard
             self._loaded = True
 
     def rank(self, card: dict) -> tuple:
@@ -147,13 +244,15 @@ def family(settings: dict, site: str, parent: int, *, children_only: bool = Fals
     key = family_key(site, parent)
     now = time.time()
     with _LOCK:
-        for old_key in [k for k, f in _FAMILIES.items() if now - f.asked > FAMILY_TTL]:
-            _FAMILIES.pop(old_key).close()
+        _forget_old(now)
         found = _FAMILIES.get(key)
         if found is not None and getattr(found, "children_only", False) and not children_only:
             _FAMILIES.pop(key).close()
             found = None
         if found is None:
+            quiet = _quiet(site, now)
+            if quiet:
+                raise FamilyError(quiet)
             found = _FAMILIES[key] = Family(settings, site, parent, children_only=children_only)
             while len(_FAMILIES) > KEEP:
                 _old_key, old = _FAMILIES.popitem(last=False)
@@ -161,15 +260,17 @@ def family(settings: dict, site: str, parent: int, *, children_only: bool = Fals
         else:
             _FAMILIES.move_to_end(key)
     found.load()
+    _heard(found)
     return found
 
 
 def forget_all() -> None:
-    """Every family and сборка asked again next time (the checks; a change of the site table)."""
+    """Every family and сборка asked again next time, every site too (the checks; a change of the site table)."""
     with _LOCK:
         while _FAMILIES:
             _key, old = _FAMILIES.popitem()
             old.close()
+        _SILENT.clear()
 
 
 # ── a сборка's parts: its family, the uploader's posts around, the same work (v5.32) ────────
@@ -245,10 +346,9 @@ class _Lane:
     """One query on the сборка's site, page after page: the site's pictures (``posts`` — (post, card) in the order the
     site gave them)."""
 
-    def __init__(self, settings: dict, site: str, engine: str, query: str):
-        from core.grabber.search import GrabberSearch
+    def __init__(self, settings: dict, site: str, engine: str, query: str, patience: _Patience):
         self.site, self.engine, self.query = site, engine, query
-        self.search = GrabberSearch(settings, query, [site], per_site=PER_PAGE)
+        self.search = _search(settings, query, site, PER_PAGE, patience)
         self.posts: list = []
         self.more_left = bool(self.search.lanes)
 
@@ -294,6 +394,10 @@ class _Lane:
     def error(self) -> str:
         return next((lane["error"] for lane in self.search.lanes.values() if lane.get("error")), "")
 
+    @property
+    def unheard(self) -> bool:
+        return _unheard(self.search)
+
     def close(self) -> None:
         self.search.close()
 
@@ -313,6 +417,8 @@ class SetParts:
         self.signature = asked_plan["signature"]
         self.asked = time.time()
         self.error = ""
+        self.unheard = False                  # the site left a question unanswered (asked again soon: SILENT_FOR)
+        self.patience = _Patience()
         self.notes: list = []                 # what was not asked, and why (words)
         self.cards: list = []                 # the parts found: the parent first, then by the post's number
         self._found: dict = {}                # card key -> (search, card)
@@ -334,6 +440,7 @@ class SetParts:
                 _LOG.warning("parts of set %s: %s", self.set_id, exc, exc_info=True)
                 self.error = sanitize_text(f"{type(exc).__name__}: {exc}")[:300]
             finally:
+                self.patience.rest()
                 self._loaded = True
 
     def rank(self, card: dict) -> tuple:
@@ -364,7 +471,10 @@ class SetParts:
 
     # ── asking ───────────────────────────────────────────────────────────────
     def _lane(self, query: str) -> _Lane:
-        return _Lane(self.settings, self.site, self.engine, query)
+        return _Lane(self.settings, self.site, self.engine, query, self.patience)
+
+    def _family(self, parent: int) -> Family:
+        return Family(self.settings, self.site, parent, patience=self.patience)
 
     def _load(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
@@ -389,7 +499,7 @@ class SetParts:
                       for key, text in set_seek.work_queries(data["ids"], data["queries"])]
         family = None
         if self.parent:
-            family = Family(self.settings, self.site, self.parent)
+            family = self._family(self.parent)
             self._families.append(family)
         elif self.kind == "parent" and self.plan.get("root"):
             self.notes.append(f"{self.plan['root'][0]} нет среди сайтов «Галереи (booru)» или он выключен — семья не "
@@ -440,13 +550,16 @@ class SetParts:
         for key, lane in work_lanes:
             hits += set_seek.work_hits(key, [p for p, _c in lane.posts], own_ids)
         anchor = pages[0] if pages else None
-        canvas = set_seek.canvases(pages, anchor) if anchor is not None else []
+        # the site answered none of the first questions (v5.44.152): the next ones are not asked — the page waits
+        deaf = bool(lanes or family is not None) and all(lane.unheard for lane in lanes) and \
+            (family is None or family.unheard)
+        canvas = set_seek.canvases(pages, anchor) if anchor is not None and not deaf else []
         asc, no_video = _ASC.get(self.engine, ""), _NO_VIDEO.get(self.engine, "")
         canvas_lanes = [(page, w, h, self._lane(_query(art, f"width:{w}", f"height:{h}", no_video)))
                         for page, art, w, h in canvas]
         lanes += [lane for *_x, lane in canvas_lanes]
         artist_lanes: dict = {}
-        comic = set_seek.comic_tags(pages + found) if walk_lanes and self.engine != "danbooru" else None
+        comic = set_seek.comic_tags(pages + found) if walk_lanes and self.engine != "danbooru" and not deaf else None
         if comic:
             known = [p.id for p in pages + found]
             lo, hi = min(known), max(known)
@@ -480,7 +593,7 @@ class SetParts:
             root = post.parent or post.id
             if root != self.parent and root not in roots:
                 roots.append(root)
-        families = [Family(self.settings, self.site, root) for root in roots[:WORK_FAMILIES]]
+        families = [self._family(root) for root in roots[:WORK_FAMILIES]]
         if families:
             self._families += families
             with ThreadPoolExecutor(max_workers=len(families), thread_name_prefix="set-parts") as pool:
@@ -504,6 +617,7 @@ class SetParts:
         errors = [lane.error for lane in lanes if lane.error] + [fam.error for fam in self._families if fam.error]
         if not out and errors:
             self.error = errors[0]
+        self.unheard = any(lane.unheard for lane in lanes) or any(fam.unheard for fam in self._families)
         return out
 
     def _walk(self, pages: list, walk_lanes: dict, where: dict) -> list:
@@ -561,13 +675,15 @@ def parts(settings: dict, set_id: int) -> SetParts:
     key = parts_key(set_id)
     now = time.time()
     with _LOCK:
-        for old_key in [k for k, f in _FAMILIES.items() if now - f.asked > FAMILY_TTL]:
-            _FAMILIES.pop(old_key).close()
+        _forget_old(now)
         found = _FAMILIES.get(key)
         if found is not None and getattr(found, "signature", None) != asked_plan["signature"]:
             _FAMILIES.pop(key).close()
             found = None
         if found is None:
+            quiet = _quiet(asked_plan["site"], now) if asked_plan["site"] else ""
+            if quiet:
+                raise FamilyError(quiet)
             found = _FAMILIES[key] = SetParts(settings, asked_plan)
             while len(_FAMILIES) > KEEP:
                 _old_key, old = _FAMILIES.popitem(last=False)
@@ -575,6 +691,7 @@ def parts(settings: dict, set_id: int) -> SetParts:
         else:
             _FAMILIES.move_to_end(key)
     found.load()
+    _heard(found)
     return found
 
 

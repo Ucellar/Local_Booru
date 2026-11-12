@@ -59,7 +59,8 @@ def _parse_address(settings: dict, url: str) -> tuple[str, str, str]:
         name = HOST_ALIASES.get(host, host)
         if table_config(settings, name) is None:
             raise ManualUrlError(f"С сайта {host} программа теги брать не умеет: только с booru-сайтов (Danbooru, "
-                                 "Gelbooru, rule34, e621, Moebooru…). Свой booru-сайт можно добавить на странице «Сайты».")
+                                 "Gelbooru, rule34, e621, Moebooru…). Свой booru-сайт можно добавить: «Настройки "
+                                 "→ Парсер и сайты».")
         return url, name, post_id            # a site of the table whose engine is found out when it is asked
     return url, site.host, post_id
 
@@ -135,10 +136,10 @@ def apply(settings: dict, request: ManualRequest, *, progress: Callable[[str], N
             return {"stopped": True}
         if site is None:
             raise ManualUrlError(f"Сайт {request.host} не ответил как booru-сайт — его движок не определить. "
-                                 "Укажите тип сайта на странице «Сайты».")
+                                 "Укажите тип сайта: «Настройки → Парсер и сайты».")
         site.preflight()
         if site.disabled_reason:          # rule34.xxx without its key: the reason names the site
-            raise ManualUrlError(f"{site.disabled_reason} — впишите это на странице «Сайты»")
+            raise ManualUrlError(f"{site.disabled_reason} — впишите это: «Настройки → Парсер и сайты»")
         say(f"Спрашиваю {site.label} о посте {request.post_id}…")
         try:
             post = site.fetch_post(request.post_id)
@@ -150,7 +151,7 @@ def apply(settings: dict, request: ManualRequest, *, progress: Callable[[str], N
         http.close_all()
     if post is None:
         raise ManualUrlError(f"На {site.label} нет поста {request.post_id} — или его видно только после входа на сайт "
-                             "(логин и ключ — на странице «Сайты»)")
+                             "(логин и ключ — «Настройки → Парсер и сайты»)")
     if not post.tags:
         raise ManualUrlError(f"У поста {request.post_id} на {site.label} нет тегов")
     say(f"Пост найден: {post.url} — тегов: {len(post.tags)}")

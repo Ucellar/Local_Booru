@@ -9,10 +9,16 @@
 // and the snapshots of pages loaded the graphics of the program's window.
 // (v5.44.58) The way out: the pictures still coming are let go when the reader leaves, so the next page does not
 // wait for them (below; not part of the softness — it works with «Плавные переходы» off too).
+// (v5.44.158; the owner: «анимаций как будто вообще нет», the mockup «Анимации» approved 11.11.2026) Three positions,
+// not two: «Нет», «Спокойные», «Заметные» (data-motion-pref: none, calm, vivid — «Заметные» until chosen otherwise).
+// data-motion stays «on» / «off» (whether anything moves), data-motion-level says how much: the styles take their
+// lengths, distances and easing from it (booru.css: --m-…).  Tiles lift under the pointer, buttons give under a
+// press, the tiles of a list come one after another, menus and sheets open, the bars of «Загрузки» run.
 (() => {
   "use strict";
   const root = document.documentElement;
-  let on = root.dataset.motionPref !== "off";
+  const pref = root.dataset.motionPref === "none" ? "none" : root.dataset.motionPref === "calm" ? "calm" : "vivid";
+  let on = pref !== "none";
   try {
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) on = false;
     if (navigator.webdriver && !window.sessionStorage.getItem("lbMotionTest")) on = false;
@@ -20,6 +26,7 @@
     if (navigator.webdriver) on = false;
   }
   root.dataset.motion = on ? "on" : "off";
+  root.dataset.motionLevel = on ? pref : "off";
 
   // ── which way the reader went ─────────────────────────────────────────────────────────────────────────────────
   // The page left says whether it was to its «next» or «prev» link (the reader's pages, a card's neighbours, the pages
@@ -49,6 +56,20 @@
     }
     const way = said && said.to === window.location.href && (said.way === "next" || said.way === "prev") ? said.way : "";
     root.dataset.turned = way || "fade";             // how this page comes in (booru.css; the checks read it)
+    // a page come back to (the browser's «back») stands at the place left, far down its list: the tiles there would
+    // all wait for the turn of the last — they come together with the page
+    let came = null;
+    try { came = window.performance.getEntriesByType("navigation")[0]; } catch (_) { came = null; }
+    if (came && came.type === "back_forward") root.dataset.came = "back";
+    // while the content comes in it is drawn a little off its place: what would stick out of the page's frame for
+    // that moment is cut (booru.css: data-coming), or a scroll bar would flash at the window's edge
+    root.dataset.coming = "1";
+    const there = (event) => {
+      if (!event || (event.target instanceof Element && event.target.matches("main.content"))) delete root.dataset.coming;
+    };
+    document.addEventListener("animationend", there, true);
+    document.addEventListener("animationcancel", there, true);
+    document.addEventListener("DOMContentLoaded", () => window.setTimeout(there, 1200));   // nothing moved after all
   }
 
   // ── pictures as they come: hidden until loaded, then faded in (booru.css; a broken one is shown at once) ──

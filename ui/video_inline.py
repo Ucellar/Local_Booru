@@ -24,6 +24,15 @@ from PySide6.QtCore import (Q_ARG, QBuffer, QIODevice, QMetaObject, QObject, QRe
 
 from webui.video_relay import RELAY, fit_size
 
+
+def silent() -> bool:
+    """(v5.44.145) ``LOCAL_BOORU_SILENT=1``: the program's players make no sound — they are not joined to the
+    computer's speakers (the volume and «без звука» are kept and said as always).  The checks play real videos with
+    the program's real players, and on the owner's computer that was heard (10.11.2026: «питон выдает высокочастотный
+    меняющийся звук» — the test clips' tones at half the volume, each time every check was run there):
+    ``run_checks.py`` sets it for every check, the checks with a window — for themselves."""
+    return os.environ.get("LOCAL_BOORU_SILENT", "").strip().lower() in ("1", "true", "yes", "on")
+
 _LOG = logging.getLogger("local_booru.video")
 
 try:
@@ -381,7 +390,8 @@ class InlineVideo(QObject):
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
         self.sink = QVideoSink(self)
-        self.player.setAudioOutput(self.audio)
+        if not silent():                         # (a check: the player keeps its volume and «без звука», unheard)
+            self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.sink)
         self.player.setLoops(QMediaPlayer.Loops.Infinite)
         self.maker = _FrameMaker()

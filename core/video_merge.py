@@ -148,7 +148,7 @@ def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = 
                     margin *= 4
                 frames = itertools.chain([first] if first is not None else [], frames)
             for n, frame in enumerate(frames):
-                if stop is not None and n % 500 == 0 and stop():
+                if stop is not None and n % 100 == 0 and stop():      # (v5.44.151; was 500 — seconds with one thread)
                     raise MergeError("остановлено")
                 if frame.time is None or (start is not None and frame.time < start):
                     continue
@@ -734,6 +734,44 @@ def read_note(folder: Path) -> dict:
         return {}
 
 
+# ── (v5.44.150) an episode's picture lent by a release whose voice-over was not asked for ───────────
+PICTURES = "picture.json"
+
+
+def read_pictures(folder: Path) -> dict:
+    """{an episode's stem: {"group": the release's sub-folder, "state"}} — ``.lb/picture.json`` of the series folder.
+    "wanted": the release's file of the episode is downloaded for its picture alone (``video_dubs.Resolver.roles``:
+    the original's cut in a better quality than the voice-overs asked for have) — its sound is not put into the
+    episode's file; "refused": its picture did not fit the episode's file — not asked of it again."""
+    from core.file_safety import read_json_kept
+    place = Path(folder) / ".lb" / PICTURES
+    try:
+        data = read_json_kept(place, dict, what="pictures") if place.is_file() else None
+    except (OSError, ValueError):
+        data = None
+    return {str(stem): item for stem, item in (data or {}).items()
+            if isinstance(item, dict) and item.get("group") and item.get("state") in ("wanted", "refused")}
+
+
+def put_picture(folder: Path, stem: str, group: str = "", state: str = "") -> None:
+    """Notes (``state`` "wanted" / "refused") or forgets (no state) the release an episode's picture is lent by."""
+    from core.file_safety import write_json_kept
+    kept = read_pictures(folder)
+    before = dict(kept)
+    if state:
+        kept[stem] = {"group": group, "state": state}
+    else:
+        kept.pop(stem, None)
+    if kept == before:
+        return
+    place = Path(folder) / ".lb" / PICTURES
+    try:
+        place.parent.mkdir(parents=True, exist_ok=True)
+        write_json_kept(place, json.dumps(kept, ensure_ascii=False, indent=1), dict)
+    except OSError as exc:
+        _LOG.info("the picture's note of %s not kept: %s", stem, exc)
+
+
 # ── an episode of a series: its voice-overs' files → one file ────────────────────────────
 def dub_key(name: str) -> str:
     """What makes two voice-overs' names one: the same words but for spaces, case and signs («Red Head Sound» and
@@ -806,23 +844,29 @@ def _prints_place(folder: Path, path: Path) -> Path:
     return folder / ".lb" / "prints" / f"{name.hexdigest()[:16]}.npz"
 
 
-def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Path | str | None = None) -> dict:
+def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Path | str | None = None,
+                  lent: bool = False) -> dict:
     """«<stem>.mkv» in the series folder: the voice-overs' files of one episode (``files``: [(track name, path)]) put
     into it — beside the ones it has.  The picture: ``prefer`` (one of ``files``: the original's cut chosen by
     ``video_dubs.Resolver.roles`` — it replaces the file's picture, its sound the track of the same name), otherwise
     the largest of them (the file's own one when equal).  A voice-over whose picture is another video stays a file of
-    its own.  Its files put in are removed after the new file is checked.  {"merged": [names], "kept": [(name,
+    its own.  Its files put in are removed after the new file is checked.  (v5.44.150) ``lent`` — ``prefer`` gives its
+    picture alone (a release whose voice-over was not asked for): its sound is no track; the episode's file is made
+    anew on it even when no voice-over is added, and its file is removed after.  {"merged": [names], "kept": [(name,
     why)], "file": path or "", "picture": the file its picture came from, "repictured": the file got another
-    picture}."""
+    picture, "refused": the lent picture was not taken (it fits nothing there)}."""
     target = folder / f"{stem}.mkv"
     had = tracks_in(target) if target.is_file() else []
     had_keys = {dub_key(name) for name in had}
-    fresh = [(name, Path(path)) for name, path in files if dub_key(name) not in had_keys]
     chosen = Path(prefer) if prefer and Path(prefer).is_file() and Path(prefer) != target else None
+    lone = chosen if lent else None                      # gives the picture, no track
+    fresh = [(name, Path(path)) for name, path in files if dub_key(name) not in had_keys and Path(path) != lone]
     chosen_name = next((name for name, path in files if chosen is not None and Path(path) == chosen), None)
-    if chosen_name is None:
+    if lone is not None:
+        chosen_name = None
+    elif chosen_name is None:
         chosen = None
-    result = {"merged": [], "kept": [], "file": "", "repictured": False}
+    result = {"merged": [], "kept": [], "file": "", "repictured": False, "refused": False}
     if not fresh and chosen is None:
         return result
     sources = ([(target, True)] if had else []) + [(path, False) for _name, path in fresh]
@@ -847,7 +891,8 @@ def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Pa
                 say(f"{stem}: картинка {picture.name} не совпала с общим файлом ({exc}) — оставляю картинку общего файла")
                 picture = target
                 base = prints_of(target, stop=stop, cache=_prints_place(folder, target))
-        replaced = dub_key(chosen_name) if picture == chosen and dub_key(chosen_name) in had_keys else None
+        replaced = dub_key(chosen_name) if chosen_name is not None and picture == chosen \
+            and dub_key(chosen_name) in had_keys else None
         tracks += [Track(chosen, name) if dub_key(name) == replaced  # its sound — from the picture's file now
                    else Track(target, name, fit=fit, index=n) for n, name in enumerate(had)]
     for name, path in fresh:
@@ -868,13 +913,26 @@ def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Pa
         say(f"{stem}: {name} — {fit.words()}")
         tracks.append(Track(path, name, fit=fit))
     added = [t for t in tracks if t.path != target]
-    if not added:
+    repictured = bool(had) and picture != target
+    result["refused"] = lone is not None and (picture != lone or not tracks)
+    if not tracks or (not added and not repictured):     # nothing to put in, and the picture there stays
         return result
     origin = merge(picture, tracks, target, stop=stop)
     result["merged"] = [t.title for t in added]
     result["file"] = str(target)
     result["picture"] = str(picture)
-    result["repictured"] = bool(had) and picture != target
+    result["repictured"] = repictured
+    if lone is not None and picture == lone:             # the lent picture is in the file: its own file goes
+        for gone in (lone, _prints_place(folder, lone)):
+            try:
+                gone.unlink(missing_ok=True)
+            except OSError as exc:
+                say(f"{stem}: {gone.name} не удалён — {exc}")
+        try:
+            if lone.parent != folder and not any(lone.parent.iterdir()):
+                lone.parent.rmdir()
+        except OSError as exc:
+            _LOG.info("%s not removed: %s", lone.parent, exc)
     for track in added:                                  # the voice-overs' own files: in the new file now
         for gone in (track.path, _prints_place(folder, track.path)):
             try:
@@ -948,6 +1006,41 @@ class Merger:
                     out.add(stem)
         return out
 
+    def _lent_over(self, stem: str, lender: dict, lent, result: dict, say) -> None:
+        """After an episode was put together: its lent picture is in the file — the note goes; it did not fit — said,
+        noted «refused» (not asked of that release again), and its file goes when the episode has a file of its own
+        (with none it stays: a whole episode, a voice-over as any other); the release's file never came — the note
+        and what was begun of it go."""
+        place = self.folder / lender["group"]
+        if lender["state"] != "wanted":
+            return
+        if lent is None:
+            if not result["merged"] and not result.get("repictured"):
+                return                           # nothing was put together: it may still come
+            for left in list(place.iterdir()) if place.is_dir() else ():
+                if left.name.startswith(stem + ".") and ".part" in left.name:      # «Серия 07.mp4.part», its notes
+                    try:
+                        left.unlink()
+                    except OSError as exc:
+                        _LOG.info("%s not removed: %s", left, exc)
+            put_picture(self.folder, stem)
+        elif result.get("refused"):
+            say(f"{stem}: картинка «{title_of(lender['group'])}» не подошла к серии — остаётся прежняя")
+            put_picture(self.folder, stem, lender["group"], "refused")
+            if (self.folder / f"{stem}.mkv").is_file():
+                for gone in (lent, _prints_place(self.folder, lent)):
+                    try:
+                        gone.unlink(missing_ok=True)
+                    except OSError as exc:
+                        say(f"{stem}: {gone.name} не удалён — {exc}")
+        elif result["merged"] or result.get("repictured"):
+            put_picture(self.folder, stem)
+        try:
+            if place.is_dir() and not any(place.iterdir()):
+                place.rmdir()
+        except OSError as exc:
+            _LOG.info("%s not removed: %s", place, exc)
+
     def __call__(self, *, say, stop, stems=None) -> dict:
         """The voice-overs' files of the episodes into their «Серия NN.mkv» — every episode of the folder, or those of
         ``stems`` (one whose files have all come: put together at once, not at the end of the whole download — owner,
@@ -969,6 +1062,7 @@ class Merger:
             if path is not None:
                 episodes.setdefault(stem, []).append((self.title(remote), path))
         done = 0
+        lenders = read_pictures(self.folder)
         for n, (stem, files) in enumerate(sorted(episodes.items(), key=lambda e: video_library.natural_key(e[0])), 1):
             if stop():
                 say("Сборка остановлена — остальные серии соберутся со следующего «Скачать»")
@@ -982,22 +1076,42 @@ class Merger:
             if chosen is not None:
                 place = self.folder / chosen.group if chosen.group else self.folder
                 prefer = next((place / f"{stem}{ext}" for ext in (".mp4", ".ts") if (place / f"{stem}{ext}").is_file()), None)
+            # (v5.44.150) a picture lent by a release whose voice-over was not asked for (``.lb/picture.json``: kept
+            # between the runs — a download stopped half-way goes on the same): its file gives the picture alone
+            lender = lenders.get(stem)
+            lent = None
+            if lender is not None and lender["state"] == "wanted":
+                place = self.folder / lender["group"]
+                lent = next((place / f"{stem}{ext}" for ext in (".mp4", ".ts") if (place / f"{stem}{ext}").is_file()), None)
+                if lent is not None and any(dub_key(title_of(lender["group"])) == dub_key(name)
+                                            for name in self.tracks(self.folder / f"{stem}.mkv")):
+                    lent = None                  # its voice-over is in the file already: a voice-over as any other
+                    prefer = prefer or next((path for _name, path in files if path.parent == place), None)
+                elif lent is not None:
+                    prefer = lent
             from core import video_skips
             before = video_skips.stamp_of(self.folder / f"{stem}.mkv")
             try:
-                result = merge_episode(self.folder, stem, files, say=say, stop=stop, prefer=prefer)
+                result = merge_episode(self.folder, stem, files, say=say, stop=stop, prefer=prefer,
+                                       lent=lent is not None)
             except MergeError as exc:
                 say(f"{stem}: не собрана — {exc}; файлы озвучек остались как были")
                 continue
             except OSError as exc:               # Windows: the file is open in a player; the disk
                 say(f"{stem}: не собрана — {exc} (если серия открыта в плеере, закройте её); файлы озвучек остались")
                 continue
-            if result["merged"]:
+            if lender is not None:
+                self._lent_over(stem, lender, lent, result, say)
+            if result["merged"] or result.get("repictured"):
                 done += 1
                 count = len(self.tracks(Path(result["file"])))
                 if result.get("repictured"):
-                    say(f"{stem}: картинка общего файла теперь — от «{self.title(chosen)}»" if chosen is not None
+                    whose = title_of(lender["group"]) if lent is not None and not result.get("refused") else \
+                        self.title(chosen) if chosen is not None else ""
+                    say(f"{stem}: картинка общего файла теперь — от «{whose}»" if whose
                         else f"{stem}: картинка общего файла заменена")
+                elif lent is not None and not result.get("refused"):
+                    say(f"{stem}: картинка — от «{title_of(lender['group'])}», её звук в файл не идёт")
                 say(f"{stem}: в общем файле теперь озвучек: {count}")
                 try:                             # YummyAnime's times of its picture's file — the new file's
                     video_skips.carry(self.folder, [result.get("picture") or ""], Path(result["file"]))

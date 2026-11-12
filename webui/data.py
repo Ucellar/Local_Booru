@@ -1,11 +1,13 @@
 """What the web pages read from the library (read-only; changes go through core functions)."""
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sqlite3
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 from core import trash_tools
@@ -27,7 +29,7 @@ ALL_LENGTHS = {"trash", "no_match"}
 
 def video_limit(settings: dict | None) -> int:
     """Seconds: a video card longer than this is on the tab «Видео», not in the gallery (0 — every video is in the
-    gallery).  «Настройки → Вкладка «Видео»»."""
+    gallery).  «Настройки → Видео»."""
     try:
         return max(0, int((settings or {}).get("video_tab_seconds", 60)))
     except (TypeError, ValueError):
@@ -151,9 +153,8 @@ def long_videos_found(settings: dict, query: str, *, source: str = "all") -> int
     """How many videos of a gallery search are on the tab «Видео» instead (0 when the tab takes none)."""
     if video_limit(settings) <= 0 or not str(query or "").strip():
         return 0
-    from core.database.repository import count_search_items
     tags, bucket, extra, params = _filters(settings, query, VIDEO_SECTION)
-    return count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params)
+    return _counted(settings, tags, source, bucket, extra, params, False)
 
 
 def collapses(settings: dict | None, section: str) -> bool:
@@ -179,15 +180,13 @@ def mark_tiles(settings: dict, items: list) -> list:
 
 def search_page(settings: dict, query: str, *, section: str = "all", source: str = "all", order: str = "newest",
                 page: int = 1, per_page: int = 42) -> tuple[list, int]:
-    from core.database.repository import count_search_items, enrich_items, search_items
+    from core.database.repository import enrich_items, search_items
     tags, bucket, extra, params = _filters(settings, query, section)
     collapse = collapses(settings, section)
-    total = count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params,
-                               collapse_sets=collapse)
+    total = _counted(settings, tags, source, bucket, extra, params, collapse)
     # (v5.44.40) tiles vs files: a сборка is one tile but many files — the gallery shows both, so count the files too
     # (only when sets are collapsed; without collapsing a tile is a file, and in the trash / Брак sets never collapse)
-    files_total = total if not collapse else count_search_items(
-        settings, tags, source, bucket, extra_where=extra, extra_params=params, collapse_sets=False)
+    files_total = total if not collapse else _counted(settings, tags, source, bucket, extra, params, False)
     offset = max(0, (page - 1) * per_page)
     items = search_items(settings, tags, source, bucket, limit=per_page, offset=offset,
                          order=order if order in ORDERS else "newest", extra_where=extra, extra_params=params,
@@ -200,10 +199,73 @@ def search_page(settings: dict, query: str, *, section: str = "all", source: str
 
 def count_tiles(settings: dict, query: str, *, section: str = "all", source: str = "all") -> int:
     """How many tiles a search has (a сборка — one tile where the section shows it so): the phone's «12 из 1 240»."""
-    from core.database.repository import count_search_items
     tags, bucket, extra, params = _filters(settings, query, section)
-    return count_search_items(settings, tags, source, bucket, extra_where=extra, extra_params=params,
-                              collapse_sets=collapses(settings, section))
+    return _counted(settings, tags, source, bucket, extra, params, collapses(settings, section))
+
+
+def base_mark(settings: dict) -> tuple:
+    """What changes whenever anything is written to the base: the size and the time of its file and of its journal
+    (every commit goes into the journal; a journal put back into the file changes the file).  Two looks at the disk,
+    nothing read."""
+    from core.database.connection import db_path
+    path = db_path(settings)
+    out = [str(path)]
+    for name in (str(path), str(path) + "-wal"):
+        try:
+            st = os.stat(name)
+            out.append((st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
+class PageCounts:
+    """(v5.44.152) How many cards a search of the gallery has, kept while the base is as it was.
+
+    Every page of the gallery counted its search anew — twice (tiles and files): on 40 thousand cards the whole
+    table of the cards read for each count.  The number is the same until something is written to the base
+    (:func:`base_mark`), so the next page of the same search, and the way back to it, take it from here; ``TTL`` — a
+    count is not believed longer than this whatever the mark says; a change of the library the pages are told of
+    (``TAG_COUNTS.invalidate`` — it follows the tag counts) forgets them all at once."""
+
+    TTL = 120.0
+    KEPT = 300
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._kept: OrderedDict = OrderedDict()
+
+    def get(self, settings: dict, key: tuple, count) -> int:
+        mark = base_mark(settings)
+        now = time.monotonic()
+        with self._lock:
+            item = self._kept.get(key)
+            if item is not None and item[1] == mark and now - item[2] < self.TTL:
+                self._kept.move_to_end(key)
+                return item[0]
+        value = int(count())
+        with self._lock:
+            self._kept[key] = (value, mark, now)
+            self._kept.move_to_end(key)
+            while len(self._kept) > self.KEPT:
+                self._kept.popitem(last=False)
+        return value
+
+    def forget(self) -> None:
+        with self._lock:
+            self._kept.clear()
+
+    invalidate = forget                   # a follower of the tag counts (``Kept.followers``)
+
+
+PAGE_COUNTS = PageCounts()
+
+
+def _counted(settings: dict, tags, source, bucket, extra, params, collapse: bool) -> int:
+    from core.database.repository import count_search_items
+    key = (str(tags), str(source), str(bucket), tuple(extra or ()), tuple(params or ()), bool(collapse))
+    return PAGE_COUNTS.get(settings, key, lambda: count_search_items(
+        settings, tags, source, bucket, extra_where=extra, extra_params=params, collapse_sets=collapse))
 
 
 def item_at(settings: dict, query: str, *, section: str, source: str, order: str, index: int) -> dict | None:
@@ -228,10 +290,14 @@ class Kept:
     """
 
     THREAD = "webui-kept"
+    FILE = ""                 # (v5.44.152) the file of the cache folder that keeps the count between the runs
+    SAVE_EVERY = 300.0        # seconds between two savings of a count that changes all the time (a parser's run)
 
     def __init__(self, ttl: float = 60.0, followers: tuple = ()):
         self.ttl = ttl
         self.followers = tuple(followers)
+        self._saved_at = None                 # time.monotonic() of the last saving (None — not saved by this run)
+        self._saved_mark = None
         self._lock = threading.Lock()
         self._load_lock = threading.Lock()
         self._loaded_at = 0.0
@@ -255,11 +321,78 @@ class Kept:
                 if self._db == key and self._loaded_at:
                     return self._by_name
                 generation = self._generation
+            # (v5.44.152) the count of the last run first: the first page after a start does not wait for the whole
+            # table of tags to be read from the disk.  The numbers are counted anew behind it, always: whether the
+            # base is as it was when they were kept is not something its files say for sure (closing the program
+            # alone rewrites them)
+            kept = self._restore(key)
+            if kept is not None:
+                with self._lock:
+                    self._by_name, self._db = kept, key
+                    self._loaded_at = 1.0
+                    start = not self._refreshing
+                    if start:
+                        self._refreshing = True
+                if start:
+                    threading.Thread(target=self._refresh, args=(dict(settings), key, generation),
+                                     name=self.THREAD, daemon=True).start()
+                return kept
             data = self._load(settings)
             with self._lock:
                 self._by_name, self._db = data, key
                 self._loaded_at = time.time() if generation == self._generation else 1.0
+            threading.Thread(target=self._keep, args=(dict(settings), key, data), name=self.THREAD + "-keep",
+                             daemon=True).start()
             return data
+
+    # ── between the runs ──
+    def _place(self) -> Path | None:
+        if not self.FILE:
+            return None
+        from core.paths import CACHE_DIR
+        return Path(CACHE_DIR) / self.FILE
+
+    @staticmethod
+    def _pack(data):
+        return data
+
+    @staticmethod
+    def _unpack(data):
+        return data
+
+    def _restore(self, key: str):
+        """The count the last run kept for this base (None — there is none)."""
+        place = self._place()
+        if place is None:
+            return None
+        try:
+            kept = json.loads(place.read_text(encoding="utf-8"))
+            if not isinstance(kept, dict) or kept.get("v") != 1 or kept.get("db") != key:
+                return None
+            return self._unpack(kept["data"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:      # no file, a file cut short: counted as before
+            if not isinstance(exc, FileNotFoundError):
+                _LOG.info("%s not read (%s) — counted anew", place.name, exc)
+            return None
+
+    def _keep(self, settings: dict, key: str, data, *, often: bool = True) -> None:
+        """The count written for the next run; ``often`` False — not more than once in ``SAVE_EVERY``."""
+        place = self._place()
+        if place is None:
+            return
+        try:
+            mark = base_mark(settings)
+            now = time.monotonic()
+            with self._lock:
+                recent = self._saved_at is not None and now - self._saved_at < self.SAVE_EVERY
+                if mark == self._saved_mark or (not often and recent):
+                    return
+                self._saved_mark, self._saved_at = mark, now
+            from core.file_safety import atomic_write_bytes
+            atomic_write_bytes(place, json.dumps({"v": 1, "db": key, "data": self._pack(data)},
+                                                 ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except (OSError, ValueError, TypeError) as exc:                 # a cache that is not written: counted next time
+            _LOG.info("%s not kept: %s", place.name, exc)
 
     def _refresh(self, settings: dict, key: str, generation: int) -> None:
         data = None
@@ -274,6 +407,8 @@ class Kept:
                     self._by_name = data
                     # Changed while counting (a card trashed meanwhile): these numbers are already old.
                     self._loaded_at = time.time() if generation == self._generation else 1.0
+            if data is not None:
+                self._keep(settings, key, data, often=False)
 
     def invalidate(self) -> None:
         with self._lock:
@@ -294,6 +429,11 @@ class SourceHosts(Kept):
     the 0.4 s of a page — now once a minute, and after a change of the library (it follows the tag counts)."""
 
     THREAD = "webui-source-hosts"
+    FILE = "gallery_sites.json"
+
+    @staticmethod
+    def _unpack(data):
+        return [(str(host), int(count)) for host, count in data]
 
     @staticmethod
     def _load(settings: dict) -> list:
@@ -313,6 +453,11 @@ class TagCounts(Kept):
     """
 
     THREAD = "webui-tag-counts"
+    FILE = "gallery_tag_counts.json"
+
+    @staticmethod
+    def _unpack(data):
+        return {str(norm): (str(name), str(category), int(count)) for norm, (name, category, count) in data.items()}
 
     @staticmethod
     def _load(settings: dict) -> dict:
@@ -334,7 +479,7 @@ class TagCounts(Kept):
 
 
 SOURCE_HOSTS = SourceHosts()
-TAG_COUNTS = TagCounts(followers=(SOURCE_HOSTS,))      # a change of the library makes both stale
+TAG_COUNTS = TagCounts(followers=(SOURCE_HOSTS, PAGE_COUNTS))      # a change of the library makes all three stale
 
 
 def sidebar_tags(settings: dict, items: list, limit: int = 60) -> dict[str, list[tuple[str, int]]]:

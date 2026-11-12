@@ -106,6 +106,36 @@
     try { await navigator.clipboard.writeText(text); return true; } catch (_) { return false; }
   }
 
+  // ── (v5.44.158) «Плавные переходы»: a row that changed its place moves there, a new one comes in ────────────────
+  // (the mockup «Анимации»; booru.css sets data-motion and the lengths; nothing of it on the phone or with the
+  // transitions off).  The lists are drawn anew as the state comes: where each row stood is noted before, and after —
+  // a row known before is moved from its old place to the new one, a row not seen before comes in (.dl-new).
+  const root = document.documentElement;
+  const moves = () => root.dataset.motion === "on" && typeof Element.prototype.animate === "function";
+  function places(list) {
+    const at = new Map();
+    if (moves()) for (const li of list.children) at.set(li.dataset.row || "", li.getBoundingClientRect().top);
+    return at;
+  }
+  function settle(list, before) {
+    if (!moves()) return;
+    const style = getComputedStyle(root);
+    const duration = parseFloat(style.getPropertyValue("--m-page")) || 220;
+    const easing = style.getPropertyValue("--m-ease").trim() || "ease-out";
+    let fresh = 0;
+    for (const li of list.children) {
+      const row = li.dataset.row || "";
+      if (before.has(row)) {
+        const by = before.get(row) - li.getBoundingClientRect().top;
+        if (Math.abs(by) > 2) li.animate([{ transform: "translateY(" + by + "px)" }, { transform: "none" }], { duration, easing });
+      } else {
+        li.style.setProperty("--m-i", String(Math.min(fresh++, 16)));
+        li.classList.add("dl-new");                    // once: a row put into the list again must not come in again
+        li.addEventListener("animationend", () => li.classList.remove("dl-new"), { once: true });
+      }
+    }
+  }
+
   // ── the state: asked while the page is seen ─────────────────────────────────────────────────────────────────────
   let timer = 0;
   let asking = false;
@@ -169,6 +199,7 @@
     if (rows[id]) return rows[id];
     const li = el("li", "dl-job");
     li.dataset.key = r.key;
+    li.dataset.row = id;
     const pic = el("span", "dl-pic");
     const letter = el("span", "dl-letter");
     letter.setAttribute("aria-hidden", "true");
@@ -246,6 +277,7 @@
   }
 
   function paintJobs(list) {
+    const before = places(jobsList);
     const wanted = new Set(list.map(rowId));
     Object.keys(rows).forEach((id) => {
       if (!wanted.has(id)) {
@@ -288,6 +320,7 @@
     const order = list.map((r) => rows[rowId(r)].li);
     if (now.length !== order.length || now.some((li, k) => li !== order[k])) jobsList.append(...order);
     goingEmpty.hidden = list.length > 0;
+    settle(jobsList, before);
   }
 
   // «Подробности»: the task's journal, asked while it is open
@@ -324,13 +357,21 @@
   }
 
   // ── «Очередь» ───────────────────────────────────────────────────────────────────────────────────────────────────
+  let queueSaid = "";             // (v5.44.158) the queue as it was drawn last
   function paintQueue(list) {
     queuePanel.hidden = !list.length;
     queuePanel.querySelector(".dl-n").textContent = list.length ? String(list.length) : "";
+    // nothing new: the rows stay as they are (the button under the pointer, the one in focus) — drawn anew every
+    // 1.5 s they lost both
+    const said = JSON.stringify(list);
+    if (said === queueSaid && queueList.children.length === list.length) return;
+    queueSaid = said;
+    const before = places(queueList);
     queueList.textContent = "";
     list.forEach((q, n) => {
       const li = el("li", "dl-q" + (q.hidden ? " hid" : ""));
       li.dataset.key = q.key;
+      li.dataset.row = q.key + "|" + q.id;
       li.append(el("span", "dl-qn", String(n + 1)), el("span", "dl-kind", q.kind || ""));
       const main = el("span", "dl-q-main");
       const name = el("span", "dl-q-name");      // the kind beside the name — where its own column is not (narrow)
@@ -362,16 +403,20 @@
       }
       queueList.append(li);
     });
+    settle(queueList, before);
   }
 
   // ── «Готово» ────────────────────────────────────────────────────────────────────────────────────────────────────
   const SIGNS = { ok: "check", part: "warn", fail: "warn", stop: "stop" };
+  const openEarlier = new Set();      // the titles whose earlier downloads are unfolded (kept while the list is drawn anew)
 
   async function loadDone() {
     let st;
     try { st = await getJson("/api/downloads/done" + (showAll ? "?all=1" : "")); } catch (_) { return; }
+    const before = places(doneList);
     doneList.textContent = "";
     (st.rows || []).forEach((r) => doneList.append(doneRow(r)));
+    settle(doneList, before);
     doneEmpty.hidden = (st.rows || []).length > 0;
     doneAll.hidden = showAll || (st.total || 0) <= (st.rows || []).length;
   }
@@ -379,6 +424,7 @@
   function doneRow(r) {
     const li = el("li", "dl-res " + (r.sign || "ok") + (r.hidden ? " hid" : ""));
     li.dataset.id = r.id;
+    li.dataset.row = String(r.id);
     const sign = el("span", "dl-sign");
     sign.append(svg(ICON[SIGNS[r.sign] || "check"], 14));
     const body = el("div", "dl-res-body");
@@ -389,6 +435,23 @@
       const ul = el("ul");
       r.fails.forEach((f) => ul.append(el("li", "", f)));
       body.append(ul);
+    }
+    if (r.note) body.append(el("p", "dl-note", r.note));   // (v5.44.146) where the chapters were looked for
+    // (v5.44.151) the title's downloads before this one — folded: a title is one row, not a row a download
+    if (r.earlier && (r.earlier.lines || []).length) {
+      const fold = el("details", "dl-earlier");
+      fold.open = openEarlier.has(r.key);
+      fold.addEventListener("toggle", () => { if (fold.open) openEarlier.add(r.key); else openEarlier.delete(r.key); });
+      fold.append(el("summary", "", r.earlier.words || "Раньше"));
+      const ol = el("ol");
+      r.earlier.lines.forEach((line) => {
+        const item = el("li", line.sign || "");
+        if (line.when) item.append(el("time", "", line.when));
+        item.append(el("span", "", line.what || ""));
+        ol.append(item);
+      });
+      fold.append(ol);
+      body.append(fold);
     }
     const tools = el("div", "dl-res-tools");
     if (r.retry && r.retry.href) {

@@ -108,17 +108,35 @@ def facts_of(page: str) -> dict:
 
 
 def numbers_of(title: str, posi=None) -> tuple:
-    """(tome, number, the chapter's own name) of «Том 1 Глава 12 - Имя», «#12», «Король меча 12»…"""
+    """(tome, number, the chapter's own name) of a chapter as the site writes it: «4 - 185 Конец 4-го сезона» (its
+    list: the volume, a dash, the chapter, its name), «Том 1 Глава 12 - Имя», «#12», «185 Имя», «Король меча 12».
+
+    (v5.44.145) Until then the last number of the line was the chapter: «4 - 185 Конец 4-го сезона» was chapter 4 —
+    the site «had no» chapter 185 (the owner, 10.11.2026: «на com-x есть 185 глава»), and its pictures stood under
+    the number 4.  A number inside the name is never the chapter's now: the site's own form first, then a word that
+    names the number, then a number the line begins or ends with, then the chapter's place in the list.  The volume
+    of the site's list («4 - …») is not taken, as before: the folders of the titles downloaded from it have none, and
+    two ways of counting volumes in one folder would put its chapters out of order."""
     from core.manhwa_sources import _num
     title = text_of(title)
+    named = re.search(r"(?i)(?:глава|chapter|\bch\.?|#|выпуск|эпизод)\s*(\d+(?:[.,]\d+)?)", title)
+    listed = None if named else re.match(r"\s*(\d+)\s*[-–—]\s*(\d+(?:[.,]\d+)?)(?![\d.,]*\d)(.*)$", title, re.S)
+    if listed:
+        own = re.sub(r"^[\s:.\-–—]+", "", listed.group(3)).strip()
+        return 0, _num(listed.group(2)), own
     tome = re.search(r"(?i)(?:\bтом|\bvol(?:ume)?\.?)\s*(\d+)", title)
-    chapter = re.search(r"(?i)(?:глава|chapter|\bch\.?|#|выпуск|эпизод)\s*(\d+(?:[.,]\d+)?)", title)
-    if chapter:
-        number, rest = _num(chapter.group(1)), title[chapter.end():]
+    if named:
+        number, rest = _num(named.group(1)), title[named.end():]
     else:
         after = title[tome.end():] if tome else title
-        found = re.findall(r"\d+(?:[.,]\d+)?", after)
-        number, rest = (_num(found[-1]) if found else (_num(posi) if posi not in (None, "") else "")), ""
+        first = re.match(r"[\s:.\-–—]*(\d+(?:[.,]\d+)?)(?![\d.,]*\d)(.*)$", after, re.S)
+        last = re.search(r"(\d+(?:[.,]\d+)?)\s*$", after)
+        if first:                                   # «185 Конец 4-го сезона»
+            number, rest = _num(first.group(1)), first.group(2)
+        elif last:                                  # «Король меча 12»
+            number, rest = _num(last.group(1)), ""
+        else:                                       # no number of its own («Экстра», «Конец 4-го сезона»)
+            number, rest = (_num(posi) if posi not in (None, "") else ""), ""
     own = re.sub(r"^[\s:.\-–—]+", "", rest).strip()
     return (int(tome.group(1)) if tome else 0), number, own
 

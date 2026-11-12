@@ -1,7 +1,9 @@
 /* Local Booru — (v5.44.121) one page of a series and one player of an episode (webui/pages/video_series.py,
    series.js): the owner's mockup D «Видео: одна страница сериала и один плеер» — the cover and the facts, «Откуда
    серии» (the folder, «Смотреть онлайн», the voice-over), the episodes of the folder and of the site in one list, the
-   player under them.  The look of the page of a title (title.css, .tt); every look gives its colours by its own
+   player under them.  (v5.44.142, the owner's mockup «Видео: серии плитками и скачивание озвучек») The episodes are
+   tiles in the card «Серии» over the player, «Откуда серии» under them; «Скачать серии…» (.sv-get) turns the card
+   into the choice of «Скачать» — on the phone it is a sheet at the bottom of the screen.  The look of the page of a title (title.css, .tt); every look gives its colours by its own
    tokens (--panel, --accent…).  Every rule starts with .sv (or .vgoing, .vlong-…): the looks style button, input and
    a:hover by their tags, a class alone would lose to «button:hover».  The phone (.m-body) — its own tokens. */
 .sv {
@@ -64,16 +66,12 @@
 .sv .sv-side .action-status { min-height: 0; margin: 0; }
 .sv .sv-side .action-status:empty { display: none; }
 
-/* «Откуда серии» */
-.sv .sv-src { display: flex; flex-direction: column; gap: 10px; max-width: 760px; padding: 14px 18px;
-  border: 1px solid var(--sv-line); border-radius: 12px; background: color-mix(in srgb, var(--panel) 70%, transparent); }
+/* «Откуда серии»: under the tiles (v5.44.142) — a part of the card «Серии» */
+.sv .sv-src { display: flex; flex-direction: column; gap: 10px; padding-top: 12px; border-top: 1px solid var(--sv-line); }
 .sv .sv-src:empty { display: none; }
-.sv .sv-src-head { display: flex; flex-direction: column; gap: 2px; padding-bottom: 8px;
-  border-bottom: 1px solid var(--sv-line); }
-.sv .sv-src-h { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; color: var(--text); }
+.sv .sv-src-h { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--muted); font-size: 13px; font-weight: 600; }
 .sv .sv-src-h .sv-i { color: var(--accent); }
-.sv .sv-src-note { color: var(--muted); font-size: 12.5px; }
-.sv .sv-src-rows { display: flex; flex-direction: column; gap: 12px; margin: 0; }
+.sv .sv-src-rows { display: flex; flex-direction: column; gap: 10px; margin: 0; }
 .sv .sv-src-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 4px 16px; align-items: start; }
 .sv .sv-src-row dt { padding-top: 2px; color: var(--muted); font-size: 13px; }
 .sv .sv-src-row dd { margin: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
@@ -86,12 +84,6 @@
 .sv .sv-check input { flex: none; width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
 .sv .sv-src-state { margin: 0; color: var(--muted); font-size: 13px; }
 .sv .sv-src-state.bad { padding-left: 10px; border-left: 3px solid var(--danger, #b8615c); color: var(--text); }
-.sv .sv-voice-now { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; padding: 6px 12px;
-  border: 1px solid var(--sv-line); border-radius: 8px; background: var(--panel-2, var(--panel)); color: var(--text);
-  font: inherit; font-size: 13.5px; cursor: pointer; }
-.sv .sv-voice-now:hover { border-color: var(--accent); background: var(--panel-2, var(--panel)); color: var(--text); }
-.sv .sv-voice-now b { white-space: nowrap; }
-.sv .sv-voice-now small { overflow: hidden; color: var(--muted); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
 
 /* the description and the genres */
 .sv .sv-desc { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 80ch; }
@@ -108,8 +100,30 @@
 .sv .sv-chips a { display: inline-block; padding: 3px 10px; border: 1px solid var(--sv-line); border-radius: 999px;
   color: var(--text); font-size: 13px; text-decoration: none; }
 .sv .sv-chips a:hover { border-color: var(--accent); color: var(--text); }
+.sv .sv-chips .sv-chip-words { padding: 3px 10px; border: 1px solid var(--sv-line); border-radius: 999px;
+  color: var(--muted); font-size: 13px; }
 
 /* everything the description says (info.json), folded */
+/* «Порядок просмотра» of a title from YummyAnime — a button under the description, the list under it (v5.44.38).
+   (v5.44.145) Here, not in videos.css: series.js draws it for a title of a site and on the phone too.  The selectors
+   stay as light as they were: the looks restyle the list (youtube.css). */
+.vorder { margin: 14px 0 0; }
+.vorder-toggle { display: inline-flex; align-items: center; gap: 10px; }
+.vorder-count { font-weight: 400; opacity: 0.85; }
+.vorder-toggle[aria-expanded="true"] .vorder-arrow { transform: rotate(180deg); }
+.vorder-arrow { display: inline-block; transition: transform 0.15s; }
+.vorder-list { display: flex; flex-direction: column; gap: 6px; max-width: 760px; margin: 8px 0 0; padding: 10px 14px 10px 34px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); font-size: 14px; }
+.vorder-list li { line-height: 1.4; }
+.vorder-list li.soon { color: var(--muted); }
+.vorder-list a.vorder-name { color: var(--accent-text, var(--accent)); }
+.vorder-mark { float: right; margin-left: 12px; color: var(--muted); font-size: 12px; }
+.vorder-list li.have .vorder-mark, .vorder-list li.here .vorder-mark { color: var(--tag-character, #3f9d4a); }
+.vorder-mark a { color: var(--accent-text, var(--accent)); }
+.m-body .vorder { margin: 12px 0 0; }
+.m-body .vorder-toggle { width: 100%; justify-content: center; }
+.m-body .vorder-list { padding: 10px 12px 10px 30px; border-color: #3a3a3a; border-radius: 10px; }
+.m-body .vorder-mark { float: none; display: block; margin: 2px 0 0; }      /* a narrow screen: under the name */
 .sv .sv-fields { max-width: 80ch; font-size: 13.5px; }
 .sv .sv-fields summary { color: var(--sv-site); font-size: 13px; cursor: pointer; }
 .sv .sv-fields .vfacts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 18px; margin: 10px 0 0; }
@@ -118,62 +132,82 @@
 .sv .sv-fields .vchip { display: inline-block; margin: 0 4px 4px 0; padding: 1px 8px; border-radius: 3px;
   background: var(--panel); color: var(--text); font-size: 12.5px; text-decoration: none; }
 
-/* ── the episodes ── */
-.sv .sv-list { padding: 8px 0; background: var(--panel); border: 1px solid var(--border, var(--sv-line));
-  border-radius: 16px; }
-.sv .sv-list:empty { display: none; }
-.sv .sv-list-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 10px 20px 12px; }
-.sv .sv-list-head h2 { margin: 0; font-size: 18px; color: var(--text); }
+/* ── the episodes: tiles in the card «Серии» over the player (v5.44.142) ── */
+.sv .sv-list { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px 16px;
+  background: var(--panel); border: 1px solid var(--border, var(--sv-line)); border-radius: 12px; }
+.sv .sv-list.getting { border-color: var(--accent); }
+.sv .sv-eps { display: flex; flex-direction: column; gap: 14px; }
+.sv .sv-list-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+.sv .sv-list-head h2 { margin: 0; font-size: 20px; color: var(--text); }
 .sv .sv-count { color: var(--muted); font-weight: 500; }
-.sv .sv-order { font-size: 13px; }
-.sv .sv-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0; padding: 0; list-style: none;
-  color: var(--muted); font-size: 12.5px; }
-.sv .sv-rows { margin: 0; padding: 0; list-style: none; }
-.sv .sv-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto minmax(0, 196px) auto; align-items: center;
-  gap: 14px; padding: 10px 20px; border-top: 1px solid var(--sv-line); }
-.sv .sv-row.here { background: color-mix(in srgb, var(--accent) 14%, transparent);
-  box-shadow: inset 3px 0 0 var(--accent); }
-.sv .sv-row.now:not(.here) { background: color-mix(in srgb, var(--accent) 7%, transparent); }
-.sv .sv-n { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 8px;
-  background: var(--panel-2, var(--panel)); color: var(--text); font-weight: 800; font-variant-numeric: tabular-nums;
-  font-size: 14px; overflow: hidden; }
-.sv .sv-row.read .sv-n { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--sv-line); }
-.sv .sv-row.here .sv-n { background: var(--accent); color: var(--accent-ink, #ffffff); }
-.sv .sv-row.site:not(.here) .sv-n { background: transparent; color: var(--sv-site);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent); }
-.sv .sv-row-name { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.sv .sv-row-title { font-weight: 600; overflow-wrap: anywhere; }
-.sv .sv-row.read .sv-row-title { color: var(--muted); font-weight: 500; }
-.sv .sv-row-sub { color: var(--muted); font-size: 12.5px; }
-.sv .sv-row-sub.here { color: var(--sv-site); font-weight: 600; }
-.sv .sv-part { display: block; width: min(260px, 100%); height: 4px; margin-top: 3px; border-radius: 2px;
-  background: color-mix(in srgb, var(--text) 14%, transparent); }
-.sv .sv-part i { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
-.sv .sv-marks-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.sv .sv-mark { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 999px;
-  font-size: 12px; white-space: nowrap; }
-.sv .sv-mark.read { padding-left: 0; padding-right: 0; color: var(--muted); }
-.sv .sv-mark.have { border: 1px solid color-mix(in srgb, var(--sv-good) 55%, transparent); color: var(--sv-good); }
-.sv .sv-mark.from { border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); color: var(--sv-site); }
-.sv .sv-mark.new { background: var(--accent); color: var(--accent-ink, #ffffff); font-weight: 700; }
-.sv .sv-dub { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
-  min-width: 0; padding: 5px 10px; box-sizing: border-box; border: 1px solid var(--sv-line); border-radius: 8px;
-  background: transparent; color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; }
-.sv .sv-dub:hover { border-color: var(--accent); background: transparent; color: var(--text); }
-.sv .sv-dub > span { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 600; }
-.sv .sv-dub small { color: var(--muted); font-weight: 400; }
-.sv .sv-dub[aria-expanded="true"] { border-color: var(--accent); }
-.sv .sv-dub:disabled { cursor: default; opacity: 0.75; }
-.sv .sv-dub:disabled .sv-i { visibility: hidden; }
-.sv .sv-read { white-space: nowrap; }
-.sv .sv-read.off { opacity: 0.4; pointer-events: none; }
-/* the variants of an episode (▾): the files in the folder (its tracks, the sub-folders) and the site's voice-overs */
-.sv .sv-vars { padding: 4px 20px 16px 72px; background: color-mix(in srgb, var(--panel-2, var(--panel)) 45%, transparent); }
-.sv .sv-vars-head { margin: 0 0 10px; color: var(--muted); font-size: 12.5px; }
-.sv .sv-vars-head b { color: var(--text); }
-.sv .sv-vars-group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 8px; }
-.sv .sv-vars-label { display: inline-flex; align-items: center; gap: 4px; width: 130px; color: var(--muted); font-size: 12.5px; }
-.sv .sv-vars-note { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; }
+.sv .sv-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; list-style: none;
+  color: var(--muted); font-size: 12px; }
+.sv .sv-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.sv .sv-sw { display: inline-grid; place-items: center; width: 14px; height: 10px; box-sizing: border-box; border-radius: 2px;
+  font-size: 10px; line-height: 1; }
+.sv .sv-sw.disk { background: var(--panel-2, var(--panel)); border: 1px solid color-mix(in srgb, var(--text) 30%, transparent); }
+.sv .sv-sw.site { border: 1px solid color-mix(in srgb, var(--text) 30%, transparent); }
+.sv .sv-sw.done { width: auto; height: auto; color: var(--muted); }
+.sv .sv-sw.new { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.sv .sv-list-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-left: auto; }
+.sv .sv-order { font-size: 12.5px; }
+.sv .sv-voice-pick { position: relative; display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.sv .sv-voice-now { display: inline-flex; align-items: center; gap: 8px; max-width: 320px; min-height: 34px; padding: 5px 10px;
+  box-sizing: border-box; border: 1px solid var(--sv-line); border-radius: 6px; background: var(--field-bg, var(--bg));
+  color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.sv .sv-voice-now:hover { border-color: var(--accent); background: var(--field-bg, var(--bg)); color: var(--text); }
+.sv .sv-voice-now b { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sv .sv-voice-pick .sv-pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: min(560px, 86vw);
+  margin: 0; }
+.sv .sv-parts { display: flex; flex-wrap: wrap; gap: 6px; }
+.sv .sv-part { min-height: 30px; padding: 3px 10px; border: 1px solid var(--sv-line); border-radius: 999px;
+  background: transparent; color: var(--text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.sv .sv-part:hover { border-color: var(--accent); background: transparent; color: var(--text); }
+.sv .sv-part[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink, #ffffff); }
+/* the tiles keep the classes of the row of numbers of before (.vepisodes, .vep — videos.css and the looks style them):
+   their margins, heights, radius and weight given back here */
+.sv .sv-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; margin: 0; }
+.sv .sv-tiles-group { grid-column: 1 / -1; margin: 6px 0 0; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.sv .sv-tile { position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 4px;
+  min-width: 0; height: 62px; padding: 8px 10px; box-sizing: border-box; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent); border-radius: 6px; background: transparent;
+  color: var(--text); font-weight: 400; line-height: 1.3; text-decoration: none; cursor: pointer; }
+.sv .sv-tile.disk { background: var(--panel-2, var(--panel)); border-color: color-mix(in srgb, var(--text) 30%, transparent); }
+.sv .sv-tile:hover { border-color: var(--accent); color: var(--text); text-decoration: none; }
+.sv .sv-tile.now { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.sv .sv-tile.off { opacity: 0.45; cursor: default; }
+.sv .sv-tile.off:hover { border-color: color-mix(in srgb, var(--text) 22%, transparent); }
+.sv .sv-tile-top { position: relative; display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; }
+.sv .sv-tile-n { min-width: 0; overflow: hidden; font-size: 19px; font-weight: 700; line-height: 1.1;
+  font-variant-numeric: tabular-nums; white-space: nowrap; text-overflow: ellipsis; }
+.sv .sv-tile.done .sv-tile-n { color: var(--muted); }
+.sv .sv-tile-mark { flex: none; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.sv .sv-tile.new .sv-tile-mark { color: var(--sv-site); font-size: 9px; }
+.sv .sv-tile-sub { position: relative; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.3;
+  white-space: nowrap; text-overflow: ellipsis; }
+/* the accent mixed with the text: readable on a tile of the folder (--panel-2) in every look, dark and light */
+.sv .sv-tile.here .sv-tile-sub, .sv .sv-tile.new .sv-tile-sub { color: color-mix(in srgb, var(--sv-site) 55%, var(--text));
+  font-weight: 700; }
+.sv .sv-tile-bar { position: absolute; left: 0; bottom: 0; height: 3px; background: var(--accent); }
+/* a file of the episode downloading: the tile fills as it comes («62%»), «в очереди», «✓ скачана» */
+.sv .sv-tile[data-dl="active"], .sv .sv-tile[data-dl="paused"] { border-color: var(--accent);
+  background-image: linear-gradient(to right, color-mix(in srgb, var(--accent) 30%, transparent) var(--dl, 0%),
+    transparent var(--dl, 0%)); }
+.sv .sv-tile[data-dl="active"] .sv-tile-sub, .sv .sv-tile[data-dl="paused"] .sv-tile-sub { color: var(--text); font-weight: 700; }
+.sv .sv-tile[data-dl="done"] .sv-tile-sub { color: var(--sv-good); font-weight: 600; }
+.sv .sv-tile[data-dl="failed"] .sv-tile-sub, .sv .sv-tile[data-dl="stopped"] .sv-tile-sub { color: var(--danger, #e06c6c); }
+.sv .sv-hint { margin: 0; color: var(--muted); font-size: 12px; }
+/* what downloads for the series now: the line over the tiles */
+.sv .sv-going { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding: 10px 14px; border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.sv .sv-going.queued { border-style: dashed; background: transparent; }
+.sv .sv-going > .sv-i { color: var(--accent); }
+.sv .sv-going-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 320px; }
+.sv .sv-going-text b { color: var(--text); overflow-wrap: anywhere; }
+.sv .sv-going-text small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.sv .sv-going-buttons { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 13px; }
+.sv .sv-said { margin: -4px 0 0; color: var(--muted); font-size: 13px; }
+.sv .sv-said.bad { color: var(--text); padding-left: 10px; border-left: 3px solid var(--danger, #b8615c); }
 .sv .sv-var, .sv-sheet .sv-var { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px;
   padding: 6px 12px; border: 1px solid var(--sv-line, rgba(127, 127, 127, 0.35)); border-radius: 8px;
   background: var(--panel); color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
@@ -215,11 +249,7 @@
   font: inherit; font-weight: 700; cursor: pointer; }
 .sv .sv-pick select option { background: var(--panel); color: var(--text); }
 .sv .sv-picks .sv-pop { flex-basis: 100%; }
-/* the episodes as numbers over the player */
-.sv .sv-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.sv .sv-strip:empty { display: none; }
-.sv .sv-eptabs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; }
-.sv .sv-strip-label { margin-right: 4px; color: var(--muted); font-size: 13px; }
+/* the episodes as numbers: the grid of the phone's player page */
 .sv .sv-ep { position: relative; display: inline-grid; place-items: center; min-width: 40px; height: 36px;
   padding: 0 10px; box-sizing: border-box; border-radius: 6px; background: var(--panel); color: var(--text);
   font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums; text-decoration: none; }
@@ -233,7 +263,6 @@
 .sv .sv-ep.site::after { content: ""; position: absolute; left: 50%; bottom: 3px; width: 4px; height: 4px; margin-left: -2px;
   border-radius: 50%; background: var(--sv-site); }
 .sv .sv-ep.off { opacity: 0.4; pointer-events: none; }
-.sv .sv-strip-legend { margin-left: 8px; color: var(--muted); font-size: 12px; }
 .sv .sv-site-word { color: var(--sv-site); }
 /* the stage: the window's own player (booru.js .native-video) or the page's own <video> with its bar */
 .sv .sv-stage { position: relative; }
@@ -344,12 +373,8 @@
 
 /* ── a narrow window ── */
 @media (max-width: 900px) {
-  .sv .sv-row { grid-template-columns: 38px minmax(0, 1fr) auto; row-gap: 6px; }
-  .sv .sv-row .sv-marks-row { grid-column: 2; grid-row: 2; justify-content: flex-start; }
-  .sv .sv-row .sv-dub { grid-column: 2; grid-row: 3; max-width: 260px; }
-  .sv .sv-row .sv-read { grid-column: 3; grid-row: 1 / span 3; }
-  .sv .sv-vars { padding-left: 20px; }
   .sv .sv-keys { display: none; }
+  .sv .sv-list-tools { margin-left: 0; }
 }
 @media (max-width: 640px) {
   .sv { padding: 14px 14px 40px; gap: 20px; }
@@ -357,12 +382,148 @@
   .sv .sv-cover { flex-basis: 150px; margin: 0 auto; }
   .sv .sv-name { font-size: 26px; }
   .sv .sv-src-row { grid-template-columns: minmax(0, 1fr); }
-  .sv .sv-list-head, .sv .sv-row { padding-left: 12px; padding-right: 12px; }
-  .sv .sv-vars-label { width: 100%; }
+  .sv .sv-list { padding: 14px 12px 12px; }
+  .sv .sv-tiles { grid-template-columns: repeat(auto-fill, minmax(60px, 1fr)); gap: 6px; }
   .sv .sv-bar { flex-wrap: wrap; }
   .sv .sv-seek { flex-basis: 100%; order: -1; }
   .sv .sv-vol { display: none; }
 }
+
+/* ── «Скачать серии…» (v5.44.142): the choice of «Скачать» — the card «Серии» (computer), a sheet (phone).  Its rules
+   start with .sv-get (it lives in .sv and in the phone's sheet, outside it), with a tag or a second class where a look
+   styles that tag ── */
+.sv-get { --sv-line: color-mix(in srgb, var(--text) 18%, transparent);
+  --sv-site: var(--accent-text, var(--accent)); display: flex; flex-direction: column; gap: 14px; color: var(--text); }
+.sv-get [hidden] { display: none !important; }
+.sv-get :is(button, a, input, select):focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+.sv-get svg.sv-i { flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.sv-get .sv-get-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
+.sv-get .sv-get-head h2 { margin: 0; color: var(--text); font-size: 20px; overflow-wrap: anywhere; }
+.sv-get .sv-get-head h2:focus { outline: none; }
+.sv-get button.sv-get-close { margin-left: auto; min-height: 32px; padding: 4px 10px; border: 1px solid var(--sv-line);
+  border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.sv-get button.sv-get-close:hover { border-color: var(--accent); background: transparent; color: var(--text); }
+.sv-get .sv-get-note { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.sv-get .sv-get-note.warn { padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text); }
+/* (v5.44.152) a voice-over only in a player the program takes nothing from: the way to the site */
+.sv-get .sv-get-note .sv-get-go { color: var(--sv-site, var(--accent-text, var(--accent))); text-decoration: underline;
+  white-space: nowrap; }
+.sv-get .sv-get-note .sv-get-go:hover { color: var(--text); }
+.sv-get .sv-get-wait { display: flex; align-items: center; gap: 10px; margin: 0; color: var(--muted); font-size: 13.5px;
+  overflow-wrap: anywhere; }
+.sv-get .sv-get-wait.bad { display: block; padding-left: 10px; border-left: 3px solid var(--danger, #b8615c); color: var(--text); }
+.sv-get .sv-spin { flex: none; width: 16px; height: 16px; box-sizing: border-box; border: 2px solid var(--sv-line);
+  border-top-color: var(--accent); border-radius: 50%; animation: sv-spin 0.9s linear infinite; }
+@keyframes sv-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .sv-get .sv-spin { animation-duration: 4s; } }
+.sv-get .sv-get-top { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px 22px; }
+.sv-get .sv-get-main { flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.sv-get .sv-kinds { display: inline-flex; flex-wrap: wrap; align-self: flex-start; gap: 4px; padding: 4px;
+  border: 1px solid var(--sv-line); border-radius: 8px; background: var(--bg, #000000); }
+.sv-get button.sv-kind { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px;
+  padding: 6px 14px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font: inherit;
+  font-size: 14px; font-weight: 700; cursor: pointer; }
+.sv-get button.sv-kind:hover { background: color-mix(in srgb, var(--text) 9%, transparent); color: var(--text); }
+.sv-get button.sv-kind[aria-selected="true"] { background: var(--accent); color: var(--accent-ink, #ffffff); }
+.sv-get .sv-kind-n { padding: 1px 7px; border-radius: 9px; background: color-mix(in srgb, var(--text) 13%, transparent);
+  font-size: 11px; font-variant-numeric: tabular-nums; }
+.sv-get .sv-kind[aria-selected="true"] .sv-kind-n { background: rgba(0, 0, 0, 0.18); }
+.sv-get .sv-studios { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; margin: 0;
+  padding: 0; list-style: none; }
+.sv-get .sv-studio { display: flex; align-items: flex-start; gap: 10px; height: 100%; box-sizing: border-box;
+  padding: 10px 12px; border: 1px solid var(--sv-line); border-radius: 8px;
+  background: color-mix(in srgb, var(--bg, #000000) 45%, transparent); cursor: pointer; }
+.sv-get .sv-studio:hover { border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.sv-get .sv-studio.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.sv-get .sv-studio input { flex: none; width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+.sv-get .sv-studio-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sv-get .sv-studio-text b { overflow-wrap: anywhere; }
+.sv-get .sv-studio-text small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.sv-get .sv-studio-text small.sv-studio-have { color: var(--sv-site); }
+.sv-get .sv-studio-tools { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0; font-size: 12.5px; }
+.sv-get .sv-get-side { flex: 0 1 330px; min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 14px 16px;
+  border: 1px solid var(--sv-line); border-radius: 8px; background: color-mix(in srgb, var(--bg, #000000) 45%, transparent); }
+.sv-get .sv-get-quality { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12px; }
+.sv-get .sv-get-quality select { min-height: 38px; padding: 6px 10px; border: 1px solid var(--sv-line); border-radius: 6px;
+  background: var(--field-bg, var(--bg, #1f1f1f)); color: var(--text); font: inherit; font-size: 14px; }
+.sv-get .sv-get-quality select option { background: var(--panel); color: var(--text); }
+.sv-get .sv-get-merge { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; cursor: pointer; }
+.sv-get .sv-get-merge input { flex: none; width: 17px; height: 17px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+.sv-get .sv-get-merge span { display: flex; flex-direction: column; gap: 3px; }
+.sv-get .sv-get-merge small { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.sv-get .sv-get-eps-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding-top: 14px;
+  border-top: 1px solid var(--sv-line); }
+.sv-get .sv-get-eps-head h3 { margin: 0; color: var(--text); font-size: 16px; }
+.sv-get .sv-get-counted { color: var(--muted); font-size: 13px; }
+.sv-get .sv-get-quick { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-left: auto; font-size: 13px; }
+.sv-get .sv-muted { color: var(--muted); font-size: 12px; }
+.sv-get .sv-link { padding: 0; border: 0; background: transparent; color: var(--sv-site); font: inherit;
+  text-decoration: underline; cursor: pointer; }
+.sv-get .sv-link:hover { background: transparent; color: var(--text); }
+.sv-get .sv-parts { display: flex; flex-wrap: wrap; gap: 6px; }
+.sv-get button.sv-part { min-height: 30px; padding: 3px 10px; border: 1px solid var(--sv-line); border-radius: 999px;
+  background: transparent; color: var(--text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; cursor: pointer; }
+.sv-get button.sv-part[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); color: var(--accent-ink, #ffffff); }
+.sv-get .sv-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+.sv-get .sv-pt { position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 4px;
+  min-width: 0; height: 62px; padding: 8px 10px; box-sizing: border-box; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 32%, transparent); border-radius: 6px; color: var(--text);
+  cursor: pointer; user-select: none; }
+.sv-get .sv-pt:hover { border-color: var(--accent); }
+.sv-get .sv-pt.on { border-color: var(--accent); background: var(--accent); color: var(--accent-ink, #ffffff); }
+.sv-get .sv-pt.off { border-style: dashed; border-color: var(--sv-line); color: var(--muted); cursor: default; }
+.sv-get .sv-pt:has(input:focus-visible) { outline: 2px solid var(--focus, var(--accent)); outline-offset: 2px; }
+.sv-get .sv-vh { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; border: 0; opacity: 0; }
+.sv-get .sv-pt-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 4px; }
+.sv-get .sv-pt-n { min-width: 0; overflow: hidden; font-size: 19px; font-weight: 700; line-height: 1.1;
+  font-variant-numeric: tabular-nums; white-space: nowrap; text-overflow: ellipsis; }
+.sv-get .sv-pt-tick { flex: none; font-size: 13px; font-weight: 800; }
+.sv-get .sv-pt-sub { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+.sv-get .sv-pt.on .sv-pt-sub { color: inherit; opacity: 0.8; }
+.sv-get .sv-get-legend { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0; padding: 0; list-style: none;
+  color: var(--muted); font-size: 12px; }
+.sv-get .sv-get-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.sv-get .sv-sw.pick { display: inline-block; width: 12px; height: 12px; border-radius: 3px; background: var(--accent); }
+/* «Скачать N файлов» with what it takes: in sight while the episodes are scrolled */
+.sv-get .sv-get-foot { position: sticky; bottom: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px 18px; margin: 0 -20px -16px; padding: 12px 20px; border-top: 1px solid var(--sv-line);
+  border-radius: 0 0 12px 12px; background: var(--panel); box-shadow: 0 -10px 24px rgba(0, 0, 0, 0.3); }
+.sv-get .sv-get-sum { min-width: 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.sv-get .sv-get-sum.bad { color: var(--danger, #e06c6c); }
+.sv .sv-get .sv-btn.sv-get-go:disabled { opacity: 0.55; cursor: default; filter: none; }
+/* the phone: the same in a sheet at the bottom of the screen */
+.sv-get-sheet { padding-bottom: 0; }
+.sv-get-sheet .sv-get { --text: #d9d9d9; --muted: #9a9a9a; --panel: #262626; --bg: #1f1f1f; --accent-ink: #ffffff;
+  gap: 12px; font-size: 14px; }
+.sv-get-sheet .sv-get-head { flex-wrap: nowrap; align-items: center; }
+.sv-get-sheet .sv-get-head h2 { color: #ffffff; font-size: 18px; }
+.sv-get-sheet button.sv-get-close { width: 44px; height: 44px; margin-right: -8px; padding: 0; border: 0; font-size: 18px; }
+.sv-get-sheet .sv-kinds { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); align-self: stretch; }
+.sv-get-sheet button.sv-kind { min-height: 40px; padding: 4px 6px; font-size: 13px; gap: 4px; }
+.sv-get-sheet .sv-studios { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.sv-get-sheet .sv-studio { align-items: center; min-height: 48px; padding: 6px 12px; }
+.sv-get-sheet .sv-studio input { width: 20px; height: 20px; margin: 0; }
+.sv-get-sheet .sv-get-side { flex: 1 1 100%; flex-direction: row; flex-wrap: wrap; gap: 10px 14px; padding: 0; border: 0; background: none; }
+.sv-get-sheet .sv-get-quality { flex: 1 1 140px; }
+.sv-get-sheet .sv-get-quality select { min-height: 44px; }
+.sv-get-sheet .sv-get-merge { flex: 1 1 140px; align-items: center; padding-top: 16px; font-size: 12.5px; }
+.sv-get-sheet .sv-get-merge input { width: 20px; height: 20px; margin: 0; }
+.sv-get-sheet .sv-get-eps-head { gap: 4px 10px; padding-top: 10px; }
+.sv-get-sheet .sv-get-quick { gap: 4px 14px; }
+.sv-get-sheet .sv-get-quick .sv-link { min-height: 36px; }
+.sv-get-sheet .sv-pick-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 5px; }
+.sv-get-sheet .sv-pt { height: 40px; padding: 2px; align-items: center; justify-content: center; }
+.sv-get-sheet .sv-pt-top { justify-content: center; }
+.sv-get-sheet .sv-pt-n { font-size: 14px; }
+.sv-get-sheet .sv-pt-tick, .sv-get-sheet .sv-pt-sub { display: none; }
+.sv-get-sheet .sv-pt.on { background: var(--accent); }
+.sv-get-sheet .sv-get-foot { flex-direction: column; align-items: stretch; gap: 6px; margin: 0 -14px; padding: 10px 14px 16px;
+  border-radius: 0; background: #262626; }
+.sv-get-sheet .sv-get-go { min-height: 50px; gap: 8px; font-size: 16px; font-weight: 700; }
+.sv-get-sheet .sv-get-go:disabled { opacity: 0.55; }
+.sv-get-sheet .sv-get-go svg { width: 16px; height: 16px; }
+.sv-get-sheet .sv-get-sum { font-size: 12.5px; text-align: center; }
 
 /* ── the phone: the same page and player in its frame (its own tokens) ── */
 .m-body .sv { --text: #d9d9d9; --sv-good: var(--tag-character, #7fd18b); --sv-site: var(--accent-text, #ff5c80);
@@ -379,27 +540,35 @@
 .m-body .sv .sv-numbers { gap: 2px 12px; font-size: 13px; }
 .m-body .sv .sv-rate { font-size: 16px; color: var(--strong, #ffffff); }
 .m-body .sv .sv-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
-.m-body .sv .sv-actions .sv-go, .m-body .sv .sv-actions > :only-child { grid-column: 1 / -1; }
+.m-body .sv .sv-actions .sv-go, .m-body .sv .sv-actions > :only-child,
+.m-body .sv .sv-actions .sv-get-open { grid-column: 1 / -1; }
 .m-body .sv .sv-actions .m-button { min-height: 46px; justify-content: center; gap: 8px; }
+.m-body .sv .sv-actions .sv-get-open { border: 1px solid var(--line, #3d3d3d); background: transparent; font-weight: 600; }
 .m-body .sv .sv-side { gap: 8px 16px; }
 .m-body .sv .sv-side .sv-link { min-height: 32px; display: inline-flex; align-items: center; }
 .m-body .sv .sv-desc, .m-body .sv .sv-desc-from, .m-body .sv .sv-chips { margin-top: 0; }
-.m-body .sv .sv-src { max-width: none; padding: 12px; background: var(--panel); border-color: var(--line, #3d3d3d); }
+/* «Серии»: the voice-over of the series as a chip by the heading, six tiles a row, the legend under them */
+.m-body .sv .sv-list { padding: 14px 12px 12px; gap: 12px; border-radius: 10px; border-color: var(--line, #3d3d3d); }
+.m-body .sv .sv-list-head { flex-wrap: nowrap; gap: 10px; }
+.m-body .sv .sv-list-head h2 { flex: none; color: var(--strong, #ffffff); font-size: 17px; }
+.m-body .sv .sv-list-tools { min-width: 0; margin-left: auto; }
+.m-body .sv .sv-voice-pick { min-width: 0; }
+.m-body .sv .sv-voice-now { max-width: 100%; min-height: 36px; border-radius: 18px; padding: 0 12px; background: var(--bg, #1f1f1f);
+  font-size: 12.5px; }
+.m-body .sv .sv-tiles { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+.m-body .sv .sv-tile { height: 52px; padding: 4px 2px; align-items: center; justify-content: center; gap: 1px; }
+.m-body .sv .sv-tile-top { justify-content: center; }
+.m-body .sv .sv-tile-n { font-size: 17px; }
+.m-body .sv .sv-tile-mark { position: absolute; top: -1px; right: -1px; }
+.m-body .sv .sv-tile-sub { font-size: 10px; text-align: center; }
+.m-body .sv .sv-tile:is(.disk, .done):not(.here):not(.new):not([data-dl]) .sv-tile-sub { display: none; }
+.m-body .sv .sv-legend { gap: 2px 12px; font-size: 12px; }
+.m-body .sv .sv-going { padding: 10px 12px; }
+.m-body .sv .sv-going-buttons { width: 100%; }
+.m-body .sv .sv-going-buttons .m-button { flex: 1 1 auto; min-height: 40px; }
 .m-body .sv .sv-src-row { grid-template-columns: minmax(0, 1fr); }
 .m-body .sv .sv-src-row dt { display: none; }
-.m-body .sv .sv-voice-now { width: 100%; min-height: 46px; justify-content: flex-start; background: var(--bg, #1f1f1f); }
-.m-body .sv .sv-voice-now small { margin-left: auto; }
-.m-body .sv .sv-list { border-radius: 12px; border-color: var(--line, #3d3d3d); }
-.m-body .sv .sv-list-head { padding: 8px 12px; }
-.m-body .sv .sv-row { grid-template-columns: 32px minmax(0, 1fr) 44px; gap: 10px; padding: 10px 10px 10px 12px; }
-.m-body .sv .sv-row .sv-marks-row { grid-column: auto; grid-row: auto; justify-content: flex-start; margin-top: 2px; }
-.m-body .sv .sv-row .sv-read { grid-column: 3; grid-row: 1; }
-.m-body .sv .sv-n { width: 32px; height: 32px; border-radius: 7px; }
-.m-body .sv a.sv-read { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%; color: var(--text); }
-.m-body .sv a.sv-read:hover { color: var(--strong, #ffffff); }
-.m-body .sv .sv-row.here a.sv-read { color: var(--sv-site); }
-.m-body .sv .sv-part { width: 150px; }
-.m-body .sv .sv-legend { width: 100%; }
+.m-body .sv .sv-part { min-height: 36px; }
 .m-body .sv .sv-desc-text { -webkit-line-clamp: 4; font-size: 14.5px; }
 /* the phone's player: the page's own bar, not the browser's buttons */
 .m-body .sv.sv-phone-player { padding: 0 0 24px; gap: 0; }

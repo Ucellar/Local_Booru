@@ -29,7 +29,8 @@ the year: as ``manhwa_search.merge``) — one tile.  A page of the list — ever
 taken in turns by their place there, without those the list showed on its pages before (:data:`_SHOWN`).  The sites
 are asked in threads, one request of a page however many ask it; a page of the program waits :data:`WAIT` and then
 says «отвечает» (as ``manhwa_feed`` since 5.44.89).  Covers — only the addresses the sites gave (:func:`cover`).
-The program's rule about minors: the tag of that kind is never offered and always left out (:data:`NEVER_TAGS`).
+The program's gates (``core/gates.py``): what a site says of each of its titles is handed to ``gates.title`` — a title
+it closes is not a tile; what ``gates.left_out`` names is asked left out of every list of the site.
 
 (v5.44.93) The owner: «а где хентай? … в видео нет хентая», «в всё все а в sfw только sfw тобиш без хентая с nsfw только
 хентай», «оно не должно показывать то что уже скачано».  The sites of hentai alone (:data:`ADULT_SITES`) are in the
@@ -44,33 +45,61 @@ page — ``source_url``) are not shown.
 
 (v5.44.97) The owner: «дак а блять с nhentai показывать мангу?» — nhentai in «Манга» (``core/nhentai.py``: its API v2,
 asked 6.11.2026): «Новые главы» and «Новые тайтлы» — its newest (``/api/v2/galleries``), «Популярное» and a name — its
-search (ten a minute), 25 a page; no filters, no other order (not asked, said why); a gallery the program's rule
-leaves out (its tags by their numbers and names, its titles) — not a tile; the tile — «Хентай · N стр.», its
+search (ten a minute), 25 a page; no filters, no other order (not asked, said why); a gallery a gate closes (its
+tags by their numbers and names, its titles) — not a tile; the tile — «Хентай · N стр.», its
 thumbnail, the title without its brackets; downloaded (``nhentai-<n>`` in the manga folder) — not shown.
 
 (v5.44.99) The owner: «https://20.allhen.online/ добавить» — AllHentai in «Манга» and «Манхва» (``manhwa_sources.
 AllHentai``, asked 6.11.2026): its catalog API ``/api/catalog/search?offset=&sortType=`` (50 a page: «Популярное» —
 POPULARITY, «Новые главы» — DATE_UPDATE, «Новые тайтлы» — DATE_CREATE, «По оценке» — RATING; no filters — not asked
 with them, said why), a name — its search ``/search/suggestion`` (one page); its kinds — ``category`` (the tab's:
-«Манга», «Комикс», «3D», «Без текста» / «Манхва», «Маньхуа»); a title the program's rule leaves out (its names, its
-``elements`` — genres and tags) — not a tile."""
+«Манга», «Комикс», «3D», «Без текста» / «Манхва», «Маньхуа»); a title a gate closes (its names, its ``elements`` —
+genres and tags) — not a tile.
+
+(v5.44.148) The owner: «я не могу написать тег tentaclies мне его просто не выдает должно показывать любой тег … найти
+автора или нищевый тег просто нереально».  nhentai takes the filters now — its own search words (``tag:"…"``,
+``-tag:"…"``, asked 11.11.2026: «tag:"tentacles"» — 17 508 galleries, «artist:"…"» the same way): a genre or tag of
+the feed it names its own way (``core/catalog_names.py`` — «Тентакли» is its «tentacles») is asked of it too, and any
+tag, artist, character, parody or group of its own — a **site's own tag** of the query (:data:`EXTRA_TYPES`,
+``Query.extra`` / ``unextra``: «nhentai:artist:name»; the address's ``sg`` / ``sx``): only that site is asked then.
+What to choose from — its own tag search (``POST /api/v2/tags/search`` {type, query, limit}; 14 in a row answered in
+3,7 s) — :func:`suggest`; «Найти тег» looks in the other names of the feed's tags too (:func:`also_names`: the Lib
+API's ``alt_name``, nhentai's).  A name a gate closes is offered by nothing here, and a query with one asks no site.
+
+(v5.44.149) The authors of MangaLib and HentaiLib — a site's own tag too («lib:people:<number> <name>»: one base of
+people for both sites of the Lib API): its search of people (``/api/people?q=&site_id[]=``: id, name, rus_name,
+``titles_count_details`` {site: titles}) and the catalogue as the site's own page of a person asks it —
+``/api/manga?…&target_id=<number>&target_model=people`` (asked 11.11.2026: «Boichi» — 20 titles at MangaLib, 9 at
+HentaiLib; with the other filters too).  One author at a time (the catalogue takes one ``target_id``), no «none of
+these».  None of the nine parameters tried (``authors[]``, ``people[]``…) filters anything — only this pair.
+
+(v5.44.155) The owner sent the sites' pages of tags («ты там теги просил я кинул куда сказал»): AllHentai's list — 188
+tags, Nude-Moon's — 97.  AllHentai's catalog API does take filters (:func:`allhentai_url`: the numbers of its genres,
+tags and kinds — ``core/catalog_names.py``; all of these, none of these, the tab's kinds, the statuses, the years, a
+name with pages): it is one of the sites that filter now, its 213 genres and tags are the feed's (56 of them it alone
+has).  Nude-Moon's six tags its table had not are there (:data:`NUDEMOON_TAGS`).  «Найти тег» finds a tag by the
+site's own word of it (:func:`also_names`)."""
 from __future__ import annotations
 
 import hashlib
 import html as _html
+import json
 import logging
 import re
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from urllib.parse import quote, urljoin, urlparse
+from itertools import zip_longest
+from urllib.parse import quote, unquote, urljoin, urlparse
 
-from core import filter as F
+from core import catalog_names as NAMES
+from core import gates as G
 from core import manhwa_sources as S
 from core import nhentai as N
-# (v5.44.101) the filters no switch turns off — in ``core/filter.py``; their names here for the code that uses them
-from core.filter import HAVE_TTL, Have, downloaded, forget_have  # noqa: F401
+# what the program's folders hold (``core/catalog_have.py``); their names here for the code that uses them
+from core.catalog_have import HAVE_TTL, Have, downloaded, forget_have  # noqa: F401
 
 _LOG = logging.getLogger("local_booru.catalog")
 
@@ -94,6 +123,21 @@ MAX_CHOSEN = 12                   # genres or tags chosen at most (each way)
 HENTAICHAN_PAGE = 20              # (v5.44.93) titles of a page of Хентай-тян's lists
 HENTASIS_PAGE = 10                # …of Hentasis
 HENTASIS_SITE = "https://hentasis1.top"
+HENTASIS_FIRST_YEAR = 1990        # (v5.44.137) years «до …» without «от» — from this one (its oldest page of a year: 1994)
+# (v5.44.138) HentaiHaven: its pages (a Next.js site) and its catalogue — the API of its WordPress (asked from the owner's
+# computer 9.11.2026: not reached straight there — through the system's proxy, as ``manhwa_sources.Net`` turns)
+HAVEN_SITE = "https://hentaihaven.xxx"
+HAVEN_API = "https://cms.hentaihaven.xxx/wp-json/wp/v2"
+HAVEN_IMAGES = "https://img.hentaihaven.xxx/"
+HAVEN_PAGE = 24
+# (v5.44.139) Hentai-XS (a site of its own: ten titles a page, newest first, a page of each year, a search — a form,
+# no pages of genres: its rows tell them) and HFShare (DataLife Engine, as Hentasis: «Хентай аниме» twelve a page, its
+# genres ``/xfsearch/<value>/``, its tag «без цензуры», its section of 3D, a search; its titles' pages — v2.hfshare.me)
+XS_SITE = "https://hentai-xs.com"
+XS_WALK = 4                       # its pages read for one page of «Лента» when a genre is chosen (its rows tell them)
+XS_FIRST_YEAR = 1995              # years «до …» without «от» — from this one (the first of its menu of years)
+HFSHARE_SITE = "https://hfshare.me"
+HFSHARE_FOUND_PAGE = 10           # titles of its search for one page of «Лента» (each one's page tells its genres)
 COVER_WIDTH = 480                 # px: a cover wider is given smaller (a tile is ~175 px; YummyAnime's — 1448 px)
 
 # ── genres and tags ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -116,8 +160,7 @@ MANGALIB_GENRES = {
     "Самурайский боевик": 57, "Сверхъестественное": 58, "Сёдзё": 59, "Сёнэн": 61, "Спорт": 63, "Супер сила": 87,
     "Сэйнэн": 64, "Трагедия": 65, "Триллер": 66, "Ужасы": 67, "Фантастика": 68, "Фэнтези": 69, "Школа": 70,
     "Эротика": 71, "Этти": 72}
-# (v5.44.96) HentaiLib's genres (site 4 of the same API; asked 6.11.2026): MangaLib's numbers, without «Эротика» — and
-# without «Школа» (70), «Кодомо» (76): the program's rule about minors on a site of hentai (:data:`NEVER_GENRE_IDS`)
+# (v5.44.96) HentaiLib's genres (site 4 of the same API; asked 6.11.2026): MangaLib's numbers, without «Эротика»
 HENTAILIB_GENRES = {
     "Арт": 32, "Безумие": 91, "Боевик": 34, "Боевые искусства": 35, "Вампиры": 36, "Военное": 89, "Гарем": 37,
     "Гендерная интрига": 38, "Героическое фэнтези": 39, "Демоны": 81, "Детектив": 40, "Дзёсэй": 41, "Драма": 43,
@@ -127,8 +170,7 @@ HENTAILIB_GENRES = {
     "Психология": 55, "Романтика": 56, "Самурайский боевик": 57, "Сверхъестественное": 58, "Сёдзё": 59,
     "Сёдзё-ай": 60, "Сёнэн": 61, "Сёнэн-ай": 62, "Спорт": 63, "Супер сила": 87, "Сэйнэн": 64, "Трагедия": 65,
     "Триллер": 66, "Ужасы": 67, "Фантастика": 68, "Фэнтези": 69, "Этти": 72, "Юри": 73, "Яой": 74}
-# …its tags of site 4 (217 at the site; here without «Лоликон» 372, «Сетакон» 373, «Юные» 145, «Девочки-волшебницы» 50
-# — :data:`NEVER_IDS`; its titles carry MangaLib's tags too — its «Лоли» 187 left out as well)
+# …its tags of site 4
 HENTAILIB_TAGS = {
     "3D": 1, "DILF": 363, "Footfuck": 5, "Footjob": 6, "FPP (Вид от первого лица)": 289, "Handjob": 7,
     "Koikatsu": 1825, "Scat": 13, "Selfcest": 286, "Shemale": 220, "Tomboy": 14, "Unbirth": 283, "Vore": 367,
@@ -170,6 +212,54 @@ HENTAILIB_TAGS = {
     "Частично сгенерировано ИИ": 4839, "Чикан": 140, "Чулки": 141, "Шимайдон": 365, "Шлюха": 142, "Шоу-бизнес": 4812,
     "Эксгибиционизм": 143, "Эксперименты над людьми": 1839, "Эльфы": 217, "Эмоциональное насилие": 4835,
     "Яндере": 368}
+# (v5.44.135; the owner: «не ищет по тегам нормально, особенно с нового сайта») Nude-Moon's tags — its pages
+# ``/tags/<слово>``, «all of these» as ``/tags/a+b`` (asked from the owner's computer 8.11.2026: «большие_груди+ahegao» —
+# 20 of 20 titles with both; the column of every tag of its lists and its entries' tags).  The feed's name → its word; a
+# tag the other sites have under another
+# name is under theirs («большие груди» — «Большая грудь»), its own words — :data:`NUDEMOON_NAMES`.  Its genre-like tags
+# are the feed's genres (:data:`NUDEMOON_GENRES`; «Ужасы» is a tag of HentaiLib too — in both tables).
+NUDEMOON_GENRES = {"Гарем": "гарем", "Гендерная интрига": "gender_bender", "Драма": "драма", "Комедия": "юмор",
+                   "Романтика": "романтика", "Студенты": "студенты", "Ужасы": "ужасы", "Фэнтези": "фэнтези",
+                   "Юри": "юри", "Яой": "яой"}
+NUDEMOON_TAGS = {
+    "3D": "3D", "Ахэгао": "ahegao", "БДСМ": "bdsm", "Гяру и Гангуро": "ganguro", "Дыра в стене": "glory_hole",
+    "Инсеки": "inseki", "В очках": "megane", "Психический слом": "mind_break", "Монстродевушки": "monstergirl",
+    "Нетораре": "netorare", "Проникновение в соски": "nipple_penetration", "Оякодон": "oyakodon",
+    "Skinsuit": "skinsuit", "Пайзури": "titsfuck", "Vore": "vore", "X-Ray": "x-ray", "Анал": "анал",
+    "Анимация (GIF)": "анимация", "Без цензуры": "без_цензуры", "Беременность": "беременные", "Близнецы": "близняшки",
+    "Большая грудь": "большие_груди", "В бассейне": "в_бассейне", "Больница": "в_больнице", "В ванной": "в_ванной",
+    "В общественном месте": "в_общественном_месте", "В первый раз": "в_первый_раз", "В транспорте": "в_транспорте",
+    "В туалете": "в_туалете", "Гипноз": "гипноз", "Горничные": "горничные", "Горячий источник": "горячий_источник",
+    "Групповой секс": "групповой_секс", "Запредельное": "запредельное", "Золотой дождь": "золотой_дождь",
+    "Зрелые женщины": "зрелые_женщины", "Идолы": "идолы", "Извращение": "извращение", "Измена": "измена",
+    "Имеют парня": "имеют_парня", "Инцест": "инцест", "Клизма": "клизма", "Колготки": "колготки", "Комикс": "комикс",
+    "Косплей": "косплей", "Мастурбация": "мастурбация", "Мерзкий дядька": "мерзкий_мужик",
+    "Много спермы": "много_спермы", "Молоко": "молоко", "Монашка": "монашки", "Монстры": "монстры",
+    "Камера": "на_камеру", "На природе": "на_природе", "Насекомые": "насекомые",
+    "Небритые подмышки": "небритые_подмышки", "Сгенерировано ИИ": "нейросеть", "Обычный секс": "обычный_секс",
+    "Огромный член": "огромный_член", "Пляж": "пляж", "Подглядывание": "подглядывание",
+    "Пояс верности": "пояс_верности", "Принуждение": "принуждение", "Проституция": "продажность", "Пьяные": "пьяные",
+    "Рабы": "рабыни", "Ушастые": "с_ушками", "Секс-игрушки": "секс_игрушки", "Спящие": "спящие",
+    "Страпон": "страпон", "Суккуб": "суккуб", "Тентакли": "тентакли", "Толстушки": "толстушки", "Трап": "трапы",
+    "Ужасы": "ужасы", "Униформа": "униформа", "Фемдом": "фемдом", "Фетиш": "фетиш", "Фурри": "фурри",
+    "Футанари": "футанари", "Footjob": "футджоб", "В цвете": "цветная", "Чикан": "чикан", "Чулки": "чулки",
+    "Эксгибиционизм": "эксгибиционизм", "Эльфы": "эльфы",
+    # (v5.44.155) its own list of tags (its page «Настройка тегов», saved by the owner 11.11.2026: 97) had six more
+    "Гуро": "гуро", "Зоофилия": "зоо", "Манхва": "манхва", "Недоперевод": "недоперевод", "Scat": "копро",
+    "Shemale": "шимейл"}
+
+
+def _nudemoon_names(table: dict, also: dict) -> dict:
+    """{a name Nude-Moon writes (its tag's words, «_» as a space): the feed's name} where they differ."""
+    out = {}
+    for shown, word in table.items():
+        for said in (word.replace("_", " "), *[k for k, v in also.items() if v == word]):
+            if S.name_key(said) != S.name_key(shown):
+                out[said] = shown
+    return out
+
+
+NUDEMOON_NAMES = {**_nudemoon_names(NUDEMOON_TAGS, {"3D арт": "3D"}), **_nudemoon_names(NUDEMOON_GENRES, {})}
 EROTICA = "Эротика"               # MangaLib's own word for what is explicit (``content_marks``: hentai)
 # one genre under two names: shown by the first
 _SAME = {"Боевик": "Экшен", "Школьники": "Школа"}
@@ -184,7 +274,7 @@ REMANGA_TAGS = {
     "ГГ мужчина": 64, "ГГ не человек": 123, "Геймеры": 61, "Гильдии": 62, "Горничные": 23, "Грузовик-сан": 125,
     "Гяру": 28, "Демоны": 15, "Дружба": 67, "Ёнкома": 8, "Жестокий мир": 69, "Животные компаньоны": 70,
     "Зверолюди": 19, "Зомби": 14, "Игровые элементы": 73, "Исекай": 115, "Космос": 76, "Криминал": 36,
-    "Кулинария": 16, "Культивация": 18, "Лоли": 108, "Магическая академия": 78, "Магия": 22, "Медицина": 17,
+    "Кулинария": 16, "Культивация": 18, "Магическая академия": 78, "Магия": 22, "Медицина": 17,
     "Месть": 79, "Монстры": 38, "Музыка": 39, "Навыки": 80, "Наёмники": 81, "Насилие / жестокость": 82,
     "Научпоп": 824, "Нежить": 83, "Ниндзя": 30, "Обратный Гарем": 40, "Офисные работники": 31, "Пародия": 85,
     "Подземелья": 86, "Политика": 87, "Полиция": 32, "Путешествия во времени": 43, "Разумные расы": 88,
@@ -208,7 +298,7 @@ MANGALIB_TAGS = {
     "Здоровые отношения": 4831, "Злые духи": 252, "Зомби": 155, "Игра на выживание": 681, "Игровые элементы": 253,
     "Изгнание": 4820, "Измена": 713, "Империи": 254, "Исторические": 380, "Камера": 66, "Квесты": 255,
     "Кемпинг": 789, "Космос": 256, "Кулинария": 152, "Культивирование": 369, "ЛГБТ": 343, "Легендарное оружие": 257,
-    "Лоли": 187, "Магическая академия": 258, "Магия": 170, "Матриархат": 705, "Мафия": 172, "Медицина": 159,
+    "Магическая академия": 258, "Магия": 170, "Матриархат": 705, "Мафия": 172, "Медицина": 159,
     "Месть": 259, "Монстродевушки": 81, "Монстры": 82, "Мурим": 632, "Навыки / способности": 260, "Наёмники": 261,
     "Насилие / жестокость": 262, "Недопонимание": 4823, "Нежить": 263, "Нездоровые отношения": 4832, "Ниндзя": 199,
     "Обмен телами": 346, "Обратный Гарем": 210, "Обратный исекай": 4841, "Обретённая семья": 643,
@@ -227,7 +317,6 @@ MANGALIB_TAGS = {
 _SAME_TAGS = {"Культивирование": "Культивация", "Навыки / способности": "Навыки",
               "Путешествие во времени": "Путешествия во времени", "Преступники / Криминал": "Криминал",
               "Амнезия / Потеря памяти": "Амнезия", "Учитель": "Учитель / ученик", "Глупый ГГ": "Тупой ГГ"}
-NEVER_TAGS = F.CATALOG_NEVER_TAGS  # the program's rule about minors: never offered, always left out (core/filter.py)
 
 # YummyAnime's genres (``/anime/genres``: value, title, group — -1 «Японские», -2 «Классические», -3 «Другие», or the
 # genre it is a part of)
@@ -258,6 +347,9 @@ YUMMY_GENRES = (
     (95, "Школьная жизнь", -3), (96, "Гарем (для девочек)", -3), (97, "Полулюди", -3), (99, "Манга", 78),
     (101, "Не японское", -3), (103, "Сверхъестественное", -3), (104, "Игры", -3), (107, "Китайское 3D", 101),
     (108, "Мотоциклы", -3), (109, "Хулиганы", -3))
+# «Видео → Лента», «Новые» without a status chosen: out already or coming out (YummyAnime's words) — the announcements
+# of years ahead would be the whole first page; a status chosen in the filters — that one
+VIDEO_NEW_STATUSES = ("ongoing", "released")
 VIDEO_TOP = ("Сёнэн", "Сэйнэн", "Сёдзё", "Комедия", "Драма", "Романтика", "Приключения", "Фэнтези", "Экшен",
              "Детектив", "Мистика", "Ужасы", "Фантастика", "Повседневность", "Спорт", "Исэкай")
 
@@ -279,20 +371,160 @@ def _merged(*tables, same: dict) -> "OrderedDict[str, dict]":
     return _sorted(out)
 
 
+# (v5.44.148) …and nhentai's own names of them (``core/catalog_names.py``): asked of it as ``tag:"…"``; (v5.44.155)
+# AllHentai's — the numbers of its catalog's elements (the same file)
 MANGA_GENRES = _merged(("remanga", REMANGA_GENRES), ("mangalib", MANGALIB_GENRES), ("hentailib", HENTAILIB_GENRES),
-                      same=_SAME)
-_NEVER = {S.name_key(n) for n in NEVER_TAGS}
-_ALL_TAGS = _merged(("remanga", REMANGA_TAGS), ("mangalib", MANGALIB_TAGS), ("hentailib", HENTAILIB_TAGS),
-                    same=_SAME_TAGS)
-MANGA_TAGS = OrderedDict((k, v) for k, v in _ALL_TAGS.items() if S.name_key(k) not in _NEVER)
-NEVER_IDS = {site: tuple(v[site] for k, v in _ALL_TAGS.items() if S.name_key(k) in _NEVER and site in v)
-             for site in ("remanga", "mangalib")}
-# (v5.44.96) «Лоликон», «Сетакон», «Юные», «Девочки-волшебницы» — and MangaLib's «Лоли» (187): HentaiLib's titles carry
-# MangaLib's numbers of tags too (6.11.2026: 3 of its first 60 opened had «Лоли» 187 alone)
-NEVER_IDS["hentailib"] = F.HENTAILIB_NEVER_TAGS
-NEVER_GENRE_IDS = F.NEVER_GENRE_IDS                # …and «Школа», «Кодомо» (core/filter.py)
-never_genres = F.never_genres
-VIDEO_GENRES = _sorted({title: {"yummy": value} for value, title, _g in YUMMY_GENRES})
+                      ("nudemoon", NUDEMOON_GENRES), ("nhentai", NAMES.NHENTAI_GENRES),
+                      ("allhentai", NAMES.ALLHENTAI_GENRES), same=_SAME)
+MANGA_TAGS = _merged(("remanga", REMANGA_TAGS), ("mangalib", MANGALIB_TAGS), ("hentailib", HENTAILIB_TAGS),
+                     ("nudemoon", NUDEMOON_TAGS), ("nhentai", NAMES.NHENTAI_TAGS),
+                     ("allhentai", NAMES.ALLHENTAI_TAGS), same=_SAME_TAGS)
+# (v5.44.137; the owner: «почему в видео нет фильтров») Hentasis's genres: its pages ``/xfsearch/<слово>/`` (its menu's
+# words; one it does not name there — by the word of its rows: «Юри» — asked from the owner's computer 9.11.2026, 25
+# pages); the feed's name → (its address word, its rows' word).  A genre YummyAnime has too is under its name.
+HENTASIS_GENRES = {
+    "Анал": ("Anal", "Анал"), "БДСМ": ("BDSM", "БДСМ"), "Большая грудь": ("Big", "Большие сиськи"),
+    "Бондаж": ("bondage", "Бондаж"), "Вибраторы": ("Vibrators", "Вибраторы"), "Гарем": ("Harem", "Гарем"),
+    "Гипноз": ("Гипноз", "Гипноз"), "Групповой секс": ("Group", "Групповуха"), "Девственницы": ("Virgin", "Девственницы"),
+    "Демоны": ("Demons", "Демоны"), "Домохозяйки": ("Housewives", "Домохозяйки"), "Драма": ("Drama", "Драма"),
+    "Изнасилование": ("Изнасилование", "Изнасилование"), "Инцест": ("Incest", "Инцест"), "Комедия": ("Comedy", "Комедия"),
+    "Магия": ("Magic", "Магия"), "Маленькая грудь": ("small", "Маленькие сиськи"), "Медсёстры": ("Nurse", "Медсестры"),
+    "Милфы": ("Милфы", "Милфы"), "Минет": ("Oral", "Минет"), "Мистика": ("Mystic", "Мистика"),
+    "Монстры": ("Monster", "Монстры"), "Нетораре": ("Netorare", "Нетораре"), "Пайзури": ("paizuri", "Пайзури"),
+    "Романтика": ("Romance", "Романтика"), "Служанки": ("Maid", "Служанки"), "Студенты": ("student", "Студенты"),
+    "Суккубы": ("Succubus", "Сукубы"), "Тентакли": ("Tentacles", "Щупальцы"), "Ужасы": ("Horror", "Ужасы"),
+    "Фантастика": ("Sci-Fi", "Скай Фай"), "Фэнтези": ("Fantasy", "Фэнтези"), "Эльфы": ("elf", "Эльфы"),
+    "Этти": ("Этти", "Этти"), "Юри": ("Юри", "Юри")}
+# …and the other words of its rows for one of them («Фентези» — as some of its rows write it)
+HENTASIS_ALSO = {"Фентези": "Фэнтези"}
+
+
+def _site_words(table: dict, also: dict) -> dict:
+    """{a site's word for a genre: the feed's name} where they differ (the chips of a title's page — ``feed_filter``)."""
+    out = {said: shown for shown, (_address, said) in table.items() if S.name_key(said) != S.name_key(shown)}
+    out.update(also)
+    return out
+
+
+HENTASIS_NAMES = _site_words(HENTASIS_GENRES, HENTASIS_ALSO)
+# (v5.44.138) HentaiHaven's genres (the numbers of its WordPress; its Russian names, 9.11.2026): the feed's name → (its
+# number, its own name); of its several numbers for one genre («Большая грудь» — three) the one most titles carry
+HAVEN_GENRES = {
+    "3D": (2245, "3D Хентай"), "Ахэгао": (11709, "Ахегао"), "Анал": (222, "Анальный"), "БДСМ": (133, "БДСМ"),
+    "Без цензуры": (107, "Нецензурированное хентай"), "Большая грудь": (11719, "Большая грудь"), "Гарем": (105, "Гарем"),
+    "Гендерная интрига": (2582, "Гендербендер Хентай"), "Групповой секс": (11740, "Групповой секс"),
+    "Девственницы": (11745, "Virgin"), "Домохозяйки": (11743, "Housewife"), "Зоофилия": (252, "Зоофилия"),
+    "Изнасилование": (65, "Рейп"), "Инцест": (64, "Инцест Хентай"), "Комедия": (11725, "Комедия"),
+    "Кримпай": (11710, "Кримпай"), "Милфы": (208, "Милф"), "Минет": (11720, "Минет"), "Монстры": (290, "Монстры"),
+    "Нетораре": (11728, "Ntr"), "Пайзури": (11722, "Пайзури"), "Романтика": (103, "Романтика"),
+    "Софткор": (2627, "Софткор"), "Тентакли": (244, "Тентакли"), "Толстушки": (2433, "BBW"), "Ужасы": (1606, "Ужасы"),
+    "Фембой": (2673, "Фембой"), "Фемдом": (2676, "Фемдом"), "Фурри": (165, "Фурри"), "Футанари": (229, "Футанари"),
+    "Фэнтези": (11716, "Фэнтези"), "Цундере": (106, "Цундере"), "Эльфы": (11734, "Эльф"), "Этти": (2594, "Этти"),
+    "Юри": (102, "Юри"), "Яой": (104, "Яой")}
+HAVEN_YEARS = {1991: 2625, 1992: 2575, 1994: 2759, 1995: 2604, 1996: 1614, 1997: 1579, 1998: 2643, 1999: 828, 2000: 2610,
+               2001: 781, 2002: 1118, 2003: 1018, 2004: 882, 2005: 1026, 2006: 1199, 2007: 318, 2008: 261, 2009: 68,
+               2010: 110, 2011: 114, 2012: 361, 2013: 112, 2014: 166, 2015: 111, 2016: 113, 2017: 142, 2018: 198,
+               2019: 879, 2020: 1930, 2021: 2593, 2022: 2656, 2023: 2681, 2024: 11308, 2025: 11700, 2026: 11708}
+_HAVEN_YEAR_OF = {number: year for year, number in HAVEN_YEARS.items()}
+HAVEN_NAMES = {said: shown for shown, (_number, said) in HAVEN_GENRES.items()
+               if S.name_key(said) != S.name_key(shown)}
+# (v5.44.139) Hentai-XS's genres: the words of its rows (every title of it, 828, read from the owner's computer
+# 9.11.2026 — Russian and English, in any case: compared by their letters) → the feed's name.  It has no page of a
+# genre: a genre is looked for in its rows (:func:`_xs_page` reads several of its pages for one page of «Лента»);
+# «Без цензуры» — its rows' «Цензура: нет».
+XS_GENRES = {
+    "Анал": ("Анал", "Anal", "Anal sex"), "Ахэгао": ("Ahegao", "Ахегао"), "БДСМ": ("BDSM",),
+    "Без цензуры": ("Без цензуры",), "Беременные": ("Pregnant", "Pregnancy", "Беременные"),
+    "Большая грудь": ("Большие сиськи", "Big tits", "Big Boobs", "Large Breasts", "Huge Boobs", "Gigantic Breasts",
+                      "Big Breasts", "Больше сиськи", "большие груди", "бакуню", "Busty"),
+    "Бондаж": ("Bondage", "Бондаж", "Shibari", "Sibari", "сибари"), "Буккаке": ("Bukkake", "буккакэ", "Bukakke"),
+    "Вибраторы": ("Vibrators", "Вибраторы", "Дидло", "Dildos"), "Гарем": ("Harem", "Гарем"),
+    "Гипноз": ("Гипноз", "Mind control", "Gypnos", "Hypnos", "Hypnosis"),
+    "Групповой секс": ("Group sex", "Групповуха", "Групповой секс", "Гоупповуха", "Group", "Orgy"),
+    "Гэнгбэнг": ("Gangbang", "Gangband"), "Гяру": ("Gyaru",),
+    "Двойное проникновение": ("Double Penetration", "Двойное проникновение", "DP", "DAP"),
+    "Девственницы": ("Virgin", "Virgins", "Девственницы", "Defloration"), "Демоны": ("Demons", "Демоны", "Demon"),
+    "Домохозяйки": ("Housewives", "Домохозяйки", "Housewife", "Жены"), "Драма": ("Drama", "Драма"),
+    "Игрушки": ("Toys", "Sex toys", "Toy"), "Изнасилование": ("Rape", "Изнасилование", "Forced Sex", "Рэйп"),
+    "Инцест": ("Incest", "Инцест", "Инцecт"), "Комедия": ("Comedy", "Комедия"), "Косплей": ("Cosplay",),
+    "Кримпай": ("Creampie", "Кремпай", "Nakadashi", "Internal Cumshot", "Creampai"),
+    "Лактация": ("Lactation", "Лактация", "Milk", "Lactating"), "Магия": ("Magic", "Магия"),
+    "Маленькая грудь": ("Small tits", "Маленькие сиськи", "Small Boobs", "Small Breast", "Small Breasts"),
+    "Мастурбация": ("Masturbation", "Мастурбация"), "Медсёстры": ("Nurse", "Медсестры", "Nurses"),
+    "Милфы": ("MILF", "Милф", "Mature"),
+    "Минет": ("Минет", "Oral sex", "Blowjob", "Oral", "Fellatio", "Minet", "Орал", "Оральный секс"),
+    "Мистика": ("Mystic", "Мистика", "Supernatural"), "Монстродевушки": ("Monster Girl",),
+    "Монстры": ("Monsters", "Монстры", "Monster"), "Неко": ("Neko", "Кошкодевушки"),
+    "Нетораре": ("Нетораре", "Netorare", "NTR", "нэторарэ", "Cheating"),
+    "Пайзури": ("Paizuri", "Tittyfuck", "Titsjob", "Пайзури", "Секс в сиськи", "Titfuck", "Paizury", "Titjob"),
+    "Рентген": ("X-Ray", "Икс Рэй", "Икс Рей", "Икс-Рэй", "Рентген"), "Романтика": ("Romance", "Романтика"),
+    "Служанки": ("Maids", "Служанки", "Maid"),
+    "Студенты": ("Students", "Student Girl", "Студенты", "Female Students", "Студентки", "University"),
+    "Суккубы": ("Суккубы", "Succubus"),
+    "Тентакли": ("Tentacles", "Щупальцы", "Тентакли", "Щупальца", "Tentacle", "Механические щупальцы"),
+    "Ужасы": ("Horror", "Ужасы"), "Учителя": ("Teachers", "Teacher", "Учительницы"),
+    "Фантастика": ("Sci-Fi", "Скай Фай", "Скай-Фай", "Фантастика"), "Футанари": ("Futanari", "Футанари"),
+    "Фэнтези": ("Fantasy", "Фэнтези", "Фентези"), "Чикан": ("Chikan", "Чикан", "Train Molestation", "Molester"),
+    "Чулки": ("Stockings",), "Эльфы": ("Elf", "Эльфы"), "Этти": ("Ecchi", "Эччи", "Этти"),
+    "Юри": ("Yuri", "Юри", "Лесбиянки", "Lesbians")}
+# (v5.44.139) HFShare's genres: the feed's name → (its page — the value of ``/xfsearch/<value>/``, or a page of its own:
+# «3D» — its section, «Без цензуры» — its tag; the words of its rows' genres for it).  Its menu's words (as it shows
+# them in Russian) and its 250 genres (``/katalog.html``), read from the owner's computer 9.11.2026.
+HFSHARE_GENRES = {
+    "3D": ("/3d-hentay/", ("3D", "3DCG", "SFM", "MMD", "Koikatsu", "Blender")),
+    "Без цензуры": ("/tags/без цензуры/", ()),          # its tag: not in the rows — its own page alone
+    "Ахэгао": ("Ahegao", ("Ahegao",)), "Анал": ("Anal+sex", ("Anal sex", "Anal")), "БДСМ": ("BDSM", ("BDSM",)),
+    "Беременные": ("Pregnant", ("Pregnant", "Pregnancy", "impregnation")),
+    "Большая грудь": ("Big+tits", ("Big tits", "Large Breasts", "Gigantic Breasts")),
+    "Бондаж": ("Bondage", ("Bondage", "shibari")), "Буккаке": ("Bukkake", ("Bukkake", "Bukakke", "Bukake")),
+    "Вибраторы": ("Vibrators", ("Vibrators",)), "Гарем": ("Harem", ("Harem",)),
+    "Гендерная интрига": ("Gender+Bender", ("Gender Bender",)),
+    "Гипноз": ("Mind+control", ("Mind control", "Hypnos", "Gypnos", "Hypnosis")),
+    "Групповой секс": ("Group+sex", ("Group sex", "Group", "Orgy Sex")), "Гэнгбэнг": ("Gangbang", ("Gangbang",)),
+    "Гяру": ("Gyaru", ("Gyaru", "Gal")), "Двойное проникновение": ("Double+penetration", ("Double penetration", "dp")),
+    "Девственницы": ("Virgin", ("Virgin", "Defloration")), "Демоны": ("Demons", ("Demons",)),
+    "Домохозяйки": ("Housewives", ("Housewives", "Housewife", "Married Woman")), "Драма": ("Drama", ("Drama",)),
+    "Зоофилия": ("Bestiality", ("Bestiality",)), "Игрушки": ("Toys", ("Toys", "Sex toys", "Dildos")),
+    "Изнасилование": ("Rape", ("Rape", "Violation")), "Инцест": ("Incest", ("Incest",)),
+    "Комедия": ("Comedy", ("Comedy",)), "Косплей": ("Cosplay", ("Cosplay",)),
+    "Кримпай": ("Creampie", ("Creampie", "Internal Cumshot", "Nakadashi")),
+    "Лактация": ("Lactation", ("Lactation", "Milk")), "Магия": ("Magic", ("Magic",)),
+    "Маленькая грудь": ("Small+tits", ("Small tits", "Tiny tits")), "Мастурбация": ("Masturbation", ("Masturbation",)),
+    "Медсёстры": ("Nurse", ("Nurse", "Nurses")), "Милфы": ("Milf", ("MILF", "Mature")),
+    "Минет": ("Oral+sex", ("Oral sex", "Oral", "Blowjob", "Deep throat")), "Мистика": ("Mystic", ("Mystic",)),
+    "Монстродевушки": ("Monster+girl", ("Monster girl",)), "Монстры": ("Monster", ("Monster",)),
+    "Неко": ("Neko", ("Neko", "Nekomimi", "Cat Girl")),
+    "Нетораре": ("Netorare", ("Netorare", "NTR", "Cuckoldry", "Cheating")),
+    "Пайзури": ("Paizuri", ("Paizuri", "Titsjob", "Titfuck", "Titsfuck")), "Пародия": ("Parody", ("Parody",)),
+    "Рентген": ("X-ray", ("X-ray",)), "Романтика": ("Romance", ("Romance",)), "Служанки": ("Maids", ("Maids",)),
+    "Софткор": ("Softcore", ("Softcore",)), "Студенты": ("Students", ("Students", "female students")),
+    "Суккубы": ("Succubus", ("Succubus",)), "Тентакли": ("Tentacles", ("Tentacles", "Tentacle")),
+    "Ужасы": ("Horror", ("Horror",)), "Учителя": ("Teachers", ("Teachers", "Female Teachers")),
+    "Фантастика": ("Sci-fi", ("Sci-fi",)), "Фембой": ("Trap", ("Trap",)), "Фемдом": ("Femdom", ("Femdom",)),
+    "Футанари": ("Futanari", ("Futanari",)), "Фурри": ("Furry", ("Furry",)), "Фэнтези": ("Fantasy", ("Fantasy",)),
+    "Цундере": ("Tsundere", ("Tsundere",)), "Чикан": ("Chikan", ("Chikan", "Molester")),
+    "Чулки": ("Stockings", ("Stockings",)), "Эльфы": ("Elf", ("Elf",)), "Этти": ("Ecchi", ("Ecchi", "Ecchie")),
+    "Юри": ("Yuri", ("Yuri", "Lesbians"))}
+
+
+def _row_words(table: dict) -> dict:
+    """{the letters of a word of a site's rows: the feed's genre}."""
+    return {S.name_key(word): shown for shown, words in table.items() for word in words}
+
+
+_XS_ROW = _row_words(XS_GENRES)
+_HFSHARE_ROW = _row_words({shown: words for shown, (_address, words) in HFSHARE_GENRES.items()})
+XS_NAMES = {word: shown for shown, words in XS_GENRES.items() for word in words
+            if S.name_key(word) != S.name_key(shown)}
+HFSHARE_NAMES = {word: shown for shown, (_address, words) in HFSHARE_GENRES.items() for word in words
+                 if S.name_key(word) != S.name_key(shown)}
+VIDEO_GENRES = _merged(("yummy", {title: value for value, title, _g in YUMMY_GENRES}),
+                       ("hentasis", {shown: address for shown, (address, _said) in HENTASIS_GENRES.items()}),
+                       ("haven", {shown: number for shown, (number, _said) in HAVEN_GENRES.items()}),
+                       ("hentaixs", {shown: words[0] for shown, words in XS_GENRES.items()}),
+                       ("hfshare", {shown: address for shown, (address, _words) in HFSHARE_GENRES.items()}), same={})
+VIDEO_NSFW_TOP = ("Большая грудь", "Минет", "Анал", "Романтика", "Гарем", "Юри", "Нетораре", "Тентакли", "Фэнтези",
+                  "Комедия", "Групповой секс", "Монстры")
 
 
 def genres(kind: str) -> "OrderedDict[str, dict]":
@@ -306,21 +538,91 @@ def tags(kind: str) -> "OrderedDict[str, dict]":
 def offered(table: "OrderedDict[str, dict]", kind: str, mode: str, *, of_genres: bool = False) -> list:
     """(v5.44.96) The names of a table of genres (``of_genres``) or tags the page offers in this mode: those of a site
     the list can ask (``sites_shown``) — not a tag of HentaiLib alone in «SFW», not one of Remanga alone in «NSFW»; a
-    genre a site has as a tag (:data:`GENRE_AS_TAG`) — its; a genre the site leaves out in the mode
-    (:func:`never_genres`) — not its."""
+    genre a site has as a tag (:data:`GENRE_AS_TAG`) — its; a genre the site's lists are asked without in the mode
+    (``gates.left_out``) — not its."""
     shown = sites_shown(kind, mode)
+    left = {site: set(G.left_out(site, mode).genres) for site in shown} if of_genres else {}
 
     def takes(name: str, ids: dict, site: str) -> bool:
         if not of_genres:
             return site in ids
         if site in ids:
-            return ids[site] not in never_genres(site, mode)
+            return ids[site] not in left[site]
         return kind != "video" and name in GENRE_AS_TAG.get(site, {})
     return [name for name, ids in table.items() if any(takes(name, ids, site) for site in shown)]
 
 
-def top_genres(kind: str) -> tuple:
-    return VIDEO_TOP if kind == "video" else MANGA_TOP
+def top_genres(kind: str, mode: str = "all") -> tuple:
+    """The genres shown first; (v5.44.137) the videos' in «NSFW» — those of the sites of hentai."""
+    if kind == "video":
+        return VIDEO_NSFW_TOP if mode == "nsfw" else VIDEO_TOP
+    return MANGA_TOP
+
+
+# (v5.44.129; the owner: «при открытии страницы с интернета (в ленте) теги и все плитки связанные с каким либо поиском
+# не кликабельны») a title's genre or tag, as a site names it → the filter of the feed that shows such titles
+_FILTER_NAMES: dict = {}
+
+
+def _filter_names(kind: str) -> "tuple[dict, dict]":
+    """({letters of a name: the feed's genre}, {…: the feed's tag}) — every name of the tables, and the other names
+    of one genre or tag (:data:`_SAME`, :data:`_SAME_TAGS`; (v5.44.148) :func:`also_names` — the sites' own other
+    names: «Tentacles» is «Тентакли»)."""
+    group = "video" if kind == "video" else "manga"
+    got = _FILTER_NAMES.get(group)
+    if got is None:
+        def table(names, same: dict, also: dict) -> dict:
+            out = {S.name_key(n): n for n in names}
+            for other, shown in same.items():
+                if shown in names:
+                    out.setdefault(S.name_key(other), shown)
+            for shown, others in also.items():            # after the names themselves: a name is its own first
+                for other in others:
+                    if shown in names:
+                        out.setdefault(S.name_key(other), shown)
+            return out
+        got = (table(genres(kind), {**HENTASIS_NAMES, **HAVEN_NAMES, **XS_NAMES, **HFSHARE_NAMES} if group == "video"
+                     else {**_SAME, **NUDEMOON_NAMES, **NAMES.ALLHENTAI_NAMES},
+                     {} if group == "video" else also_names(kind, of_genres=True)),
+               table(tags(kind), {} if group == "video" else {**_SAME_TAGS, **NUDEMOON_NAMES, **NAMES.ALLHENTAI_NAMES},
+                     {} if group == "video" else also_names(kind)))
+        _FILTER_NAMES[group] = got
+    return got
+
+
+def also_names(kind: str, *, of_genres: bool = False) -> dict:
+    """(v5.44.148) {a genre or tag of the feed: its other names} — as the sites themselves call it besides
+    (``core/catalog_names.py``: the Lib API's ``alt_name``, nhentai's name): «Найти тег» finds «Тентакли» by
+    «tentacles», a chip «NTR» of a title's page is the feed's «Нетораре».  (v5.44.155) …and Nude-Moon's and
+    AllHentai's own words (:data:`NUDEMOON_NAMES`, ``ALLHENTAI_NAMES``): «рентген зрение» finds «X-Ray», «копро» —
+    «Scat».  A name a gate closes — not."""
+    if kind == "video":
+        return {}
+    table = NAMES.ALSO_GENRES if of_genres else NAMES.ALSO_TAGS
+    known = genres(kind) if of_genres else tags(kind)
+    out = {shown: list(others) for shown, others in table.items() if shown in known}
+    for said, shown in (*NUDEMOON_NAMES.items(), *NAMES.ALLHENTAI_NAMES.items()):
+        have = out.setdefault(shown, []) if shown in known else None
+        if have is not None and S.name_key(said) not in {S.name_key(x) for x in (shown, *have)}:
+            have.append(said)
+    return {shown: tuple(n for n in others if not G.chip(n)) for shown, others in out.items() if others}
+
+
+def feed_filter(kind: str, name: str, *, tag: bool = False) -> "tuple[str, str]":
+    """A title's genre (``tag`` — its tag) as a site names it → the filter of the feed of ``kind`` that shows such
+    titles: ("g", the feed's genre) or ("tg", the feed's tag) — the table of its own kind first («Боевик» of MangaLib —
+    «Экшен», «Культивирование» — «Культивация»); ("never", "") — a name the page makes no search of at all
+    (``gates.chip``); ("", "") — the feed has no such filter."""
+    key = S.name_key(name)
+    if not key:
+        return "", ""
+    by_genre, by_tag = _filter_names(kind)
+    for table, field in (((by_tag, "tg"), (by_genre, "g")) if tag else ((by_genre, "g"), (by_tag, "tg"))):
+        if key in table:
+            return field, table[key]
+    if G.chip(name):
+        return "never", ""
+    return "", ""
 
 
 # ── types, statuses, orders ───────────────────────────────────────────────────────────────────────────────────────
@@ -335,10 +637,12 @@ TYPES = {
               ("ova", "OVA и ONA", {"yummy": ("ova", "ona")}), ("special", "Спешл", {"yummy": ("special",)})),
 }
 STATUS = {
-    "manga": (("ongoing", "Выходит", {"remanga": (2,), "mangalib": (1,), "hentailib": (1,)}),
-              ("done", "Завершён", {"remanga": (1,), "mangalib": (2,), "hentailib": (2,)}),
-              ("announce", "Анонс", {"remanga": (5,), "mangalib": (3,), "hentailib": (3,)}),
-              ("frozen", "Заморожен", {"remanga": (3,), "mangalib": (4, 5), "hentailib": (4, 5)})),
+    "manga": (("ongoing", "Выходит", {"remanga": (2,), "mangalib": (1,), "hentailib": (1,),
+                                      "allhentai": ("PROGRESS",)}),
+              ("done", "Завершён", {"remanga": (1,), "mangalib": (2,), "hentailib": (2,), "allhentai": ("FINISHED",)}),
+              ("announce", "Анонс", {"remanga": (5,), "mangalib": (3,), "hentailib": (3,), "allhentai": ("PLANNED",)}),
+              ("frozen", "Заморожен", {"remanga": (3,), "mangalib": (4, 5), "hentailib": (4, 5),
+                                       "allhentai": ("POSTPONED", "CANCELED")})),
     "video": (("ongoing", "Выходит", {"yummy": ("ongoing",)}), ("done", "Вышел", {"yummy": ("released",)}),
               ("announce", "Анонс", {"yummy": ("announcement",)})),
 }
@@ -355,28 +659,57 @@ ORDERS = {
     "video": (("popular", "Популярное", {"yummy": ("views", "0")}), ("top", "По оценке", {"yummy": ("top", "")}),
               ("new", "Новые", {"yummy": ("year", "0")}), ("title", "По алфавиту", {"yummy": ("title", "")})),
 }
-SITES = {"manga": ("remanga", "mangalib", "hentailib", "hentaichan", "allhentai", "nhentai"),
-         "manhwa": ("remanga", "mangalib", "hentailib", "allhentai"), "video": ("yummy", "hentasis")}
+SITES = {"manga": ("remanga", "mangalib", "hentailib", "hentaichan", "allhentai", "nhentai", "nudemoon"),
+         "manhwa": ("remanga", "mangalib", "hentailib", "allhentai"),
+         "video": ("yummy", "hentasis", "haven", "hentaixs", "hfshare")}                    # (v5.44.139)
 LABELS = {"remanga": "Remanga", "mangalib": "MangaLib", "yummy": "YummyAnime", "hentaichan": "Хентай-тян",
-          "hentasis": "Hentasis", "hentailib": "HentaiLib", "nhentai": "nhentai", "allhentai": "AllHentai"}
-# (v5.44.93) sites of hentai alone; (v5.44.96) HentaiLib; (v5.44.97) nhentai; (v5.44.99) AllHentai
-ADULT_SITES = ("hentaichan", "hentasis", "hentailib", "nhentai", "allhentai")
-FILTERING = ("remanga", "mangalib", "yummy", "hentailib")  # the sites that take the filters
+          "hentasis": "Hentasis", "hentailib": "HentaiLib", "nhentai": "nhentai", "allhentai": "AllHentai",
+          "nudemoon": "Nude-Moon", "haven": "HentaiHaven", "hentaixs": "Hentai-XS", "hfshare": "HFShare"}
+# (v5.44.93) sites of hentai alone; (v5.44.96) HentaiLib; (v5.44.97) nhentai; (v5.44.99) AllHentai; (v5.44.131)
+# Nude-Moon
+ADULT_SITES = ("hentaichan", "hentasis", "hentailib", "nhentai", "allhentai", "nudemoon", "haven",  # (v5.44.138)
+               "hentaixs", "hfshare")                                                            # (v5.44.139)
+FILTERING = ("remanga", "mangalib", "yummy", "hentailib", "nudemoon",  # the sites that take the filters (Nude-Moon —
+             "hentasis", "haven", "hentaixs", "hfshare", "nhentai",     # its tags and genres alone: v5.44.135;
+             "allhentai")           # (v5.44.148) nhentai — its tags; (v5.44.155) AllHentai — its catalog API's
+# (v5.44.148) a site's own tags of a query — what the site itself searches by besides the feed's genres and tags:
+# {site: the kinds it has}; a query's ``extra`` / ``unextra`` — «site:kind:name» (the address's ``sg`` / ``sx``)
+EXTRA_TYPES = {"nhentai": ("tag", "artist", "character", "parody", "group", "language", "category"),
+               "lib": ("people",)}                 # (v5.44.149) the people of the Lib API: «<number> <name>»
+EXTRA_WORDS = {"tag": "тег", "artist": "автор", "character": "персонаж", "parody": "пародия", "group": "группа",
+               "language": "язык", "category": "вид", "people": "автор"}
+# (v5.44.149) the sites of «Лента» a site's own tag is asked of («lib» — one base of people for both its sites), the
+# name it is shown under, and whether its lists can be asked without it («none of these»)
+EXTRA_SITES = {"nhentai": ("nhentai",), "lib": ("mangalib", "hentailib")}
+EXTRA_LABELS = {"nhentai": "nhentai", "lib": "MangaLib"}
+EXTRA_LEFT_OUT = ("nhentai",)
+EXTRA_NAME = 80                    # characters of a site's own tag at most
+SUGGEST_MIN = 2                    # letters typed before a site's own tags are asked
+SUGGEST_SHOWN = 30                 # a site's own tags offered for the words typed
+SUGGEST_TTL = 10 * 60
+SUGGEST_KEPT = 400
 # (v5.44.93) the orders of the lists of a site of hentai: its own list for each (none — it is not asked)
 # — Хентай-тян's «Популярное» is empty now (19 bytes, 6.11.2026: ``Hentaichan.popular_empty``): «Обновления» for it too
 HENTAICHAN_ORDER = {"popular": "new", "updates": "new", "new": "new"}
 HENTASIS_ORDERS = ("popular", "new")         # its one list — the newest first: as «Популярное» too (said on the page)
+NEWEST_ORDERS = HENTASIS_ORDERS              # (v5.44.139) Hentai-XS and HFShare: the same — their lists, newest first
+# (v5.44.131) Nude-Moon: its lists by the date and by the views (``manhwa_sources.NudeMoon.FEED``)
+NUDEMOON_ORDER = {"popular": "popular", "updates": "new", "new": "new"}
 # (v5.44.97) nhentai: «Популярное» — its search by the favourites of all time, the new — its list of the newest
 NHENTAI_ORDER = {"popular": "popular", "updates": "date", "new": "date"}
 # (v5.44.99) AllHentai: its catalog's orders (an order it does not know is its default — RATING: not asked by that);
-# its kinds (``category``) of each tab, and of each type the tab offers
+# its kinds (``category``) of each tab, and of each type the tab offers ((v5.44.155) every title has one of its eight
+# kinds — 30 171 «Манга», 4 562 «Комикс», 1 758 «Манхва», 694 «3D», 572 «Без текста», 75 «Руманга», 71 «Маньхуа», 27
+# «Анимация», 11.11.2026; their numbers — ``catalog_names.ALLHENTAI_KIND_IDS``); its words of a title's state
+# (``productionStatus``: PLANNED, PROGRESS, POSTPONED, CANCELED, FINISHED, NON_FINISHED)
 ALLHENTAI_ORDER = {"popular": "POPULARITY", "updates": "DATE_UPDATE", "new": "DATE_CREATE", "rating": "RATING"}
 ALLHENTAI_PAGE = 50
-ALLHENTAI_KINDS = {"manga": {"manga": ("Манга", "3D", "Без текста"), "comics": ("Комикс",)},
-                   "manhwa": {"manhwa": ("Манхва",), "manhua": ("Маньхуа",)}}
+ALLHENTAI_KINDS = {"manga": {"manga": ("Манга", "3D", "Без текста", "Анимация"), "comics": ("Комикс",)},
+                   "manhwa": {"manhwa": ("Манхва",), "manhua": ("Маньхуа",), "russian": ("Руманга",)}}
 _ALLHENTAI_KNOWN = frozenset(k for tab in ALLHENTAI_KINDS.values() for names in tab.values() for k in names)
-_ALLHENTAI_STATUS = {"ONGOING": "ongoing", "FINISHED": "done", "ANNOUNCE": "announce", "POSTPONED": "frozen",
-                     "FROZEN": "frozen", "PAUSED": "frozen"}
+_ALLHENTAI_STATUS = {"PROGRESS": "ongoing", "FINISHED": "done", "PLANNED": "announce", "POSTPONED": "frozen",
+                     "CANCELED": "frozen"}
+ALLHENTAI_YEARS = (1900, 2100)     # its ``years=`` wants both ends: the open one
 # a tile's words of the sites' types and statuses
 _REMANGA_TYPE = {1: "manga", 4: "comics", 2: "manhwa", 3: "manhua", 5: "russian", 6: "other", 7: "other", 22: "other"}
 _MANGALIB_TYPE = {1: "manga", 4: "manga", 9: "comics", 5: "manhwa", 6: "manhua", 8: "russian"}
@@ -421,6 +754,14 @@ def filters_taken(kind: str, mode: str) -> bool:
     return any(s in FILTERING for s in sites_shown(kind, mode))
 
 
+def typed(kind: str, mode: str) -> bool:
+    """(v5.44.137) Whether a site of the list tells the types and the statuses of its titles: the videos — YummyAnime
+    alone (the sites of hentai say none; in «NSFW» the page offers neither)."""
+    if kind == "video":
+        return "yummy" in sites_shown(kind, mode)
+    return True
+
+
 def _signed(site: str) -> bool:
     return bool(S.token_of(site))
 
@@ -454,6 +795,8 @@ class Query:
     years: tuple = (0, 0)
     sites: tuple = ()                # the sites asked (() — all of the kind's)
     mode: str = "all"                # «SFW / Всё / NSFW» of the program
+    extra: tuple = ()                # (v5.44.148) a site's own tags, all of them: «nhentai:artist:name»
+    unextra: tuple = ()              # …none of them
 
     def __post_init__(self):
         kind = self.kind if self.kind in KINDS else "manga"
@@ -480,18 +823,93 @@ class Query:
         mine = sites_for(kind, self.mode)
         picked = tuple(s for s in mine if s in self.sites)
         object.__setattr__(self, "sites", picked if picked and len(picked) < len(mine) else ())
+        def here(value: str) -> bool:                # a site of the tag is among the mode's sites of the kind
+            return bool(value) and any(s in mine for s in EXTRA_SITES.get(value.split(":")[0], ()))
+        chosen = tuple(dict.fromkeys(x for x in map(extra_of, self.extra) if here(x)))
+        object.__setattr__(self, "extra", chosen[:MAX_CHOSEN])
+        object.__setattr__(self, "unextra", tuple(dict.fromkeys(
+            x for x in map(extra_of, self.unextra)
+            if here(x) and x.split(":")[0] in EXTRA_LEFT_OUT and x not in chosen))[:MAX_CHOSEN])
 
     def sig(self) -> str:
         return hashlib.sha1(repr(self).encode("utf-8")).hexdigest()[:16]
 
     def asked(self) -> tuple:
-        """The sites of the query (of those the mode shows — :func:`sites_for`)."""
-        return self.sites or sites_for(self.kind, self.mode)
+        """The sites of the query (of those the mode shows — :func:`sites_for`); (v5.44.148) with a site's own tag
+        chosen — that site alone (no other has such a tag)."""
+        mine = self.sites or sites_for(self.kind, self.mode)
+        own = {site for x in self.extra for site in EXTRA_SITES.get(x.split(":")[0], ())}
+        if not own:
+            return mine
+        return (tuple(s for s in mine if s in own)       # (v5.44.149) …of the sites picked; none of them is its site —
+                or tuple(s for s in sites_for(self.kind, self.mode) if s in own))    # the tag's own sites of the mode
 
     def plain(self) -> bool:
         """Nothing chosen but the order (and the mode)."""
         return not (self.text or self.genres or self.without or self.tags or self.untags or self.types or self.status
-                    or any(self.chapters) or any(self.rating) or any(self.years) or self.sites)
+                    or any(self.chapters) or any(self.rating) or any(self.years) or self.sites or self.extra
+                    or self.unextra)
+
+
+def extra_of(value) -> str:
+    """(v5.44.148) «site:kind:name» of a site's own tag as an address says it — the site and the kind it has, the name
+    in small letters without quotes; "" — not one."""
+    site, _, rest = str(value or "").partition(":")
+    kind, _, name = rest.partition(":")
+    name = " ".join(name.replace('"', " ").replace("\\", " ").split())
+    if site == "lib":                                # (v5.44.149) «<the person's number> <the name shown>», as written
+        found = re.fullmatch(r"(\d{1,9})(?: (.*))?", name)
+        name = f"{int(found.group(1))} {found.group(2) or ''}".strip()[:EXTRA_NAME].strip() if found else ""
+    else:
+        name = name.lower()[:EXTRA_NAME].strip()
+    if kind not in EXTRA_TYPES.get(site, ()) or not name:
+        return ""
+    return f"{site}:{kind}:{name}"
+
+
+def extra_parts(value: str) -> tuple:
+    """(site, kind, name) of «site:kind:name»."""
+    site, kind, name = (str(value).split(":", 2) + ["", ""])[:3]
+    return site, kind, name
+
+
+def extra_shown(value: str) -> str:
+    """The name a site's own tag is shown under: nhentai's — its name; a person of the Lib API — the name after the
+    number («№ 229» — none was given)."""
+    site, _kind, name = extra_parts(value)
+    if site == "lib":
+        number, _, shown = name.partition(" ")
+        return shown or f"№ {number}"
+    return name
+
+
+def extra_where(value: str, kind: str = "", mode: str = "") -> str:
+    """Whose tag it is, in words: «nhentai»; the people of the Lib API — its sites the mode of the kind shows
+    («MangaLib + HentaiLib»; no kind given — «MangaLib»)."""
+    site = extra_parts(value)[0]
+    shown = [LABELS[s] for s in EXTRA_SITES.get(site, ()) if s in sites_shown(kind, mode)] if kind else []
+    return " + ".join(shown) or EXTRA_LABELS.get(site, site)
+
+
+def extra_label(value: str, kind: str = "", mode: str = "") -> str:
+    """«автор: name · nhentai» — a site's own tag in words."""
+    _site, what, _name = extra_parts(value)
+    return f"{EXTRA_WORDS.get(what, what)}: {extra_shown(value)} · {extra_where(value, kind, mode)}"
+
+
+def extra_single(value: str) -> bool:
+    """(v5.44.149) One of its kind at a time, and no «none of these»: a person of the Lib API (its catalogue takes one
+    ``target_id``)."""
+    return extra_parts(value)[0] not in EXTRA_LEFT_OUT
+
+
+def extra_closed(site: str, name: str) -> bool:
+    """Whether a gate of the program closes a site's own tag of this name: the site's lists are always asked without
+    it (``gates.left_out``), or every title with it is closed (``gates.title``) — it is offered by nothing, and a
+    query with it asks no site."""
+    key = S.name_key(name)
+    return bool(any(key in {S.name_key(n) for n in G.left_out(s).names} for s in EXTRA_SITES.get(site, (site,)))
+                or G.title(site, tags=[name]))
 
 
 def _pair(value, cast, top) -> tuple:
@@ -531,7 +949,7 @@ def _genre_as_tag() -> dict:
     """{site: {a genre it has not: its tag of that name}} — MangaLib has «Боевые искусства» and «Мурим» as tags,
     Remanga «Исекай», «Магия», «Демоны» as categories."""
     out = {}
-    for site in ("remanga", "mangalib", "hentailib"):
+    for site in ("remanga", "mangalib", "hentailib", "nudemoon", "nhentai", "allhentai"):
         by_key = {S.name_key(name): ids[site] for name, ids in MANGA_TAGS.items() if site in ids}
         out[site] = {name: by_key[S.name_key(name)] for name, ids in MANGA_GENRES.items()
                      if site not in ids and S.name_key(name) in by_key}
@@ -555,13 +973,13 @@ def _wanted(q: Query, site: str) -> "tuple[list, list, str]":
     none of, why it has no such title: "" — it may)."""
     label = LABELS[site]
     out, left = [], []
-    never = never_genres(site, q.mode)
     for name in q.genres:
         got = _genre_of(q, name, site)
         if got is None:
             return [], [], f"у {label} нет жанра «{name}»"
-        if got[0] == "g" and got[1] in never:       # (v5.44.96) the program's rule about minors
-            return [], [], f"хентай с жанром «{name}» программа не показывает"
+        refused = G.genre(site, q.mode, got[1], name) if got[0] == "g" else ""
+        if refused:                                 # (v5.44.96) a gate: the genre is not asked of the site
+            return [], [], refused
         out.append(got)
     for name in q.tags:
         number = tags(q.kind)[name].get(site)
@@ -573,8 +991,9 @@ def _wanted(q: Query, site: str) -> "tuple[list, list, str]":
         if got is not None:
             left.append(got)
     left += [("t", tags(q.kind)[name][site]) for name in q.untags if site in tags(q.kind)[name]]
-    left += [("t", n) for n in NEVER_IDS.get(site, ())]
-    left += [("g", n) for n in never]
+    always = G.left_out(site, q.mode)                            # what its lists are always asked without
+    left += [("t", n) for n in always.tags]
+    left += [("g", n) for n in always.genres]
     return out, list(dict.fromkeys(left)), ""
 
 
@@ -609,13 +1028,13 @@ def remanga_url(q: Query, page: int) -> "tuple[str | None, str]":
 
 def mangalib_url(q: Query, page: int) -> "tuple[str | None, str]":
     if q.mode == "nsfw" and not _signed("mangalib"):     # (v5.44.93) its «Эротика» without a sign-in: 0 titles
-        return None, "MangaLib показывает хентай только со входом («Настройки → Сайты манги»)"
+        return None, "MangaLib показывает хентай только со входом («Настройки → Манга и манхва»)"
     return _lib_url(q, page, "mangalib")
 
 
 def hentailib_url(q: Query, page: int) -> "tuple[str | None, str]":
-    """(v5.44.96) HentaiLib: the API and the filters of MangaLib, its site 4 — every title of it is hentai; what the
-    program's rule leaves out — always (``_wanted``: :data:`NEVER_IDS`, :data:`NEVER_GENRE_IDS`)."""
+    """(v5.44.96) HentaiLib: the API and the filters of MangaLib, its site 4 — every title of it is hentai; what its
+    lists are always asked without — ``_wanted`` (``gates.left_out``)."""
     return _lib_url(q, page, "hentailib")
 
 
@@ -641,6 +1060,13 @@ def _lib_url(q: Query, page: int, site: str) -> "tuple[str | None, str]":
     parts += [f"genres_exclude[]={n}" for n in dict.fromkeys(unwanted)]
     parts += [f"tags_exclude[]={n}" for what, n in left if what == "t"]
     parts += [f"status[]={s}" for s in _ids(statuses(q.kind), q.status, site)]
+    people = [x for x in q.extra if extra_parts(x)[:2] == ("lib", "people")]
+    if len(people) > 1:                              # (v5.44.149) its catalogue takes one ``target_id``
+        return None, f"у {label} автор выбирается один"
+    if people:                                       # …the titles of a person, as the site's own page asks them
+        if extra_closed("lib", extra_shown(people[0])):
+            return None, f"по «{extra_shown(people[0])}» {label} ничего не показывает"
+        parts += [f"target_id={extra_parts(people[0])[2].split(' ', 1)[0]}", "target_model=people"]
     if q.text:
         parts.append(f"q={quote(q.text)}")
     query = "&".join(parts) + _bounds([("chap_count_min", q.chapters[0]), ("chap_count_max", q.chapters[1]),
@@ -650,20 +1076,24 @@ def _lib_url(q: Query, page: int, site: str) -> "tuple[str | None, str]":
 
 
 def yummy_url(q: Query, page: int, api: str) -> "tuple[str | None, str]":
+    _wanted_genres, _left, why = _wanted(q, "yummy")    # (v5.44.137) a genre of the sites of hentai alone («Минет»)
+    if why:
+        return None, why
     sort, forward = dict((k, s) for k, _l, s in orders("video"))[q.order]["yummy"]
     parts = [f"limit={VIDEO_PAGE}", f"offset={VIDEO_PAGE * (page - 1)}", f"sort={sort}"]
     if forward:
         parts.append(f"sort_forward={forward}")
     if q.genres:
         parts.append("genres=" + ",".join(str(VIDEO_GENRES[g]["yummy"]) for g in q.genres))
-    if q.without:
-        parts.append("exclude_genres=" + ",".join(str(VIDEO_GENRES[g]["yummy"]) for g in q.without))
+    unwanted = [str(VIDEO_GENRES[g]["yummy"]) for g in q.without if "yummy" in VIDEO_GENRES[g]]
+    if unwanted:
+        parts.append("exclude_genres=" + ",".join(unwanted))
     chosen = _ids(types("video"), q.types, "yummy")
     if chosen:
         parts.append("types=" + ",".join(chosen))
     said = _ids(statuses("video"), q.status, "yummy")
     if not said and q.order == "new":
-        said = list(F.VIDEO_NEW_STATUSES)          # (core/filter.py) no announcements without a status chosen
+        said = list(VIDEO_NEW_STATUSES)            # no announcements without a status chosen
     if said:
         parts.append("status=" + ",".join(said))
     if q.text:
@@ -695,51 +1125,269 @@ def hentaichan_url(q: Query, page: int) -> "tuple[str | None, str]":
     return source.feed_url(how, page), ""
 
 
+def nudemoon_url(q: Query, page: int) -> "tuple[str | None, str]":
+    """(v5.44.131) Nude-Moon: its lists, its search — one page.  (v5.44.135) Its genres and tags
+    (:data:`NUDEMOON_GENRES`, :data:`NUDEMOON_TAGS`): «all of these» — its pages of those tags (``/tags/a+b`` — the site
+    joins them), «none of these» and a search by a name with tags — the tags of the rows of its page
+    (:func:`_nudemoon_page`); a genre or tag it has not — not asked (as the other sites), nor with the filters it has
+    not (status, chapters, rating, years)."""
+    source = S.by_name("nudemoon")
+    if source is None:
+        return None, ""
+    if q.status or any(q.chapters) or any(q.rating) or any(q.years):
+        return None, "у Nude-Moon из фильтров только жанры и теги"
+    if q.types and "manga" not in q.types:
+        return None, "у Nude-Moon только манга"
+    wanted, _left, why = _wanted(q, "nudemoon")
+    if why:
+        return None, why
+    how = NUDEMOON_ORDER.get(q.order)
+    if q.text:
+        return (source.search_url(q.text) if page == 1 else None), ""
+    if how is None:
+        return None, "Nude-Moon так не сортирует"
+    if wanted:
+        return source.tag_url([word for _kind, word in wanted], page, how), ""
+    return source.feed_url(how, page), ""
+
+
+def nhentai_words(q: Query) -> "tuple[str, str]":
+    """(v5.44.148) (the words of nhentai's search for what the query chose, why it has no such gallery): a genre or tag
+    of the feed — nhentai's tag of it (``catalog_names``; none — it has no such gallery), its own tags
+    (``Query.extra``) — ``kind:"name"``; «none of these» — the same with «-» (one it does not name — nothing to leave
+    out there).  One a gate closes (:func:`extra_closed`) — no gallery is asked."""
+    yes, no = [], []
+    for name in (*q.genres, *q.tags):
+        got = _genre_of(q, name, "nhentai") if name in q.genres else None
+        word = got[1] if got else tags(q.kind).get(name, {}).get("nhentai")
+        if not word:
+            return "", f"у nhentai нет {'жанра' if name in q.genres else 'тега'} «{name}»"
+        yes.append(("tag", str(word)))
+    for name in (*q.without, *q.untags):
+        got = _genre_of(q, name, "nhentai") if name in q.without else None
+        word = got[1] if got else tags(q.kind).get(name, {}).get("nhentai")
+        if word:
+            no.append(("tag", str(word)))
+    for value in q.extra:
+        site, kind, name = extra_parts(value)
+        if site != "nhentai":
+            continue
+        if extra_closed(site, name):
+            return "", f"по «{name}» nhentai ничего не показывает"
+        yes.append((kind, name))
+    for value in q.unextra:
+        site, kind, name = extra_parts(value)
+        if site == "nhentai" and not extra_closed(site, name):    # one a gate closes is left out of every list anyway
+            no.append((kind, name))
+    words = [f'{kind}:"{name}"' for kind, name in dict.fromkeys(yes)]
+    words += [f'-{kind}:"{name}"' for kind, name in dict.fromkeys(no) if (kind, name) not in yes]
+    return " ".join(words), ""
+
+
 def nhentai_url(q: Query, page: int) -> "tuple[str | None, str]":
-    """(v5.44.97) nhentai: its newest or its search (by a name, «Популярное») — no filters, no other order."""
-    if _filtered(q, types_too=False):
-        return None, "у nhentai нет фильтров — его галереи видны без них"
+    """(v5.44.97) nhentai: its newest or its search (by a name, «Популярное»).  (v5.44.148) Its filters — its tags:
+    the feed's genres and tags it names its own way and its own tags (:func:`nhentai_words` — the words of its
+    search); the filters it has not (status, chapters, rating, years) — not asked with them, said why."""
+    if q.status or any(q.chapters) or any(q.rating) or any(q.years):
+        return None, "у nhentai из фильтров только теги"
     if q.types and "manga" not in q.types:
         return None, "у nhentai только манга"
+    words, why = nhentai_words(q)
+    if why:
+        return None, why
     how = NHENTAI_ORDER.get(q.order)
     if how is None:
         return None, "nhentai так не сортирует"
-    return N.list_url(how, page, q.text), ""
+    return N.list_url(how, page, q.text, words), ""
 
 
 def allhentai_url(q: Query, page: int) -> "tuple[str | None, str]":
-    """(v5.44.99) AllHentai: its catalog (no filters), its search by a name — one page."""
+    """(v5.44.99) AllHentai: its catalog API.  (v5.44.155; the owner: «должно показывать любой тег», and its page of
+    tags sent 11.11.2026) The API takes the filters — as the open reader apps ask it, tried from the owner's computer
+    11.11.2026: ``includeElementIds`` — a genre, tag or kind a title has (several — all of them: 370 titles of one
+    tag, 13 of two), ``excludeElementIds`` — none of these (37 560 = all without those 370);
+    ``includeProductionStatuses`` (several — any of them), ``years=<from>,<to>`` (both ends, else it is not a
+    filter), ``q`` — a name (the other names of a title too; pages; with the other filters).  The tab's kinds (of
+    the types chosen) — by leaving the other kinds out: «Манхва» is asked for its 1 829 titles, not shown the two
+    manhwa of each fifty of everything.  What its lists are always asked without (``gates.left_out`` —
+    :func:`_wanted`) is left out of every address.  What it has not (the number of chapters, a rating) — not asked
+    with them, said why."""
     source = S.by_name("allhentai")
     if source is None:
         return None, ""
-    if _filtered(q, types_too=False):
-        return None, "у AllHentai нет фильтров — его тайтлы видны без них"
+    if any(q.chapters) or any(q.rating):
+        return None, "у AllHentai нет фильтров по числу глав и по оценке"
     kinds = ALLHENTAI_KINDS.get(q.kind, {})
     if q.types and not any(t in kinds for t in q.types):
         return None, "у AllHentai таких нет"
-    if q.text:
-        return (f"{source.site()}/search/suggestion?query={quote(q.text)}" if page == 1 else None), ""
-    how = ALLHENTAI_ORDER.get(q.order)
+    wanted, left, why = _wanted(q, "allhentai")
+    if why:
+        return None, why
+    how = ALLHENTAI_ORDER.get(q.order) or ("POPULARITY" if q.text else None)
     if how is None:
         return None, "AllHentai так не сортирует"
-    return f"{source.site()}/api/catalog/search?offset={ALLHENTAI_PAGE * (page - 1)}&sortType={how}", ""
+    mine = {name for t, names in kinds.items() if not q.types or t in q.types for name in names}
+    yes = list(dict.fromkeys(number for _what, number in wanted))
+    no = list(dict.fromkeys([*(number for _what, number in left),
+                             *(number for name, number in NAMES.ALLHENTAI_KIND_IDS.items() if name not in mine)]))
+    if set(yes) & set(no):                               # «3D» of the tab «Манхва»: a kind of the other tab
+        return None, "у AllHentai таких нет"
+    parts = [f"offset={ALLHENTAI_PAGE * (max(1, page) - 1)}", f"sortType={how}"]
+    if q.text:
+        parts.append(f"q={quote(q.text)}")
+    parts += [f"includeElementIds={number}" for number in yes] + [f"excludeElementIds={number}" for number in no]
+    parts += [f"includeProductionStatuses={word}" for word in _ids(statuses(q.kind), q.status, "allhentai")]
+    if any(q.years):
+        parts.append(f"years={q.years[0] or ALLHENTAI_YEARS[0]},{q.years[1] or ALLHENTAI_YEARS[1]}")
+    return f"{source.site()}/api/catalog/search?" + "&".join(parts), ""
 
 
 def hentasis_url(q: Query, page: int) -> "tuple[str | None, str]":
-    """(v5.44.93) Hentasis: its list, the newest first — no filters, no search, no other order."""
-    if _filtered(q):
-        return None, "у Hentasis нет фильтров — его тайтлы видны без них"
+    """(v5.44.93) Hentasis: its list, the newest first.  (v5.44.137; the owner: «почему в видео нет фильтров») Its
+    genres (:data:`HENTASIS_GENRES`): «all of these» — the first one's page ``/xfsearch/<слово>/`` (the others and «none
+    of these» — by the genres of its rows: :func:`_hentasis_page`); one year — its page ``/tags/<год>/``, years and a
+    rating — by its rows; its search (``index.php?do=search``, ten a page; the genres and the year of each found title —
+    from its page); what it has not (the types, the statuses, another order) — not asked, said why."""
+    if q.types or q.status:
+        return None, "у Hentasis нет типов и статусов — только жанры, годы, оценка и поиск"
+    wanted, _left, why = _wanted(q, "hentasis")
+    if why:
+        return None, why
     if q.text:
-        return None, "Hentasis не ищет по названию"
+        return (f"{HENTASIS_SITE}/index.php?do=search&subaction=search&search_start={max(1, page)}&full_search=0"
+                f"&story={quote(q.text)}"), ""
     if q.order not in HENTASIS_ORDERS:
         return None, "Hentasis так не сортирует"
-    return HENTASIS_SITE + ("/" if page <= 1 else f"/page/{page}/"), ""
+    if wanted:
+        base = f"{HENTASIS_SITE}/xfsearch/{quote(str(wanted[0][1]), safe='')}/"
+    elif q.years[0] and q.years[0] == q.years[1]:
+        base = f"{HENTASIS_SITE}/tags/{q.years[0]}/"
+    elif any(q.years):                                # several years: their pages one after another (_hentasis_years)
+        low, high = q.years[0] or HENTASIS_FIRST_YEAR, q.years[1] or time.localtime().tm_year + 1
+        return f"{HENTASIS_SITE}/tags/{high}/#years={low}-{high}&n={max(1, page)}", ""
+    else:
+        base = HENTASIS_SITE + "/"
+    return base + ("" if page <= 1 else f"page/{page}/"), ""
+
+
+HAVEN_ORDER = {"popular": "date", "new": "date", "title": "title"}   # (v5.44.138) its WordPress: by date, by title
+HAVEN_FIELDS = "id,slug,title,meta,wp-manga-genre,wp-manga-tag,wp-manga-release"
+
+
+def haven_url(q: Query, page: int) -> "tuple[str | None, str]":
+    """(v5.44.138; the owner: «в хентае только хентасис а не другие из поддерживаемых») HentaiHaven: the catalogue of its
+    WordPress (``/wp-json/wp/v2/wp-manga``, asked from the owner's computer 9.11.2026 — 1056 titles): its genres
+    (:data:`HAVEN_GENRES`; «all of these» — ``[operator]=AND``, «none of these» — ``_exclude``), its years (the
+    taxonomy ``wp-manga-release``: :data:`HAVEN_YEARS`), its search; what its lists are always asked without — left out
+    (``_wanted``); «Популярное» — the newest (it counts no views there); what it has not (types, statuses, a rating) —
+    not asked, said why."""
+    if q.types or q.status or any(q.rating):
+        return None, "у HentaiHaven из фильтров только жанры, годы и поиск"
+    wanted, left, why = _wanted(q, "haven")
+    if why:
+        return None, why
+    how = HAVEN_ORDER.get(q.order)
+    if how is None:
+        return None, "HentaiHaven так не сортирует"
+    parts = [f"per_page={HAVEN_PAGE}", f"page={max(1, page)}", f"_fields={HAVEN_FIELDS}"]
+    if how == "title":
+        parts += ["orderby=title", "order=asc"]
+    chosen = [str(n) for kind, n in wanted if kind == "g"]
+    if len(chosen) == 1:
+        parts.append(f"wp-manga-genre={chosen[0]}")
+    elif chosen:
+        parts += [f"wp-manga-genre[terms]={','.join(chosen)}", "wp-manga-genre[operator]=AND"]
+    unwanted = [str(n) for kind, n in left if kind == "g"]
+    if unwanted:
+        parts.append("wp-manga-genre_exclude=" + ",".join(unwanted))
+    untagged = [str(n) for kind, n in left if kind == "t"]
+    if untagged:
+        parts.append("wp-manga-tag_exclude=" + ",".join(untagged))
+    if any(q.years):
+        low, high = q.years[0] or 0, q.years[1] or 9999
+        years = [str(n) for year, n in HAVEN_YEARS.items() if low <= year <= high]
+        if not years:
+            return None, "у HentaiHaven нет тайтлов этих лет"
+        parts.append("wp-manga-release=" + ",".join(years))
+    if q.text:
+        parts.append(f"search={quote(q.text)}")
+    return f"{HAVEN_API}/wp-manga?" + "&".join(parts), ""
+
+
+def xs_url(q: Query, page: int) -> "tuple[str | None, str]":
+    """(v5.44.139; the owner: «в хентае только хентасис а не другие из поддерживаемых») Hentai-XS: its list (ten a page,
+    the newest first; ``/animepage.php?id=N``), a year — its page ``/age.php?age=<год>``, several — their pages one
+    after another (the newest year first), its search (a form: :func:`_xs_page` sends it); its genres — by its rows
+    (:data:`XS_GENRES`; with a genre chosen :data:`XS_WALK` of its pages are one page of «Лента»).  What it has not
+    (types, statuses, a rating, another order) — not asked, said why."""
+    if q.types or q.status or any(q.rating):
+        return None, "у Hentai-XS из фильтров только жанры, годы и поиск"
+    _wanted_ids, _left, why = _wanted(q, "hentaixs")
+    if why:
+        return None, why
+    if q.text:                                        # its search: every title found in one answer — one page
+        return (f"{XS_SITE}/search.php#search={quote(q.text)}", "") if page <= 1 else (None, "")
+    if q.order not in NEWEST_ORDERS:
+        return None, "Hentai-XS так не сортирует"
+    if q.years[0] and q.years[0] == q.years[1]:
+        return f"{XS_SITE}/age.php?age={q.years[0]}" + ("" if page <= 1 else f"&page={page}"), ""
+    if any(q.years):
+        low, high = q.years[0] or XS_FIRST_YEAR, q.years[1] or time.localtime().tm_year + 1
+        return f"{XS_SITE}/age.php#years={low}-{high}&n={max(1, page)}", ""
+    if q.genres or q.without:                         # its rows alone tell the genres: several of its pages
+        return f"{XS_SITE}/animepage.php#walk={XS_WALK}&n={max(1, page)}", ""
+    return (XS_SITE + "/" if page <= 1 else f"{XS_SITE}/animepage.php?id={page}"), ""
+
+
+def _hfshare_base(q: Query) -> str:
+    """(v5.44.139) The genre whose own page of HFShare the list is (its others — by the rows): «Без цензуры» (its tag
+    is not in the rows), «3D» (its section), else the first chosen."""
+    for name in ("Без цензуры", "3D"):
+        if name in q.genres:
+            return name
+    return q.genres[0] if q.genres else ""
+
+
+def hfshare_url(q: Query, page: int) -> "tuple[str | None, str]":
+    """(v5.44.139) HFShare: «Хентай аниме» (``/hentai-anime/``, twelve a page, the newest first); a genre — its pages
+    ``/xfsearch/<value>/page/N/`` (the first — ``index.php?do=xfsearch``; :data:`HFSHARE_GENRES`; «3D» — its section,
+    «Без цензуры» — its tag), the others, «none of these», years, a rating (its people's «Нравится») — by its rows;
+    its search (DataLife Engine's: every title found in one answer, no genres — each one's page tells them).  What it
+    has not — not asked, said why."""
+    if q.types or q.status:
+        return None, "у HFShare нет типов и статусов — только жанры, годы, оценка и поиск"
+    _wanted_ids, _left, why = _wanted(q, "hfshare")
+    if why:
+        return None, why
+    if "Без цензуры" in q.without:
+        return None, "HFShare не говорит в списках, есть ли цензура, — «без этих» для «Без цензуры» он не умеет"
+    if q.text:
+        return (f"{HFSHARE_SITE}/index.php?do=search&subaction=search&search_start=0&full_search=0&result_from=1"
+                f"&story={quote(q.text)}#n={max(1, page)}"), ""
+    if q.order not in NEWEST_ORDERS:
+        return None, "HFShare так не сортирует"
+    base = HFSHARE_SITE + "/hentai-anime/"
+    first = _hfshare_base(q)
+    if first:
+        address = HFSHARE_GENRES[first][0]
+        if not address.startswith("/") and page <= 1:
+            # the first page of a genre — DataLife Engine's own address of it: ``/xfsearch/<value>/`` of «Юри»,
+            # «Футанари», «Групповой секс»… is the site's «Ошибка 404» (9.11.2026), their next pages are not
+            return f"{HFSHARE_SITE}/index.php?do=xfsearch&xfname=janre&xf={address}", ""
+        base = HFSHARE_SITE + (quote(address) if address.startswith("/") else f"/xfsearch/{address}/")
+    return base + ("" if page <= 1 else f"page/{page}/"), ""
 
 
 def addresses(q: Query, n: int, settings: "dict | None" = None) -> "dict[str, tuple]":
     """{site: (its address for page ``n`` of the query or None, why not)} — the query's sites."""
     out = {}
     for site in q.asked():
+        foreign = [x for x in q.extra if site not in EXTRA_SITES.get(extra_parts(x)[0], ())]
+        if foreign:                                   # (v5.44.148) another site's own tag: this one has no such
+            _site, kind, _name = extra_parts(foreign[0])
+            out[site] = (None, f"«{extra_shown(foreign[0])}» — {EXTRA_WORDS.get(kind, 'тег')} "
+                               f"{EXTRA_LABELS.get(_site, _site)}")
+            continue
         if site == "remanga":
             out[site] = remanga_url(q, n)
         elif site == "mangalib":
@@ -754,6 +1402,14 @@ def addresses(q: Query, n: int, settings: "dict | None" = None) -> "dict[str, tu
             out[site] = nhentai_url(q, n)
         elif site == "allhentai":
             out[site] = allhentai_url(q, n)
+        elif site == "nudemoon":
+            out[site] = nudemoon_url(q, n)
+        elif site == "haven":
+            out[site] = haven_url(q, n)
+        elif site == "hentaixs":                     # (v5.44.139)
+            out[site] = xs_url(q, n)
+        elif site == "hfshare":
+            out[site] = hfshare_url(q, n)
         else:
             from core import video_dubs
             out[site] = yummy_url(q, n, video_dubs.api_of(settings or {}))
@@ -804,6 +1460,8 @@ def _remanga_items(data, q: Query) -> tuple:
         if q.text and S._int(kind.get("id")) not in wanted:
             continue                                  # its search has no filters: the kinds of this tab at least
         names = [x.get("main_name"), x.get("secondary_name"), *str(x.get("another_name") or "").split(" / ")]
+        if G.title("remanga", names=[str(n) for n in names if n], adult=bool(x.get("is_erotic"))):
+            continue                                  # (v5.44.143) a gate closed it — by the name too, as MangaLib's
         cover = _dict(x.get("cover"))
         path = str(cover.get("mid") or cover.get("low") or cover.get("high") or "")
         dir_ = str(x["dir"])
@@ -832,7 +1490,7 @@ def _mangalib_items(data, q: Query, site: str = "mangalib") -> tuple:
         names = [str(n).strip() for n in (x.get("rus_name"), x.get("eng_name"), x.get("name")) if n and str(n).strip()]
         age = str(_dict(x.get("ageRestriction")).get("label") or "")
         adult = source.adult_only or q.mode == "nsfw" or "RX" in age.upper()
-        if adult and S.depicts_minors(names):         # (v5.44.96) the program's rule about minors — by the name too
+        if G.title(site, names=names, adult=adult):               # (v5.44.96) a gate closed it — by the name too
             continue                                  # (the site's tags leave out what it tags so, not the rest)
         cover = _dict(x.get("cover"))
         rating = _dict(x.get("rating"))
@@ -889,13 +1547,14 @@ def _plain(fragment: str) -> str:
     return " ".join(_html.unescape(re.sub(r"<[^>]+>", " ", str(fragment or ""))).split())
 
 
-def hentasis_items(text: str, page: int = 1, base: str = "") -> tuple:
+def hentasis_items(text: str, page: int = 1, base: str = "", q: "Query | None" = None) -> tuple:
     """(v5.44.93) ([:class:`Item`], whether there is a page more) of a page of Hentasis's list: ``div.short-item`` —
     the link ``a.short-link`` «Русское / Romaji (2026г.)», the picture of ``.short-img``, the rating (the width of
     ``.current-rating``, %) and the votes, the lines of ``.mov-lines`` («Год выпуска», «Жанр», «Эпизоды»…).  A post
     of the site's own (one name, no year: «Есть свет в конце тонеля…» — the first of its first page) and a title that
-    depicts minors (its genres: ``manhwa_sources.depicts_minors``) — not.  ``base`` — the page's address (its
-    addresses are read against it)."""
+    a gate closes (its genres, its names: ``gates.title``) — not.  ``base`` — the page's
+    address (its addresses are read against it).  (v5.44.137) ``q`` — a row the query's genres, years or rating leave
+    out (:func:`_hentasis_fits`) — not."""
     base = base or HENTASIS_SITE + "/"
     starts = list(_HENTASIS_ITEM.finditer(text))
     out, seen = [], set()
@@ -919,21 +1578,23 @@ def hentasis_items(text: str, page: int = 1, base: str = "") -> tuple:
         lines = {}
         for label, value in re.findall(r'<li>\s*<div\s+class=["\']mov-label["\']>(.*?)</div>(.*?)</li>', block, re.S):
             lines[_plain(label).strip(" :")] = _plain(value)
-        genres = [g.strip() for g in lines.get("Жанр", "").split(",") if g.strip()]
-        if S.depicts_minors(genres):
-            continue                                   # the program's rule
-        year = re.search(r"\b(?:19|20)\d{2}\b", lines.get("Год выпуска", ""))
+        genres = [g.strip() for g in re.split(r"[,.]\s", lines.get("Жанр", "") + " ") if g.strip()]
+        if G.title("hentasis", names=names, genres=genres):
+            continue                                   # a gate closed it
+        rate = re.search(r'current-rating["\'][^>]*width:\s*(\d+(?:\.\d+)?)%', block)
+        rating = round(float(rate.group(1)) / 10, 1) if rate else 0.0
+        if q is not None and not _hentasis_fits(genres, lines.get("Год выпуска", ""), rating, q):
+            continue                                   # (v5.44.137) the query's other genres, «none of these», years
+        year = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", lines.get("Год выпуска", ""))
         picture = re.search(r'class=["\'][^"\']*\bshort-img\b[^"\']*["\'][^>]*>\s*<img\b([^>]*)>', block)
         src = (re.search(r'\bdata-src=["\']([^"\']+)["\']', picture.group(1))
                or re.search(r'\bsrc=["\']([^"\']+)["\']', picture.group(1))) if picture else None
         cover = urljoin(base, _html.unescape(src.group(1).strip())) if src else ""
-        rate = re.search(r'current-rating["\'][^>]*width:\s*(\d+(?:\.\d+)?)%', block)
         votes = re.search(r'data-vote-num-id=["\']\d+["\'][^>]*>\s*([\d\s]+)<', block)
         episodes = lines.get("Эпизоды", "").replace("-", "–")
         seen.add(number.group(1))
         out.append(Item(site="hentasis", key=number.group(1), names=names, url=url, shown_type="Хентай",
-                        year=int(year.group(0)) if year else 0, cover=cover,
-                        rating=round(float(rate.group(1)) / 10, 1) if rate else 0.0,
+                        year=int(year.group(0)) if year else 0, cover=cover, rating=rating,
                         votes=int(re.sub(r"\D", "", votes.group(1)) or 0) if votes else 0, adult=True,
                         status=(f"серии {episodes}" if re.search(r"\D", episodes) else
                                 f"{episodes} серия" if episodes == "1" else f"{episodes} серий" if episodes else "")))
@@ -941,16 +1602,486 @@ def hentasis_items(text: str, page: int = 1, base: str = "") -> tuple:
     return out, any(x > page for x in pages)
 
 
+# (v5.44.137) a row's genre as Hentasis writes it → the feed's name (:data:`HENTASIS_GENRES`, :data:`HENTASIS_ALSO`)
+_HENTASIS_ROW = {**{S.name_key(said): shown for shown, (_address, said) in HENTASIS_GENRES.items()},
+                 **{S.name_key(said): shown for said, shown in HENTASIS_ALSO.items()}}
+
+
+def _hentasis_fits(genres: list, years: str, rating: float, q: Query) -> bool:
+    """(v5.44.137) A title of Hentasis by its genres (its rows' words), its years («2022-2025»), its rating (0…10) — what
+    the query asks: every genre chosen, none of «none of these», a year of its in the years, its rating in the bounds (a
+    title without one — not, when a rating is asked)."""
+    return _rows_fit(genres, years, rating, q, _HENTASIS_ROW)
+
+
+def _rows_fit(genres: list, years: str, rating: float, q: Query, row: dict, served: tuple = ()) -> bool:
+    """(v5.44.139) A title of a site whose rows the feed narrows (:data:`LOCAL_FILTERS`) — what the query asks (as
+    :func:`_hentasis_fits`): ``row`` — the site's words → the feed's genres; ``served`` — genres the list asked is of
+    already (HFShare's tag «без цензуры»: its rows do not say it)."""
+    shown = {S.name_key(row.get(S.name_key(g), g)) for g in genres}
+    if any(S.name_key(g) not in shown for g in q.genres if g not in served) or \
+            any(S.name_key(g) in shown for g in q.without):
+        return False
+    if any(q.years):
+        found = [int(y) for y in re.findall(r"(?<!\d)(?:19|20)\d{2}(?!\d)", str(years or ""))]
+        low, high = q.years[0] or 0, q.years[1] or 9999
+        if not found or not any(low <= y <= high for y in range(min(found), max(found) + 1)):
+            return False
+    if any(q.rating):
+        low, high = float(q.rating[0] or 0), float(q.rating[1] or 10)
+        if not rating or not low <= rating <= high:
+            return False
+    return True
+
+
+def hentasis_found(text: str, page: int = 1, base: str = "") -> tuple:
+    """(v5.44.137) ([:class:`Item`], whether there is a page more) of a page of Hentasis's search (ten a page):
+    ``a.sres-wrap`` — its picture (``.sres-img img``), its name (``.sres-text h2`` «Русское / Romaji (2026г.)»); its
+    pages — ``list_submit(N)``.  The rows say no genres: :func:`_hentasis_page` reads them from each title's page."""
+    base = base or HENTASIS_SITE + "/"
+    out, seen = [], set()
+    for attrs, inner in re.findall(r"<a\b([^>]*)>(.*?)</a>", text, re.S):
+        if not re.search(r'class=["\'][^"\']*\bsres-wrap\b', attrs):
+            continue
+        href = re.search(r'href=["\']([^"\']+)["\']', attrs)
+        if not href:
+            continue
+        url = urljoin(base, _html.unescape(href.group(1)))
+        number = re.search(r"/(\d+)-[^/]*\.html?$", urlparse(url).path)
+        heading = re.search(r"<h2[^>]*>(.*?)</h2>", inner, re.S)
+        if not number or not heading or number.group(1) in seen:
+            continue
+        full = _plain(heading.group(1))
+        years = re.search(r"\(\s*((?:19|20)\d{2})(?:\s*[-–]\s*\d{4})?\s*г?\.?\s*\)\s*$", full)
+        title = re.sub(r"\s*\(\s*\d{4}(?:\s*[-–]\s*\d{4})?\s*г?\.?\s*\)\s*$", "", full)
+        names = [x.strip() for x in title.split(" / ") if x.strip()]
+        if len(names) < 2 and not years:
+            continue                                   # the site's own post, not a title
+        if not S._cyrillic(names[0]) and any(S._cyrillic(x) for x in names[1:]):
+            names.sort(key=lambda x: not S._cyrillic(x))
+        if G.title("hentasis", names=names):
+            continue                                   # a gate closed it: by its names (its genres — after)
+        picture = re.search(r"<img\b([^>]*)>", inner)
+        src = (re.search(r'\bdata-src=["\']([^"\']+)["\']', picture.group(1))
+               or re.search(r'\bsrc=["\']([^"\']+)["\']', picture.group(1))) if picture else None
+        seen.add(number.group(1))
+        out.append(Item(site="hentasis", key=number.group(1), names=names, url=url, shown_type="Хентай",
+                        year=int(years.group(1)) if years else 0, adult=True,
+                        cover=urljoin(base, _html.unescape(src.group(1).strip())) if src else ""))
+    pages = [int(x) for x in re.findall(r"list_submit\((\d+)\)", text)]
+    return out, any(x > page for x in pages)
+
+
+HENTASIS_FACTS_KEPT = 3000             # (v5.44.137) titles whose genres a search read from their pages, kept
+_HENTASIS_FACTS: "OrderedDict[tuple, tuple]" = OrderedDict()     # (site, key) → (genres, years, rating)
+_HENTASIS_FACTS_LOCK = threading.Lock()
+_PAGE_HEADERS = {"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"}
+
+
+def _site_of_page(site: str) -> str:
+    """(v5.44.139) The address the program asks a site of pages at (its Referer)."""
+    return {"hentasis": HENTASIS_SITE, "hentaixs": XS_SITE, "hfshare": HFSHARE_SITE}.get(site, "")
+
+
+def likes_of(text: str) -> tuple:
+    """(v5.44.139) (rating 0…10, votes) of HFShare's «Нравится / Не нравится» of a title (its first ``data-hr`` box —
+    a row's, or its page's own): the share of «Нравится»; (0.0, 0) — none, or nobody voted."""
+    box = re.search(r"data-hr=[\"']\d+[\"']", str(text or ""))
+    if not box:
+        return 0.0, 0
+    part = text[box.start():box.start() + 3000]
+    pct = re.search(r"data-hr-pct[^>]*>\s*(\d{1,3})\s*%", part)
+    votes = sum(int(x) for x in re.findall(r"data-hr-(?:up|down)\b[^>]*>\s*(\d{1,9})\s*<", part))
+    return (round(min(100, int(pct.group(1))) / 10, 1), votes) if pct and votes else (0.0, 0)
+
+
+def _page_rating(site: str, text: str) -> tuple:
+    """(rating 0…10, votes) a title's page or row tells: Hentasis's stars (the width of ``.current-rating``, %), (v5.44.139)
+    HFShare's «Нравится» of its people (:func:`likes_of`)."""
+    if site == "hfshare":
+        return likes_of(text)
+    rate = re.search(r'current-rating["\'][^>]*width:\s*(\d+(?:\.\d+)?)%', text)
+    return (round(float(rate.group(1)) / 10, 1) if rate else 0.0), 0
+
+
+def _hentasis_facts(net, item: Item) -> "tuple | None":
+    """(v5.44.137) (genres, years, rating) of a title of Hentasis — (v5.44.139) or of HFShare — from its own page (a
+    search's rows say none); kept — a title's genres do not change; None — its page did not come (the title is not
+    shown: its genres are not known)."""
+    with _HENTASIS_FACTS_LOCK:
+        kept = _HENTASIS_FACTS.get((item.site, item.key))
+    if kept is not None:
+        return kept
+    from core import video_meta
+    label = LABELS.get(item.site, item.site)
+    try:
+        body, ctype = net.fetch(item.url, what=label, headers=dict(_PAGE_HEADERS, Referer=_site_of_page(item.site) + "/"))
+    except S.SourceError as exc:
+        _LOG.info("catalog: %s: the page of %s did not come: %s", label, item.key, exc)
+        return None
+    text = S._decoded(body, ctype)
+    meta = video_meta.parse_page(text, item.url)
+    genres = [str(g).strip() for g in meta.get("genres") or [] if str(g).strip()]
+    facts = (genres, str(meta.get("year") or item.year or ""), _page_rating(item.site, text)[0])
+    with _HENTASIS_FACTS_LOCK:
+        _HENTASIS_FACTS[(item.site, item.key)] = facts
+        while len(_HENTASIS_FACTS) > HENTASIS_FACTS_KEPT:
+            _HENTASIS_FACTS.popitem(last=False)
+    return facts
+
+
+def _with_facts(net, items: list, q: Query, row: dict) -> list:
+    """(v5.44.137) The titles a search found whose rows tell no genres: each one's page read (four at once, kept) —
+    the gate asked with them (``gates.title``: the title's site, names and these genres), then the
+    query's genres, years, rating (``row`` — the site's words → the feed's genres); a page that did not come — the
+    title is not shown."""
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="catalog-facts") as pool:
+        facts = list(pool.map(lambda item: _hentasis_facts(net, item), items))
+    kept = []
+    for item, got in zip(items, facts):
+        if got is None or G.title(item.site, names=item.names, genres=got[0]):
+            continue                                   # a gate closed it: by its genres too
+        if _rows_fit(*got, q, row):
+            item.rating = item.rating or got[2]
+            kept.append(item)
+    return kept
+
+
+HENTASIS_YEARS_TTL = 30 * 60          # (v5.44.137) seconds the number of pages of a year of Hentasis is kept
+_HENTASIS_YEARS: dict = {}             # (site, year) → (its pages, its first page's text, when)
+
+
+def _hentasis_text(net, address: str, site: str = "hentasis") -> str:
+    body, ctype = net.fetch(address, what=LABELS[site], headers=dict(_PAGE_HEADERS, Referer=_site_of_page(site) + "/"))
+    return S._decoded(body, ctype)
+
+
+def _year_url(site: str, year: int, page: int = 1) -> str:
+    """The address of page ``page`` of a year's own list: Hentasis's ``/tags/<год>/``, (v5.44.139) Hentai-XS's
+    ``/age.php?age=<год>``."""
+    if site == "hentaixs":
+        return f"{XS_SITE}/age.php?age={year}" + ("" if page <= 1 else f"&page={page}")
+    return f"{HENTASIS_SITE}/tags/{year}/" + ("" if page <= 1 else f"page/{page}/")
+
+
+def _hentasis_year(net, year: int, site: str = "hentasis") -> tuple:
+    """(its pages, its first page's text) of a year of Hentasis (``/tags/<год>/``; (v5.44.139) of Hentai-XS —
+    ``/age.php?age=<год>``; none — 0)."""
+    with _HENTASIS_FACTS_LOCK:
+        kept = _HENTASIS_YEARS.get((site, year))
+    if kept is not None and time.time() - kept[2] < HENTASIS_YEARS_TTL:
+        return kept[0], kept[1]
+    try:
+        text = _hentasis_text(net, _year_url(site, year), site)
+    except S.Missing:
+        text = ""
+    if site == "hentaixs":
+        numbers = [int(x) for x in re.findall(r"age\.php\?age=\d{4}&(?:amp;)?page=(\d+)", text)]
+        pages = max(numbers or [1]) if _XS_ITEM.search(text) else 0
+    else:
+        numbers = [int(x) for x in re.findall(r'href=["\'][^"\']*/tags/\d{4}/page/(\d+)/?["\']', text)]
+        pages = max(numbers or [1]) if _HENTASIS_ITEM.search(text) else 0
+    with _HENTASIS_FACTS_LOCK:
+        _HENTASIS_YEARS[(site, year)] = (pages, text, time.time())
+    return pages, text
+
+
+def _hentasis_years(net, address: str, q: Query, site: str = "hentasis") -> tuple:
+    """(v5.44.137) Page ``n`` of several years of Hentasis — (v5.44.139) or of Hentai-XS: its pages of the years one
+    after another, the newest year first (the main list is the newest first — its first pages would have none of the
+    years of long ago)."""
+    found = re.search(r"#years=(\d+)-(\d+)&n=(\d+)", address)
+    low, high, left = int(found.group(1)), int(found.group(2)), int(found.group(3))
+    items_of = xs_items if site == "hentaixs" else hentasis_items
+    for year in range(high, low - 1, -1):
+        pages, first = _hentasis_year(net, year, site)
+        if left <= pages:
+            url = _year_url(site, year, left)
+            text = first if left == 1 else _hentasis_text(net, url, site)
+            items, _more = items_of(text, left, url, q)
+            return items, left < pages or year > low
+        left -= pages
+    return [], False
+
+
 def _hentasis_page(net, address: str, q: Query) -> tuple:
-    body, ctype = net.fetch(address, what=LABELS["hentasis"],
-                            headers={"Referer": HENTASIS_SITE + "/", "Accept": "text/html,application/xhtml+xml,*/*;q=0.8"})
+    if "#years=" in address:
+        return _hentasis_years(net, address, q)
+    text = _hentasis_text(net, address)
+    if "do=search" in address:                         # (v5.44.137) its search: the genres from each title's page
+        number = re.search(r"search_start=(\d+)", address)
+        items, more = hentasis_found(text, int(number.group(1)) if number else 1, address)
+        return _with_facts(net, items, q, _HENTASIS_ROW), more
     number = re.search(r"/page/(\d+)/?$", address)
-    return hentasis_items(S._decoded(body, ctype), int(number.group(1)) if number else 1, address)
+    return hentasis_items(text, int(number.group(1)) if number else 1, address, q)
+
+
+# ── (v5.44.139) Hentai-XS ─────────────────────────────────────────────────────────────────────────────────────────
+_XS_ITEM = re.compile(r"<div\b[^>]*\bclass=[\"']mini_anime[\"'][^>]*>")
+
+
+def _episodes_word(count: int) -> str:
+    """«1 серия», «3 серии», «12 серий» ("" — not known)."""
+    if count <= 0:
+        return ""
+    tail = count % 100
+    word = ("серия" if count % 10 == 1 and tail != 11 else
+            "серии" if 2 <= count % 10 <= 4 and not 12 <= tail <= 14 else "серий")
+    return f"{count} {word}"
+
+
+def xs_items(text: str, page: int = 1, base: str = "", q: "Query | None" = None) -> tuple:
+    """(v5.44.139) ([:class:`Item`], whether there is a page more) of a page of Hentai-XS's lists (its main one, a
+    year's, its search): ``div.mini_anime`` — the link ``.name_anime a`` «Русское|Romaji» to ``anime.php?id=N``, its
+    picture, the lines «Год производства», «Жанр», «Серии», «Цензура» («нет» — the feed's «Без цензуры»).  A title a
+    gate closes (its genres, its names — ``gates.title``) — not; ``q`` — a row the query's
+    genres, «none of these», years leave out (:func:`_rows_fit`) — not.  Its pages — ``animepage.php?id=N``,
+    ``…&page=N``."""
+    starts = list(_XS_ITEM.finditer(text))
+    out, seen = [], set()
+    for n, m in enumerate(starts):
+        block = text[m.end():starts[n + 1].start() if n + 1 < len(starts) else m.end() + 30000]
+        link = re.search(r"class=[\"']name_anime[\"'][^>]*>\s*<a\b[^>]*\bhref=[\"'][^\"']*?anime\.php\?id=(\d{1,9})[\"'][^>]*>"
+                         r"(.*?)</a>", block, re.S)
+        if not link or str(int(link.group(1))) in seen:
+            continue
+        number = str(int(link.group(1)))
+        names = [x.strip(" /") for part in _plain(link.group(2)).split("|") for x in part.split(" / ") if x.strip(" /")]
+        if not names:
+            continue
+        lines = {}
+        for label, value in re.findall(r"<p>\s*<span\b[^>]*>\s*([^<]{1,60}?)\s*</span>(.*?)</p>", block, re.S):
+            lines.setdefault(_plain(label).strip(" :"), _plain(value))
+        genres = [g.strip(" .") for g in re.split(r"\s*[,;]\s*|\.\s+", lines.get("Жанр", "")) if g.strip(" .")]
+        if re.fullmatch(r"нет\.?", lines.get("Цензура", "").strip(), re.I):
+            genres.append("Без цензуры")
+        if G.title("hentaixs", names=names, genres=genres):
+            continue                                   # a gate closed it
+        if q is not None and not _rows_fit(genres, lines.get("Год производства", ""), 0.0, q, _XS_ROW):
+            continue
+        year = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", lines.get("Год производства", ""))
+        picture = re.search(r"<img\b[^>]*?\bsrc=[\"']([^\"']+)[\"']", block)
+        count = re.search(r"\d{1,4}", lines.get("Серии", ""))
+        seen.add(number)
+        out.append(Item(site="hentaixs", key=number, names=names, url=f"{XS_SITE}/anime.php?id={number}",
+                        shown_type="Хентай", year=int(year.group(0)) if year else 0, adult=True,
+                        cover=urljoin(XS_SITE + "/", _html.unescape(picture.group(1).strip())) if picture else "",
+                        status=_episodes_word(int(count.group(0))) if count else ""))
+    pages = [int(x) for x in re.findall(r"(?:animepage\.php\?id=|[?&](?:amp;)?page=)(\d{1,5})", text)]
+    return out, any(x > page for x in pages)
+
+
+def _xs_list(page: int) -> str:
+    return XS_SITE + "/" if page <= 1 else f"{XS_SITE}/animepage.php?id={page}"
+
+
+def _xs_page(net, address: str, q: Query) -> tuple:
+    """(v5.44.139) A page of Hentai-XS for «Лента»: its search (a form — sent here), its years, its list — with a
+    genre chosen, :data:`XS_WALK` of its pages (its rows alone tell the genres)."""
+    if "/search.php#search=" in address:
+        words = re.search(r"#search=([^&]*)", address)
+        body, ctype = net.fetch(XS_SITE + "/search.php", method="POST", what=LABELS["hentaixs"],
+                                data={"search": unquote(words.group(1)) if words else "", "submit_s": ""},
+                                headers=dict(_PAGE_HEADERS, Referer=XS_SITE + "/"))
+        items, _more = xs_items(S._decoded(body, ctype), 1, XS_SITE + "/search.php", q)
+        return items, False                             # every title found — in one answer
+    if "#years=" in address:
+        return _hentasis_years(net, address, q, "hentaixs")
+    walk = re.search(r"#walk=(\d+)&n=(\d+)", address)
+    if walk:
+        size, n = max(1, int(walk.group(1))), max(1, int(walk.group(2)))
+        items, last, seen = [], 0, set()
+        for k in range((n - 1) * size + 1, n * size + 1):
+            if last and k > last:
+                break
+            try:
+                text = _hentasis_text(net, _xs_list(k), "hentaixs")
+            except S.Missing:
+                break                                   # past its last page
+            got, _more = xs_items(text, k, _xs_list(k), q)
+            items += [i for i in got if i.key not in seen]
+            seen |= {i.key for i in got}
+            last = max([int(x) for x in re.findall(r"animepage\.php\?id=(\d{1,5})", text)] + [k])
+        return items, n * size < last
+    text = _hentasis_text(net, address, "hentaixs")
+    number = re.search(r"(?:animepage\.php\?id=|[?&]page=)(\d+)", address)
+    return xs_items(text, int(number.group(1)) if number else 1, address, q)
+
+
+# ── (v5.44.139) HFShare ───────────────────────────────────────────────────────────────────────────────────────────
+_HFSHARE_ITEM = re.compile(r"<div\b[^>]*\bclass=[\"'][^\"']*\bkino-item\b[^\"']*[\"'][^>]*>")
+
+
+def _hfshare_names(text: str) -> list:
+    """Its names of a title («Romaji / Русское»), the Russian first, without the brackets after them («… 01-02
+    [720px][Demosaic Model H2Dv1.1][Preview]»)."""
+    names = [re.sub(r"(?:\s*\[[^\[\]]*\])+\s*$", "", x).strip() for x in _plain(text).split(" / ")]
+    names = [x for x in names if x]
+    if names and not S._cyrillic(names[0]) and any(S._cyrillic(x) for x in names[1:]):
+        names.sort(key=lambda x: not S._cyrillic(x))     # «Muramata-san no Aijou / Любовь Мураматы-сан»: Russian first
+    return names
+
+
+def hfshare_items(text: str, page: int = 1, base: str = "", q: "Query | None" = None, served: tuple = ()) -> tuple:
+    """(v5.44.139) ([:class:`Item`], whether there is a page more) of a page of HFShare's lists: ``div.kino-item`` — the
+    link ``a.kino-h`` «Romaji / Русское» to ``<номер>-<slug>.html``, the picture of ``.kino-img``, its genres
+    (``.xf-chips[data-xf=janre]`` — a row of another field, its manga's ``manj``, — not a video: not), its people's
+    «Нравится» (``data-hr-pct``), the lines «Год выпуска», «Продолжительность» («2эп. 19мин.»).  A title a gate
+    closes (``gates.title``) — not; ``q`` — what the query's genres (but ``served`` — the list is of
+    them), «none of these», years, rating leave out (:func:`_rows_fit`) — not."""
+    base = base or HFSHARE_SITE + "/"
+    starts = list(_HFSHARE_ITEM.finditer(text))
+    out, seen = [], set()
+    for n, m in enumerate(starts):
+        block = text[m.end():starts[n + 1].start() if n + 1 < len(starts) else m.end() + 30000]
+        link = next((a for a in re.finditer(r"<a\b([^>]*)>(.*?)</a>", block, re.S)
+                     if re.search(r'class=["\'][^"\']*\bkino-h\b', a.group(1))), None)
+        href = re.search(r'href=["\']([^"\']+)["\']', link.group(1)) if link else None
+        if not href:
+            continue
+        url = urljoin(base, _html.unescape(href.group(1)))
+        number = re.search(r"/(\d{1,9})-[^/]*\.html?$", urlparse(url).path)
+        if not number or number.group(1) in seen:
+            continue
+        said = re.search(r'title=["\']([^"\']*)["\']', link.group(1))       # whole (its heading is cut short)
+        names = _hfshare_names(_html.unescape(said.group(1)) if said else "") or _hfshare_names(link.group(2))
+        fields = dict(re.findall(r'data-xf=["\'](\w+)["\'][^>]*>(.*?)</div>', block, re.S))
+        if not names or (fields and "janre" not in fields):
+            continue                                   # a row of its manga (``manj``), not a video
+        genres = [g.strip(" .") for g in re.split(r"\s*,\s*", _plain(fields.get("janre", ""))) if g.strip(" .")]
+        if G.title("hfshare", names=names, genres=genres):
+            continue                                   # a gate closed it
+        lines = {_plain(label).strip(" :"): _plain(value) for label, value in
+                 re.findall(r"<strong>\s*([^<]{1,60}?)\s*</strong>\s*</div>(.*?)</li>", block, re.S)}
+        rating, votes = _page_rating("hfshare", block)
+        if q is not None and not _rows_fit(genres, lines.get("Год выпуска", ""), rating, q, _HFSHARE_ROW, served):
+            continue
+        year = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", lines.get("Год выпуска", ""))
+        picture = re.search(r'class=["\'][^"\']*\bkino-img\b[^"\']*["\'][^>]*>\s*<img\b([^>]*)>', block)
+        src = (re.search(r'\bdata-src=["\']([^"\']+)["\']', picture.group(1))
+               or re.search(r'\bsrc=["\']([^"\']+)["\']', picture.group(1))) if picture else None
+        count = re.search(r"(\d{1,4})\s*эп", lines.get("Продолжительность", ""))
+        seen.add(number.group(1))
+        out.append(Item(site="hfshare", key=number.group(1), names=names, url=url, shown_type="Хентай",
+                        year=int(year.group(0)) if year else 0, adult=True, rating=rating, votes=votes,
+                        cover=urljoin(base, _html.unescape(src.group(1).strip())) if src else "",
+                        status=_episodes_word(int(count.group(1))) if count else ""))
+    pages = [int(x) for x in re.findall(r'href=["\'][^"\']*/page/(\d{1,5})/?["\']', text)]
+    return out, any(x > page for x in pages)
+
+
+def hfshare_found(text: str, base: str = "") -> list:
+    """(v5.44.139) [:class:`Item`] of HFShare's search (DataLife Engine's, as Hentasis's: ``a.sres-wrap`` — its picture,
+    its name in ``h2``; every title found in one answer); the rows say no genres (each title's page tells them)."""
+    base = base or HFSHARE_SITE + "/"
+    out, seen = [], set()
+    for attrs, inner in re.findall(r"<a\b([^>]*)>(.*?)</a>", text, re.S):
+        if not re.search(r'class=["\'][^"\']*\bsres-wrap\b', attrs):
+            continue
+        href = re.search(r'href=["\']([^"\']+)["\']', attrs)
+        heading = re.search(r"<h2[^>]*>(.*?)</h2>", inner, re.S)
+        if not href or not heading:
+            continue
+        url = urljoin(base, _html.unescape(href.group(1)))
+        number = re.search(r"/(\d{1,9})-[^/]*\.html?$", urlparse(url).path)
+        names = _hfshare_names(heading.group(1))
+        if not number or not names or number.group(1) in seen:
+            continue
+        if G.title("hfshare", names=names):
+            continue                                   # a gate closed it: by its names (its genres — after)
+        picture = re.search(r"<img\b([^>]*)>", inner)
+        src = (re.search(r'\bdata-src=["\']([^"\']+)["\']', picture.group(1))
+               or re.search(r'\bsrc=["\']([^"\']+)["\']', picture.group(1))) if picture else None
+        seen.add(number.group(1))
+        out.append(Item(site="hfshare", key=number.group(1), names=names, url=url, shown_type="Хентай", adult=True,
+                        cover=urljoin(base, _html.unescape(src.group(1).strip())) if src else ""))
+    return out
+
+
+HFSHARE_FOUND_TTL = 10 * 60             # seconds a search of HFShare is kept (its answer has every title found)
+_HFSHARE_FOUND: "OrderedDict[str, tuple]" = OrderedDict()   # its address → (the titles, when)
+
+
+def _hfshare_page(net, address: str, q: Query) -> tuple:
+    """(v5.44.139) A page of HFShare for «Лента»: its list (narrowed by the rows), its search — ten titles of it a page,
+    each one's genres from its page (:func:`_with_facts`)."""
+    if "do=search" in address:
+        bare, _hash, rest = address.partition("#n=")
+        n = max(1, int(rest)) if rest.isdigit() else 1
+        with _HENTASIS_FACTS_LOCK:
+            kept = _HFSHARE_FOUND.get(bare)
+        if kept is None or time.time() - kept[1] > HFSHARE_FOUND_TTL:
+            kept = (hfshare_found(_hentasis_text(net, bare, "hfshare"), bare), time.time())
+            with _HENTASIS_FACTS_LOCK:
+                _HFSHARE_FOUND[bare] = kept
+                while len(_HFSHARE_FOUND) > QUERIES_KEPT:
+                    _HFSHARE_FOUND.popitem(last=False)
+        found = kept[0]
+        shown = [Item(**vars(i)) for i in found[(n - 1) * HFSHARE_FOUND_PAGE:n * HFSHARE_FOUND_PAGE]]
+        return _with_facts(net, shown, q, _HFSHARE_ROW), n * HFSHARE_FOUND_PAGE < len(found)
+    text = _hentasis_text(net, address, "hfshare")
+    number = re.search(r"/page/(\d+)/?$", address)
+    served = tuple(name for name in ("Без цензуры", "3D") if name == _hfshare_base(q))
+    return hfshare_items(text, int(number.group(1)) if number else 1, address, q, served)
+
+
+def haven_items(data) -> list:
+    """(v5.44.138) [:class:`Item`] of a page of HentaiHaven's catalogue (its WordPress' entries: ``slug``,
+    ``title.rendered``, ``meta.vraven_remote_thumbnail`` — the cover on ``img.hentaihaven.xxx``, the numbers of its
+    genres, tags and year); a title a gate closes (its genres, tags, name — ``gates.title``) — not."""
+    out = []
+    for x in data if isinstance(data, list) else []:
+        if not isinstance(x, dict):
+            continue
+        slug = str(x.get("slug") or "")
+        name = _html.unescape(str(_dict(x.get("title")).get("rendered") or "")).strip()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,199}", slug) or not name:
+            continue
+        if G.title("haven", names=[name], genre_ids=x.get("wp-manga-genre") or [],
+                   tag_ids=x.get("wp-manga-tag") or []):
+            continue                                       # a gate closed it
+        thumb = str(_dict(x.get("meta")).get("vraven_remote_thumbnail") or "").strip()
+        year = next((_HAVEN_YEAR_OF[n] for n in x.get("wp-manga-release") or [] if n in _HAVEN_YEAR_OF), 0)
+        out.append(Item(site="haven", key=slug, names=[name], url=f"{HAVEN_SITE}/ru/watch/{slug}/", shown_type="Хентай",
+                        year=year, cover=urljoin(HAVEN_IMAGES, thumb) if thumb else "", adult=True))
+    return out
+
+
+def _haven_page(net, address: str, q: Query) -> tuple:
+    page = re.search(r"[?&]page=(\d+)", address)
+    try:
+        data = net.json(address, what=LABELS["haven"], headers={"Accept": "application/json",
+                                                                 "Referer": HAVEN_SITE + "/"})
+    except S.SourceError as exc:
+        if page and int(page.group(1)) > 1 and re.search(r"\b400\b", str(exc)):
+            return [], False                               # a page past the last: its WordPress says 400
+        raise
+    return haven_items(data), isinstance(data, list) and len(data) >= HAVEN_PAGE
+
+
+def haven_said(net, slug: str) -> "dict | None":
+    """(v5.44.138) What HentaiHaven's catalogue says of a title by its slug — its name and the numbers of its genres
+    and tags (the page «Смотреть» opens shows its genres by name only): ``{names, genre_ids, tag_ids}`` for
+    ``gates.title("haven", **…)``; None — not known (no such slug, no answer)."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,199}", str(slug or "")):
+        return None
+    try:
+        data = net.json(f"{HAVEN_API}/wp-manga?slug={slug}&_fields={HAVEN_FIELDS}", what=LABELS["haven"],
+                        headers={"Accept": "application/json", "Referer": HAVEN_SITE + "/"})
+    except S.SourceError as exc:
+        _LOG.info("catalog: HentaiHaven did not say of %s: %s", slug, exc)
+        return None
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    x = data[0]
+    name = _html.unescape(str(_dict(x.get("title")).get("rendered") or "")).strip()
+    return {"names": [name], "genre_ids": list(x.get("wp-manga-genre") or []),
+            "tag_ids": list(x.get("wp-manga-tag") or [])}
 
 
 def _hentaichan_page(net, address: str, q: Query) -> tuple:
-    """(v5.44.93) A page of Хентай-тян's lists or its search (``manhwa_sources.Hentaichan.listing``: a title depicting
-    minors is not in it); (v5.44.95) the parts of one work — one tile, named as the work («Укрощение строптивого - часть
+    """(v5.44.93) A page of Хентай-тян's lists or its search (``manhwa_sources.Hentaichan.listing``: a title a gate
+    closes is not in it); (v5.44.95) the parts of one work — one tile, named as the work («Укрощение строптивого - часть
     22» six times on its «Обновления» of 6.11.2026; the card of any part is the whole work)."""
     source = S.by_name("hentaichan")
     hits, more = source.listing(net, address)
@@ -958,27 +2089,25 @@ def _hentaichan_page(net, address: str, q: Query) -> tuple:
                  adult=True) for h, names in works_of(hits)], more
 
 
+def _nudemoon_page(net, address: str, q: Query) -> tuple:
+    """(v5.44.131) A page of Nude-Moon's lists or its search (``manhwa_sources.NudeMoon.listing``: a title the program's
+    rule leaves out is not in it); the chapters of one work — one tile, named as the work (as Хентай-тян's parts).
+    (v5.44.135) The genres and tags of the query — by the tags its rows carry: all the wanted ones, none of the others
+    (a page of its tags has them already; its search and its lists — not)."""
+    source = S.by_name("nudemoon")
+    wanted, left, _why = _wanted(q, "nudemoon")
+    hits, more = source.listing(net, address, need=[word for _kind, word in wanted],
+                                unwanted=[word for _kind, word in left])
+    return [Item(site="nudemoon", key=h.key, names=names, url=h.url, type="Манга", shown_type="Хентай", cover=h.cover,
+                 adult=True) for h, names in works_of(hits)], more
+
+
 def _allhentai_items(data, q: Query) -> tuple:
-    """(v5.44.99) ([:class:`Item`], whether there is a page more) of AllHentai's catalog or search, every kind (the
-    page is kept once for both tabs — :func:`_tab_fits` takes the tab's); a title the program's rule leaves out (its
-    names, its genres and tags) — not."""
+    """(v5.44.99) ([:class:`Item`], whether there is a page more) of AllHentai's catalog — by a name too (v5.44.155:
+    ``q=`` of the same API); a title a gate closes (its names; its genres and tags — their names and their numbers at
+    the site) — not."""
     source = S.by_name("allhentai")
     out = []
-    if isinstance(data, dict) and "suggestions" in data:          # its search: names, a link, a kind
-        for x in data.get("suggestions") or []:
-            element = x.get("elementId") if isinstance(x, dict) and isinstance(x.get("elementId"), dict) else {}
-            link = str(x.get("link") or "") if isinstance(x, dict) else ""
-            key = source.key_of(source.site() + link) if link.startswith("/") else ""
-            if not key or str(element.get("type") or "MANGA") != "MANGA":
-                continue
-            names = list(dict.fromkeys(str(n).strip() for n in [x.get("value"), *(x.get("names") or [])]
-                                       if n and str(n).strip()))
-            kind = next((str(k) for k in (element.get("typeName"), x.get("additional")) if k in _ALLHENTAI_KNOWN), "")
-            if S.depicts_minors(names):
-                continue                                  # the program's rule
-            out.append(Item(site="allhentai", key=key, names=names, url=f"{source.site()}/{key}", type=kind,
-                            shown_type=kind or "Хентай", cover=str(x.get("thumbnail") or ""), adult=True))
-        return out, False
     rows = (data.get("list") if isinstance(data, dict) else None) or []
     for x in rows:
         element = x.get("elementId") if isinstance(x, dict) and isinstance(x.get("elementId"), dict) else {}
@@ -988,9 +2117,8 @@ def _allhentai_items(data, q: Query) -> tuple:
         category = x.get("category") if isinstance(x.get("category"), dict) else {}
         kind = str(category.get("name") or "")
         names = [str(x.get("name") or link).strip()]
-        marks = [str(e.get("name") or "") for e in x.get("elements") or [] if isinstance(e, dict)]
-        if S.depicts_minors(names + marks):
-            continue                                  # the program's rule
+        if G.title("allhentai", names=names, **S.AllHentai.said(x)):
+            continue                                  # a gate closed it
         rating = x.get("rating") if isinstance(x.get("rating"), dict) else {}
         year = next((S._int(e.get("name")) for e in x.get("elements") or []
                      if isinstance(e, dict) and e.get("typeName") == "year"), 0)
@@ -1005,9 +2133,8 @@ def _allhentai_items(data, q: Query) -> tuple:
 
 
 def nhentai_items(data, net=None) -> tuple:
-    """(v5.44.97) ([:class:`Item`], whether there is a page more) of a page of nhentai's list or search: a gallery the
-    program's rule leaves out — not (its tags by their numbers, their names asked of the site once — ``net``; its
-    titles); the name — the title without its brackets (the whole one — the second name), the cover — its thumbnail,
+    """(v5.44.97) ([:class:`Item`], whether there is a page more) of a page of nhentai's list or search: a gallery a
+    gate closes — not (its tags by their numbers, their names asked of the site once — ``net``; its titles); the name — the title without its brackets (the whole one — the second name), the cover — its thumbnail,
     the status — its pages."""
     items = data.get("result") if isinstance(data, dict) else None
     galleries = [g for g in items or [] if isinstance(g, dict) and S._int(g.get("id"))]
@@ -1018,8 +2145,8 @@ def nhentai_items(data, net=None) -> tuple:
         gid = S._int(g.get("id"))
         titles = [" ".join(str(g.get(k) or "").split()) for k in ("english_title", "japanese_title")]
         tags = [t for t in g.get("tag_ids") or [] if isinstance(t, int)]
-        if N.forbidden(titles, tags, [names.get(t, "") for t in tags]):
-            continue                                  # the program's rule
+        if G.title("nhentai", names=titles, tags=[names.get(t, "") for t in tags], tag_ids=tags):
+            continue                                  # a gate closed it
         shown = N.pretty(titles[0]) or N.pretty(titles[1])
         if len(re.sub(r"[\W_]", "", shown)) < 2:     # «[Artist] ♥ [English]»: the brackets were the most of it
             shown = titles[0] or titles[1] or f"nhentai {gid}"
@@ -1080,6 +2207,11 @@ def forget() -> None:
         _ASKED.clear()
         _GIVEN.clear()
         _COVERS.clear()
+        _SUGGESTED.clear()
+    with _HENTASIS_FACTS_LOCK:                        # (v5.44.139) the pages of years, titles' facts, searches kept
+        _HENTASIS_FACTS.clear()
+        _HENTASIS_YEARS.clear()
+        _HFSHARE_FOUND.clear()
 
 
 def _net():
@@ -1103,13 +2235,180 @@ def _headers(site: str) -> dict:
     return {"Accept": "application/json", "Referer": video_dubs.SITE + "/"}
 
 
+# ── a site's own tags for the words typed ─────────────────────────────────────────────────────────────────────────
+_SUGGESTED: "OrderedDict[tuple, tuple]" = OrderedDict()     # (site, the words) → (the rows, when)
+
+
+def suggest(kind: str, mode: str, words: str, *, net=None) -> list:
+    """(v5.44.148) The sites' own tags whose names begin with the words typed — what «Найти тег» offers besides the
+    feed's genres and tags: [{value «site:kind:name», name, kind, word («автор»), site (its label), count, one — one
+    of its kind at a time (:func:`extra_single`), exact — its name is the words typed}] (:func:`suggested` without
+    the sites that did not answer)."""
+    return suggested(kind, mode, words, net=net)[0]
+
+
+def suggested(kind: str, mode: str, words: str, *, net=None) -> "tuple[list, list]":
+    """(the rows of :func:`suggest`, the labels of the sites that did not answer).  nhentai's own tag search
+    (``POST /api/v2/tags/search``, every kind at once: tags, artists, characters, parodies, groups); (v5.44.149) the
+    people of the Lib API (``/api/people?q=``: the authors of MangaLib and HentaiLib, ``one`` — one at a time) —
+    both asked at once.  A tag the feed has under a name of its own (``catalog_names``: «tentacles» — «Тентакли») is
+    not repeated; one a gate closes (:func:`extra_closed`) is not offered.  A site's rows are kept
+    :data:`SUGGEST_TTL`; a site that did not answer — nothing of it (it is asked again the next time).  The rows —
+    the sites in turn (each one's most used first), a name that is the words typed — before the others."""
+    words = " ".join(str(words or "").replace('"', " ").split()).lower()[:60]
+    if kind == "video" or len(words) < SUGGEST_MIN:
+        return [], []
+    shown = sites_shown(kind, mode)
+    asked = []                                        # (the key its rows are kept by, its label, who asks)
+    if kind == "manga" and "nhentai" in shown:
+        asked.append((("nhentai", words), LABELS["nhentai"], _nhentai_suggested))
+    people = tuple(s for s in EXTRA_SITES["lib"] if s in shown and S.by_name(s) is not None)
+    if people:
+        asked.append((("lib", words, people), " и ".join(LABELS[s] for s in people),
+                      lambda words, net, people=people: _lib_people(words, people, net)))
+    now = time.time()
+    got, going = {}, []
+    net = net or _net()
+    for key, _label, ask in asked:
+        with _LOCK:
+            kept = _SUGGESTED.get(key)
+            if kept and now - kept[1] < SUGGEST_TTL:
+                _SUGGESTED.move_to_end(key)
+                got[key] = [dict(row) for row in kept[0]]
+                continue
+
+        def run(key=key, ask=ask):
+            try:
+                rows = ask(words, net)
+            except S.SourceError as exc:
+                _LOG.info("catalog: %s's tags for %r did not come: %s", key[0], words, exc)
+                return
+            with _LOCK:
+                _SUGGESTED[key] = (rows, time.time())
+                while len(_SUGGESTED) > SUGGEST_KEPT:
+                    _SUGGESTED.popitem(last=False)
+            got[key] = [dict(row) for row in rows]
+        thread = threading.Thread(target=run, name="catalog-suggest", daemon=True)
+        thread.start()
+        going.append(thread)
+    for thread in going:
+        thread.join()
+    lists = [got[key] for key, _label, _ask in asked if key in got]
+    rows = [row for turn in zip_longest(*lists) for row in turn if row is not None]
+    rows.sort(key=lambda row: not row["exact"])       # stable: a name that is the words typed — first
+    return rows, [label for key, label, _ask in asked if key not in got]
+
+
+def _nhentai_suggested(words: str, net) -> list:
+    # (v5.44.150) two tries: the first may be the straight way that does not get through — the net turns to the
+    # system's proxy and has nothing left to ask with (seen 11.11.2026: «HentaiLib: нет ответа» once in seven asks)
+    data = net.json(
+        N.API + "/tags/search", method="POST", what=LABELS["nhentai"], tries=2, paced=False, timeout=(4, 8),
+        headers={"Accept": "application/json", "Content-Type": "application/json", "Referer": N.SITE + "/"},
+        data=json.dumps({"type": None, "query": words, "limit": SUGGEST_SHOWN}))
+    mine = {S.name_key(str(name)) for name in (*NAMES.NHENTAI_TAGS.values(), *NAMES.NHENTAI_GENRES.values())}
+    rows = []
+    for tag in data if isinstance(data, list) else []:
+        if not isinstance(tag, dict):
+            continue
+        what = str(tag.get("type") or "")
+        value = extra_of(f"nhentai:{what}:{tag.get('name') or ''}")
+        if not value:
+            continue
+        name = extra_parts(value)[2]
+        if what == "tag" and S.name_key(name) in mine or extra_closed("nhentai", name):
+            continue
+        rows.append({"value": value, "name": name, "kind": what, "word": EXTRA_WORDS[what], "site": LABELS["nhentai"],
+                     "count": S._int(tag.get("count")), "one": False, "exact": S.name_key(name) == S.name_key(words)})
+    rows.sort(key=lambda row: -row["count"])
+    return rows
+
+
+PEOPLE_PAGES = 2                    # pages of the Lib API's people asked for the words typed (fifty people a page)
+
+
+def _words_set(text) -> frozenset:
+    """The words of a name, whatever their order («Inagaki Riichiro» is «Riichiro Inagaki»)."""
+    return frozenset(key for key in (S.name_key(part) for part in re.split(r"[\s,./]+", str(text or ""))) if key)
+
+
+def _lib_people(words: str, sites: tuple, net) -> list:
+    """(v5.44.149) The people of the Lib API whose names hold the words (one base for its sites; asked 11.11.2026:
+    ``/api/people?q=boichi`` — {id 229, name «Boichi», rus_name, alt_name, titles_count_details {"1": 24, "4": 9, …}};
+    fifty a page, ``sort_by=titles_count`` — the ones with the most titles first, of every site of it: the anime's
+    too; it has no filter by a site) — those with titles at the sites shown: «автор Boichi · MangaLib + HentaiLib ·
+    33».  A full page with few of them — the next one too (:data:`PEOPLE_PAGES`).  Words that found nobody and are a
+    name of several words — asked by its longest word (the other order of a name: «Inagaki Riichiro»)."""
+    source = S.by_name(sites[0])
+    wanted = _words_set(words)
+
+    def ask(text: str) -> list:
+        rows = []
+        for page in range(1, PEOPLE_PAGES + 1):
+            data = net.json(f"{source.api()}/api/people?q={quote(text)}&site_id[]={source.SITE_ID}"
+                            f"&sort_by=titles_count&sort_type=desc&page={page}", what=source.label,
+                            headers=_headers(sites[0]), tries=2, paced=False, timeout=(4, 8))
+            people = [x for x in (data.get("data") if isinstance(data, dict) else None) or [] if isinstance(x, dict)]
+            for person in people:
+                row = _person_row(person, sites, wanted)
+                if row is not None and row["value"] not in {r["value"] for r in rows}:
+                    rows.append(row)
+            if len(people) < 50 or len(rows) >= SUGGEST_SHOWN:
+                break
+        return rows
+
+    rows = ask(words)
+    longest = max(re.split(r"[\s,./]+", words), key=len, default="")
+    if not rows and len(wanted) > 1 and len(longest) >= 3:
+        rows = [row for row in ask(longest) if row["exact"]]
+    rows.sort(key=lambda row: -row["count"])
+    return rows[:SUGGEST_SHOWN]
+
+
+def _person_row(person: dict, sites: tuple, wanted: frozenset) -> "dict | None":
+    """A person of the Lib API as a row of :func:`suggest`; None — no titles at the sites shown (ranobe, anime alone),
+    or a gate closes a name of theirs."""
+    number = S._int(person.get("id"))
+    counts = person.get("titles_count_details") if isinstance(person.get("titles_count_details"), dict) else {}
+    where = [(site, S._int(counts.get(str(S.by_name(site).SITE_ID)))) for site in sites]
+    where = [(site, count) for site, count in where if count > 0]
+    if number <= 0 or not where:
+        return None
+    said = [" ".join(str(person.get(key) or "").split()) for key in ("name", "rus_name", "alt_name")]
+    name, local = said[0], said[1]
+    shown = f"{name} ({local})" if name and local and S.name_key(name) != S.name_key(local) else name or local
+    value = extra_of(f"lib:people:{number} {shown}")
+    if not value or not shown or any(extra_closed("lib", one) for one in said if one):
+        return None
+    return {"value": value, "name": extra_shown(value), "kind": "people", "word": EXTRA_WORDS["people"],
+            "site": " + ".join(LABELS[site] for site, _count in where),
+            "count": sum(count for _site, count in where), "one": True,
+            "exact": bool(wanted) and wanted in {_words_set(one) for one in said if one}}
+
+
 _PARSE = {"remanga": _remanga_items, "mangalib": _mangalib_items, "yummy": _yummy_items,
           "hentailib": lambda data, q: _mangalib_items(data, q, "hentailib"), "allhentai": _allhentai_items}
 # (v5.44.93) sites of pages, not of API; (v5.44.97) nhentai — its API asked twice a page (the tags' names)
-_PAGES_OF = {"hentaichan": _hentaichan_page, "hentasis": _hentasis_page, "nhentai": _nhentai_page}
+_PAGES_OF = {"hentaichan": _hentaichan_page, "hentasis": _hentasis_page, "nhentai": _nhentai_page,
+             "nudemoon": _nudemoon_page,                    # (v5.44.131)
+             "haven": _haven_page,                          # (v5.44.138)
+             "hentaixs": _xs_page, "hfshare": _hfshare_page}  # (v5.44.139)
 
 
-def _ask(site: str, address: str, q: Query, net, going) -> None:
+# (v5.44.137) sites whose pages the query's own filters narrow here, by their rows (Hentasis: the second genre, «none
+# of these», years, a rating; Nude-Moon: «none of these», its search with tags): one address, different queries —
+# a page of each kept apart (before, the first query's page served the next: «none of these» lost, or added)
+LOCAL_FILTERS = ("hentasis", "nudemoon", "hentaixs", "hfshare")     # (v5.44.139) Hentai-XS, HFShare
+
+
+def _page_key(site: str, address: str, q: Query) -> str:
+    """The key a site's page is kept by: its address — and the query's filters, for a site that filters here."""
+    if site not in LOCAL_FILTERS:
+        return address
+    return address + "#" + repr((q.genres, q.without, q.tags, q.untags, q.years, q.rating))
+
+
+def _ask(site: str, address: str, key: str, q: Query, net, going) -> None:
     from core.redaction import sanitize_text
     label = LABELS.get(site, site)
     try:
@@ -1129,28 +2428,29 @@ def _ask(site: str, address: str, q: Query, net, going) -> None:
         _LOG.warning("catalog: %s broke: %s", label, exc, exc_info=True)
         got = Got(error=f"{label}: ответ не разобрался")
     with _LOCK:
-        _PAGES[address] = got
-        _PAGES.move_to_end(address)
+        _PAGES[key] = got
+        _PAGES.move_to_end(key)
         while len(_PAGES) > PAGES_KEPT:
             _PAGES.popitem(last=False)
-        _GOING.pop(address, None)
+        _GOING.pop(key, None)
     going.set()
 
 
 def _site_page(site: str, address: str, q: Query, net, again: bool) -> threading.Event:
     """The event set when the site's page is here (kept, or asked now in a thread of its own)."""
+    key = _page_key(site, address, q)
     with _LOCK:
-        kept = _PAGES.get(address)
+        kept = _PAGES.get(key)
         if kept is not None and not (again and kept.error) and \
                 time.time() - kept.at < (FAILED_TTL if kept.error else TTL):
-            _PAGES.move_to_end(address)
+            _PAGES.move_to_end(key)
             done = threading.Event()
             done.set()
             return done
-        going = _GOING.get(address)
+        going = _GOING.get(key)
         if going is None:
-            going = _GOING[address] = threading.Event()
-            threading.Thread(target=_ask, args=(site, address, q, net, going), daemon=True,
+            going = _GOING[key] = threading.Event()
+            threading.Thread(target=_ask, args=(site, address, key, q, net, going), daemon=True,
                              name=f"catalog-{site}").start()
     return going
 
@@ -1212,7 +2512,7 @@ def page(q: Query, n: int = 1, *, wait: "float | None" = None, again: bool = Fal
             result.late.append(label)
             continue
         with _LOCK:
-            got = _PAGES.get(address)
+            got = _PAGES.get(_page_key(site, address, q))
         if got is None:
             result.errors[label] = f"{label} не ответил"
             continue
@@ -1263,9 +2563,9 @@ def _name_first(tiles: list, text: str) -> list:
 
 
 def _tab_fits(item: Item, q: Query) -> bool:
-    """(v5.44.99) AllHentai gives every kind on one page (its API takes no kind and no filter — 6.11.2026), the page is
-    kept once for both tabs: here — the tab's kinds (of the chosen types); a kind it did not name (its search) — any
-    tab; a kind unknown here — «Манга» (most of its titles)."""
+    """(v5.44.99) AllHentai's kinds: here — the tab's (of the chosen types); (v5.44.155) its catalog is asked without
+    the other tabs' kinds already (:func:`allhentai_url`) — what is left for this is a kind unknown here, one the site
+    made since: «Манга» (most of its titles); no kind named — any tab."""
     if item.site != "allhentai" or not item.type:
         return True
     if item.type in _ALLHENTAI_KNOWN:
@@ -1349,9 +2649,6 @@ def hit_tile(hit, label: str) -> dict:
             "type": hit.type, "year": hit.year, "url": hit.url, "rating": round(hit.rating or 0.0, 1), "status": "",
             "adult": bool(hit.adult), "cover": _chosen_cover([(hit.site, hit.key)]) or cover_id(hit.cover, hit.url),
             "sites": [label]}
-
-
-# ── what the program's folders hold: core/filter.py (Have, downloaded, forget_have) ──────────────────────────────
 
 
 # ── covers ────────────────────────────────────────────────────────────────────────────────────────────────────────

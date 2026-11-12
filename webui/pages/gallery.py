@@ -406,7 +406,7 @@ def empty_words(section: str, settings: dict | None = None) -> tuple[str, str]:
     how to add."""
     if section == "inbox":
         if not (settings or {}).get("imports_to_inbox", True):
-            return ("Новых картинок нет", "Новые файлы сюда не попадают — так выбрано в «Настройки → Библиотека».")
+            return ("Новых картинок нет", "Новые файлы сюда не попадают — так выбрано в «Настройки → Галерея».")
         try:
             hours = max(1, int((settings or {}).get("inbox_auto_archive_hours", 24) or 24))
         except (TypeError, ValueError):
@@ -421,8 +421,7 @@ def empty_words(section: str, settings: dict | None = None) -> tuple[str, str]:
                                                 "сейчас таких нет."),
         "favorites": ("В избранном пока ничего нет", "Откройте картинку и нажмите «В избранное» — она появится здесь."),
         "trash": ("Корзина пуста", "Сюда уходят удалённые карточки — отсюда их можно вернуть."),
-        data.VIDEO_SECTION: ("Длинных видео нет", "Здесь видео библиотеки длиннее, чем выбрано в настройках "
-                                                   "(«Вкладка «Видео»»)."),
+        data.VIDEO_SECTION: ("Длинных видео нет", "Здесь видео библиотеки длиннее, чем выбрано в «Настройки → Видео»."),
     }
     return words.get(section, ("Здесь пока пусто", "Картинки появятся, когда парсер разберёт папку с ними или "
                                                     "что-нибудь скачается в «Скачать → Галерея (booru)»."))

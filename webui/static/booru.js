@@ -4,6 +4,22 @@
 
   const root = document.documentElement;
 
+  // (v5.44.158) While a page comes in, its content is drawn a little off its place (booru.css: lb-come…): by how much
+  // right now, across and down.  What is measured from the window's edge at that moment (getBoundingClientRect) is
+  // put right by it — the count of pictures that fit the window and the room of a card's picture are the same
+  // whether the page still moves or stands.
+  function comingOff() {
+    const main = document.querySelector("main.content");
+    const moved = main ? getComputedStyle(main).transform : "";
+    if (!moved || moved === "none") return [0, 0];
+    try {
+      const m = new DOMMatrixReadOnly(moved);
+      return [m.m41 || 0, m.m42 || 0];
+    } catch (_) {
+      return [0, 0];
+    }
+  }
+
   // The look and the thumbnail size are kept by the program (one file for the window and any browser).
   function remember(key, value) {
     postJson("/api/prefs", { [key]: value }).catch((err) => console.warn("prefs not saved:", err.message));
@@ -22,6 +38,9 @@
     list.hidden = !open;
     button.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) {
+      // (v5.44.158) measured as it stands, not as it is drawn while it opens (booru.css: lb-drop — smaller and
+      // higher for a moment): the opening begins when the place and the height are known
+      list.style.animation = "none";
       // the list hangs from the button's right edge; a button near the left edge (a header that wrapped) — from its
       // left edge, or the list would start outside the window
       list.style.left = "";
@@ -35,6 +54,7 @@
       list.style.maxHeight = "";
       const room = window.innerHeight - list.getBoundingClientRect().top - 8;
       if (room < list.getBoundingClientRect().height) list.style.maxHeight = Math.max(160, room) + "px";
+      list.style.animation = "";
       const current = list.querySelector(".skin-item.active") || list.querySelector(".skin-item");
       if (current) current.focus();
     }
@@ -49,11 +69,22 @@
   setInterval(tick, 15000);
   document.addEventListener("DOMContentLoaded", tick);
 
+  // (v5.44.159) The window of tabs colours its strip as the page shown in it (ui/web_tabs.py): when the look of a page
+  // is changed, the window is told — the tab asks the page its colours again.  The main window and a browser have no
+  // strip: the first has nothing to do, the second is not asked.
+  let lookTold = 0;
+  function lookChanged() {
+    if (!navigator.userAgent.includes("QtWebEngine")) return;
+    clearTimeout(lookTold);
+    lookTold = setTimeout(() => { postJson("/api/app/look", {}).catch(() => { /* no window to tell */ }); }, 120);
+  }
+
   // Every page of the menu keeps a look of its own (data-skin-key); «gallery» — the page looks like the gallery.
   function showSkin(id) {
     const link = document.getElementById("skin-css");
     if (link && root.dataset.skin !== id) {
       link.addEventListener("load", tick, { once: true });
+      link.addEventListener("load", lookChanged, { once: true });
       link.href = "/static/skins/" + id + ".css";
     }
     root.dataset.skin = id;
@@ -91,6 +122,7 @@
 
   function showVariant(side, toggles) {
     root.dataset.variant = side;
+    lookChanged();
     const control = document.querySelector(".skin-variant");
     if (!control) return;
     if (toggles !== undefined) control.hidden = !toggles;
@@ -301,15 +333,21 @@
       if (button) button.focus();
     },
 
-    // (v5.44.55) «Плавные переходы» — on every page (static/motion.js reads it on the next page; this one at once)
+    // (v5.44.55) «Плавные переходы» — on every page (static/motion.js reads it on the next page; this one at once);
+    // (v5.44.158) three positions: «Нет», «Спокойные», «Заметные»
     motion(el) {
-      const on = el.getAttribute("aria-checked") !== "true";
-      el.setAttribute("aria-checked", on ? "true" : "false");
-      const said = el.querySelector("small");
-      if (said) said.textContent = on ? "включены — страницы и картинки появляются мягко" : "выключены — всё сменяется сразу";
-      root.dataset.motionPref = on ? "on" : "off";
-      root.dataset.motion = on && !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ? "on" : "off";
-      remember("motion", on ? "on" : "off");
+      const level = ["none", "calm", "vivid"].includes(el.dataset.level) ? el.dataset.level : "vivid";
+      const group = el.closest(".skin-motion");
+      (group ? group.querySelectorAll("[data-level]") : []).forEach((b) => {
+        b.classList.toggle("active", b === el);
+        b.setAttribute("aria-pressed", b === el ? "true" : "false");
+      });
+      const still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const on = level !== "none" && !still;
+      root.dataset.motionPref = level;
+      root.dataset.motion = on ? "on" : "off";
+      root.dataset.motionLevel = on ? level : "off";
+      remember("motion", level);
     },
 
     drawer: () => setDrawer(!root.classList.contains("drawer-open")),
@@ -651,7 +689,7 @@
     const place = () => {
       // from the top of the stage's inside: a look that centres the picture in a tall stage gives it all of that
       const inside = stage.getBoundingClientRect().top + px(box.paddingTop) + px(box.borderTopWidth);
-      const top = Math.min(img.getBoundingClientRect().top, inside) + window.scrollY;
+      const top = Math.min(img.getBoundingClientRect().top, inside) - comingOff()[1] + window.scrollY;
       const room = Math.max(160, Math.floor(window.innerHeight - top - under - 14));
       width = Math.max(1, Math.floor(column.clientWidth - across));
       if (w > 0 && h > 0) {
@@ -751,10 +789,10 @@
       pitch = row * 1.1 + gap;
     } else {
       if (cells.length > cols && cells[cols]) pitch = cells[cols].offsetTop - cells[0].offsetTop;
-      if (!(pitch > 0)) pitch = cells[0].getBoundingClientRect().height + gap;
+      if (!(pitch > 0)) pitch = cells[0].offsetHeight + gap;      // as it stands: not as drawn under the pointer
     }
     if (!(pitch > 0) || !cols) return 0;
-    const top = grid.getBoundingClientRect().top + window.scrollY;
+    const top = grid.getBoundingClientRect().top - comingOff()[1] + window.scrollY;
     // the page numbers' line, the same on every page (a page whose numbers wrap scrolls a little rather than
     // making the count differ from page to page — and the pages ask each other again and again)
     const pager = document.querySelector(".paginator");

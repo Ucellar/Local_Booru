@@ -107,13 +107,15 @@ a:hover { color: var(--link-hover); text-decoration: underline; }
   font-weight: bold;
 }
 .skin-button:hover { color: var(--link-hover); text-decoration: underline; }
-.settings-link.active { background: var(--bar-active-bg); color: var(--bar-active-ink); }
+.settings-link.active, .help-link.active { background: var(--bar-active-bg); color: var(--bar-active-ink); }
 .gear-icon, .skin-icon { display: none; }
 .settings-link .skin-label { display: inline; }
 .dl-badge-icon { display: none; }                     /* (v5.44.120) «Загрузки» — a word of the row, as «Настройки» */
 .dl-badge .skin-label { display: inline; }
 .dl-badge { gap: 5px; }
 .top-back { padding-left: 6px; padding-right: 6px; }   /* (v5.44.116) «←» — the arrow alone: the row keeps its width */
+.help-link { padding-left: 6px; padding-right: 6px; }  /* (v5.44.153) «?» — the mark alone, as the arrow */
+.help-icon { width: 15px; height: 15px; }
 .skin-list {
   top: calc(100% + 2px);
   border-radius: 0;
