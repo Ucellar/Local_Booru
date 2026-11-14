@@ -7,6 +7,7 @@ from core.paths import (
 )
 import logging
 import time
+from core.quiet import passed as let_pass
 
 _LOG = logging.getLogger("local_booru.settings")
 
@@ -695,7 +696,7 @@ def _requested_existing_workspace(settings):
             if target.resolve() == DATA_DIR.resolve():
                 continue
         except Exception:
-            pass
+            let_pass("core.settings._requested_existing_workspace")
         return target
     return None
 
@@ -754,7 +755,7 @@ def load_settings():
                             loaded["rows_per_page"] = 4
                             loaded["items_per_page"] = 32
                     except Exception:
-                        pass
+                        let_pass("core.settings.load_settings")
                     loaded["gallery_layout_v160_initialized"] = True
                 # v5.17: pictures per page of the web gallery — as many as fit the window instead of the old fixed 42.
                 if not loaded.get("webui_posts_per_page_v517"):
@@ -940,7 +941,7 @@ def save_settings(settings):
                 if USING_SEPARATE_STORAGE and BOOTSTRAP_SETTINGS_FILE.exists() and BOOTSTRAP_SETTINGS_FILE.resolve() != canonical.resolve():
                     BOOTSTRAP_SETTINGS_FILE.unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.settings.save_settings")
         else:
             # Legacy mode is retained only until the user selects/creates a portable
             # Local_Booru_Archive.  Saving never deletes the pointer files: forgetting an

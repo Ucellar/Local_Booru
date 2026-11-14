@@ -21,6 +21,7 @@ from core.paths import CACHE_DIR, LOGS_DIR, BACKUPS_DIR, result_output_base, DAT
 from core.media_utils import file_md5, host_from_url
 from core.source_protection import require_managed_media_mutation, is_managed_media_path
 from core.services.media_storage_service import move_managed, unlink_managed, content_addressed_path, normalize_managed_content_name
+from core.quiet import passed as let_pass
 
 
 def _now() -> int:
@@ -161,7 +162,7 @@ def _write_operation_backup(settings: dict, source: Path, folder: Path, reason: 
         if not _ok:
             return ""
     except Exception:
-        pass
+        let_pass("core.library_lifecycle._write_operation_backup")
     try:
         src = sqlite3.connect(str(source), timeout=60)
         try:
@@ -210,18 +211,6 @@ def import_lifecycle_kwargs(settings: dict, origin: str) -> dict:
     }
 
 
-def mark_new_or_archive(settings: dict, image_id: int, *, origin: str = "") -> None:
-    add_inbox = bool(settings.get("imports_to_inbox", True))
-    hours = max(1, int(settings.get("inbox_auto_archive_hours", 24) or 24))
-    lifecycle = "inbox" if add_inbox else "archive"
-    until = _now() + hours * 3600 if add_inbox else 0
-    with db(settings, write=True) as con:
-        con.execute(
-            "UPDATE images SET lifecycle=?, inbox_until=?, import_origin=CASE WHEN ?<>'' THEN ? ELSE import_origin END WHERE id=? AND deleted=0",
-            (lifecycle, until, str(origin or ""), str(origin or ""), int(image_id)),
-        )
-
-
 def archive_expired_inbox(settings: dict) -> int:
     now = _now()
     with db(settings, write=True) as con:
@@ -229,16 +218,6 @@ def archive_expired_inbox(settings: dict) -> int:
             "UPDATE images SET lifecycle='archive', inbox_until=0 WHERE deleted=0 AND lifecycle='inbox' AND inbox_until>0 AND inbox_until<=?",
             (now,),
         )
-        return int(cur.rowcount or 0)
-
-
-def set_archived(settings: dict, image_ids: Iterable[int]) -> int:
-    ids = [int(x) for x in image_ids if x is not None]
-    if not ids:
-        return 0
-    ph = ",".join("?" for _ in ids)
-    with db(settings, write=True) as con:
-        cur = con.execute(f"UPDATE images SET lifecycle='archive', inbox_until=0 WHERE id IN ({ph}) AND deleted=0", ids)
         return int(cur.rowcount or 0)
 
 
@@ -687,11 +666,6 @@ def _merge_exact_groups_locked(settings: dict, hold, verified: dict, *, backup: 
     return result
 
 
-def _delete_thumb_files_for_path(path: str) -> int:
-    """Delete only thumbnails mapped to one purged media path (see :func:`_delete_thumb_files_for_paths`)."""
-    return _delete_thumb_files_for_paths([path])
-
-
 def _delete_thumb_files_for_paths(paths: Iterable[str]) -> int:
     """Delete only thumbnails mapped to purged media paths — one pass over the cache for all of them (a pass per
     card made a purge of hundreds of cards take minutes on a big cache).
@@ -720,7 +694,7 @@ def _delete_thumb_files_for_paths(paths: Iterable[str]) -> int:
                 image.unlink(missing_ok=True); removed += 1
             marker.unlink(missing_ok=True)
         except Exception:
-            pass
+            let_pass("core.library_lifecycle._delete_thumb_files_for_paths")
     return removed
 
 
@@ -761,7 +735,7 @@ def trash_media_paths(settings: dict, paths: Iterable[str | Path], *, reason: st
             image_id = ensure_image(settings, p, status=reason, hash_md5=md5, lifecycle="archive", import_origin="legacy_cleanup")
             rows.append({"id": image_id, "path": str(p), "file_name": p.name, "bucket": "", "size_bytes": int(p.stat().st_size)})
         except Exception:
-            pass
+            let_pass("core.library_lifecycle.trash_media_paths")
     result = move_to_trash(settings, rows, reason=reason, make_backup=make_backup)
     result["protected_source_skipped"] = int(result.get("protected_source_skipped", 0) or 0) + protected_source_skipped
     return result
@@ -857,7 +831,7 @@ def _purge_trash(settings: dict, image_ids, *, make_backup: bool, reuse_backup: 
                 if last_reason in reimport_blocking_reasons:
                     mark_deleted(p, reason=last_reason, md5=str(row["hash_md5"] or ""), size=int(row["size_bytes"] or 0), settings=settings, manual_delete=True)
             except Exception:
-                pass
+                let_pass("core.library_lifecycle._purge_trash")
             if delete_file:
                 if unlink_managed(settings, p, operation="purge_trash"):
                     removed += 1
@@ -980,7 +954,7 @@ def folder_size(path: str | Path) -> int:
             if p.is_file():
                 total += p.stat().st_size
         except Exception:
-            pass
+            let_pass("core.library_lifecycle.folder_size")
     return total
 
 
@@ -1017,7 +991,7 @@ def trim_thumbnail_cache(settings: dict) -> dict:
         try:
             files.append((p.stat().st_mtime_ns, p))
         except Exception:
-            pass
+            let_pass("core.library_lifecycle.trim_thumbnail_cache")
     files.sort(reverse=True)
     removed = 0
     for _, p in files[keep:]:
@@ -1026,12 +1000,12 @@ def trim_thumbnail_cache(settings: dict) -> dict:
             p.with_suffix(p.suffix + ".src").unlink(missing_ok=True)
             removed += 1
         except Exception:
-            pass
+            let_pass("core.library_lifecycle.trim_thumbnail_cache#2")
     for marker in root.glob("*.jpg.src"):
         image = Path(str(marker)[:-4])
         if not image.exists():
             try: marker.unlink(missing_ok=True)
-            except Exception: pass
+            except Exception: let_pass("core.library_lifecycle.trim_thumbnail_cache#3")
     return {"before": before, "after": folder_size(root), "removed": removed}
 
 
@@ -1109,8 +1083,10 @@ def _path_is_under(value: str, root: Path) -> bool:
     try:
         Path(value).resolve().relative_to(root.resolve())
         return True
+    except ValueError:
+        pass                                            # not under it by the resolved paths: by the words, below
     except Exception:
-        pass
+        let_pass("core.library_lifecycle._path_is_under")
     raw = str(value or "").replace("/", "\\").lower().rstrip("\\")
     base = str(root).replace("/", "\\").lower().rstrip("\\")
     return bool(base and (raw == base or raw.startswith(base + "\\")))
@@ -1244,7 +1220,7 @@ def relocate_missing_library_paths(settings: dict, new_output: str | Path, *, ap
                     "at": now,
                 }, ensure_ascii=False)))
             except Exception:
-                pass
+                let_pass("core.library_lifecycle.relocate_missing_library_paths")
 
     old_base = next(iter(old_roots), "")
     return {
@@ -1310,7 +1286,7 @@ def repair_live_md5_by_bytes(settings: dict, *, make_backup: bool = True, progre
             try:
                 progress(idx, len(rows))
             except Exception:
-                pass
+                let_pass("core.library_lifecycle.repair_live_md5_by_bytes")
     duplicates_after = 0
     try:
         with db(settings, readonly=True) as con:
@@ -1332,38 +1308,6 @@ def repair_live_md5_by_bytes(settings: dict, *, make_backup: bool = True, progre
         "duplicate_md5_groups_after": duplicates_after,
         "backup": backup,
     }
-
-def filename_collision_stats(settings: dict) -> dict:
-    """Read-only report for unsafe filename/path situations."""
-    with db(settings, readonly=True) as con:
-        duplicate_paths = int(con.execute(
-            "SELECT COUNT(*) FROM (SELECT path FROM images WHERE deleted=0 GROUP BY path HAVING COUNT(*)>1)"
-        ).fetchone()[0] or 0)
-        same_name_diff_md5 = int(con.execute(
-            """SELECT COUNT(*) FROM (
-                   SELECT file_name FROM images WHERE deleted=0 AND COALESCE(file_name,'')<>''
-                   GROUP BY file_name HAVING COUNT(DISTINCT lower(COALESCE(hash_md5,'')))>1
-               )"""
-        ).fetchone()[0] or 0)
-        unsafe_content_names = int(con.execute(
-            """SELECT COUNT(*) FROM images WHERE deleted=0 AND COALESCE(hash_md5,'')<>''
-               AND file_name NOT LIKE '%' || substr(lower(hash_md5),1,12) || '%'"""
-        ).fetchone()[0] or 0)
-        rows = con.execute("SELECT id,path,file_name,hash_md5 FROM images WHERE deleted=0 ORDER BY id").fetchall()
-    missing = 0
-    for row in rows:
-        try:
-            if not Path(str(row["path"] or "")).exists():
-                missing += 1
-        except Exception:
-            missing += 1
-    return {
-        "duplicate_live_paths": duplicate_paths,
-        "same_filename_different_md5": same_name_diff_md5,
-        "unsafe_content_names": unsafe_content_names,
-        "missing_live_paths": missing,
-    }
-
 
 def repair_missing_paths_by_md5(settings: dict, *, make_backup: bool = True, progress=None, cancel_check=None) -> dict:
     """Repair live DB rows whose path is missing by searching managed output by MD5.
@@ -1410,7 +1354,7 @@ def repair_missing_paths_by_md5(settings: dict, *, make_backup: bool = True, pro
                 try:
                     progress(checked_files, len(wanted))
                 except Exception:
-                    pass
+                    let_pass("core.library_lifecycle.repair_missing_paths_by_md5")
     repaired = unresolved = 0
     now = _now()
     with db(settings, write=True) as con:
@@ -1483,5 +1427,5 @@ def normalize_live_content_filenames(settings: dict, *, make_backup: bool = True
             try:
                 progress(idx, len(rows))
             except Exception:
-                pass
+                let_pass("core.library_lifecycle.normalize_live_content_filenames")
     return {"checked": checked, "renamed": renamed, "skipped": skipped, "db_path_collisions": db_path_collisions, "errors": errors, "backup": backup}

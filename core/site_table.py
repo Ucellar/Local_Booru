@@ -14,8 +14,6 @@ from copy import deepcopy
 from urllib.parse import urlparse
 
 ENGINE_TYPES = {"Danbooru": "danbooru", "Gelbooru": "gelbooru", "Moebooru": "moebooru", "e621": "e621", "Свой": "custom"}
-ROW_FIELDS = ("enabled", "name", "domain", "base_url", "login_url", "engine_label", "login", "api_key", "user_id",
-              "description")
 
 
 def clean_domain(text: str) -> str:

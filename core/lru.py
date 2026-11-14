@@ -27,43 +27,6 @@ def _register_cache(cache, name: str) -> None:
         _REGISTRY[cache_id] = (str(name or f"LRUCache@{cache_id:x}"), ref)
 
 
-def lru_diagnostics() -> list[dict]:
-    """Return aggregate sizes for all live named LRU caches.
-
-    Multiple Tagger instances can own caches with the same logical name.  They
-    are aggregated so the RAM-guard log remains compact but still shows both
-    total entries and instance count.
-    """
-    live = []
-    stale = []
-    with _REGISTRY_LOCK:
-        for cache_id, (name, ref) in list(_REGISTRY.items()):
-            cache = ref()
-            if cache is None:
-                stale.append(cache_id)
-                continue
-            try:
-                with cache._lock:
-                    live.append((name, len(cache), int(cache.maxsize)))
-            except Exception:
-                live.append((name, -1, int(getattr(cache, "maxsize", 0) or 0)))
-        for cache_id in stale:
-            _REGISTRY.pop(cache_id, None)
-    aggregated: dict[str, dict] = {}
-    for name, entries, maxsize in live:
-        row = aggregated.setdefault(name, {
-            "name": name,
-            "instances": 0,
-            "entries": 0,
-            "maxsize_total": 0,
-        })
-        row["instances"] += 1
-        if entries >= 0:
-            row["entries"] += entries
-        row["maxsize_total"] += max(0, maxsize)
-    return [aggregated[key] for key in sorted(aggregated)]
-
-
 class LRUCache(OrderedDict, Generic[K, V]):
     """Small bounded LRU mapping with a dict-compatible API."""
 
@@ -101,9 +64,3 @@ class LRUCache(OrderedDict, Generic[K, V]):
         with self._lock:
             for key, value in dict(*args, **kwargs).items():
                 self[key] = value
-
-    def set_maxsize(self, maxsize: int) -> None:
-        with self._lock:
-            self.maxsize = max(1, int(maxsize or 1))
-            while len(self) > self.maxsize:
-                self.popitem(last=False)

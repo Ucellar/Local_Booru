@@ -682,7 +682,8 @@
     };
     // «Куда»: the manga — page by page, the strips — the manhwa (the folder of manga not chosen: the manhwa's)
     const rootsOk = !!(f.roots && f.roots.manga);
-    whereNow = choices && choices.where ? choices.where : f.kind === "manga" && rootsOk ? "manga" : "manhwa";
+    whereNow = f.eh_photo ? f.kind
+      : choices && choices.where ? choices.where : f.kind === "manga" && rootsOk ? "manga" : "manhwa";
     const where = row("Куда", "where");
     const seg = el("div", "tt-seg");
     seg.setAttribute("role", "group");
@@ -692,12 +693,15 @@
       pick.type = "button";
       pick.dataset.value = value;
       pick.setAttribute("aria-pressed", value === whereNow ? "true" : "false");
-      if (value === "manga" && !rootsOk) {
+      if (f.eh_photo && value !== whereNow) {
+        pick.disabled = true;
+        pick.title = "Фотосборка E-Hentai сохраняется в папку " + (whereNow === "manga" ? "манги" : "манхвы");
+      } else if (!f.eh_photo && value === "manga" && !rootsOk) {
         pick.disabled = true;
         pick.title = "Папка манги не выбрана — «Настройки → Хранение и копии»";
       }
       pick.addEventListener("click", () => {
-        if (whereNow === value) return;
+        if (pick.disabled || f.eh_photo || whereNow === value) return;
         whereNow = value;
         seg.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === pick ? "true" : "false"));
         paintCounts();
@@ -1042,7 +1046,8 @@
     waitFor = Date.now() + 15000;                 // a loop following now goes on until the download shows
     // (v5.44.117) the other sites still answer: the program waits for them, then begins
     if ((shown.asking || []).length) say(status, "Жду ответа других сайтов — скачивание начнётся само");
-    const body = () => ({ find: findId, where: whereNow || shown.kind, helpers: helpersOn(), chapters,
+    const body = () => ({ find: findId, where: shown.eh_photo ? shown.kind : whereNow || shown.kind,
+      helpers: helpersOn(), chapters,
       follow: followTick ? followTick.checked : shown.follow !== false });       // (v5.44.116) the box, not «true»
     try {
       let reply;

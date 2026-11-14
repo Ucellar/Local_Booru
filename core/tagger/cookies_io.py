@@ -2,17 +2,8 @@ from __future__ import annotations
 
 import json
 from http.cookiejar import MozillaCookieJar
-from urllib.parse import urlparse
 
 from core.paths import BROWSER_COOKIES_DIR
-
-
-def cookie_file_for_url(url):
-    host = urlparse(url).netloc.lower().replace("www.", "")
-    if not host:
-        host = "default"
-    safe = host.replace(":", "_").replace("/", "_")
-    return BROWSER_COOKIES_DIR / f"{safe}.json"
 
 
 def load_netscape_cookie_file(path):

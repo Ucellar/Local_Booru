@@ -148,10 +148,10 @@ def read_json_kept(path: str | Path, expected: type, *, what: str = "file"):
     path = Path(path)
     if not path.exists():
         return None
-    text = _read_text_retrying(path)
-    if text is None:
-        return None
     try:
+        text = _read_text_retrying(path)
+        if text is None:
+            return None
         data = json.loads(text)
         if isinstance(data, expected):
             return data

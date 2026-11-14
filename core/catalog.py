@@ -100,6 +100,7 @@ from core import manhwa_sources as S
 from core import nhentai as N
 # what the program's folders hold (``core/catalog_have.py``); their names here for the code that uses them
 from core.catalog_have import HAVE_TTL, Have, downloaded, forget_have  # noqa: F401
+from core.catalog_sites import SITES, LABELS, ADULT_SITES, FILTERING
 
 _LOG = logging.getLogger("local_booru.catalog")
 
@@ -120,8 +121,6 @@ VIDEO_PAGE = 40                   # titles of YummyAnime asked a page
 REMANGA_PAGE = 30
 MANGALIB_PAGE = 60
 MAX_CHOSEN = 12                   # genres or tags chosen at most (each way)
-HENTAICHAN_PAGE = 20              # (v5.44.93) titles of a page of Хентай-тян's lists
-HENTASIS_PAGE = 10                # …of Hentasis
 HENTASIS_SITE = "https://hentasis1.top"
 HENTASIS_FIRST_YEAR = 1990        # (v5.44.137) years «до …» without «от» — from this one (its oldest page of a year: 1994)
 # (v5.44.138) HentaiHaven: its pages (a Next.js site) and its catalogue — the API of its WordPress (asked from the owner's
@@ -659,19 +658,6 @@ ORDERS = {
     "video": (("popular", "Популярное", {"yummy": ("views", "0")}), ("top", "По оценке", {"yummy": ("top", "")}),
               ("new", "Новые", {"yummy": ("year", "0")}), ("title", "По алфавиту", {"yummy": ("title", "")})),
 }
-SITES = {"manga": ("remanga", "mangalib", "hentailib", "hentaichan", "allhentai", "nhentai", "nudemoon"),
-         "manhwa": ("remanga", "mangalib", "hentailib", "allhentai"),
-         "video": ("yummy", "hentasis", "haven", "hentaixs", "hfshare")}                    # (v5.44.139)
-LABELS = {"remanga": "Remanga", "mangalib": "MangaLib", "yummy": "YummyAnime", "hentaichan": "Хентай-тян",
-          "hentasis": "Hentasis", "hentailib": "HentaiLib", "nhentai": "nhentai", "allhentai": "AllHentai",
-          "nudemoon": "Nude-Moon", "haven": "HentaiHaven", "hentaixs": "Hentai-XS", "hfshare": "HFShare"}
-# (v5.44.93) sites of hentai alone; (v5.44.96) HentaiLib; (v5.44.97) nhentai; (v5.44.99) AllHentai; (v5.44.131)
-# Nude-Moon
-ADULT_SITES = ("hentaichan", "hentasis", "hentailib", "nhentai", "allhentai", "nudemoon", "haven",  # (v5.44.138)
-               "hentaixs", "hfshare")                                                            # (v5.44.139)
-FILTERING = ("remanga", "mangalib", "yummy", "hentailib", "nudemoon",  # the sites that take the filters (Nude-Moon —
-             "hentasis", "haven", "hentaixs", "hfshare", "nhentai",     # its tags and genres alone: v5.44.135;
-             "allhentai")           # (v5.44.148) nhentai — its tags; (v5.44.155) AllHentai — its catalog API's
 # (v5.44.148) a site's own tags of a query — what the site itself searches by besides the feed's genres and tags:
 # {site: the kinds it has}; a query's ``extra`` / ``unextra`` — «site:kind:name» (the address's ``sg`` / ``sx``)
 EXTRA_TYPES = {"nhentai": ("tag", "artist", "character", "parody", "group", "language", "category"),
@@ -1432,6 +1418,7 @@ class Item:
     votes: int = 0
     adult: bool = False
     status: str = ""                 # the tile's word
+    cover_alts: tuple = ()           # other sizes this site supplied for the same cover
 
 
 @dataclass
@@ -1444,6 +1431,22 @@ class Got:
 
 def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
+
+
+def _cover_sizes(value, base: str, *sizes: str) -> tuple:
+    row = _dict(value)
+    urls = []
+    for size in sizes:
+        path = row.get(size)
+        if not isinstance(path, str) or not path.strip():
+            continue
+        try:
+            url = urljoin(base.rstrip("/") + "/", path.strip())
+            if urlparse(url).scheme in ("https", "http"):
+                urls.append(url)
+        except ValueError:                         # malformed address in one field does not discard the other sizes
+            continue
+    return tuple(dict.fromkeys(urls))
 
 
 def _remanga_items(data, q: Query) -> tuple:
@@ -1462,15 +1465,14 @@ def _remanga_items(data, q: Query) -> tuple:
         names = [x.get("main_name"), x.get("secondary_name"), *str(x.get("another_name") or "").split(" / ")]
         if G.title("remanga", names=[str(n) for n in names if n], adult=bool(x.get("is_erotic"))):
             continue                                  # (v5.44.143) a gate closed it — by the name too, as MangaLib's
-        cover = _dict(x.get("cover"))
-        path = str(cover.get("mid") or cover.get("low") or cover.get("high") or "")
+        covers = _cover_sizes(x.get("cover"), source.site(), "mid", "low", "high")
         dir_ = str(x["dir"])
         state = _dict(x.get("status"))
         out.append(Item(site="remanga", key=dir_, names=[str(n).strip() for n in names if n and str(n).strip()],
                         url=f"{source.site()}/manga/{quote(dir_, safe='')}", type=str(kind.get("name") or ""),
                         shown_type=_TYPE_WORD.get(_REMANGA_TYPE.get(S._int(kind.get("id")), ""),
                                                   str(kind.get("name") or "")),
-                        year=S._int(x.get("issue_year")), cover=urljoin(source.site() + "/", path) if path else "",
+                        year=S._int(x.get("issue_year")), cover=covers[0] if covers else "", cover_alts=covers[1:],
                         rating=round(S._float(x.get("avg_rating")), 1), votes=S._int(x.get("total_votes")),
                         adult=bool(x.get("is_erotic")),
                         status=_STATUS_WORD.get(_REMANGA_STATUS.get(S._int(state.get("id")), ""),
@@ -1492,7 +1494,7 @@ def _mangalib_items(data, q: Query, site: str = "mangalib") -> tuple:
         adult = source.adult_only or q.mode == "nsfw" or "RX" in age.upper()
         if G.title(site, names=names, adult=adult):               # (v5.44.96) a gate closed it — by the name too
             continue                                  # (the site's tags leave out what it tags so, not the rest)
-        cover = _dict(x.get("cover"))
+        covers = _cover_sizes(x.get("cover"), source.site(), "default", "md", "thumbnail")
         rating = _dict(x.get("rating"))
         kind = _dict(x.get("type"))
         state = _dict(x.get("status"))
@@ -1501,7 +1503,7 @@ def _mangalib_items(data, q: Query, site: str = "mangalib") -> tuple:
                         shown_type=_TYPE_WORD.get(_MANGALIB_TYPE.get(S._int(kind.get("id")), ""),
                                                   str(kind.get("label") or "")),
                         year=S._year(x.get("releaseDate") or x.get("releaseDateString")),
-                        cover=str(cover.get("default") or cover.get("md") or cover.get("thumbnail") or ""),
+                        cover=covers[0] if covers else "", cover_alts=covers[1:],
                         rating=round(S._float(rating.get("average")), 1), votes=S._int(rating.get("votes")),
                         status=_STATUS_WORD.get(_MANGALIB_STATUS.get(S._int(state.get("id")), ""),
                                                 str(state.get("label") or ""))))
@@ -2196,7 +2198,7 @@ _GOING: dict = {}                                          # address → threadi
 _SHOWN: "OrderedDict[str, dict]" = OrderedDict()          # a query's signature → {page: the name keys it showed}
 _ASKED: "OrderedDict[tuple, float]" = OrderedDict()       # (v5.44.98) (signature, page) → when it was first asked
 _GIVEN: "OrderedDict[tuple, set]" = OrderedDict()         # (v5.44.98) (signature, page) → the tiles' keys given
-_COVERS: "OrderedDict[str, tuple]" = OrderedDict()        # a cover's number → (its address, the title's page)
+_COVERS: "OrderedDict[str, tuple]" = OrderedDict()        # a cover's number → ordered (address, title page) pairs
 
 
 def forget() -> None:
@@ -2428,11 +2430,13 @@ def _ask(site: str, address: str, key: str, q: Query, net, going) -> None:
         _LOG.warning("catalog: %s broke: %s", label, exc, exc_info=True)
         got = Got(error=f"{label}: ответ не разобрался")
     with _LOCK:
-        _PAGES[key] = got
-        _PAGES.move_to_end(key)
-        while len(_PAGES) > PAGES_KEPT:
-            _PAGES.popitem(last=False)
-        _GOING.pop(key, None)
+        # An answer started before forget() belongs to the old mirror/sign-in, never the new request.
+        if _GOING.get(key) is going:
+            _PAGES[key] = got
+            _PAGES.move_to_end(key)
+            while len(_PAGES) > PAGES_KEPT:
+                _PAGES.popitem(last=False)
+            _GOING.pop(key, None)
     going.set()
 
 
@@ -2449,6 +2453,8 @@ def _site_page(site: str, address: str, q: Query, net, again: bool) -> threading
             return done
         going = _GOING.get(key)
         if going is None:
+            if again and kept is not None and kept.error:
+                _PAGES.pop(key, None)       # the retry's polls must await its answer, not reuse the previous error
             going = _GOING[key] = threading.Event()
             threading.Thread(target=_ask, args=(site, address, key, q, net, going), daemon=True,
                              name=f"catalog-{site}").start()
@@ -2622,14 +2628,12 @@ def _tile(t: dict, order: tuple) -> dict:
     items = sorted(t["items"], key=lambda i: order.index(i.site) if i.site in order else len(order))
     best = items[0]
     rated = next((i for i in items if i.rating), None)
-    covered = next((i for i in items if i.cover), None)
     return {
         "title": t["names"][0] if t["names"] else best.key, "alt": t["names"][1] if len(t["names"]) > 1 else "",
         "type": next((i.shown_type for i in items if i.shown_type), ""), "year": t["year"], "url": best.url,
         "rating": rated.rating if rated else 0.0, "status": next((i.status for i in items if i.status), ""),
         "adult": any(i.adult for i in items),
-        "cover": _chosen_cover([(i.site, i.key) for i in items]) or (cover_id(covered.cover, covered.url) if covered
-                                                                    else ""),
+        "cover": _chosen_cover([(i.site, i.key) for i in items]) or _cover_choices_id(items),
         "sites": [LABELS.get(i.site, i.site) for i in items], "keys": t["keys"],
         "ids": {(i.site, i.key) for i in items},
     }
@@ -2656,8 +2660,23 @@ def cover_id(address: str, page: str = "") -> str:
     if not address:
         return ""
     number = hashlib.sha1(address.encode("utf-8")).hexdigest()[:16]
+    return _keep_cover(number, ((address, page),))
+
+
+def _cover_choices_id(items: list) -> str:
+    choices = tuple(dict.fromkeys((address, item.url) for item in items
+                                  for address in (item.cover, *item.cover_alts) if address))
+    if not choices:
+        return ""
+    if len(choices) == 1:
+        return cover_id(*choices[0])                  # keep the shared ID when different tiles use the same picture
+    number = hashlib.sha1(json.dumps(choices, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
+    return _keep_cover(number, choices)
+
+
+def _keep_cover(number: str, choices: tuple) -> str:
     with _LOCK:
-        _COVERS[number] = (address, page)
+        _COVERS[number] = choices
         _COVERS.move_to_end(number)
         while len(_COVERS) > COVERS_KEPT:
             _COVERS.popitem(last=False)
@@ -2671,6 +2690,10 @@ def cover(number: str, *, net=None) -> "tuple | None":
     if kept is None:
         return None
     from core import manhwa_search as MS, title_covers
-    if kept[0].startswith(title_covers.OWN_MARK):     # (v5.44.123) a picture of the owner's own, chosen for a title
-        return title_covers.own_picture(kept[0], shrink=COVER_WIDTH)
-    return MS.fetch_cover(kept[0], kept[1], net=net, shrink=COVER_WIDTH)
+    for address, page in kept:
+        if not page and address.startswith(title_covers.OWN_MARK):  # the owner's own picture has no remote page
+            return title_covers.own_picture(address, shrink=COVER_WIDTH)
+        got = MS.fetch_cover(address, page, net=net, shrink=COVER_WIDTH)
+        if got is not None:
+            return got
+    return None

@@ -18,6 +18,7 @@ from core.database.connection import db, db_path, close_thread_pooled_connection
 from core.database.storage import _safe_ident
 from core.paths import SETTINGS_FILE, RUNTIME_DIR, DATA_DIR
 from core.stability import swallow
+from core.quiet import passed as let_pass
 
 
 def _now() -> int:
@@ -137,7 +138,7 @@ def create_light_backup(settings: dict, *, reason: str = "manual", force: bool =
             if last and now - last < hours * 3600:
                 return {"created": False, "skipped": True, "reason": "interval", "next_after": last + hours * 3600}
         except Exception:
-            pass
+            let_pass("core.light_backup.create_light_backup")
 
     source_db = db_path(settings)
     if not source_db.exists():
@@ -162,7 +163,7 @@ def create_light_backup(settings: dict, *, reason: str = "manual", force: bool =
         if not ok_space:
             return {"created": False, "error": space_msg, "destination": str(root)}
     except Exception:
-        pass
+        let_pass("core.light_backup.create_light_backup#2")
     tmp_dir = root / f".tmp_light_backup_{stamp}_{reason_slug}"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir, ignore_errors=True)

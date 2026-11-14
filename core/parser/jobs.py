@@ -40,7 +40,6 @@ _SEQ = 0
 _EXIT_HOOKED = False
 
 _SITE_LINE = re.compile(r"^\[MD5:([^:\]]+):[^\]]*\]")
-_FILE_LINE = re.compile(r"^\[(?:MD5|REVERSE):[^\]]*\]")
 # (v5.44.125) «Манга через парсер» (core/parser_manga.line): «МАНГА: …», «НЕ МАНГА: …», «ЖДЁТ: …», «СБОРКА: …»,
 # «МАНГА В ПАПКЕ: …» — the tab «Манга» of the journal
 _MANGA_LINE = re.compile(r"^(?:МАНГА(?: В ПАПКЕ)?|НЕ МАНГА|ЖДЁТ|СБОРКА): ")

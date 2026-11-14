@@ -60,6 +60,10 @@ def settings_block(settings: dict) -> str:
     sign-in (``static/manga-sites.js``): a value is never on the page."""
     from core import manhwa_access as A
     from core import manhwa_sources as S
+    from core import site_browser
+    from webui import content_mode
+    manual_sites = site_browser.manual_check_sites()
+    mode = content_mode.mode()
     now = S.LANGUAGE[0]                   # the language in place (``manhwa_access.apply`` — of the settings)
     options = "".join(f'<option value="{esc(v)}"{" selected" if v == now else ""}>{esc(t)}</option>'
                       for v, t in LANGUAGES)
@@ -98,6 +102,15 @@ def settings_block(settings: dict) -> str:
         forget_token = ('<button type="button" data-action="ms-forget" data-what="token" hidden>Убрать токен</button>'
                         if site["token"] or name in A.BROWSER_TOKEN else "")
         address = site["mine"] or site["address"]
+        manual = ""
+        source = S.by_name(name)
+        if name in manual_sites and source is not None and not (mode == "sfw" and source.adult_only):
+            manual = (f'<div class="ms-field ms-note" data-ms-browser-tools hidden><div class="tool-actions">'
+                      f'<button type="button" data-action="ms-browser-check" '
+                      f'data-ms-browser-label="{esc(manual_sites[name])}">Пройти проверку сайта</button>'
+                      '<span class="action-status" role="status" aria-live="polite"></span></div>'
+                      '<small>Откроется отдельное окно программы. Пройдите проверку сайта в нём, '
+                      'затем повторите открытие ленты или загрузку.</small></div>')
         # what the search of a setting finds the site by: its name and addresses («язык» — the site that has one)
         hosts = " ".join(dict.fromkeys([_host(address), *site["hosts"]])) + (" язык глав" if chapters else "")
         items.append(f"""<li class="ms-site" data-site="{esc(name)}" data-need="{NEED.get(name, "")}" data-find="{esc(hosts)}">
@@ -124,6 +137,7 @@ def settings_block(settings: dict) -> str:
           {token}
           {fields}
           {chapters}
+          {manual}
         </div>
       </details>
     </li>""")

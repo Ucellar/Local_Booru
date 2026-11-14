@@ -121,9 +121,13 @@ class AppBridge(QObject):
             payload["done"].set()
             return
         guard = payload.get("guard")
+        manual = payload.get("manual")
+        manual = manual if callable(manual) else None
         fetch = PageFetch(profile, str(payload.get("url") or ""), payload["box"], payload["done"], parent=self,
                           guard=guard if callable(guard) else None, cookies=bool(payload.get("cookies")),
-                          visible=bool(payload.get("visible")))
+                          visible=bool(payload.get("visible")), manual=manual,
+                          owner=self._owner(payload) if manual else None,
+                          manual_label=str(payload.get("manual_label") or "") if manual else "")
         fetch.start()
 
     def _do_fetch_bytes(self, payload) -> None:

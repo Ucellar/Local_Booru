@@ -34,6 +34,7 @@ import uuid
 from pathlib import Path
 
 from core.paths import SETTINGS_DIR
+from core.quiet import passed as let_pass
 
 SUBS_FILE = SETTINGS_DIR / "subscriptions.json"
 
@@ -310,11 +311,6 @@ def _tag_info_kinds(post: dict) -> dict[str, str]:
     return kinds
 
 
-def _post_source_url(site: str, post: dict) -> str:
-    pid = post.get("id", "")
-    return f"https://{site}/posts/{pid}" if pid else ""
-
-
 def _candidate_file_url(site: str, post: dict) -> str:
     from core.downloader_utils import original_media_urls
     urls = original_media_urls(post, site)
@@ -475,7 +471,7 @@ def _post_media_url(site: str, post: dict, settings: dict | None = None) -> str:
                 if ("/data/" in u or "static." in u) and not any(part in u.lower() for part in _REDUCED_PATH):
                     return u
     except Exception:
-        pass
+        let_pass("core.subscriptions._post_media_url")
     return ""
 
 def _post_page_url(site: str, post: dict) -> str:
@@ -725,7 +721,7 @@ def run_subscription(sub: dict, settings: dict,
                 log("  QUEUE DOWNLOAD PLAN: " + ", ".join(f"{k}={v}" for k, v in sorted(by_group_site.items())))
                 log(f"  QUEUE MERGED GROUPS: {merged_groups}")
         except Exception:
-            pass
+            let_pass("core.subscriptions.run_subscription")
 
         for group in groups:
             if stop_flag and getattr(stop_flag, "_stop_requested", False):
@@ -803,7 +799,7 @@ def run_subscription(sub: dict, settings: dict,
                                 mark_seed(key, "blocked_session_policy", error=last_error)
                             continue
                     except Exception:
-                        pass
+                        let_pass("core.subscriptions.run_subscription#2")
                     last_error = str(e)
 
                 if ok and dest_path:
@@ -816,7 +812,7 @@ def run_subscription(sub: dict, settings: dict,
                         if len(sites_joined) > 1:
                             log(f"  GROUP METADATA: download_source={site}; metadata_sources={', '.join(sites_joined)}")
                     except Exception:
-                        pass
+                        let_pass("core.subscriptions.run_subscription#3")
                     _index_and_tag(dest_path, candidates, settings, log)
                     mark_many(group_keys, "downloaded", path=str(dest_path))
                     if on_file_ready:

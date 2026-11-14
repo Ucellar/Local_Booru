@@ -15,6 +15,46 @@
   const MARKS = { "": "", yes: "✓", no: "−" };
   const sleep = (ms) => new Promise((go) => setTimeout(go, ms));
   const norm = (text) => String(text || "").toLocaleLowerCase("ru").replace(/ё/g, "е");
+  let browserChecking = false;
+
+  function browserButtons(busy) {
+    for (const button of form.querySelectorAll("[data-cat-browser-check]")) {
+      button.disabled = busy;
+      button.setAttribute("aria-busy", String(busy));
+      button.textContent = busy ? "Проверка открыта…" : `Пройти проверку ${button.dataset.catBrowserLabel || "Nude-Moon"}`;
+    }
+  }
+
+  async function checkBrowser(button) {
+    if (browserChecking) return;
+    const status = button.closest(".cat-note").querySelector("[data-cat-browser-status]");
+    const site = button.dataset.catBrowserSite || "nudemoon";
+    const label = button.dataset.catBrowserLabel || "Nude-Moon";
+    // Only the server-generated feed link is a destination; the POST receives a site id, never a URL.
+    const retry = new URL(button.dataset.catRetry, location.href);
+    if (retry.origin !== location.origin || !["/manga/feed", "/manhwa/feed"].includes(retry.pathname)) return;
+    browserChecking = true;
+    browserButtons(true);
+    status.textContent = `Пройдите проверку ${label} в отдельном окне программы. Затем лента обновится.`;
+    try {
+      const response = await fetch("/api/catalog/browser-check", {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ site }),
+      });
+      let reply = {};
+      try { reply = await response.json(); } catch (_) { /* a closed program may not return JSON */ }
+      if (!response.ok || reply.ok !== true) {
+        throw new Error(reply.error || "Программа не ответила. Откройте её окно и повторите проверку.");
+      }
+      location.assign(retry.href);
+    } catch (error) {
+      const current = status.isConnected ? status : form.querySelector("[data-cat-browser-status]");
+      if (current) current.textContent = error.message || "Не удалось завершить проверку. Попробуйте ещё раз.";
+    } finally {
+      browserChecking = false;
+      browserButtons(false);
+    }
+  }
 
   // ── chips of three states ──
   function paint(chip) {
@@ -50,9 +90,23 @@
   form.addEventListener("error", (event) => {
     if (event.target instanceof HTMLImageElement && event.target.closest(".cat-cover")) event.target.classList.add("gone");
   }, true);
+  function revealCover(img) {
+    if (img instanceof HTMLImageElement && img.closest(".cat-cover") && img.complete && img.naturalWidth > 0) {
+      img.classList.remove("gone");
+    }
+  }
+  form.addEventListener("load", (event) => revealCover(event.target), true);
+  // A cached image may have loaded before this script; a restored list gets the same capture listener above.
+  form.querySelectorAll(".cat-cover img.gone").forEach(revealCover);
 
   // ── what is clicked ──
   form.addEventListener("click", (event) => {
+    const browser = event.target.closest("[data-cat-browser-check]");
+    if (browser) {
+      event.preventDefault();
+      checkBrowser(browser);
+      return;
+    }
     const chip = event.target.closest(".cat-tri-chip");
     if (chip) {
       if (chip.dataset.one) {
@@ -263,6 +317,11 @@
   });
   window.addEventListener("pageshow", () => {
     for (const input of form.querySelectorAll("[disabled]")) input.disabled = false;
+    form.querySelectorAll(".cat-cover img.gone").forEach(revealCover);
+    browserButtons(browserChecking);
+    if (!browserChecking) {
+      for (const status of form.querySelectorAll("[data-cat-browser-status]")) status.textContent = "";
+    }
   });
 
   // the filters on a narrow window: folded under their heading

@@ -20,10 +20,10 @@ from core.storage_roots import (
     managed_output_root_state,
     probe_media_path,
 )
+from core.quiet import passed as let_pass
 
 _log = logging.getLogger("local_booru.file_integrity")
 PRESENCE_STATUSES = ("present", "missing", "offline_root", "path_error")
-HASH_STATUSES = ("ok", "mismatch", "unreadable", "deferred")
 RECOVERY_STATUSES = ("recovered", "failed", "blocked", "no_source", "cancelled")
 _MD5_RE = re.compile(r"^[0-9a-f]{32}$")
 
@@ -257,7 +257,7 @@ def run_presence_check(
             try:
                 _finish_run(settings, run_id, result, "failed", f"{type(exc).__name__}: {exc}")
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_presence_check")
         _log.exception("Presence integrity failed")
         raise
     finally:
@@ -265,7 +265,7 @@ def run_presence_check(
             try:
                 source_con.close()
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_presence_check#2")
 
 
 def get_presence_summary(settings: dict) -> dict[str, Any]:
@@ -645,7 +645,7 @@ def run_hash_verification(
             try:
                 _finish_run(settings, run_id, result, "failed", f"{type(exc).__name__}: {exc}")
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_hash_verification")
         _log.exception("Hash integrity failed")
         raise
     finally:
@@ -653,7 +653,7 @@ def run_hash_verification(
             try:
                 source_con.close()
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_hash_verification#2")
 
 
 def _looks_like_direct_media_url(value: str) -> bool:
@@ -679,7 +679,7 @@ def _post_id_from_url(value: str) -> str:
         if match:
             return match.group(1)
     except Exception:
-        pass
+        let_pass("core.file_integrity._post_id_from_url")
     return ""
 
 
@@ -698,7 +698,7 @@ def _recovery_sources(settings: dict, image_id: int) -> list[dict[str, Any]]:
                 if is_permanently_disabled_url(text):
                     return
             except Exception:
-                pass
+                let_pass("core.file_integrity._recovery_sources.add")
             seen.add(text)
             out.append({"url": text, "host": str(host or ""), "kind": str(kind), "rank": int(rank)})
 
@@ -1284,7 +1284,7 @@ def run_verified_recovery(
                         try:
                             stage.unlink(missing_ok=True)
                         except Exception:
-                            pass
+                            let_pass("core.file_integrity.run_verified_recovery")
                         continue
 
                     installed = _install_staged_recovery(
@@ -1306,7 +1306,7 @@ def run_verified_recovery(
                     try:
                         stage.unlink(missing_ok=True)
                     except Exception:
-                        pass
+                        let_pass("core.file_integrity.run_verified_recovery#2")
 
                 if not recovered:
                     result["recovery_failed"] += 1
@@ -1335,7 +1335,7 @@ def run_verified_recovery(
             try:
                 Path(active_stage).unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_verified_recovery#3")
         if active_attempt_id and active_image_id:
             try:
                 _finish_recovery_attempt(
@@ -1345,7 +1345,7 @@ def run_verified_recovery(
                     observed_md5=active_observed, error=str(exc),
                 )
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_verified_recovery#4")
         if run_id:
             _finish_run(settings, run_id, result, "cancelled", str(exc))
         return result
@@ -1355,7 +1355,7 @@ def run_verified_recovery(
             try:
                 Path(active_stage).unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_verified_recovery#5")
         if active_attempt_id and active_image_id:
             try:
                 _finish_recovery_attempt(
@@ -1366,12 +1366,12 @@ def run_verified_recovery(
                     error=f"{type(exc).__name__}: {exc}",
                 )
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_verified_recovery#6")
         if run_id:
             try:
                 _finish_run(settings, run_id, result, "failed", f"{type(exc).__name__}: {exc}")
             except Exception:
-                pass
+                let_pass("core.file_integrity.run_verified_recovery#7")
         _log.exception("Verified recovery failed")
         raise
 

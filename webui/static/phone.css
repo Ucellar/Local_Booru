@@ -1216,7 +1216,7 @@ dl.m-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 /* (v5.44.105) «Лента» and the page of a title on the phone — the computer's (catalog.css, title.css, all under .cat
    and .tt) in the phone's frame: their tokens from the phone's; a button with white words — --accent-button (4.8:1);
    the way back — the bar's, not the page's own «← Лента»; touch targets 44 px. */
-.m-body .cat, .m-body .tt, .m-body .wt {
+.m-body .cat, .m-body .tt {
   --border: var(--line);
   --field-bg: var(--panel);
   --accent: var(--accent-button);
@@ -1241,24 +1241,3 @@ dl.m-dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .m-body .tt .tt-row input[type="checkbox"] { width: 22px; height: 22px; }
 .m-body .tt .tt-read { min-height: 40px; }
 .m-body .tt .tt-list { border-radius: 12px; }
-/* (v5.44.106) «Смотреть» on the phone — the computer's page (watch.css, under .wt) in the phone's frame: its way back
-   is the bar's; the poster beside the buttons; the pickers one under another, their lists the screen's width. */
-.m-body .wt { padding: 8px 14px 24px; gap: 18px; }
-.m-body .wt .wt-back { display: none; }
-.m-body .wt .wt-name { font-size: 24px; }
-.m-body .wt .wt-hero { gap: 16px; }
-.m-body .wt .wt-side { flex: 1 1 100%; min-width: 0; flex-direction: row; flex-wrap: wrap; align-items: flex-start; }
-.m-body .wt .wt-poster { flex: 0 0 120px; }
-.m-body .wt .wt-actions { flex: 1 1 160px; }
-.m-body .wt .wt-btn { min-height: 44px; }
-.m-body .wt .wt-facts { grid-template-columns: 104px minmax(0, 1fr); gap: 8px 12px; }
-.m-body .wt .wt-pick, .m-body .wt .wt-pick-btn, .m-body .wt .wt-pick:first-child .wt-pick-btn { flex: 1 1 100%;
-  min-width: 0; width: 100%; }
-.m-body .wt .wt-pop { width: 100%; }
-.m-body .wt .wt-downloads { margin-left: 0; flex: 1 1 100%; }
-.m-body .wt .wt-downloads .wt-btn { flex: 1 1 100%; }
-.m-body .wt .wt-legend { margin-left: 0; }
-.m-body .wt .wt-eps { grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); }
-.m-body .wt .wt-ep { height: 44px; }
-.m-body .wt .wt-screen { border-radius: 10px; }
-.m-body .wt .wt-skip { right: 12px; bottom: 56px; padding: 9px 14px; }

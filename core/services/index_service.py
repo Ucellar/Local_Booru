@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable
+from core.quiet import passed as let_pass
 
 
 def rebuild_index(settings: dict, force: bool = False, with_md5: bool = False,
@@ -18,13 +19,13 @@ def rebuild_index(settings: dict, force: bool = False, with_md5: bool = False,
             try:
                 progress(f"indexed={indexed} skipped={skipped}")
             except Exception:
-                pass
+                let_pass("core.services.index_service.rebuild_index.report")
 
     if progress:
         try:
             progress("scan roots...")
         except Exception:
-            pass
+            let_pass("core.services.index_service.rebuild_index")
     result = index_library(
         settings,
         force=force,
@@ -39,7 +40,7 @@ def rebuild_index(settings: dict, force: bool = False, with_md5: bool = False,
                 f"skipped={result.get('skipped', 0)} removed={result.get('removed', 0)}"
             )
         except Exception:
-            pass
+            let_pass("core.services.index_service.rebuild_index#2")
     return result
 
 

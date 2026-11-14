@@ -1,5 +1,5 @@
 hls.js 1.6.19 (dist/hls.light.min.js) — https://github.com/video-dev/hls.js
-Used by the page «Смотреть» (webui/static/watch.js) in a browser that does not play HLS itself.
+Used by the page of a series (webui/static/series.js) in a browser that does not play HLS itself.
 
 Copyright (c) 2017 Dailymotion (http://www.dailymotion.com)
 

@@ -196,7 +196,6 @@ PAGE_CSS = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
             "getlink": '\n<link rel="stylesheet" href="/static/get-link.css">',    # (v5.44.87) «Скачать → По ссылке»
             "catalog": '\n<link rel="stylesheet" href="/static/catalog.css">',     # (v5.44.90) «Лента» of the tabs
             "title": '\n<link rel="stylesheet" href="/static/title.css">',        # (v5.44.102) a title of «Лента»
-            "watch": '\n<link rel="stylesheet" href="/static/watch.css">',       # (v5.44.106) «Смотреть» a series
             "covers": '\n<link rel="stylesheet" href="/static/covers.css">',     # (v5.44.123) the menu of covers
             "downloads": '\n<link rel="stylesheet" href="/static/downloads.css">',  # (v5.44.120) «Скачать → Загрузки»
             "help": '\n<link rel="stylesheet" href="/static/help.css">'}           # (v5.44.153) «Справка»
@@ -210,9 +209,9 @@ PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            "getlink": '\n<script src="/static/get-link.js" defer></script>',    # (v5.44.87) «Скачать → По ссылке»
            "catalog": '\n<script src="/static/catalog.js" defer></script>',     # (v5.44.90) «Лента» of the tabs
            "title": '\n<script src="/static/title.js" defer></script>',         # (v5.44.102) a title of «Лента»
-           # (v5.44.106) «Смотреть»: hls.js for a browser that does not play HLS itself (the window: its own player)
+           # (v5.44.106) a series of a site watched: hls.js for a browser that does not play HLS itself (the window:
+           # its own player) — before ``series`` (``video_series``)
            "hls": '\n<script src="/static/vendor/hls.light.min.js" defer></script>',
-           "watch": '\n<script src="/static/watch.js" defer></script>',
            "covers": '\n<script src="/static/covers.js" defer></script>',       # (v5.44.123) the menu of covers
            "archive": '\n<script src="/static/archive.js" defer></script>',
            "reader": '\n<script src="/static/reader.js" defer></script>',     # (v5.44.117) the one reader
@@ -279,7 +278,8 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
     manga_css = "".join(PAGE_CSS.get(key, "") for key in taken)
     page_js = "".join(PAGE_JS.get(key, "") for key in taken)
     data_attrs = "".join(f' data-{esc(k)}="{esc(v)}"' for k, v in (body_data or {}).items())
-    sections += _reset_notice() + _archive_notice()
+    sections += _reset_notice() + _archive_notice() + update_notice()
+    from core.version import VERSION
     return f"""<!doctype html>
 <html lang="ru" data-skin="{esc(skin)}" data-thumb="{esc(thumbs)}" data-skin-key="{esc(look["key"])}" data-gallery-skin="{esc(look["gallery"])}" data-variant="{esc(look.get("variant", "light"))}" data-variant-key="{esc(look.get("variant_key", "skin_variant"))}" data-gallery-variant="{esc(look.get("gallery_variant", "light"))}" data-content-mode="{esc(mode)}" data-motion-pref="{esc(motion)}">
 <head>
@@ -295,7 +295,7 @@ def page_frame(title: str, body: str, *, active: str = "posts", search: str = ""
 </head>
 <body class="page-{esc(kind or active)}"{data_attrs}>
 <header class="top">
-  <a class="brand" href="{content_mode.home(mode)}"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name"><span class="bn-1">Local</span> <span class="bn-2">Booru</span></span></a>
+  <a class="brand" href="{content_mode.home(mode)}" title="Local Booru {esc(VERSION)}"><span class="brand-mark" aria-hidden="true"></span><span class="brand-name"><span class="bn-1">Local</span> <span class="bn-2">Booru</span></span></a>
   <nav class="main-nav" aria-label="Основное меню">{"".join(nav)}</nav>
   {top_search}
   <div class="top-tools">{_back_button()}{drawer_button}{_downloads_badge()}{content_mode.switch(mode)}{_help_link(active, kind, mode)}{_settings_link(active)}{_skin_menu(look, prefs.LOOK_OF.get(active, active), motion)}<span class="tray-clock" aria-hidden="true"></span></div>
@@ -328,6 +328,32 @@ def _reset_notice() -> str:
                 'следующем запуске программы. <a href="/diag/reset#reset-all">Подробнее</a></p>')
     return ('<p class="reset-notice" role="alert"><b>Заказан полный сброс библиотеки:</b> при следующем запуске '
             'программа спросит ещё раз и удалит её картинки, базу и кэш. <a href="/diag/reset#reset-all">Отменить</a></p>')
+
+
+def update_notice() -> str:
+    """(v5.44.165) The program's folder holds another version than the one running — an update was installed while
+    it worked (``core/started_code.update_waiting``): every page says so until the program is started again, with
+    «Перезапустить» where there is the program's window to do it.  The same words come to a page already open
+    (``/api/downloads/count`` → ``booru.js``)."""
+    from core import started_code, version
+    waiting = started_code.update_waiting()
+    if not waiting:
+        return ""
+    from webui import service
+    if version.order(waiting) >= version.order(version.VERSION):
+        said = (f"<b>Установлено обновление {esc(waiting)}.</b> Оно заработает, когда программа запустится заново "
+                f"— сейчас работает {esc(version.VERSION)}.")
+    else:
+        said = (f"<b>В папке программы теперь версия {esc(waiting)}.</b> Она заработает, когда программа запустится "
+                f"заново — сейчас работает {esc(version.VERSION)}.")
+    if service.bridge() is not None:
+        action = ('<button type="button" class="primary" data-action="app-restart" data-ask="Программа закроется и '
+                  'откроется снова — нажмите ещё раз">Перезапустить</button>'
+                  '<span class="action-status" role="status"></span>')
+    else:
+        action = "<span>Закройте программу и откройте снова.</span>"
+    return (f'<p class="update-notice" role="status" data-update="{esc(waiting)}"><span class="update-said">{said}'
+            f'</span>{action}</p>')
 
 
 def _archive_notice() -> str:

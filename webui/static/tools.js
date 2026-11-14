@@ -28,6 +28,20 @@
   }
   LB.confirmed = confirmed;              // the page scripts after this one (subs.js) ask the same way
 
+  // (v5.44.165) «Перезапустить» of «Установлено обновление …» (html.update_notice — any page): the window closes,
+  // the program starts again on the new code (core/app_restart)
+  actions["app-restart"] = async (el) => {
+    if (el.dataset.ask && !confirmed(el, el.dataset.ask)) return;
+    el.disabled = true;
+    try {
+      await postJson("/api/app/restart-app", {});
+      say(el, "Программа перезапускается…");
+    } catch (err) {
+      say(el, err.message, true);
+      el.disabled = false;
+    }
+  };
+
   // ── a long task of a page (core/page_jobs): its journal, polled from the program ──
   const TASK_STATUS = { starting: "запускается", running: "идёт", stopping: "останавливается", done: "готово",
     stopped: "остановлено", failed: "прервано ошибкой" };
@@ -673,9 +687,32 @@
     let every = false;
     let timer = 0;
     let asking = false;
+    // (v5.44.169) «Указать ссылку»: the row whose line with the field is open — {key, work, name, value}; the block is
+    // drawn anew every few seconds, and what is being typed stays (the line is opened again, with its text)
+    let linking = null;
 
     function opened() {
       return new Set(Array.from(inner.querySelectorAll("details.pm-open[open]")).map((d) => d.dataset.key));
+    }
+
+    function linkForm(key) {
+      return Array.from(inner.querySelectorAll("form.pm-link")).find((f) => f.dataset.key === key) || null;
+    }
+
+    // the line of «Указать ссылку» of the row being linked, as it was: open, its words, its text ( — or closed: the
+    // row is gone, or is being looked at now)
+    function showLink(focus) {
+      inner.querySelectorAll("form.pm-link").forEach((f) => { if (!linking || f.dataset.key !== linking.key) f.hidden = true; });
+      if (!linking) return;
+      const form = linkForm(linking.key);
+      if (!form) { linking = null; return; }
+      const input = form.querySelector('input[name="url"]');
+      const label = form.querySelector("label");
+      form.hidden = false;
+      form.dataset.work = linking.work || "";
+      if (label) label.textContent = linking.name ? `Ссылка на страницу манги «${linking.name}»` : "Ссылка на страницу этой манги";
+      if (input.value !== linking.value) input.value = linking.value;
+      if (focus) input.focus();
     }
 
     // (v5.44.160) the number on the tab «Манга из папки» of the page «Парсер»: the folders that look like a manga
@@ -687,8 +724,15 @@
       tab.hidden = n === 0;
     }
 
-    async function load() {
+    async function load(now) {
       if (asking) return;
+      const typing = document.activeElement;
+      if (!now && typing && inner.contains(typing) && typing.closest("form.pm-link")) {
+        // (v5.44.169) a link is being typed: the block is not drawn anew under the hands
+        clearTimeout(timer);
+        timer = setTimeout(load, 4000);
+        return;
+      }
       asking = true;
       clearTimeout(timer);
       try {
@@ -703,7 +747,9 @@
           inner.querySelectorAll("details.pm-open").forEach((d) => { if (keep.has(d.dataset.key)) d.open = true; });
           const whyNow = inner.querySelector("details.mx-why");
           if (whyNow && whyOpen) whyNow.open = true;
-          box.dataset.live = data.live ? "1" : "";
+          showLink(false);                               // (v5.44.169) the line of «Указать ссылку» stays open
+          // (v5.44.166) a look asked for by «Перепроверить» goes: the block asks as often as while the parser runs
+          box.dataset.live = (data.live || data.fast) ? "1" : "";
           counted(data.counts);
         }
       } catch (_) {
@@ -745,6 +791,17 @@
       if (act === "pm-all") {
         every = true;
         load();
+      } else if (act === "pm-link") {
+        // (v5.44.169) «Указать ссылку»: the row's line with the field (of a row of several manga — for that manga)
+        event.preventDefault();
+        const same = linking && linking.key === el.dataset.key && (linking.work || "") === (el.dataset.work || "");
+        linking = { key: el.dataset.key, work: el.dataset.work || "", name: el.dataset.workName || "",
+          value: same ? linking.value : "" };
+        showLink(true);
+      } else if (act === "pm-link-close") {
+        event.preventDefault();
+        linking = null;
+        showLink(false);
       } else if (act === "pm-not" || act === "pm-is") {
         event.preventDefault();
         el.disabled = true;
@@ -753,6 +810,22 @@
           load();
         } catch (err) {
           told(el.dataset.key, err.message, true);
+          el.disabled = false;
+        }
+      } else if (act === "pm-again" || act === "pm-again-all") {
+        // (v5.44.166) «Перепроверить» of a row; «Перепроверить все «не манга»» — asked twice (it takes the sites'
+        // searches of the hour)
+        event.preventDefault();
+        if (el.dataset.ask && !confirmed(el, el.dataset.ask)) return;
+        el.disabled = true;
+        const key = act === "pm-again" ? (el.dataset.key || "") : "";
+        try {
+          const done = await postJson("/api/parser/manga/again", key ? { key } : { all: true });
+          box.dataset.live = "1";
+          await load();
+          told(key, (done && done.words) || "Перепроверяю");
+        } catch (err) {
+          told(key, err.message, true);
           el.disabled = false;
         }
       } else if (act === "pm-now") {
@@ -768,6 +841,37 @@
           told(key, err.message, true);
           el.disabled = false;
         }
+      }
+    });
+    // (v5.44.169) «Указать ссылку»: what is typed is kept; «Привязать» — the link goes to the program, the row says
+    // what came of it (a link it does not take — said in the line itself, the text stays)
+    box.addEventListener("input", (event) => {
+      const form = event.target.closest("form.pm-link");
+      if (form && linking && form.dataset.key === linking.key) linking.value = event.target.value;
+    });
+    box.addEventListener("submit", async (event) => {
+      const form = event.target.closest("form.pm-link");
+      if (!form) return;
+      event.preventDefault();
+      const input = form.querySelector('input[name="url"]');
+      const status = form.querySelector(".action-status");
+      const go = form.querySelector('button[type="submit"]');
+      const key = form.dataset.key;
+      const url = input.value.trim();
+      if (!url) { input.focus(); return; }
+      go.disabled = true;
+      status.textContent = "";
+      try {
+        const done = await postJson("/api/parser/manga/link", { key, url, work: form.dataset.work || "" });
+        linking = null;
+        box.dataset.live = "1";
+        await load(true);
+        told(key, (done && done.words) || "Открываю ссылку");
+      } catch (err) {
+        status.textContent = err.message;
+        status.style.color = "var(--danger)";
+        go.disabled = false;
+        input.focus();
       }
     });
     box.addEventListener("change", async (event) => {

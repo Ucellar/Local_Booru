@@ -68,12 +68,8 @@ def list_url(how: str, page: int, text: str = "", also: str = "") -> str:
     filters' words (:func:`search_words`)."""
     page = max(1, int(page or 1))
     if text or also or how != "date":
-        return f"{API}/search?" + urlencode({"query": search_words(text, also), "sort": how or "date", "page": page})
+        return f"{API}/search?" + urlencode({"query": search_words(text, also) or "*", "sort": how or "date", "page": page})
     return f"{API}/galleries?" + urlencode({"page": page, "per_page": PAGE_SIZE})
-
-
-def gallery_api(number: int) -> str:
-    return f"{API}/galleries/{int(number)}"
 
 
 def link_of(number) -> str:

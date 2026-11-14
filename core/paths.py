@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from core.quiet import passed as let_pass
 
 APP_NAME = "Local_Booru"
 OUTPUT_FOLDER_NAME = "Local_Booru_Archive"
@@ -304,7 +305,7 @@ def _copy_tree_without_deleting(source: Path, destination: Path) -> None:
         if source.exists() and source.resolve() != destination.resolve():
             shutil.copytree(source, destination, dirs_exist_ok=True)
     except Exception:
-        pass
+        let_pass("core.paths._copy_tree_without_deleting")
 
 
 def _move_tree_contents(source: Path, destination: Path) -> None:
@@ -334,7 +335,7 @@ def _move_tree_contents(source: Path, destination: Path) -> None:
         except OSError:
             pass
     except Exception:
-        pass
+        let_pass("core.paths._move_tree_contents")
 
 
 def write_workspace_pointer(settings_root: str | Path) -> Path:
@@ -355,25 +356,6 @@ def write_workspace_pointer(settings_root: str | Path) -> Path:
         if written is None:
             written = pointer
     return written or workspace_pointer_file()
-
-
-def _remove_empty_legacy_dirs() -> None:
-    """Remove empty folders created before a portable workspace was reconnected."""
-    try:
-        root = LEGACY_DATA_DIR
-        if not root.exists():
-            return
-        for folder in sorted((p for p in root.rglob("*") if p.is_dir()), reverse=True):
-            try:
-                folder.rmdir()
-            except OSError:
-                pass
-        try:
-            root.rmdir()
-        except OSError:
-            pass
-    except Exception:
-        pass
 
 
 def normalize_archive_settings_root(selected: str | Path | None) -> Path | None:
@@ -424,22 +406,12 @@ def normalize_archive_settings_root(selected: str | Path | None) -> Path | None:
     return None
 
 
-def connect_existing_archive(selected: str | Path) -> Path | None:
-    """Connect an existing Local_Booru_Archive without overwriting its config."""
-    target = normalize_archive_settings_root(selected)
-    if target is None:
-        return None
-    write_workspace_pointer(target)
-    _remove_empty_legacy_dirs()
-    return target
-
-
 def remove_workspace_pointer() -> None:
     for pointer in _workspace_pointer_files():
         try:
             pointer.unlink(missing_ok=True)
         except Exception:
-            pass
+            let_pass("core.paths.remove_workspace_pointer")
 
 
 _NEXT_ARCHIVE: list = []        # the archive (its settings folder) chosen in this run for the next start
@@ -503,10 +475,6 @@ if USING_SEPARATE_STORAGE:
     _move_tree_contents(DATA_DIR / "db_backups", BACKUPS_DIR / "db")
 
 SETTINGS_FILE = SETTINGS_DIR / "app_settings.json"
-FAVORITES_FILE = SETTINGS_DIR / "favorites.json"
-CACHE_FILE = CACHE_DIR / "local_booru_cache.json"
-NOMATCH_CACHE_FILE = CACHE_DIR / "nomatch_cache.json"
-MD5_CACHE_FILE = CACHE_DIR / "md5_cache.json"
 ERROR_LOG_FILE = LOGS_DIR / "errors.log"
 
 BROWSER_COOKIES_DIR = RUNTIME_DIR / "browser_cookies"
@@ -528,7 +496,7 @@ def _retire_legacy_full_settings_if_portable() -> None:
             BOOTSTRAP_SETTINGS_FILE.unlink(missing_ok=True)
     except Exception:
         # Never delete the old locator unless a pointer could be written.
-        pass
+        let_pass("core.paths._retire_legacy_full_settings_if_portable")
 
 
 def prepare_separate_storage(settings: dict) -> Path | None:
@@ -561,7 +529,7 @@ def prepare_separate_storage(settings: dict) -> Path | None:
         if SETTINGS_DIR.exists() and SETTINGS_DIR.resolve() != config.resolve():
             shutil.copytree(SETTINGS_DIR, config, dirs_exist_ok=True)
     except Exception:
-        pass
+        let_pass("core.paths.prepare_separate_storage")
     # Repair an early portable-layout workspace that already had logs/runtime
     # directly below settings/.
     _move_tree_contents(target / "logs", service_output / "logs")

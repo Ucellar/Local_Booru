@@ -1261,9 +1261,6 @@ def join_part(settings: dict, set_id: int, image_id: int, *, site: str = "", wai
 
 
 # ── for the pages ──────────────────────────────────────────────────────────────────────
-KIND_WORDS = {"parent": "родитель и дочерние", "work": "одна работа", "series": "серия", "manual": "сборка"}
-
-
 def set_of(settings: dict, image_id: int) -> dict | None:
     """The card's сборка for its page: {"id", "kind", "title", "locked", "members": [cards: id, path, md5, size, mtime,
     is_video, width, height], "index" — the card's place among them, "parents" — the members that are a parent post of

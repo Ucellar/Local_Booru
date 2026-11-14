@@ -6,8 +6,8 @@ A keeper registers what it answers (:func:`keeper`), describes itself in its own
 (``self_check()`` — run by ``tools/dev_checks/gates.py``).  The rest of the program hands a gate what a site says and
 does what the answer says; it does not know what a keeper decides by, and it never names one.
 
-**Every gate must have a keeper.**  A gate nobody answers is not «open»: the program does not start
-(:class:`Unkept` — ``app.py`` and ``python -m webui`` ask :func:`ready` first, every gate asks it too).
+Keepers are optional. A gate with no registered answers has its neutral result: no objection, no
+excluded values, no name. Registered answers still apply, and their errors are never silently ignored.
 
 The gates — what goes in is what a site says, what comes out are the keeper's words ("" — nothing against it):
 
@@ -31,10 +31,6 @@ from typing import NamedTuple
 
 GATES = ("title", "pages", "post", "chip", "left_out", "genre", "name")
 MARK = "__keeper__"                  # a module of ``core`` with ``__keeper__ = True`` in its code is a keeper
-
-
-class Unkept(RuntimeError):
-    """A gate has no keeper: the program is not whole — it does not start."""
 
 
 class Left(NamedTuple):
@@ -88,7 +84,7 @@ def keeper_files() -> list:
 
 
 def ready() -> None:
-    """The keepers loaded (once); :class:`Unkept` when a gate has none."""
+    """Load the available keepers once; an empty or partial registry is valid."""
     global _READY
     if _READY:
         return
@@ -99,10 +95,6 @@ def ready() -> None:
             module = importlib.import_module(f"{__package__}.{path.stem}")
             if module not in _MODULES:
                 _MODULES.append(module)
-        unkept = [gate for gate in GATES if not _KEEPERS[gate]]
-        if unkept:
-            raise Unkept("Local Booru не может работать: в папке программы не хватает её обязательной части "
-                         f"(без ответа остались: {', '.join(unkept)}). Восстановите файлы программы.")
         _READY = True
 
 

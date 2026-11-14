@@ -68,25 +68,3 @@ def should_hide_tag(tag: str, category: str = "general", settings: dict | None =
         if low.startswith(technical_prefixes) or low in {"tagme", "tag_me", "unknown_tag"}:
             return True
     return False
-
-
-DEFAULT_TAG_GROUP_COLORS = {
-    "artist": "#ff3838", "contributor": "#e67e22", "character": "#00a000", "copyright": "#ff54a7",
-    "species": "#22a6b3", "general": "#004cff", "meta": "#ff9900", "lore": "#9b59b6", "invalid": "#7f8c8d",
-    "parody": "#ff54a7", "language": "#cc8800", "category": "#00aaaa",
-    "pages": "#888888",
-}
-
-def tag_display_color(tag: str, category: str = "general", settings: dict | None = None, group_colors: dict | None = None) -> str:
-    """Resolve a visible tag colour: user override first, category colour second."""
-    settings = settings or {}
-    custom = settings.get("tag_colors") or {}
-    key = canonical_tag_key(tag)
-    if isinstance(custom, dict) and key in custom and str(custom.get(key) or "").strip():
-        return str(custom[key])
-    colors = dict(DEFAULT_TAG_GROUP_COLORS)
-    if isinstance(group_colors, dict):
-        colors.update(group_colors)
-    else:
-        colors.update(settings.get("tag_group_colors") or {})
-    return str(colors.get(str(category or "general"), colors["general"]))

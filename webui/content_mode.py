@@ -254,13 +254,16 @@ def switch_mode(req):
     now = str(body.get("mode") or "")
     address = str(body.get("path") or "/")
     phone = bool(getattr(_ANSWERING, "phone", False)) or _phone_path(urlparse(address).path or "/")
-    if phone and now == PHONE_FOLLOWS:
-        prefs.save({"phone_content_mode": ""})
-        now = mode(phone=True)                        # the computer's: where the page goes is by it
-    elif now not in MODES:
+    if not (phone and now == PHONE_FOLLOWS) and now not in MODES:
         return Response.json({"ok": False, "error": "Нет такого режима"}, 400)
-    else:
-        prefs.save({"phone_content_mode": now} if phone else {"content_mode": now})
+    try:
+        if phone and now == PHONE_FOLLOWS:
+            prefs.save({"phone_content_mode": ""})
+            now = mode(phone=True)                    # the computer's: where the page goes is by it
+        else:
+            prefs.save({"phone_content_mode": now} if phone else {"content_mode": now})
+    except OSError:                                  # (v5.44.165) the file stays held (Windows): the mode is as it
+        return Response.json({"ok": False, "error": prefs.HELD_WORDS}, 503)      # was, and the page says so
     return Response.json({"ok": True, "mode": now, "go": after_switch(address, now, req.settings)})
 
 

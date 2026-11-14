@@ -98,10 +98,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 
-from core import manhwa_run as R, manhwa_sources as S
+from core import chapter_numbering as N, manhwa_run as R, manhwa_sources as S
+from core.manhwa_sites.ehentai import is_photo as ehentai_photo
 
 _LOG = logging.getLogger("local_booru.manhwa_get")
 
@@ -112,7 +112,7 @@ WATCH_FILE = "manhwa_watch.json"
 TASK = "manhwa_download"             # the page task of downloads (core/page_jobs): the page's and the nightly round's
 PAGE_WORKERS = 4                     # pictures of one chapter fetched at once
 NAME_MAX = 100
-MANGA_TYPES = {"манга", "западный комикс", "комикс западный", "комикс"}   # turned page by page: the manga folder
+MANGA_TYPES = {"манга", "западный комикс", "комикс западный", "комикс", "manga", "doujinshi", "western"}
 NIGHT = (3, 8)                       # the hours (local) of the nightly round
 AGAIN_AT_NIGHT = 18 * 3600           # a round at night when the last one is older than this
 AGAIN_ANY_TIME = 24 * 3600           # …at any hour, older than this
@@ -128,7 +128,7 @@ RESCUE_DEADLINE = 180.0              # (v5.44.146) …and when a download asks t
 TRUST_SEARCH = 600.0                 # (v5.44.146) seconds a search's «тайтла там нет» is not asked again by a download
 # (v5.44.146) how the searches of the other sites are kept (``source.json`` «helpers_rule»): until now a site that had not
 # answered its search was kept as searched — «тайтла там нет» for a week.  What an earlier rule kept is searched anew once
-HELPERS_RULE = 2
+HELPERS_RULE = 3              # reconsider sites previously rejected for restarted chapter numbers
 
 
 class DownloadError(RuntimeError):
@@ -163,7 +163,7 @@ def chapter_name(ch: S.ChapterRef) -> str:
 # ── where a title goes ────────────────────────────────────────────────────────────────────────────────────────────
 def kind_of(title: S.TitleRef) -> str:
     """"manga" — turned page by page (the manga folder); "manhwa" — a strip."""
-    return "manga" if title.type.strip().lower() in MANGA_TYPES else "manhwa"
+    return "manga" if ehentai_photo(title) or title.type.strip().lower() in MANGA_TYPES else "manhwa"
 
 
 def roots(settings: dict) -> dict:
@@ -297,6 +297,14 @@ def had(folder: Path, site: str) -> dict:
     return out
 
 
+def owned_chapters(folder: Path, title: S.TitleRef) -> dict:
+    """Photo albums need the complete chapter of their exact gallery."""
+    if ehentai_photo(title):
+        from core.parser_ehentai_photos import have
+        return have(folder, title.key)
+    return had(folder, title.site)
+
+
 def is_had(have: dict, ch: S.ChapterRef, by_number: bool = False) -> bool:
     """The folder has this chapter: by its site's id, by its tome and number — (v5.44.62) or by the number alone
     (``by_number``: the title counts its chapters through the tomes, so a number is one chapter); (v5.44.76) or its
@@ -329,13 +337,16 @@ class Helper:
     source: S.Source
     title: S.TitleRef
     chapters: list
-    mode: str                            # how its chapters were found to be the home site's (:func:`meet`): "tn" —
-    #                                      their tomes and numbers agree; "n" — the numbers alone (the tomes differ)
+    mode: str                            # "tn": volume and number; "n": number; "mapped": a proved renumbering
+    mapped: dict = field(default_factory=dict)  # a proved restarted/continuous count: home place → original ref
 
     def reach(self, through: bool) -> tuple:
         """(v5.44.163) Its free chapters as the plan looks them up: ({(tome, number): the chapter}, {number: the
         chapter} — the numbers that are one chapter here, when the home site counts through the tomes
         (``through``); else nothing by the number alone: a number is a chapter of each tome)."""
+        if self.mode == "mapped":
+            places = {place: c for place, c in self.mapped.items() if c.free}
+            return places, {number: c for (_tome, number), c in places.items()} if through else {}
         free = [c for c in self.chapters if c.free and c.number]
         by_place = {(c.tome, c.number): c for c in free}
         if not through:
@@ -374,13 +385,16 @@ class Take:
 
 def meet(home: list, other: list) -> str:
     """How the chapters of two sites meet: "tn" — by tome and number, "n" — by the number alone (one site counts the
-    tomes its own way; the home site counts its chapters through the tomes), "" — they do not (one counts the chapters
-    anew in each tome, the other not).  The home site with no chapters: "tn" — the other's own tomes and numbers.
+    tomes its own way; the home site counts its chapters through the tomes), "mapped" — a restarted/continuous count
+    proved by complete lists and chapter-name anchors, "" — not proved. The caller also checks the titles for "mapped".
+    The home site with no chapters: "tn" — the other's own tomes and numbers.
     (v5.44.163) "n" does not ask any more that no number of the other site be in two tomes (a chapter uploaded
     twice, an extra «0» of every tome — and the whole site was «counted otherwise»): such a number meets by its tome
     alone, the rest by their numbers — as :func:`plan` looks them up."""
     if not home:
         return "tn"
+    if N.different_counts(home, other):
+        return "mapped" if N.reconcile(home, other) else ""
     h = {(c.tome, c.number) for c in home if c.number}
     o = {(c.tome, c.number) for c in other if c.number}
     if not h or not o:
@@ -431,8 +445,16 @@ def plan(title: S.TitleRef, home: S.Source, chapters: list, helpers: list) -> li
     at there (:func:`_tome_for`) — before, a site that agreed with the home site on most tomes brought its last tome
     as chapters of its own, beside the other sites' copies of the same ones (and first in the order)."""
     base = numbering(chapters, helpers)
-    if not chapters:                     # the home site lists none: the first site's own count — the others met with it
-        helpers = [h for h in helpers if h.chapters is base or meet(base, h.chapters)]
+    base_title = title if chapters else next((h.title for h in helpers if h.chapters is base), title)
+    accepted = []
+    for helper in helpers:
+        if N.different_counts(base, helper.chapters):
+            mapped = N.reconcile(base, helper.chapters) if S.same_title(base_title, helper.title) else {}
+            if mapped:
+                accepted.append(replace(helper, mode="mapped", mapped=mapped))
+        elif chapters or helper.chapters is base or meet(base, helper.chapters):
+            accepted.append(helper)
+    helpers = accepted
     through = counted_through(base)
     reach = [(h, *h.reach(through)) for h in helpers]
     takes = []
@@ -457,22 +479,22 @@ def plan(title: S.TitleRef, home: S.Source, chapters: list, helpers: list) -> li
     home_numbers = {c.number for c in chapters}
     slots: dict = {}                     # the place of a chapter the home site has not → the first site's take of it
     for helper, by_place, by_number in reach:
-        for ref in sorted(by_place.values(), key=lambda c: (c.tome, S._number_key(c.number))):
+        for (ref_tome, number), ref in sorted(by_place.items(), key=lambda item: (item[0][0], S._number_key(item[0][1]))):
             if through:                  # a number is one chapter: its place is its number, whatever the site's tome
-                if ref.number in home_numbers or by_number.get(ref.number) is not ref:
+                if number in home_numbers or by_number.get(number) is not ref:
                     continue             # the home site's own chapter — or a number this site has in two tomes
-                slot, tome = ref.number, _tome_for(ref.number, base)
+                slot, tome = number, _tome_for(number, base)
             else:                        # a number is a chapter of each tome: its place — the site's tome and number
-                if (ref.tome, ref.number) in home_places:
+                if (ref_tome, number) in home_places:
                     continue
-                slot, tome = (ref.tome, ref.number), ref.tome
+                slot, tome = (ref_tome, number), ref_tome
             first = slots.get(slot)
             if first is not None:
                 copies = R.options_of(first)             # (v5.44.77) the next site's copy, (v5.44.146) every site's
                 if all(one.source is not helper.source for one in copies):
                     copies[-1].alt = Take(first.ch, helper.source, helper.title, ref, helped=True)
                 continue
-            ch = S.ChapterRef(id=f"{helper.source.name}:{ref.id}", tome=tome, number=ref.number, name=ref.name,
+            ch = S.ChapterRef(id=f"{helper.source.name}:{ref.id}", tome=tome, number=number, name=ref.name,
                               date=ref.date, url=ref.url)
             slots[slot] = Take(ch, helper.source, helper.title, ref, helped=True)
             takes.append(slots[slot])
@@ -482,14 +504,15 @@ def plan(title: S.TitleRef, home: S.Source, chapters: list, helpers: list) -> li
 
 
 def worth_asking(title: S.TitleRef, chapters: list) -> bool:
-    """The other sites may have what the home site lacks: it has no chapters, or a paid one, or the title still comes
-    out (a finished one, all free, has nothing more to come)."""
-    if not chapters or any(not c.free for c in chapters):
+    """The other sites may have what the home site lacks: no chapters, a paid one, unconfirmed reading access, or
+    a title that still comes out (a finished one with confirmed free chapters has nothing more to come)."""
+    if not chapters or any(not c.free for c in chapters) or \
+            getattr(S.by_name(title.site), "chapter_access_unknown", False):
         return True
     return not re.match(r"(?i)\s*(заверш|законч|выпуск прекращ)", title.status or "")
 
 
-LEGACY_SEARCHED = ("remanga", "recomics", "mangalib", "mangabuff")   # (v5.44.73) what a search before 5.44.73 asked
+LEGACY_SEARCHED = S.legacy_searched_sites()   # what a search before 5.44.73 asked, not the present search roster
 
 
 def _team_names(team: str) -> set:
@@ -601,6 +624,8 @@ def _ask(net: S.Net, asked: _Asked, title: S.TitleRef, chapters: list, *, team: 
             else:
                 theirs = site.chapters(net, other, best.id if best else "")
                 mode = meet(chapters, theirs)
+                if mode == "mapped" and not S.same_title(title, other):
+                    mode = ""
                 if not mode:
                     say(f"{site.label}: «{other.title}» — главы там считаются иначе, оттуда не беру")
                 else:
@@ -813,7 +838,7 @@ class Found:
             "asking": list(self.asking), "late": list(self.late),     # (v5.44.117) the other sites, asked at once
             "follow": self.follow_on,                                  # (v5.44.116) the box «Новые главы» ticked by it
             "licensed": self.title.licensed, "notes": list(self.notes), "asked": self.asked,
-            "kind": self.kind, "folder": self.folder, "cover": bool(self.cover),
+            "kind": self.kind, "folder": self.folder, "cover": bool(self.cover), "eh_photo": ehentai_photo(self.title),
             "first": self.chapters[0].label if self.chapters else "", "last": self.chapters[-1].label if self.chapters else "",
             "updated": _date(self.chapters[-1].date) if self.chapters else "",      # (v5.44.87) the newest one's date
             "list": self.tiles(takes),
@@ -876,12 +901,17 @@ def look(url: str, settings: dict, *, branch: str = "", net: "S.Net | None" = No
         say(notes[-1])
     except S.SourceError as exc:
         raise DownloadError(str(exc)) from exc
-    kind = where if where in ("manhwa", "manga") else kind_of(title)
+    photo = ehentai_photo(title)
+    if photo:
+        helpers, about = False, False  # A photo album keeps its own pages and metadata, not a comic with the same name.
+    kind = "manga" if photo else where if where in ("manhwa", "manga") else kind_of(title)
     root = roots(settings).get(kind) or ""
+    linked = linked_folder(settings, title.site, title.key)
+    if photo and not root and linked is None:
+        raise DownloadError("Укажите папку манги в Настройках — галерея E-Hentai скачивается в «Манга»")
     if kind == "manga" and not root:
         kind, root = "manhwa", roots(settings)["manhwa"]
-    linked = linked_folder(settings, title.site, title.key)
-    if linked is not None and where in ("", linked[0]):     # (v5.44.76) a folder already its: there, either library
+    if linked is not None and (photo or where in ("", linked[0])):  # Keep an existing exact gallery once, where it is.
         kind, folder = linked
     else:
         folder = folder_for(Path(root), title) if root else Path(safe_name(title.title))
@@ -902,8 +932,8 @@ def look(url: str, settings: dict, *, branch: str = "", net: "S.Net | None" = No
     if stored is None:
         stored = read_source(folder) if (folder / LB_DIR / SOURCE_FILE).is_file() else {}
     found = Found(title=title, branch=chosen, chapters=chapters, kind=kind, folder=str(folder),
-                  have=had(folder, title.site), cover=picture, cover_type=picture_type,
-                  helpers_on=bool(stored.get("helpers_on", True)),
+                  have=owned_chapters(folder, title), cover=picture, cover_type=picture_type,
+                  helpers_on=not photo and bool(stored.get("helpers_on", True)),
                   follow_on=follow_choice(stored),                     # (v5.44.116)
                   helper_record={k: stored[k] for k in ("helpers", "helpers_at", "helpers_sites", "helpers_rule")
                                  if k in stored},
@@ -1155,8 +1185,8 @@ def _cover_of(net: S.Net, source: S.Source, title: S.TitleRef) -> tuple:
     raise first or S.SourceError(f"{source.label}: обложка не пришла")
 
 
-UNKNOWN_LINK = ("Эту ссылку программа не знает: нужна страница тайтла на Remanga, ReComics, MangaLib, MangaBuff, "
-                "ReadManga, Desu, com-x.life, Manga One Love, MangaDex, HentaiLib, AllHentai, Хентай-тян или Nude-Moon")
+# ((v5.44.169) the sites named — every site there is: «… на Remanga, ReComics, … Хентай-тян или Nude-Moon»)
+UNKNOWN_LINK = "Эту ссылку программа не знает: нужна страница тайтла на " + S.labels_said()
 
 
 def _by_link_name(net: S.Net, source: S.Source, key: str, why: S.SourceError, say, *, name: str = "") -> tuple:
@@ -1231,16 +1261,6 @@ def _now() -> float:
     return time.time()
 
 
-def _iso_ready(free_at: str) -> bool:
-    """A paid chapter's date has come (its site says it is free from then)."""
-    m = re.match(r"(\d{4})-(\d\d)-(\d\d)(?:[T ](\d\d):(\d\d))?", str(free_at or ""))
-    if not m:
-        return False
-    when = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4) or 0), int(m.group(5) or 0),
-                    tzinfo=timezone.utc)
-    return when.timestamp() <= _now()
-
-
 def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt, night: bool = False) -> str:
     """One chapter into ``folder``: its pictures into ``.lb/partial/<name>`` (another site's — ``<name> (<site>)``: two
     sites' pictures never mix), then the whole folder moved in.  The chapter's folder (its name in the title's
@@ -1300,7 +1320,7 @@ def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt, night: bool = F
     (partial / "chapter.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     target, n = folder / name, 2
     while target.exists():
-        if is_had(had(folder, title.site), ch):
+        if is_had(owned_chapters(folder, title), ch):
             shutil.rmtree(partial, ignore_errors=True)            # the same chapter came meanwhile
             return target.name
         target = folder / f"{name} ({n})"
@@ -1312,7 +1332,7 @@ def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt, night: bool = F
     return target.name
 
 
-def _write_title(net: S.Net, source: S.Source, found: Found, folder: Path) -> None:
+def _write_title(net: S.Net, source: S.Source, found: Found, folder: Path, *, stop_check=None) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     info_path = folder / "info.json"
     info = found.title.info()
@@ -1341,11 +1361,20 @@ def _write_title(net: S.Net, source: S.Source, found: Found, folder: Path) -> No
         if found.about is None and old.get("info_site") and old.get("info_site") != found.title.site:
             fresh = {k: v for k, v in fresh.items() if k not in ABOUT_KEYS}   # (v5.44.112) the other site's stays
         info = {**old, **fresh}
+    # Archive relinks may be cancelled while the owner's chosen cover is fetched.
+    # Finish that fetch before committing any description for the superseded title.
+    has_cover = any((folder / f"cover{ext}").is_file() for ext in set(TYPES.values()))
+    if stop_check:
+        if stop_check():
+            return
+        if not has_cover:
+            _first_cover(found, folder, stop_check=stop_check)
+        if stop_check():
+            return
     tmp = info_path.with_suffix(".json.part")
     tmp.write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
     os.replace(tmp, info_path)
-    has_cover = any((folder / f"cover{ext}").is_file() for ext in set(TYPES.values()))
-    if not has_cover:
+    if not has_cover and not stop_check:
         _first_cover(found, folder)
 
 
@@ -1356,7 +1385,7 @@ def cover_ids(found: Found) -> list:
                               + [f"{c['site']}:{c['key']}" for c in found.covers if c.get("key")]))
 
 
-def _first_cover(found: Found, folder: Path) -> None:
+def _first_cover(found: Found, folder: Path, *, stop_check=None) -> None:
     """The cover of a folder that has none: (v5.44.123) the one the owner chose while the title had no folder (the menu
     of covers), else the one the title was found with; what it is — noted (the menu knows the folder's is that site's)."""
     from core import title_covers as TC
@@ -1367,7 +1396,7 @@ def _first_cover(found: Found, folder: Path) -> None:
         if got is not None and _picture_type(got[0], got[1]):
             picture = got[0]
             came = {k: choice.get(k) for k in ("how", "site", "url", "file") if choice.get(k)}
-    if not picture:
+    if not picture or stop_check and stop_check():
         return
     ext = _picture_type(picture, found.cover_type) or ".jpg"
     (folder / f"cover{ext}").write_bytes(picture)
@@ -1424,11 +1453,11 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
     say = say or (lambda _text: None)
     stop_check = stop_check or (lambda: False)
     net = net or S.Net(stop_check)
-    use = found.helpers_on if helpers is None else bool(helpers)
+    use = not ehentai_photo(found.title) and (found.helpers_on if helpers is None else bool(helpers))
     source = S.by_name(found.title.site)
     folder = Path(found.folder)
     try:                     # (v5.44.107) the folder as it is now: a download that waited in the queue was found before
-        found.have = had(folder, found.title.site)     # the one ahead of it put chapters there (perhaps of this title)
+        found.have = owned_chapters(folder, found.title)  # the one ahead of it might have put chapters there
     except OSError as exc:
         _LOG.info("the folder %s not read again before its download: %s", folder, exc)
     new = found.new(use)
@@ -1706,7 +1735,7 @@ def _round(titles: list, settings: dict, say, stop_check, net: S.Net, here) -> t
             continue
         if Path(found.folder) != folder:              # the folder was renamed by hand: it stays where it is
             found.folder = str(folder)
-            found.have = had(folder, found.title.site)
+            found.have = owned_chapters(folder, found.title)
         skipped = {str(x) for x in data.get("skipped") or []}     # (v5.44.74) left unticked on the page: not taken
         new = [t for t in found.new() if t.id not in skipped]
         if not new:

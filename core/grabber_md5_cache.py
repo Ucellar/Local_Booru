@@ -357,31 +357,6 @@ def upsert_item(settings: dict | None, item: dict | None, *, thumb_path: str | P
     return True
 
 
-def lookup_posts_by_md5(settings: dict | None, md5: str, *, limit: int = 50) -> list[dict]:
-    if not enabled(settings):
-        return []
-    md5 = _normalize_md5(md5)
-    if not md5:
-        return []
-    out: list[dict] = []
-    try:
-        with _connect(settings) as con:
-            rows = con.execute(
-                "SELECT payload_z FROM grabber_post_cache WHERE md5=? ORDER BY updated_at DESC LIMIT ?",
-                (md5, int(limit or 50)),
-            ).fetchall()
-        for (payload_z,) in rows:
-            try:
-                data = json.loads(zlib.decompress(payload_z).decode("utf-8", "replace"))
-                if isinstance(data, dict):
-                    out.append(data)
-            except Exception:
-                continue
-    except Exception:
-        return []
-    return out
-
-
 def post_count(settings: dict | None = None) -> int:
     try:
         with _connect(settings) as con:

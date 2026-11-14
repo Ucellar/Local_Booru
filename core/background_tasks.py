@@ -202,25 +202,6 @@ class BackgroundTaskRegistry:
     def cancel(self, task_id: str | None = None, *, detail: str = "") -> bool:
         return self.update(task_id, state="cancelled", detail=detail, progress_text="остановлено", touch=True)
 
-    def request_cancel(self, task_id: str) -> bool:
-        key = str(task_id or "")
-        callback = None
-        with self._lock:
-            row = self._tasks.get(key)
-            if not row or row.get("state") not in ACTIVE_STATES or not row.get("cancellable"):
-                return False
-            row["cancel_requested"] = True
-            row["state"] = "cancelling"
-            row["progress_text"] = "запрошена остановка"
-            row["last_activity_at"] = time.time()
-            callback = row.get("cancel_callback")
-        if callable(callback):
-            try:
-                callback()
-            except Exception:
-                return False
-        return True
-
     @contextmanager
     def task(
         self,
@@ -321,13 +302,6 @@ class BackgroundTaskRegistry:
                 stale.append(row)
         stale.sort(key=lambda row: float(row.get("effective_idle_seconds") or 0.0), reverse=True)
         return stale
-
-    def clear_finished(self) -> int:
-        with self._lock:
-            keys = [key for key, row in self._tasks.items() if row.get("state") in TERMINAL_STATES]
-            for key in keys:
-                self._tasks.pop(key, None)
-            return len(keys)
 
     # ------------------------------------------------------------------ internals
     def _touch_ancestors_locked(self, child_id: str, now: float, detail: str) -> None:

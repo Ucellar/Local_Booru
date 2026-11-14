@@ -8,6 +8,7 @@ pause, the file deferred; the 30-second one — its window waited out and the fi
 from __future__ import annotations
 
 import re
+import math
 import time
 
 from core.parser.http import HttpFailure
@@ -107,7 +108,7 @@ class SauceNao(ReverseService):
                                   detail=f"пауза ({why})" if why else "пауза после лимита")
         from core.http_rate_limiter import SauceNAOQuotaDeferred, take_saucenao_admission_serial
         params = {
-            "api_key": self._key(), "output_type": 2, "numres": 6,
+            "api_key": self._key(), "output_type": 2, "numres": 16 if self._manga_on() else 6,
             "dedupe": self.ctx.setting_int("saucenao_dedupe", 1, 0, 2),
             "hide": self.ctx.setting_int("saucenao_hide", 0, 0, 3),
         }
@@ -115,9 +116,18 @@ class SauceNao(ReverseService):
         if dbs:
             params["dbs[]"] = dbs + self._manga_indexes(dbs)
         elif str(self.ctx.settings.get("saucenao_dbmask") or "").strip():
-            params["dbmask"] = str(self.ctx.settings.get("saucenao_dbmask")).strip()
+            mask = str(self.ctx.settings.get("saucenao_dbmask")).strip()
+            if self._manga_on() and mask.isdigit():
+                # Official index_details.txt: #17 is reserved; bits are not simply 1 << index.
+                # #18=0x20000, #36=0x800000000, #37=0x1000000000, #38=0x2000000000.
+                mask = str(int(mask) | 0x3800020000)
+            params["dbmask"] = mask
         else:
-            params["db"] = self.ctx.setting_int("saucenao_db", 999, 0, 999)
+            selected = self.ctx.setting_int("saucenao_db", 999, 0, 999)
+            if selected != 999 and self._manga_on():
+                params["dbs[]"] = [selected, *self._manga_indexes([selected])]
+            else:
+                params["db"] = selected
         serial = 0
         try:
             response = self.http.post_file(API, upload_path, params=params)
@@ -185,11 +195,13 @@ class SauceNao(ReverseService):
 
     def _manga_indexes(self, dbs: list) -> list:
         """(v5.44.164) SauceNAO's indexes of manga, added to the ones the person chose («saucenao_dbs»): the same one
-        search then says whether the picture is a page of a manga.  Every index asked (the default) has them already."""
+        search then says whether the picture is a page of a manga.  Every index asked (the default) has them already.
+        (v5.44.170) Its indexes of hentai manga too (nhentai's and e-hentai's galleries: ``manga_pictures.
+        HENTAI_INDEXES``) — a page of a gallery lying loose is a page of a manga as well."""
         if not self._manga_on():
             return []
-        from core.manga_pictures import INDEXES
-        return [index for index in INDEXES if index not in dbs]
+        from core.manga_pictures import HENTAI_INDEXES, INDEXES     # (v5.44.170) …and its indexes of hentai manga
+        return [index for index in (*INDEXES, *HENTAI_INDEXES) if index not in dbs]
 
     def _manga(self, data: dict) -> list:
         """(v5.44.164) The manga the answer names (``manga_pictures.manga_hits``); said in the journal with the other
@@ -266,14 +278,16 @@ class SauceNao(ReverseService):
             pass
 
     def _collect(self, result: dict, min_sim: float, outcome: ReverseOutcome) -> None:
-        head = result.get("header") or {}
-        data = result.get("data") or {}
+        if not isinstance(result, dict):
+            return
+        head = result.get("header") if isinstance(result.get("header"), dict) else {}
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
         try:
             sim = float(head.get("similarity") or 0)
         except (TypeError, ValueError):
             return
         title = str(data.get("title") or data.get("source") or head.get("index_name") or "")
-        if sim < min_sim:
+        if not math.isfinite(sim) or not min_sim <= sim <= 100:
             return
         urls = []
         for key, template in _ID_URLS.items():

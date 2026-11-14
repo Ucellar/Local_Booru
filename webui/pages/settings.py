@@ -777,8 +777,10 @@ def frame(active: str, content: str, *, here: bool = False, find: str = "") -> s
     search = (f'<form class="sx-search" role="search" action="/settings" method="get">{icon("search")}'
               f'<input type="search" name="q" value="{esc(find)}" placeholder="Найти настройку" autocomplete="off" '
               'spellcheck="false" aria-label="Найти настройку"></form>')
-    return (f'<div class="sx-body"><nav class="sx-nav" aria-label="Разделы настроек">{search}{"".join(links)}</nav>'
-            f'<div class="sx-main">{content}</div></div>')
+    from core.version import VERSION               # (v5.44.165) which version is running — under the sections
+    version = f'<p class="sx-version">Local Booru {esc(VERSION)}</p>'
+    return (f'<div class="sx-body"><nav class="sx-nav" aria-label="Разделы настроек">{search}{"".join(links)}'
+            f'{version}</nav><div class="sx-main">{content}</div></div>')
 
 
 def in_frame(active: str, body: str, tabs: tuple = ()) -> str:
@@ -936,7 +938,11 @@ def _save_looks(body: dict) -> Response:
     side = changes.pop("side_all", "")
     if side != now["side_all"]:                 # (v5.44.161) every page's side at once: given, or each look's own again
         changes.update({vkey: side for vkey in prefs.VARIANT_KEYS})
-    prefs.save(changes)
+    try:
+        prefs.save(changes)
+    except OSError as exc:                       # (v5.44.165) the file stays held (Windows): said beside «Сохранить»
+        _LOG.warning("web gallery preferences not saved: %s", exc)
+        return Response.json({"ok": False, "error": prefs.HELD_WORDS}, 503)
     new = prefs.look("settings")
     reload = (new["skin"], new["variant"]) != (was["skin"], was["variant"]) or changes.get("motion") != now["motion"]
     return Response.json({"ok": True, "message": "Сохранено", "reload": reload})

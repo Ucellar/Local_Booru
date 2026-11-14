@@ -73,6 +73,32 @@ def _restore_later() -> None:
     threading.Thread(target=later, name="manga-download-restore", daemon=True).start()
 
 
+def begin(settings: dict, numbers: list, before: str = "") -> dict:
+    """(v5.44.170) Galleries the program downloads by itself (``core/parser_manga_nhentai.py``: the pages a copy of a
+    folder of the parser's misses; ``core/parser_loose.py``: the gallery a loose picture is a page of) — begun as
+    «Скачать» of this page begins them: they join the download going, else a download of their own begins (the same
+    page task: «Загрузки» show it, its queue is kept for the next run).  {"ok", "queued" — their place among the ones
+    waiting (0 — a download of their own, or they are in it already), "error" — why none began}."""
+    import time as _time
+    from core import manga_download, page_jobs
+    numbers = [int(n) for n in numbers if str(n).isdigit() and int(n) > 0][:manga_download.MAX_AT_ONCE]
+    if not numbers:
+        return {"ok": False, "error": "нет галерей"}
+    root = M.manga_root(settings)
+    if not root or not Path(root).is_dir():
+        return {"ok": False, "error": "папки манги нет на месте"}
+    for _try in range(25):                              # (a download ending this moment is waited for a little)
+        places = manga_download.add(numbers)
+        if places is not None:
+            return {"ok": True, "queued": min([place for place in places if place] or [0])}
+        try:
+            page_jobs.start(GET, _label(numbers, before), _run_of(numbers, Path(root)))
+            return {"ok": True, "queued": 0}
+        except page_jobs.TaskBusy:
+            _time.sleep(0.2)
+    return {"ok": False, "error": "скачивание с nhentai занято"}
+
+
 def _label(numbers: list, before: str = "") -> str:
     from webui.pages.post_sets import plural
     return before + (f"Скачать с nhentai: {numbers[0]}" if len(numbers) == 1 else

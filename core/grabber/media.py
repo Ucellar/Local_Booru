@@ -50,15 +50,6 @@ def _slot(host: str) -> threading.BoundedSemaphore:
         return _SLOTS[host]
 
 
-def _pick(card: dict, variant: str) -> tuple[dict, str]:
-    """(entry, URL): the preview — the first site's; the sample — the first site that has one."""
-    for item in card["entries"]:
-        url = item.get("preview") if variant == "preview" else (item.get("sample") or item.get("preview"))
-        if url:
-            return item, url
-    return card["entries"][0], ""
-
-
 def _cache_path(url: str) -> Path:
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
     return cache_dir() / digest[:2] / digest

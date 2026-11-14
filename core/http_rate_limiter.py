@@ -10,6 +10,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from urllib.parse import urlparse
+from core.quiet import passed as let_pass
 
 
 class RequestCancelled(InterruptedError):
@@ -119,7 +120,7 @@ def take_saucenao_admission_serial() -> int:
     try:
         _QUOTA_TLS.saucenao_admission_serial = 0
     except Exception:
-        pass
+        let_pass("core.http_rate_limiter.take_saucenao_admission_serial")
     return value
 
 
@@ -127,7 +128,7 @@ def _set_saucenao_admission_serial(value: int) -> None:
     try:
         _QUOTA_TLS.saucenao_admission_serial = int(value or 0)
     except Exception:
-        pass
+        let_pass("core.http_rate_limiter._set_saucenao_admission_serial")
 
 def _host_from_url(url: str) -> str:
     try:
@@ -169,14 +170,14 @@ def _delay_for(host: str, settings: dict | None = None) -> float:
         if isinstance(by_host, dict) and h in by_host:
             return max(0.0, float(by_host[h]))
     except Exception:
-        pass
+        let_pass("core.http_rate_limiter._delay_for")
     custom = settings.get("http_rate_limit_seconds", settings.get("http_min_interval_seconds", None))
     base = float(_SITE_DELAYS.get(h, _DEFAULT_DELAY))
     try:
         if custom is not None and str(custom).strip() != "":
             base = max(0.0, float(custom))
     except Exception:
-        pass
+        let_pass("core.http_rate_limiter._delay_for#2")
     learned = _LEARNED_DELAY.get(h)
     return max(base, learned) if learned else base
 
@@ -200,7 +201,7 @@ def _requests_per_minute_for(host: str, settings: dict | None = None) -> int | N
             value = int(overrides[h])
             return value if value > 0 else None
     except Exception:
-        pass
+        let_pass("core.http_rate_limiter._requests_per_minute_for")
     return _LEARNED_RPM.get(h) or _SITE_RPM.get(h)
 
 

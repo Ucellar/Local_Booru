@@ -20,6 +20,7 @@ import platform
 from pathlib import Path
 from typing import Callable, TypeVar
 from core.redaction import sanitize_text, sanitize_log_directory
+from core.quiet import passed as let_pass
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
@@ -94,8 +95,10 @@ def _write_crash_snapshot(message: str) -> str:
         from core.database.connection import db_path
         settings = load_settings()
         database = db_path(settings)
+        from core.version import VERSION
         payload = {
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "version": VERSION,                                 # (v5.44.165)
             "python": sys.version,
             "platform": platform.platform(),
             "database": str(database),
@@ -135,7 +138,7 @@ def install_global_exception_handler(app=None) -> None:
                 box.setStandardButtons(QMessageBox.StandardButton.Ok)
                 box.exec()
         except Exception:
-            pass
+            let_pass("core.stability.install_global_exception_handler._handle")
 
     sys.excepthook = _handle
 
@@ -149,7 +152,7 @@ def install_global_exception_handler(app=None) -> None:
                 False,
             )
         except Exception:
-            pass
+            let_pass("core.stability.install_global_exception_handler")
 
 
 def safe_call(fn: Callable, *args, default=None, label: str = "", **kwargs):
@@ -269,7 +272,7 @@ def maybe_backup_db(settings: dict, max_backups: int = 5) -> str | None:
                 old.unlink()
                 _log.info("Removed old backup: %s", old.name)
             except Exception:
-                pass
+                let_pass("core.stability.maybe_backup_db")
 
         return str(dst)
     except Exception as e:
@@ -278,88 +281,6 @@ def maybe_backup_db(settings: dict, max_backups: int = 5) -> str | None:
 
 
 # ── File maintenance ──────────────────────────────────────────────────────────
-
-def run_file_maintenance(settings: dict, log: Callable | None = None,
-                         max_check: int = 5000) -> dict:
-    """Compatibility wrapper for the non-destructive presence scanner.
-
-    Older builds marked every absent path deleted.  That was unsafe when an
-    archive drive was offline.  v435 records present/missing/offline_root/
-    path_error and never changes ``images.deleted``.
-    """
-    log = log or _log.info
-    from core.file_integrity import run_presence_check
-    result = run_presence_check(
-        settings, mode="forced", max_files=max(0, int(max_check or 0)), progress=log
-    )
-    return {
-        "checked": int(result.get("checked") or 0),
-        "missing": int(result.get("missing") or 0),
-        "offline_root": int(result.get("offline_root") or 0),
-        "errors": int(result.get("path_error") or 0),
-        "cancelled": bool(result.get("cancelled")),
-    }
-
-
-def check_recent_media_after_crash(settings: dict, log: Callable | None = None, limit: int = 250) -> dict:
-    """Verify recently written media after an unclean shutdown.
-
-    The full archive may contain tens of thousands of files; after a crash we
-    inspect only the most recently indexed live rows and persist detected
-    damage as integrity issues for the existing repair/inspection tools.
-    """
-    log = log or _log.info
-    result = {"checked": 0, "damaged": 0, "missing": 0}
-    image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-    video_exts = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
-    try:
-        from core.database.connection import db
-        with db(settings, readonly=True) as con:
-            rows = con.execute(
-                "SELECT id,path,is_video FROM images WHERE deleted=0 ORDER BY mtime_ns DESC, id DESC LIMIT ?",
-                (int(limit),),
-            ).fetchall()
-        issues = []
-        for row in rows:
-            result["checked"] += 1
-            path = Path(str(row["path"] or ""))
-            issue = ""
-            if not path.exists() or not path.is_file():
-                result["missing"] += 1
-                issue = "missing_after_crash"
-            else:
-                try:
-                    if path.stat().st_size <= 0:
-                        issue = "zero_size_after_crash"
-                    elif path.suffix.lower() in image_exts:
-                        from PIL import Image
-                        with Image.open(path) as im:
-                            im.verify()
-                    elif bool(row["is_video"]) or path.suffix.lower() in video_exts:
-                        # Full decoding would be expensive. A zero/truncated file
-                        # is caught here; normal playback remains the final test.
-                        if path.stat().st_size < 64:
-                            issue = "truncated_video_after_crash"
-                except Exception as exc:
-                    issue = f"unreadable_media_after_crash: {type(exc).__name__}"
-            if issue:
-                result["damaged"] += 1
-                issues.append((str(issue), int(row["id"]), str(path)))
-        if issues:
-            now = int(time.time())
-            with db(settings, write=True) as con:
-                for issue, image_id, path in issues:
-                    con.execute(
-                        "INSERT INTO integrity_issues(issue_type,severity,image_id,path,details,status,created_at) VALUES(?,?,?,?,?,'open',?)",
-                        ("media_after_crash", "warning", image_id, path, issue, now),
-                    )
-            log(f"[Stability] Crash media check: found {len(issues)} suspect recent file(s).")
-        else:
-            log(f"[Stability] Crash media check: {result['checked']} recent file(s) look OK.")
-    except Exception as exc:
-        _log.error("Crash media check failed: %s", exc)
-    return result
-
 
 def sample_live_media_paths(settings: dict, log: Callable | None = None, limit: int = 1000) -> dict:
     """Sample live DB paths at startup without walking the whole archive.
@@ -526,7 +447,7 @@ def swallow(label: str):
         try:
             _log.warning("Swallowed non-critical error [%s]: %s", label, exc, exc_info=True)
         except Exception:
-            pass
+            let_pass("core.stability.swallow")
 
 
 # ── Startup checks ────────────────────────────────────────────────────────────
@@ -539,7 +460,7 @@ def write_shutdown_flag(settings: dict, bad: bool = False) -> None:
         flag.parent.mkdir(parents=True, exist_ok=True)
         flag.write_text("bad" if bad else "ok", encoding="utf-8")
     except Exception:
-        pass
+        let_pass("core.stability.write_shutdown_flag")
 
 
 def was_last_shutdown_bad(settings: dict) -> bool:
@@ -685,7 +606,7 @@ def run_deferred_db_health_check(settings: dict, log: Callable | None = None) ->
         try:
             record_health_event(settings, "ok", "background quick_check ok", check_type="deferred_quick_check")
         except Exception:
-            pass
+            let_pass("core.stability.run_deferred_db_health_check")
         log("[Stability] Background DB health check OK")
         return results
     except Exception as exc:

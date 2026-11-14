@@ -5,6 +5,12 @@ import time
 import threading
 from pathlib import Path
 
+# (v5.44.165) The program lives on the code it started with (core/started_code.py): an update copied into the folder
+# while it runs works from the next start, whole — before anything else of the program is imported.
+from core import started_code
+started_code.install()
+from core.quiet import passed as let_pass
+
 # ── Early visible startup console ─────────────────────────────────────────────
 # This runs before PySide6/Qt imports and before SQLite startup checks, so a
 # double-clicked Windows launch no longer looks like a silent hang in Task
@@ -40,12 +46,12 @@ def _startup_log(message: str) -> None:
     try:
         print(line, flush=True)
     except Exception:
-        pass
+        let_pass("app._startup_log")
     try:
         with _STARTUP_LOG_FILE.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
-        pass
+        let_pass("app._startup_log#2")
 
 
 def _ensure_startup_console() -> None:
@@ -64,7 +70,7 @@ def _ensure_startup_console() -> None:
             kernel32.SetConsoleOutputCP(65001)
             kernel32.SetConsoleCP(65001)
         except Exception:
-            pass
+            let_pass("app._ensure_startup_console")
         # pythonw.exe starts with stdout/stderr detached. Rebind them to the
         # newly allocated console so print/logging becomes visible immediately.
         try:
@@ -72,9 +78,9 @@ def _ensure_startup_console() -> None:
             sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
             sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="replace")
         except Exception:
-            pass
+            let_pass("app._ensure_startup_console#2")
     except Exception:
-        pass
+        let_pass("app._ensure_startup_console#3")
 
 
 def _startup_heartbeat() -> None:
@@ -93,7 +99,7 @@ def _startup_heartbeat() -> None:
             with _STARTUP_LOG_FILE.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except Exception:
-            pass
+            let_pass("app._startup_heartbeat")
 
 
 def _enable_console_logging() -> None:
@@ -109,52 +115,38 @@ def _enable_console_logging() -> None:
         handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
         root.addHandler(handler)
     except Exception:
-        pass
+        let_pass("app._enable_console_logging")
 
 
 _ensure_startup_console()
 try:
     _STARTUP_LOG_FILE.write_text("", encoding="utf-8")
 except Exception:
-    pass
+    let_pass("app")
 _startup_log("процесс создан; ранняя консоль включена")
+try:
+    from core.version import VERSION as _VERSION
+except ImportError:                              # (a folder without the file: the program says so and goes on)
+    _VERSION = ""
+_startup_log(f"Local Booru {_VERSION}" if _VERSION else "Local Booru (версия не прочитана: нет core/version.py)")
 try:
     threading.Thread(target=_startup_heartbeat, name="startup-heartbeat", daemon=True).start()
 except Exception:
-    pass
+    let_pass("app#2")
 
 _startup_log("импорт PySide6 / Qt")
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QIcon
 _startup_log("PySide6 импортирован")
 
-from core.paths import ERROR_LOG_FILE
-from core.redaction import sanitize_text
-
 try:
     from core.image_safe import configure_pillow
     configure_pillow()
 except Exception:
-    pass
+    let_pass("app#3")
 
 from core.settings import load_settings
 from core.tagger import cleanup_preview_cache
-
-
-def _log_exception(exc_type, exc, tb):
-    import traceback, time
-    text = sanitize_text("".join(traceback.format_exception(exc_type, exc, tb)))
-    text = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] " + text
-    try:
-        ERROR_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with ERROR_LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(text + "\n")
-    except Exception:
-        pass
-    try:
-        print(text, file=sys.stderr)
-    except Exception:
-        pass
 
 
 def _workspace_available_or_restart() -> bool:
@@ -355,7 +347,7 @@ def main() -> int:
     _enable_console_logging()
     import logging
     _applog = logging.getLogger("local_booru")
-    _applog.info("=== Local Booru starting ===")
+    _applog.info("=== Local Booru %s starting ===", _VERSION or "(version unknown)")
     try:
         from core.paths import DATA_DIR, SETTINGS_FILE, WORKSPACE_POINTER_FILE, STABLE_WORKSPACE_POINTER_FILE
         _startup_log(f"workspace DATA_DIR: {DATA_DIR}")
@@ -365,12 +357,12 @@ def main() -> int:
         _applog.info("Workspace DATA_DIR: %s", DATA_DIR)
         _applog.info("Workspace SETTINGS_FILE: %s", SETTINGS_FILE)
     except Exception:
-        pass
+        let_pass("app.main")
 
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LocalBooru.App")
     except Exception:
-        pass
+        let_pass("app.main#2")
 
     # ── HiDPI / multi-resolution support ──────────────────────────────
     try:
@@ -380,7 +372,7 @@ def main() -> int:
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
     except Exception:
-        pass
+        let_pass("app.main#3")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
@@ -405,20 +397,8 @@ def main() -> int:
     _startup_log("создание QApplication")
     app = QApplication(sys.argv)
     _startup_log("QApplication создан")
-    # (v5.44.147) The program's gates: every one of them must have its keeper (``core/gates.py``) — else no start.
-    try:
-        from core import gates as _gates
-        _gates.ready()
-    except Exception as _gates_error:
-        _startup_log(f"программа не запускается: {_gates_error}")
-        _applog.error("The program is not whole: %s", _gates_error)
-        try:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.critical(None, "Local Booru", str(_gates_error))
-        except Exception:
-            pass
-        _STARTUP_DONE = True
-        return 4
+    from core import gates as _gates
+    _gates.ready()                                     # available handlers are optional and loaded once
     if not _workspace_available_or_restart():
         _STARTUP_DONE = True
         return 3
@@ -439,7 +419,7 @@ def main() -> int:
             try:
                 _applog.warning("Startup language dialog failed: %s", _language_dialog_error)
             except Exception:
-                pass
+                let_pass("app.main#5")
         # v458: one process-wide media-download gate. An environment override
         # is useful for headless/tests; otherwise the user may choose on every
         # launch without changing the persistent default.
@@ -466,7 +446,7 @@ def main() -> int:
             try:
                 _applog.warning("Startup download-policy dialog failed: %s", _download_policy_error)
             except Exception:
-                pass
+                let_pass("app.main#6")
     except Exception as _first_settings_error:    # the window reads the settings again and says what is wrong
         _applog.warning("Settings not read for the questions at the start: %s", _first_settings_error)
     app.setStyle("Fusion")
@@ -652,7 +632,7 @@ def main() -> int:
                     + str(_cleanup_error),
                 )
             except Exception:
-                pass
+                let_pass("app.main#7")
             _STARTUP_DONE = True
             return 2
         _applog.warning("Startup cache/.part cleanup failed: %s", _cleanup_error)
@@ -680,7 +660,7 @@ def main() -> int:
                     _s.pop("window_h", None)
                     _ctx.save_settings()
     except Exception:
-        pass
+        let_pass("app.main#8")
 
     # ── Optional filesystem watcher / incremental indexing ─────────────
     watcher = None
@@ -727,7 +707,7 @@ def main() -> int:
                 if is_shutting_down():
                     return None
             except Exception:
-                pass
+                let_pass("app.main._start_browser_companion_when_schema_ready")
             _startup_log("запуск Browser Companion API")
             from core.browser_companion_api import start_browser_companion_api
             from core.shutdown import register as _shutdown_register
@@ -821,7 +801,7 @@ def main() -> int:
                 + str(_db_startup_results.get("db_integrity", "")),
             )
         except Exception:
-            pass
+            let_pass("app.main#9")
 
     # aboutToQuit happens while Qt is still closing.  Do not mark the previous
     # run as clean here; post-UI SQLite/backup maintenance still has to finish.
@@ -836,7 +816,7 @@ def main() -> int:
             from core.shutdown import begin_shutdown
             begin_shutdown()
         except Exception:
-            pass
+            let_pass("app.main._on_qt_about_to_quit")
     app.aboutToQuit.connect(_on_qt_about_to_quit)
 
     _startup_log("Qt event loop запущен")
@@ -883,7 +863,7 @@ def main() -> int:
                 from core.stability import write_shutdown_flag
                 write_shutdown_flag(_exit_settings, bad=True)
             except Exception:
-                pass
+                let_pass("app.main#10")
         else:
             if bool((_exit_settings or {}).get("light_backup_on_exit", True)):
                 result = maybe_auto_backup(_exit_settings, reason="app_exit")
@@ -892,7 +872,7 @@ def main() -> int:
                         from core.settings import save_settings as _save_settings
                         _save_settings(_exit_settings)
                     except Exception:
-                        pass
+                        let_pass("app.main#11")
             if bool((_exit_settings or {}).get("sqlite_checkpoint_on_exit", True)):
                 checkpoint_sqlite(_exit_settings, truncate=True, optimize=True)
     except Exception as _db_exit_error:
@@ -905,7 +885,7 @@ def main() -> int:
             from core.stability import on_clean_exit
             on_clean_exit(_exit_settings)
     except Exception:
-        pass
+        let_pass("app.main#12")
 
     # «Перезапустить» of a page (core/app_restart.py): a new copy, now that the base and the files are closed
     try:
@@ -945,11 +925,16 @@ def _selfcheck() -> int:
         av.codec.Codec("aac", "w")
     except Exception as exc:
         failed.append(f"av (PyAV): {type(exc).__name__}: {exc}")
-    try:                                     # (v5.44.147) the program's gates: each has its keeper in this build
+    try:                                     # optional handlers load normally, including an empty registry
         from core import gates
         gates.ready()
     except Exception as exc:
         failed.append(f"gates: {type(exc).__name__}: {exc}")
+    try:                                     # (v5.44.165) the pages' files and the version, where this build has them
+        from core import started_code
+        failed += started_code.build_check()
+    except Exception as exc:
+        failed.append(f"started_code: {type(exc).__name__}: {exc}")
     text = f"modules: {len(set(names))}, failed: {len(failed)}\n" + "\n".join(failed)
     out = os.environ.get("LOCAL_BOORU_SELFCHECK_OUT", "").strip()
     if out:

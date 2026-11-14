@@ -18,6 +18,7 @@ import sqlite3
 from urllib.parse import urlparse
 
 from core.tag_utils import normalize_tag, should_hide_tag
+from core.quiet import passed as let_pass
 
 
 _TOKEN_RE = re.compile(r'"([^"]+)"|(\S+)')
@@ -59,7 +60,7 @@ def _host_for_site(site: str) -> str:
         try:
             raw = (urlparse(raw).hostname or raw).lower().replace("www.", "")
         except Exception:
-            pass
+            let_pass("core.external_corpus._host_for_site")
     return raw
 
 
@@ -144,28 +145,6 @@ def corpus_db(settings):
         yield con, root, db_path
     finally:
         con.close()
-
-
-def validate_corpus(settings_or_path) -> dict:
-    temp = settings_or_path if isinstance(settings_or_path, dict) else {"booru_corpus_path": str(settings_or_path)}
-    required = {"visual_assets", "files", "source_posts", "tags", "source_post_tags"}
-    with corpus_db(temp) as (con, root, db_path):
-        names = {str(r[0]) for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        missing = sorted(required - names)
-        if missing:
-            raise CorpusUnavailableError("Это не поддерживаемая база Booru Corpus; нет таблиц: " + ", ".join(missing))
-        images = int(con.execute(
-            "SELECT COUNT(*) FROM visual_assets va JOIN files f ON f.id=va.canonical_file_id "
-            "WHERE va.canonical_file_id IS NOT NULL AND COALESCE(f.local_path,'')<>''"
-        ).fetchone()[0] or 0)
-        posts = int(con.execute("SELECT COUNT(*) FROM source_posts WHERE visual_asset_id IS NOT NULL").fetchone()[0] or 0)
-        sites = [str(r[0]) for r in con.execute(
-            "SELECT DISTINCT site FROM source_posts WHERE visual_asset_id IS NOT NULL ORDER BY site"
-        ).fetchall()]
-    return {
-        "root": str(root), "db_path": str(db_path), "images": images,
-        "source_posts": posts, "sites": sites,
-    }
 
 
 def _parse_query(query: str):

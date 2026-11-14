@@ -3,7 +3,7 @@ site does not give it to a plain request: Cloudflare and DDoS-Guard first run a 
 then let it through — the window's Chromium runs that check as any browser does, with the gallery's own profile
 (what the site set after the check is kept for the next time).
 
-Out of sight: the page is never shown.  It ends by itself (``TIMEOUT``) and is destroyed explicitly — a web page left
+The ordinary fetch stays out of sight. It ends by itself (``TIMEOUT``) and is destroyed explicitly — a web page left
 to the garbage collector can end the program (CLAUDE.md, rule 15).  The task waiting for it gets ``box["html"]`` and
 ``box["url"]``, or ``box["error"]``, and then ``done``.
 
@@ -14,6 +14,9 @@ requests to that site go with them; ``visible`` — the page is in a view that i
 (``WA_DontShowOnScreen``): a page with no view is «hidden» to its scripts, with a screen of 0×0 and no animation frames —
 what a check for robots looks at (measured in Qt 6.11: «hidden», 0×0, no frames; in such a view — «visible», the
 screen's size, 60 frames a second).
+
+An explicit site check shows a dialog where the user can interact with the site. It uses the same profile,
+restricts top-level navigation to the site's own addresses, and closes when the catalog is ready.
 
 (v5.44.132) :class:`BytesFetch` — the browser's own request of a page or a picture, for a site whose check lets in
 nothing but the browser itself (Nude-Moon: Cloudflare refused the program's own requests even with the browser's pass
@@ -28,39 +31,80 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QTimer, QUrl
-from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineScript
 
 _LOG = logging.getLogger("local_booru.video")
 
 TIMEOUT = 45.0                 # seconds for the page and the site's check together
-SETTLE = 1.5                   # seconds after a load before the page is read (a check loads the page again)
+SETTLE = 1.5                   # seconds after the document is ready before it is read (scripts can still change it)
 FETCH_TIMEOUT = 60.0           # (v5.44.132) seconds for the browser's own request of a page or a picture
 FETCH_LIMIT = 64 * 1024 * 1024  # an answer bigger than this is not taken (a picture of a chapter is a few MB at most)
 POLL_MS = 100                  # how often the page is asked whether the answer came
+DOCUMENT_POLL_MS = 250         # a full document and its check need fewer polls than a bytes request
+
+
+class _ManualPage(QWebEnginePage):
+    def __init__(self, profile, parent, allowed):
+        super().__init__(profile, parent)
+        self._allowed = allowed
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        if is_main_frame and not self._allowed(url.toString()):
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
 
 class PageFetch(QObject):
     def __init__(self, profile, url: str, box: dict, done, parent=None, guard=None, cookies: bool = False,
-                 visible: bool = False):
+                 visible: bool = False, manual=None, owner=None, manual_label: str = ""):
         super().__init__(parent)
         self._url = url
         self._box = box
         self._done = done
         self._finished = False
         self._loaded_ok = False
+        self._load_failed = False
+        self._navigation = 0
+        self._ready_since = None
+        self._poll_pending = False
         self._guard = guard
         self._profile = profile
         self._host = (urlparse(url).hostname or "").lower()
         self._cookies: dict = {}
         self._store = profile.cookieStore() if cookies else None
-        self._page = QWebEnginePage(profile, self)
+        self._page = _ManualPage(profile, self, manual) if manual else QWebEnginePage(profile, self)
         self._page.setAudioMuted(True)           # (v5.44.145) a page nobody sees is not heard either (a site's video
         self._page.loadFinished.connect(self._loaded)      # or advert starting by itself)
+        self._page.loadStarted.connect(self._loading)
+        ready = QWebEngineScript()
+        ready.setName("local-booru-document-ready")
+        ready.setWorldId(QWebEngineScript.ScriptWorldId.ApplicationWorld.value)
+        ready.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady)
+        ready.setRunsOnSubFrames(False)
+        ready.setSourceCode("window.__lbDocumentReady = true;")
+        self._page.scripts().insert(ready)
         self._view = None
-        if visible:
+        self._dialog = None
+        if manual:
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+            from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout
+            from ui.web_gallery_page import _refuse_permission
+            self._dialog = QDialog(owner)
+            self._dialog.setWindowTitle(f"{manual_label} — проверка в браузере" if manual_label else "Проверка сайта")
+            self._dialog.resize(920, 720)
+            self._dialog.finished.connect(self._manual_closed)
+            layout = QVBoxLayout(self._dialog)
+            layout.addWidget(QLabel("Пройдите проверку сайта. Когда сайт откроется, это окно закроется."))
+            self._view = QWebEngineView(self._dialog)
+            self._view.setPage(self._page)
+            layout.addWidget(self._view)
+            if hasattr(self._page, "permissionRequested"):
+                self._page.permissionRequested.connect(_refuse_permission)
+        elif visible:
             from PySide6.QtCore import Qt
             from PySide6.QtWebEngineWidgets import QWebEngineView
             self._view = QWebEngineView()                 # no parent: destroyed by _finish, never by the collector
@@ -73,15 +117,25 @@ class PageFetch(QObject):
         self._timeout = QTimer(self)
         self._timeout.setSingleShot(True)
         self._timeout.timeout.connect(self._give_up)
+        self._poll = QTimer(self)
+        self._poll.timeout.connect(self._check_ready)
 
     def start(self) -> None:
-        self._timeout.start(int(TIMEOUT * 1000))
-        if self._view is not None:
+        if self._dialog is not None:
+            from core.site_browser import MANUAL_CHECK_SECONDS
+            self._timeout.start(MANUAL_CHECK_SECONDS * 1000)
+            self._dialog.show()
+            self._dialog.raise_()
+            self._dialog.activateWindow()
+        else:
+            self._timeout.start(int(TIMEOUT * 1000))
+        if self._view is not None and self._dialog is None:
             self._view.show()                             # «shown» to Qt and to the page — not on the screen
         if self._store is not None:
             self._store.cookieAdded.connect(self._cookie)
             self._store.loadAllCookies()                 # what the site set before: told again, as «added»
         self._page.load(QUrl(self._url))
+        self._poll.start(DOCUMENT_POLL_MS)
 
     def _cookie(self, cookie) -> None:
         """(v5.44.73) A cookie of the page's site (its own or its hosts' — «img.com-x.life» of «com-x.life»)."""
@@ -97,10 +151,55 @@ class PageFetch(QObject):
         if name and related(domain, self._host):
             self._cookies[(domain, path, name)] = {"name": name, "value": value, "domain": domain, "path": path}
 
+    def _loading(self) -> None:
+        self._navigation += 1
+        self._ready_since = None
+        self._loaded_ok = self._load_failed = False
+        self._settle.stop()
+
+    def _check_ready(self) -> None:
+        """DOM ready does not wait for pictures/advertising; the site's own check still has the final say."""
+        if self._finished or self._poll_pending or self._load_failed:
+            return
+        self._poll_pending = True
+        navigation = self._navigation
+        self._page.runJavaScript(
+            'window.__lbDocumentReady && document.body && document.readyState !== "loading" ? location.href : ""',
+            QWebEngineScript.ScriptWorldId.ApplicationWorld.value,
+            lambda url: self._document_ready(url, navigation))
+
+    def _document_ready(self, url, navigation: int) -> None:
+        self._poll_pending = False
+        if self._finished or navigation != self._navigation or self._load_failed:
+            return
+        url = str(url or "")
+        if urlparse(url).scheme not in ("http", "https") or url != self._page.url().toString():
+            return
+        if self._ready_since is None:
+            self._ready_since = time.monotonic()
+        if time.monotonic() - self._ready_since < SETTLE:
+            return
+        self._poll_pending = True
+        # Qt's toHtml may still return its empty initial document until loadFinished. Read the live DOM instead.
+        self._page.runJavaScript(
+            'window.__lbDocumentReady && document.body ? document.documentElement.outerHTML : ""',
+            QWebEngineScript.ScriptWorldId.ApplicationWorld.value,
+            lambda html: self._got_ready(html, url, navigation))
+
+    def _got_ready(self, html, url: str, navigation: int) -> None:
+        self._poll_pending = False
+        if (self._finished or navigation != self._navigation or self._load_failed
+                or url != self._page.url().toString()):
+            return
+        html = str(html or "")
+        if html and not self._still_check(html):
+            self._finish(html=html, url=url)
+
     def _loaded(self, ok: bool) -> None:
         if self._finished:
             return
         self._loaded_ok = bool(ok)
+        self._load_failed = not ok
         self._settle.start(int(SETTLE * 1000))      # every load starts it again: a check that reloads is waited for
 
     def _read(self) -> None:
@@ -113,7 +212,8 @@ class PageFetch(QObject):
                 return bool(self._guard(html, self._page.url().toString()))
             except Exception as exc:  # noqa: BLE001 - the asker's own test: its fault must not leave it waiting
                 _LOG.warning("page fetch: the page not told from a check: %s", exc)
-                return False
+                self._finish(error="Не удалось проверить, готова ли страница сайта")
+                return True
         from core.video_meta_import import guard_of
         return bool(guard_of(200, html))
 
@@ -131,7 +231,14 @@ class PageFetch(QObject):
     def _give_up(self) -> None:
         if self._finished:
             return
+        if self._dialog is not None:
+            self._finish(error="Время проверки сайта вышло. Откройте её ещё раз")
+            return
         self._page.toHtml(self._got_late)
+
+    def _manual_closed(self, _result: int) -> None:
+        if not self._finished:
+            self._finish(error="Окно проверки закрыто")
 
     def _got_late(self, html) -> None:
         if self._finished:
@@ -146,6 +253,7 @@ class PageFetch(QObject):
         self._finished = True
         self._settle.stop()
         self._timeout.stop()
+        self._poll.stop()
         if error:
             self._box["error"] = error
         else:
@@ -158,14 +266,20 @@ class PageFetch(QObject):
             if self._store is not None:
                 self._store.cookieAdded.disconnect(self._cookie)
             self._page.loadFinished.disconnect(self._loaded)
+            self._page.loadStarted.disconnect(self._loading)
             self._page.triggerAction(QWebEnginePage.WebAction.Stop)
         except (RuntimeError, TypeError) as exc:     # already gone
             _LOG.debug("page fetch: %s", exc)
         self._done.set()
         if self._view is not None:
             self._view.close()
-            self._view.deleteLater()
+            if self._dialog is None:
+                self._view.deleteLater()
             self._view = None
+        if self._dialog is not None:
+            dialog, self._dialog = self._dialog, None
+            dialog.hide()
+            dialog.deleteLater()
         self._page.deleteLater()
         self.deleteLater()
 

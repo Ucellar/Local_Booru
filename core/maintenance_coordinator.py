@@ -15,6 +15,7 @@ import time
 from typing import Callable, Iterator
 
 from core.background_tasks import get_background_task_registry
+from core.quiet import passed as let_pass
 
 
 @dataclass(frozen=True)
@@ -70,10 +71,6 @@ class MaintenanceCoordinator:
                 else:
                     self._blockers[key] -= 1
                 self._condition.notify_all()
-
-    def blockers_snapshot(self) -> dict[str, int]:
-        with self._lock:
-            return dict(self._blockers)
 
     @contextmanager
     def maintenance_job(
@@ -154,13 +151,13 @@ class MaintenanceCoordinator:
             if is_shutting_down():
                 return MaintenanceDecision(False, "application_shutting_down", 0.2)
         except Exception:
-            pass
+            let_pass("core.maintenance_coordinator.MaintenanceCoordinator.can_run")
         try:
             from core.database.connection import writes_blocked
             if writes_blocked():
                 return MaintenanceDecision(False, "database_safe_mode", 1.0)
         except Exception:
-            pass
+            let_pass("core.maintenance_coordinator.MaintenanceCoordinator.can_run#2")
 
         settings = settings or {}
         from core.parser.jobs import is_running as parser_running
@@ -189,7 +186,7 @@ class MaintenanceCoordinator:
             if load >= 95.0:
                 return MaintenanceDecision(False, "high_system_memory_load", 2.0)
         except Exception:
-            pass
+            let_pass("core.maintenance_coordinator.MaintenanceCoordinator.can_run#3")
         return MaintenanceDecision(True)
 
     def wait_for_permission(
@@ -311,7 +308,7 @@ def install_qt_activity_filter(app=None) -> bool:
                     }:
                         _COORDINATOR.note_user_activity()
                 except Exception:
-                    pass
+                    let_pass("core.maintenance_coordinator.install_qt_activity_filter._ActivityFilter.eventFilter")
                 return False
 
         application = app or QApplication.instance()

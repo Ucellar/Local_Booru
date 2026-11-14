@@ -182,15 +182,3 @@ def commit_revision_metadata(
             ),
         )
     return {"revision_id": int(revision_id), "image_id": int(image_id), "new_md5": canonical, "aliases_rebound": aliases}
-
-
-def alias_snapshot_mismatches(con, image_id: int | None = None) -> list[dict[str, Any]]:
-    sql = """SELECT a.site_md5,a.image_id,a.local_md5,i.hash_md5
-             FROM image_site_md5_aliases a JOIN images i ON i.id=a.image_id
-             WHERE lower(COALESCE(a.local_md5,'')) != lower(COALESCE(i.hash_md5,''))"""
-    params: tuple[Any, ...] = ()
-    if image_id is not None:
-        sql += " AND a.image_id=?"
-        params = (int(image_id),)
-    rows = con.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]

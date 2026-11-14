@@ -28,8 +28,7 @@ from core import manhwa_sources as S
 
 _LOG = logging.getLogger("local_booru.manhwa")
 
-SITES = ("remanga", "mangalib", "mangabuff", "readmanga", "desu", "mangadex", "hentailib",   # (v5.44.96) HentaiLib
-         "allhentai", "hentaichan", "nudemoon")         # (v5.44.99) AllHentai; (v5.44.85) Хентай-тян; (v5.44.131)
+SITES = S.feed_sites()
 HOWS = (("new", "Обновления"), ("popular", "Популярное"))
 TTL = 10 * 60                          # a page of a catalog kept this long (seconds)
 FAILED_TTL = 5 * 60                    # …one that did not come, asked again after this (or by «Попробовать ещё раз»)
@@ -118,6 +117,11 @@ def page(site: str, how: str, n: int = 1, *, net=None, wait: "float | None" = No
             return kept
         going = _GOING.get(key)
         if going is None:
+            if again:
+                feed_url = getattr(source, "feed_url", None)
+                S.forget_silent(feed_url(how, n) if callable(feed_url) else source.site())
+                if kept is not None and kept.error:
+                    _PAGES.pop(key, None)       # polling without «again» must wait for this attempt, not its old error
             going = _GOING[key] = threading.Event()
             threading.Thread(target=_ask, args=(key, source, net, going), daemon=True,
                              name=f"feed-{site}-{how}-{n}").start()
@@ -141,11 +145,13 @@ def _ask(key: tuple, source, net, going) -> None:
         _LOG.warning("feed: %s (%s, page %d) broke: %s", source.label, how, n, exc, exc_info=True)
         got = Page(site, how, n, error=f"{source.label}: ответ не разобрался")
     with _LOCK:
-        _PAGES[key] = got
-        _PAGES.move_to_end(key)
-        while len(_PAGES) > PAGES_KEPT:
-            _PAGES.popitem(last=False)
-        _GOING.pop(key, None)
+        # A changed mirror or sign-in clears the cache while this request may still be on its way.
+        if _GOING.get(key) is going:
+            _PAGES[key] = got
+            _PAGES.move_to_end(key)
+            while len(_PAGES) > PAGES_KEPT:
+                _PAGES.popitem(last=False)
+            _GOING.pop(key, None)
     going.set()
 
 

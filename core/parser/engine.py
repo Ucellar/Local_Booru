@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +46,7 @@ from pathlib import Path
 
 from core.parser import persist, reverse_journal, tally
 from core.parser.context import ParserContext
-from core.parser.http import Cancelled, HttpFailure
+from core.parser.http import Cancelled, HttpFailure, UploadUnavailable
 from core.parser.models import FileResult, Match, ReverseOutcome
 from core.parser.sites import SiteUnavailable, site_for_url
 from core.parser.util import host_of, md5_from_filename, norm_md5, post_id_from_url, short
@@ -435,22 +436,50 @@ class ParserEngine:
         return False
 
     def reverse_ask(self, service, ticket: ReverseTicket) -> ReverseOutcome:
-        """One service's answer about one file (in a run — its queue's thread): nothing of the file is changed here.
-        A service switched off or paused meanwhile is not asked."""
+        """Ask one service, rebuilding its prepared picture once if the cache no longer has it."""
+        from core.tagger.reverse_upload import keep_upload
         if service.disabled_reason:
             return ReverseOutcome("disabled", detail=service.disabled_reason)
         if service.paused():
             return ReverseOutcome("paused", detail=service.pause_note())
-        self.ctx.http.check_cancel()
-        self.ctx.activity(service.name, "поиск", str(ticket.state.path))
         style = self._style_now(service, ticket) or START          # (v5.44.36) a video: the picture of its style
-        ticket.asked.setdefault(service.name, []).append(style)
-        return service.search(ticket.uploads.get(style) or ticket.upload)
+        upload = ticket.uploads.get(style) or ticket.upload
+        for attempt in range(2):
+            self.ctx.http.check_cancel()
+            if upload is None:
+                break
+            try:
+                with keep_upload(upload):
+                    try:
+                        if not stat.S_ISREG(Path(upload).stat().st_mode):
+                            raise OSError("upload is not a file")
+                    except OSError as exc:
+                        raise UploadUnavailable(exc) from exc
+                    self.ctx.activity(service.name, "поиск", str(ticket.state.path))
+                    outcome = service.search(upload)
+            except UploadUnavailable as exc:
+                if attempt or not exc.missing:
+                    break
+                restored = self._upload_copy(ticket.state, style)
+                if restored is not None:
+                    if ticket.upload == upload:
+                        ticket.upload = restored
+                    ticket.uploads[style] = restored
+                    ticket.upload_hashes[style] = _picture_hash(restored)
+                upload = restored
+                continue
+            ticket.asked.setdefault(service.name, []).append(style)
+            return outcome
+        return ReverseOutcome("local_input", detail="Не удалось прочитать картинку для обратного поиска")
 
     def reverse_take(self, service, ticket: ReverseTicket, outcome: ReverseOutcome) -> list:
         """What a service's answer gives the file: its accepted finds (the posts behind the hits), or [] — the next
         service is asked.  A limit or a failure is the file's problem: a later miss is not trusted (deferred)."""
         state = ticket.state
+        if outcome.status == "local_input":
+            state.problem(None, outcome.detail)
+            ticket.held = ticket.held or service.name
+            return []
         if outcome.status == "paused":
             state.problem(service, outcome.detail or service.pause_note())
             ticket.held = ticket.held or service.name
@@ -1165,14 +1194,13 @@ class ParserEngine:
         from core.tagger.hashing import VIDEO_EXTS, search_frame_image
         from core.tagger.reverse_upload import reverse_upload_image
         source = state.path
-        if source.suffix.lower() in VIDEO_EXTS or source.suffix.lower() == ".gif":
-            # (v5.44.36) the frame of a video the service's sites make their previews of (its start, e621's, Danbooru's)
-            source = search_frame_image(source, settings=self.ctx.settings, log=None, style=style)
-            if source == state.path and state.path.suffix.lower() in VIDEO_EXTS:
-                if style == START:
-                    self._say(state, "кадр из видео не извлечён — обратный поиск пропущен")
-                return None
         try:
+            if source.suffix.lower() in VIDEO_EXTS or source.suffix.lower() == ".gif":
+                source = search_frame_image(source, settings=self.ctx.settings, log=None, style=style)
+                if source == state.path and state.path.suffix.lower() in VIDEO_EXTS:
+                    if style == START:
+                        self._say(state, "кадр из видео не извлечён — обратный поиск пропущен")
+                    return None
             return reverse_upload_image(source, self.ctx.settings, None)
         except Exception as exc:  # Pillow/OpenCV errors on odd files: skip reverse search for this file
             self._say(state, f"не удалось подготовить картинку для поиска: {type(exc).__name__}: {exc}")

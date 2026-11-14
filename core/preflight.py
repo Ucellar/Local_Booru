@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path
 
 from core.paths import result_output_base
+from core.quiet import passed as let_pass
 
 
 def format_bytes(value: int | float) -> str:
@@ -30,7 +31,7 @@ def extract_known_size(post: dict) -> int:
             if v > 0:
                 return v
         except Exception:
-            pass
+            let_pass("core.preflight.extract_known_size")
     return 0
 
 

@@ -273,11 +273,6 @@ def origin_ok(origin: str, settings: dict, port: int = 0) -> bool:
     return bool(settings.get("phone_access") and name and origin in allowed)
 
 
-def is_phone(req) -> bool:
-    """The page is asked by the owner's phone (``webui`` pages ask this of their request)."""
-    return admit(req.settings, req.headers, getattr(req, "peer", "")) == "ok"
-
-
 def address(settings: dict) -> str:
     name = str(settings.get("phone_name") or "").rstrip(".").lower()
     return f"https://{name}/" if name else ""

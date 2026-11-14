@@ -786,7 +786,9 @@ def _window_fetch():
     def fetch(address: str) -> tuple[str, str]:
         from core.video_meta_import import MetaImportError
         box: dict = {}
-        state = service.call_window("fetch_page", {"url": address, "box": box}, wait=10.0, finish_wait=60.0)
+        from core import site_browser
+        with site_browser.page_turn():
+            state = service.call_window("fetch_page", {"url": address, "box": box}, wait=10.0, finish_wait=60.0)
         if state != "done":
             raise MetaImportError("Окно программы не открыло страницу" + (" (не дождались)" if state == "late" else ""))
         if box.get("error"):

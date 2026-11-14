@@ -10,7 +10,7 @@ import hashlib
 import json
 import math
 import subprocess
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -53,15 +53,6 @@ class QualityDecision:
     decision: str  # better / worse / same / variant / uncertain
     confidence: float
     reasons: tuple[str, ...] = field(default_factory=tuple)
-
-
-@dataclass(frozen=True)
-class IdentityDecision:
-    decision: str  # same / different / uncertain
-    confidence: float
-    reasons: tuple[str, ...] = field(default_factory=tuple)
-    old_fingerprints: tuple[str, ...] = field(default_factory=tuple)
-    new_fingerprints: tuple[str, ...] = field(default_factory=tuple)
 
 
 def estimate_decode_peak_bytes(width: int, height: int, *, frames_in_memory: int = 2, channels: int = 4) -> int:
@@ -219,116 +210,6 @@ def describe_media(path: str | Path, *, compute_md5: bool = True, source_identit
         )
 
 
-def _average_hash_image(image) -> str:
-    from PIL import Image, ImageOps
-    try:
-        im = ImageOps.exif_transpose(image).convert("L").resize((16, 16), Image.Resampling.BILINEAR)
-    except Exception:
-        im = image.convert("L").resize((16, 16))
-    values = list(im.getdata())
-    avg = sum(values) / max(1, len(values))
-    bits = 0
-    for value in values:
-        bits = (bits << 1) | (1 if value >= avg else 0)
-    return f"{bits:064x}"
-
-
-def sampled_frame_fingerprints(path: str | Path, desc: MediaDescriptor, plan: VerificationPlan) -> tuple[str, ...]:
-    p = Path(path)
-    out: list[str] = []
-    if plan.media_kind == "video":
-        try:
-            import cv2
-            cap = cv2.VideoCapture(str(p))
-            if not cap.isOpened():
-                raise ValueError("video decoder failed")
-            try:
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or desc.frame_count or 1)
-                for fraction in plan.sample_positions:
-                    index = max(0, min(max(0, frame_count - 1), int(round(fraction * max(0, frame_count - 1)))))
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, index)
-                    ok, frame = cap.read()
-                    if not ok or frame is None:
-                        continue
-                    from PIL import Image
-                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    out.append(_average_hash_image(Image.fromarray(rgb)))
-            finally:
-                cap.release()
-        except Exception:
-            return tuple(out)
-        return tuple(out)
-
-    from PIL import Image
-    with Image.open(p) as im:
-        n_frames = max(1, int(getattr(im, "n_frames", 1) or 1))
-        for fraction in plan.sample_positions:
-            index = max(0, min(n_frames - 1, int(round(fraction * max(0, n_frames - 1)))))
-            try:
-                im.seek(index)
-            except EOFError:
-                continue
-            out.append(_average_hash_image(im.copy()))
-    return tuple(out)
-
-
-def _hamming_hex(a: str, b: str) -> int:
-    try:
-        return (int(a, 16) ^ int(b, 16)).bit_count()
-    except Exception:
-        return 256
-
-
-def verify_identity(
-    old: MediaDescriptor,
-    new: MediaDescriptor,
-    *,
-    identity_basis: str = "",
-    settings: dict | None = None,
-) -> IdentityDecision:
-    settings = settings or {}
-    if old.md5 and new.md5 and old.md5.lower() == new.md5.lower():
-        return IdentityDecision("same", 1.0, ("exact MD5",))
-    old_kind = "video" if old.is_video else "animation" if old.is_animation or old.frame_count > 1 else "static"
-    new_kind = "video" if new.is_video else "animation" if new.is_animation or new.frame_count > 1 else "static"
-    if old_kind != new_kind:
-        return IdentityDecision("different", 1.0, (f"media kind changed: {old_kind}->{new_kind}",))
-    if old.width and old.height and new.width and new.height:
-        old_ar = old.width / max(1, old.height)
-        new_ar = new.width / max(1, new.height)
-        ar_delta = abs(old_ar - new_ar) / max(old_ar, new_ar, 1e-9)
-        if ar_delta > float(settings.get("upgrade_identity_max_aspect_delta", 0.08) or 0.08):
-            return IdentityDecision("different", 0.98, (f"aspect ratio mismatch {ar_delta:.3f}",))
-    if old_kind in {"video", "animation"} and old.duration and new.duration:
-        delta = abs(old.duration - new.duration)
-        if delta > max(0.5, 0.02 * max(old.duration, new.duration)):
-            return IdentityDecision("different", 0.99, ("duration mismatch",))
-    old_plan = build_verification_plan(old, settings)
-    new_plan = build_verification_plan(new, settings)
-    allowed_old, reason_old = ram_budget_allows(old_plan, settings)
-    allowed_new, reason_new = ram_budget_allows(new_plan, settings)
-    if not allowed_old or not allowed_new:
-        return IdentityDecision("uncertain", 0.0, (reason_old if not allowed_old else reason_new,))
-    old_fp = sampled_frame_fingerprints(old.path, old, old_plan)
-    new_fp = sampled_frame_fingerprints(new.path, new, new_plan)
-    if not old_fp or not new_fp:
-        return IdentityDecision("uncertain", 0.2, ("sample fingerprint unavailable",), old_fp, new_fp)
-    count = min(len(old_fp), len(new_fp))
-    distances = [_hamming_hex(old_fp[i], new_fp[i]) for i in range(count)]
-    mean_distance = sum(distances) / max(1, count)
-    max_distance = max(distances) if distances else 256
-    threshold = float(settings.get("upgrade_identity_mean_hamming_max", 34) or 34)
-    strong = str(identity_basis or "").lower() in {
-        "site_md5_alias", "site_post_slot", "pixiv_work_page", "exact_source_post", "booru_post_media_slot"
-    }
-    if mean_distance <= threshold and max_distance <= threshold * 1.8:
-        confidence = min(0.995, 0.82 + (0.12 if strong else 0.0) + max(0.0, (threshold - mean_distance) / max(1.0, threshold)) * 0.06)
-        return IdentityDecision("same", confidence, (f"sample mean hamming={mean_distance:.1f}", str(identity_basis or "visual fingerprint")), old_fp, new_fp)
-    if mean_distance > threshold * 1.8:
-        return IdentityDecision("different", 0.97, (f"sample mean hamming={mean_distance:.1f}",), old_fp, new_fp)
-    return IdentityDecision("uncertain", 0.55 if strong else 0.4, (f"borderline sample mean hamming={mean_distance:.1f}",), old_fp, new_fp)
-
-
 def compare_quality(old: MediaDescriptor, new: MediaDescriptor) -> QualityDecision:
     reasons: list[str] = []
     old_kind = "video" if old.is_video else "animation" if old.is_animation or old.frame_count > 1 else "static"
@@ -375,32 +256,3 @@ def compare_quality(old: MediaDescriptor, new: MediaDescriptor) -> QualityDecisi
     if old.md5 and new.md5 and old.md5.lower() == new.md5.lower():
         return QualityDecision("same", 1.0, ("exact MD5",))
     return QualityDecision("uncertain", 0.5, tuple(reasons or ["insufficient quality evidence"]))
-
-
-def verify_upgrade(
-    old_path: str | Path,
-    new_path: str | Path,
-    *,
-    identity_basis: str,
-    settings: dict | None = None,
-    source_identity: str = "",
-) -> dict[str, Any]:
-    settings = settings or {}
-    old = describe_media(old_path, source_identity=source_identity)
-    new = describe_media(new_path, source_identity=source_identity)
-    identity = verify_identity(old, new, identity_basis=identity_basis, settings=settings)
-    quality = compare_quality(old, new)
-    auto = (
-        identity.decision == "same"
-        and identity.confidence >= float(settings.get("quality_upgrade_identity_min_confidence", 0.88) or 0.88)
-        and quality.decision == "better"
-        and quality.confidence >= float(settings.get("quality_upgrade_min_confidence", 0.85) or 0.85)
-    )
-    return {
-        "auto_upgrade": bool(auto),
-        "old": asdict(old),
-        "new": asdict(new),
-        "identity": asdict(identity),
-        "quality": asdict(quality),
-        "identity_basis": str(identity_basis or ""),
-    }

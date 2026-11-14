@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import time
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +20,7 @@ from PIL import Image, ImageOps
 from core.file_hash_cache import get_or_compute_md5
 from core.paths import CACHE_DIR
 from core.tagger.hashing import file_md5
+from core.quiet import passed as let_pass
 
 _DEFAULT_MAX_EDGE = 512
 _DEFAULT_QUALITY = 85
@@ -28,6 +29,8 @@ _DEFAULT_CACHE_FILES = 5000
 _DEFAULT_CACHE_AGE_DAYS = 30
 _DEFAULT_MAX_MEGAPIXELS = 64.0
 _UPLOAD_LOCKS = tuple(threading.RLock() for _ in range(64))
+_CACHE_LOCK = threading.Lock()
+_IN_USE: dict[str, int] = {}
 
 
 def _emit(log: Callable[[str], None] | None, message: str) -> None:
@@ -36,7 +39,7 @@ def _emit(log: Callable[[str], None] | None, message: str) -> None:
     try:
         log(str(message))
     except Exception:
-        pass
+        let_pass("core.tagger.reverse_upload._emit")
 
 
 def _setting_float(settings, key: str, default: float, minimum: float, maximum: float) -> float:
@@ -61,13 +64,47 @@ def _cache_dir() -> Path:
     return target
 
 
+def _cache_key(path) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+@contextmanager
+def keep_upload(path):
+    """Keep the upload available through the request, including any service retries."""
+    key = _cache_key(path)
+    with _CACHE_LOCK:
+        _IN_USE[key] = _IN_USE.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        with _CACHE_LOCK:
+            if _IN_USE[key] == 1:
+                del _IN_USE[key]
+            else:
+                _IN_USE[key] -= 1
+
+
+def _evict(path: Path) -> bool:
+    with _CACHE_LOCK:
+        if _cache_key(path) in _IN_USE:
+            return False
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+    return True
+
+
 def _cleanup_cache(settings=None) -> None:
     """Cheap bounded cleanup; runs at most once per process every five minutes."""
     now = time.time()
-    last = float(getattr(_cleanup_cache, "_last", 0.0) or 0.0)
-    if now - last < 300.0:
-        return
-    _cleanup_cache._last = now
+    with _CACHE_LOCK:
+        last = float(getattr(_cleanup_cache, "_last", 0.0) or 0.0)
+        if now - last < 300.0:
+            return
+        _cleanup_cache._last = now
     root = _cache_dir()
     max_files = _setting_int(settings, "reverse_upload_cache_max_files", _DEFAULT_CACHE_FILES, 100, 100000)
     max_age_days = _setting_int(settings, "reverse_upload_cache_max_age_days", _DEFAULT_CACHE_AGE_DAYS, 1, 3650)
@@ -79,20 +116,21 @@ def _cleanup_cache(settings=None) -> None:
                 st = p.stat()
             except OSError:
                 continue
-            if st.st_mtime < cutoff:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+            if ".tmp-" in p.name:
+                if st.st_mtime < cutoff:
+                    _evict(p)
+                continue
+            if st.st_mtime < cutoff and _evict(p):
                 continue
             rows.append((st.st_mtime, p))
         if len(rows) > max_files:
             rows.sort(key=lambda item: item[0])
-            for _mtime, p in rows[: len(rows) - max_files]:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+            excess = len(rows) - max_files
+            for _mtime, p in rows:
+                if _evict(p):
+                    excess -= 1
+                if excess == 0:
+                    break
     except Exception:
         return
 
@@ -173,7 +211,7 @@ def reverse_upload_image(path, settings=None, log=None) -> Path:
         ):
             return source
     except Exception:
-        pass
+        let_pass("core.tagger.reverse_upload.reverse_upload_image")
 
     source_md5 = _safe_source_md5(source, settings=settings)
     if not source_md5:
@@ -204,7 +242,7 @@ def reverse_upload_image(path, settings=None, log=None) -> Path:
                     if bool(getattr(image, "is_animated", False)):
                         image.seek(0)
                 except Exception:
-                    pass
+                    let_pass("core.tagger.reverse_upload.reverse_upload_image#2")
                 try:
                     working = ImageOps.exif_transpose(image)
                 except Exception:
@@ -234,14 +272,14 @@ def reverse_upload_image(path, settings=None, log=None) -> Path:
                 upload_kb = target.stat().st_size / 1024.0
                 _emit(log, f"REVERSE UPLOAD PREPARED: {source.name} {original_kb:.0f}KB -> {upload_kb:.0f}KB max={max_edge}px q={quality}")
             except Exception:
-                pass
+                let_pass("core.tagger.reverse_upload.reverse_upload_image#3")
             return target
         except Exception as exc:
             _emit(log, f"REVERSE UPLOAD FALLBACK: {source.name}: {type(exc).__name__}: {exc}")
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.tagger.reverse_upload.reverse_upload_image#4")
             return source
         finally:
             for obj in (rgb, working):
@@ -249,7 +287,7 @@ def reverse_upload_image(path, settings=None, log=None) -> Path:
                     if obj is not None:
                         obj.close()
                 except Exception:
-                    pass
+                    let_pass("core.tagger.reverse_upload.reverse_upload_image#5")
 
 
-__all__ = ["reverse_upload_image"]
+__all__ = ["keep_upload", "reverse_upload_image"]

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
-import gc
 
 
 def _rss_psutil():
@@ -90,79 +88,5 @@ def process_memory_snapshot():
     }
 
 
-def child_process_memory_snapshot() -> dict:
-    """Return aggregate descendant-process RSS for diagnostics only.
-
-    v453 no longer classifies browser-engine children because Local Booru owns
-    no embedded browser-engine process. External user-browser processes are not
-    descendants of the application and remain outside the RAM-guard scope.
-    """
-    result = {"available": False, "count": 0, "rss_bytes": 0, "errors": 0}
-    try:
-        import psutil  # type: ignore
-        parent = psutil.Process(os.getpid())
-        result["available"] = True
-        for child in list(parent.children(recursive=True)):
-            try:
-                result["count"] += 1
-                result["rss_bytes"] += int(child.memory_info().rss or 0)
-            except Exception:
-                result["errors"] += 1
-    except Exception:
-        pass
-    return result
-
-
 def mb(value: int | float) -> float:
     return float(value or 0) / (1024.0 * 1024.0)
-
-
-def format_snapshot(snap) -> str:
-    snap = snap or {}
-    rss = mb(int(snap.get("rss_bytes") or 0))
-    avail = mb(int(snap.get("available_bytes") or 0))
-    total = mb(int(snap.get("total_bytes") or 0))
-    load = float(snap.get("memory_load_percent") or 0.0)
-    return f"rss={rss:.0f} MB; free={avail:.0f}/{total:.0f} MB; load={load:.0f}%"
-
-
-_LAST_TRIM = 0.0
-
-
-def soft_trim_memory(min_interval_seconds: float = 10.0):
-    """Best-effort Python/Qt memory trim.  Safe to call often; real work is throttled."""
-    global _LAST_TRIM
-    now = time.time()
-    if now - _LAST_TRIM < float(min_interval_seconds or 10.0):
-        return
-    _LAST_TRIM = now
-    try:
-        gc.collect()
-    except Exception:
-        pass
-    # Linux: return free arenas to the OS where supported.
-    try:
-        import ctypes
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim(0)
-    except Exception:
-        pass
-
-    # Windows: Task Manager's "Memory" column mostly reflects the working set.
-    # After long parser runs Python/Pillow/Qt can free objects but Windows may keep
-    # the process working set high until memory pressure.  Trim it explicitly so
-    # STOP/DONE actually gives RAM back instead of looking like a leak.
-    if sys.platform.startswith("win"):
-        try:
-            import ctypes
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            try:
-                ctypes.windll.psapi.EmptyWorkingSet(handle)
-            except Exception:
-                pass
-            try:
-                ctypes.windll.kernel32.SetProcessWorkingSetSize(handle, ctypes.c_size_t(-1).value, ctypes.c_size_t(-1).value)
-            except Exception:
-                pass
-        except Exception:
-            pass

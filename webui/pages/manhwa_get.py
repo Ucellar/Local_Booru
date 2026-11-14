@@ -46,6 +46,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+from core import manhwa_sources as _sources
 from core.manhwa_download import TASK as GET      # the page task «Скачать» (and the nightly round of new chapters)
 from webui.html import esc
 from webui.server import Request, Response
@@ -58,14 +59,16 @@ FINDS_KEPT = 16                       # …and this many of them at most
 ABANDONED = 20.0                      # a search going that no page has asked of for this long: its page has gone
 FIND_WAIT_MORE = 15.0                 # «Скачать» while the other sites still answer: their time and this much more
 STALE = "Найденное устарело — нажмите «Найти» ещё раз"
-SITES = ("remanga.org", "recomics.org", "mangalib.me", "mangabuff.ru", "readmanga (a.zazaza.me)", "desu.uno",
-         "com-x.life", "mangaonelove.space", "mangadex.org")   # (v5.44.77) ReadManga and Desu, (v5.44.79) MangaDex,
-#                                                                (v5.44.143) Manga One Love
-# (v5.44.85) the sites of hentai alone: named only where hentai is shown; (v5.44.99) HentaiLib, AllHentai; (v5.44.131)
-# Nude-Moon
-ADULT_SITES = ("hentaichan.live", "hentailib.me", "allhentai (20.allhen.online)", "nude-moon.org")
-# (v5.44.75) not searched by a name (their search goes through the window's browser: a check for browsers first)
-LINK_ONLY = ("com-x.life", "mangadex.org")
+# (v5.44.169) The sites a hint names — as the sites name themselves (``Source.shown_as``; the lists were kept here by
+# hand): remanga.org, recomics.org, mangalib.me, mangabuff.ru, «readmanga (a.zazaza.me)», desu.uno, com-x.life,
+# mangaonelove.space, mangadex.org
+SITES = tuple(s.shown_as() for s in _sources.SOURCES if not s.adult_only)
+# (v5.44.85) the sites of hentai alone: named only where hentai is shown — hentailib.me, «allhentai
+# (20.allhen.online)», hentaichan.live, nude-moon.org
+ADULT_SITES = tuple(s.shown_as() for s in _sources.SOURCES if s.adult_only)
+# (v5.44.75) not searched by a name (their search goes through the window's browser: a check for browsers first) —
+# com-x.life, mangadex.org
+LINK_ONLY = tuple(s.shown_as() for s in _sources.SOURCES if not s.by_name and not s.adult_only)
 # (v5.44.116) a download of hentai in «Загрузки» while «SFW» is on: these words for its name, no cover
 HIDDEN = "Скрытая загрузка 18+"
 HIDDEN_KIND = "18+"
@@ -355,7 +358,7 @@ def find(req: Request) -> Response:
 
         def run(say, stop_check):
             if kept is not None:                     # (v5.44.93) found a while ago: at once, the folder read anew
-                kept.have = D.had(Path(kept.folder), kept.title.site)
+                kept.have = D.owned_chapters(Path(kept.folder), kept.title)
                 say(f"«{kept.title.title}» уже открывали — показываю сразу")
                 return {"found": kept, "url": url, "kept": True}
             if source.readable:
@@ -413,7 +416,7 @@ def find_state(req: Request) -> Response:
         except OSError:
             stamp = 0
         if stamp and (id(found), stamp) != entry.stamp:  # chapters came (or went) since the search: as they are now
-            found.have = D.had(folder, found.title.site)
+            found.have = D.owned_chapters(folder, found.title)
             entry.stamp = (id(found), stamp)
         if (folder / D.LB_DIR / D.SOURCE_FILE).is_file():  # (v5.44.116) «Новые главы» as a download of it left them
             stored = D.read_source(folder)
@@ -486,24 +489,33 @@ def download(req: Request) -> Response:
     if kept is None:
         return Response.json({"ok": False, "error": STALE}, 409)
     found = kept["found"]
-    where = str(body.get("where") or found.kind)
+    from core.manhwa_sites.ehentai import is_photo
+    photo = is_photo(found.title)
+    linked = D.linked_folder(req.settings, found.title.site, found.title.key) if photo else None
+    where = (linked[0] if linked else "manga") if photo else str(body.get("where") or found.kind)
     if where not in ("manhwa", "manga"):
         where = found.kind
     roots = D.roots(req.settings)
     root = roots.get(where) or ""
     if not root:
+        if photo:
+            return Response.json({"ok": False, "error": "Укажите папку манги в «Настройки → Хранение и копии»"}, 409)
         return Response.json({"ok": False, "error": "Папка манги не выбрана — выберите её в «Настройки → Хранение и копии» или "
                                                     "положите тайтл в папку манхвы"}, 409)
     try:
         Path(root).mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         return Response.json({"ok": False, "error": f"Папка {root} недоступна: {exc}"}, 409)
-    if where != found.kind or not found.folder.startswith(str(Path(root))):
+    if photo:
+        found.kind = where
+        found.folder = str(linked[1] if linked else D.folder_for(Path(root), found.title))
+        found.have = D.owned_chapters(Path(found.folder), found.title)
+    elif where != found.kind or not found.folder.startswith(str(Path(root))):
         found.kind = where
         found.folder = str(D.folder_for(Path(root), found.title))
-        found.have = D.had(Path(found.folder), found.title.site)
+        found.have = D.owned_chapters(Path(found.folder), found.title)
     follow_new = bool(body.get("follow", True))
-    helpers = bool(body.get("helpers", found.helpers_on))
+    helpers = not photo and bool(body.get("helpers", found.helpers_on))
     chapters = body.get("chapters")                  # (v5.44.74) the tiles ticked; none named — every new one
     if chapters is not None and (not isinstance(chapters, list) or len(chapters) > MAX_CHAPTERS
                                  or not all(isinstance(c, (str, int)) for c in chapters)):

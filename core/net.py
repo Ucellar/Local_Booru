@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from core.quiet import passed as let_pass
 
 DEFAULT_TIMEOUT = (10, 60)
 
@@ -12,7 +13,7 @@ def _normalise_timeout(timeout: Any):
         if isinstance(timeout, (int, float)) and float(timeout) <= 0:
             return DEFAULT_TIMEOUT
     except Exception:
-        pass
+        let_pass("core.net._normalise_timeout")
     return timeout
 
 
@@ -39,7 +40,7 @@ def http_request(session, method: str, url: str, *, timeout=DEFAULT_TIMEOUT, max
     except InterruptedError:
         raise
     except Exception:
-        pass
+        let_pass("core.net.http_request")
 
     try:
         from core.stability import retry_request

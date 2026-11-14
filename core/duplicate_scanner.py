@@ -29,6 +29,7 @@ from core.path_utils import path_key
 from core.storage_roots import check_storage_root, configured_storage_roots
 from core.vptree import VPTree
 from core.derived_cache_db import open_selected_cache, validate_external_cache
+from core.quiet import passed as let_pass
 
 RELATION_VISUAL_PHASH = "visual_phash"
 DEFAULT_PAIR_LIMIT = 500_000
@@ -134,7 +135,7 @@ def _remove_stage(path: Path | None) -> None:
         try:
             Path(str(path) + suffix).unlink(missing_ok=True)
         except Exception:
-            pass
+            let_pass("core.duplicate_scanner._remove_stage")
 
 
 def _wait_chunk(settings, *, mode, progress, stop_check) -> None:
@@ -186,7 +187,7 @@ def _finish_run(settings: dict, run_id: int, status: str, values: dict, error: s
                 ),
             )
     except Exception:
-        pass
+        let_pass("core.duplicate_scanner._finish_run")
 
 
 def _iter_stage_rows(stage_con: sqlite3.Connection, chunk_size: int = 5000) -> Iterable[list[tuple]]:
@@ -753,10 +754,10 @@ def _run_duplicate_scan_locked(
             try:
                 source_con.close()
             except Exception:
-                pass
+                let_pass("core.duplicate_scanner._run_duplicate_scan_locked")
         if stage_con is not None:
             try:
                 stage_con.close()
             except Exception:
-                pass
+                let_pass("core.duplicate_scanner._run_duplicate_scan_locked#2")
         _remove_stage(stage_path)

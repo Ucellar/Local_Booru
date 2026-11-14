@@ -118,6 +118,11 @@ class Clues:
     names: list = field(default_factory=list)
     looked: list = field(default_factory=list)
     pools: list = field(default_factory=list)
+    galleries: list = field(default_factory=list)       # (v5.44.169) [(the number of a gallery of nhentai, where)]
+
+    def add_gallery(self, number: int, where: str) -> None:
+        if number and len(self.galleries) < LINKS and all(n != number for n, _w in self.galleries):
+            self.galleries.append((int(number), where))
 
     def add_link(self, url: str, where: str) -> None:
         url = str(url or "").strip().rstrip(".,;")
@@ -125,6 +130,9 @@ class Clues:
         if pool:
             if len(self.pools) < LINKS and all(p != pool for p, _w in self.pools):
                 self.pools.append((pool, where))
+            return
+        if nhentai_gallery(url):                     # (v5.44.169) nhentai is no site of ``S.SOURCES``: kept apart
+            self.add_gallery(nhentai_gallery(url), where)
             return
         if not url or len(self.links) >= LINKS or any(u == url for u, _w in self.links):
             return
@@ -154,6 +162,15 @@ _POOL = re.compile(r"^https?://(?:www\.)?e(?:621|926)\.net/pools/(\d+)(?:[/?#].*
 def e621_pool(url: str) -> int:
     """(v5.44.125) The number of a pool of e621 in its link (``e621.net/pools/15766``); 0 — not one."""
     found = _POOL.match(str(url or "").strip())
+    return int(found.group(1)) if found else 0
+
+
+_GALLERY = re.compile(r"^https?://(?:www\.)?nhentai\.net/g/(\d{1,7})(?:[/?#].*)?$", re.I)
+
+
+def nhentai_gallery(url: str) -> int:
+    """(v5.44.169) The number of a gallery of nhentai in its link (``nhentai.net/g/123456/``); 0 — not one."""
+    found = _GALLERY.match(str(url or "").strip())
     return int(found.group(1)) if found else 0
 
 
@@ -254,6 +271,8 @@ def _description(data: bytes, where: str, found: Clues) -> None:
     found.looked.append(where)
     for url in links_in(parsed):
         found.add_link(url, where)
+    if str(parsed.get("media_id") or "").isdigit() and str(parsed.get("id") or "").isdigit():
+        found.add_gallery(int(parsed["id"]), where)      # (v5.44.169) nhentai's own description of a gallery
     for name in names_in(parsed):
         found.add_name(name, where)
 
@@ -296,15 +315,19 @@ def _shortcut(path: Path, found: Clues) -> None:
     if not text:
         return
     urls = [u.rstrip(".,;") for u in _URL.findall(text)
-            if known_link(u.rstrip(".,;")) or e621_pool(u.rstrip(".,;"))]
-    if path.suffix.lower() == ".txt" and len({title_of(u) if not e621_pool(u) else ("e621", e621_pool(u))
-                                              for u in urls}) != 1:
+            if known_link(u.rstrip(".,;")) or e621_pool(u.rstrip(".,;")) or nhentai_gallery(u.rstrip(".,;"))]
+
+    def what(url: str) -> tuple:
+        if e621_pool(url):
+            return "e621", e621_pool(url)
+        return ("nhentai", nhentai_gallery(url)) if nhentai_gallery(url) else title_of(url)
+    if path.suffix.lower() == ".txt" and len({what(u) for u in urls}) != 1:
         return
     where = f"«{path.name}»"
-    before = len(found.links) + len(found.pools)
+    before = len(found.links) + len(found.pools) + len(found.galleries)
     for url in urls:
         found.add_link(url, where)
-    if len(found.links) + len(found.pools) > before:
+    if len(found.links) + len(found.pools) + len(found.galleries) > before:
         found.looked.append(where)
 
 

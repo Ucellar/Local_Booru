@@ -36,6 +36,14 @@ class Cancelled(Exception):
     """The user pressed Stop (or the app is closing)."""
 
 
+class UploadUnavailable(Exception):
+    """A local file could not be opened before the network request."""
+
+    def __init__(self, error: OSError):
+        self.missing = isinstance(error, FileNotFoundError)
+        super().__init__("Картинки для поиска больше нет" if self.missing else "Не удалось прочитать картинку для поиска")
+
+
 class HttpFailure(Exception):
     """Request failed: network error after retries (transient) or an unusable answer.
 
@@ -308,7 +316,11 @@ class HttpClient:
                   headers=None, auth=None, timeout=None) -> requests.Response:
         """Multipart upload, exactly one attempt."""
         p = Path(path)
-        with p.open("rb") as fh:
+        try:
+            fh = p.open("rb")
+        except OSError as exc:
+            raise UploadUnavailable(exc) from exc
+        with fh:
             return self.request(
                 "POST", url, files={field: (p.name, fh)}, data=data, params=params,
                 headers=headers, auth=auth, timeout=timeout or (10.0, max(60.0, self.timeout[1])),

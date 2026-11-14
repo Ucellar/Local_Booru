@@ -1325,7 +1325,7 @@
   }
   const nativeVideo = (() => {
     // a card's video (data-id) or an episode of the tab «Видео» (data-episode: where to start, played once);
-    // (v5.44.106) an episode of «Смотреть» (data-stream: the token of its stream on the program — watch.js sets it)
+    // (v5.44.106) an episode of a site's series (data-stream: the token of its stream on the program — series.js sets it)
     const box = document.querySelector(".native-video[data-id], .native-video[data-episode], .native-video[data-stream]");
     if (!box) return null;
     const frame = box.querySelector(".nv-frame");
@@ -1969,6 +1969,19 @@
           pill.textContent = n ? String(n) : "";
           pill.hidden = !n;
           downloadsBadge.classList.toggle("on", n > 0);
+          // (v5.44.165) «Установлено обновление … — перезапустите» (html.update_notice): said on a page that was
+          // open when the update came, too — above the page, where a page opened later has it
+          const place = document.querySelector("body > .layout");
+          if (data.notice && place && !document.querySelector(".update-notice")) {
+            place.insertAdjacentHTML("beforebegin", data.notice);
+            // the gallery counted its pictures without this line: counted again, as after the window changed its
+            // size (the last row and the page numbers do not go under the window's edge) — not while something is
+            // being chosen or typed: the count may ask the page anew
+            if (document.body.dataset.fitPage === "1" && !root.classList.contains("selecting")
+                && !typing(document.activeElement)) {
+              window.dispatchEvent(new Event("resize"));
+            }
+          }
         })
         .catch(() => {})
         .finally(() => {

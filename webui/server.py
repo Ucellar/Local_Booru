@@ -41,7 +41,6 @@ from typing import Callable
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 _LOG = logging.getLogger("local_booru.webui")
-STATIC_DIR = Path(__file__).with_name("static")
 COOKIE = "lb_session"
 WORKERS = 16              # requests served at once
 PAGE_WORKERS = 4          # (v5.44.58) of them, the ones that serve only pages (pictures and files never keep them)
@@ -885,18 +884,17 @@ def _loggable(text: str) -> str:
 
 
 def _static(name: str) -> Response:
+    """A page's file (``static/…``).  (v5.44.165) As it was when the program started (``core/started_code.py``): an
+    update copied into the folder meanwhile does not give the pages of the running program new scripts."""
+    from core import started_code
     name = name.split("?", 1)[0]
-    target = (STATIC_DIR / name).resolve()
-    try:
-        target.relative_to(STATIC_DIR.resolve())
-    except ValueError:
+    data = started_code.static(name)
+    if data is None:
         return Response.not_found()
-    if not target.is_file():
-        return Response.not_found()
-    ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    ctype = mimetypes.guess_type(name.rsplit("/", 1)[-1])[0] or "application/octet-stream"
     if ctype.startswith("text/") or ctype in {"application/javascript"}:
         ctype += "; charset=utf-8"
-    return Response(200, target.read_bytes(), ctype, {"Cache-Control": "no-cache"})
+    return Response(200, data, ctype, {"Cache-Control": "no-cache"})
 
 
 def _login_required(phone: "str | None" = None) -> Response:

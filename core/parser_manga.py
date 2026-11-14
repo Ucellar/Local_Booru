@@ -72,7 +72,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import comic_manga as CM, gates as G, manga_detect as MD
+from core import comic_manga as CM, gates as G, manga_detect as MD, parser_manga_again as PA
+from core import parser_manga_nhentai as PN, parser_manga_pages as PP
 
 _LOG = logging.getLogger("local_booru.manga")
 
@@ -83,19 +84,26 @@ SURE = 85.0                     # a picture's answer this alike (%) is sure (``m
 MD5_PAGES = 3                   # pages of each part whose MD5 e621 is asked about (the names of their pools)
 MD5_MAX = 60                    # …of one manga at most
 PROBES = 2                      # pictures of one manga SauceNAO is asked about at most
-NAMES = 3                       # names of one manga searched on the sites at most
+NAMES = 4                       # names of one manga searched on the sites at most ((v5.44.166) 3 → 4: a name made
+#                                 clean is one more — ``parser_manga_pages.names_of``)
 TILES = 2                       # titles of one name whose pages are compared at most
-LOCAL_PAGES = 2                 # pages of the folder compared with a title's
-SITE_PAGES = 3                  # …with so many first pages of its chapter
+LOCAL_PAGES = 4                 # pages of the folder compared with a title's ((v5.44.166) 2 → 4: a cover, a page of
+#                                 the translators first — and two pages said nothing) — with the first pages of its
+#                                 chapter (``parser_manga_pages.SITE_FIRST``, ``SITE_MORE``)
 SEARCHES_PER_HOUR = 60          # searches of the sites of manga by a name an hour at most (the background of «Из архива»:
 #                                 4 titles of 3 names every ten minutes) — a folder of thousands never floods them
 LATER = 30 * 60                 # a check put off (no network): asked again so much later
+RULE = 4                        # E-Hentai image hash links and public photo galleries
+#                                 +1 when what confirms a folder widens (2: nhentai confirms; SauceNAO
+#                                 is asked about its indexes of hentai): the folders the program called «не манга»
+#                                 by the rules of before are looked at again by themselves, once
+#                                 (``parser_manga_again.mark_old``) — a record's ``rule``
+AUTO_KEEPS = 20                 # (v5.44.169) …and looked at after everything that is new; of the hour's searches
+#                                 they leave so many to the others (a new folder, the owner's «Перепроверить»)
+LATE_WAIT = 10 * 60             # (v5.44.169) …one put off for the sites that said nothing about its names
+LATE_TRIES = 2                  # …so many times: after that the folder is decided without them (and says so)
 ROUND_SECONDS = 40              # a round of the background works so long at most (its duty shares one thread)
 
-HOW = {"comicinfo": "ComicInfo.xml", "link": "ссылка в файлах", "site": "тайтл на сайте манги",
-       "saucenao": "SauceNAO", "hand": "вы сказали", "nothing": "не подтверждено",
-       "forbidden": "не берётся", "off": "проверить нечем", "down": "сайты манги не ответили",
-       "later": "SauceNAO — позже"}
 # (a «not a manga» for now: the files and the names confirmed nothing, SauceNAO could not be asked — its pages are
 # parsed, SauceNAO is asked by the background when it may; a manga then — copied, its cards of the gallery to the trash)
 LATER_BY = "SauceNAO спрошу позже: если подтвердит мангу, перенесу в «Мангу»"
@@ -180,13 +188,25 @@ class Store:
 
     def register(self, root: str, cands: list, *, whole: bool = False) -> dict:
         """The candidates of the parser's folder ``root`` seen now (their make-up kept, what was found of them stays);
-        ``whole`` — a look at the whole folder: its ones it did not see are gone (moved or removed).  Its items."""
+        ``whole`` — a look at the whole folder: its ones it did not see are gone (moved or removed).  Its items.
+        (v5.44.166) A manga seen now as a candidate of its own that was one of another candidate's before (a folder
+        of a kind — «bdsm» — is a сборка no more: ``manga_detect.named_after``) takes what was found of it along —
+        its state, its copy, its «handed»: nothing is asked twice, nothing is copied twice."""
         now = int(time.time())
         refused = MD.not_manga()
         mine = MD._norm(root)
 
         def put(items: dict) -> dict:
             seen = set()
+            fresh = {cand.key for cand in cands}
+            before: dict = {}                          # a work's key -> (the other candidate it was of, its record)
+            for key, item in items.items():
+                if key in fresh or not isinstance(item, dict) or MD._norm(item.get("root") or "") != mine:
+                    continue
+                for work_key, rec in (item.get("works") or {}).items():
+                    if isinstance(rec, dict):
+                        before.setdefault(work_key, (key, rec))
+            taken: set = set()                         # (the other candidate, the work) carried over
             for cand in cands:
                 seen.add(cand.key)
                 item = items.setdefault(cand.key, {"at": now, "works": {}})
@@ -201,7 +221,13 @@ class Store:
                     item["hand"] = NOT
                 works = item.setdefault("works", {})
                 for work in cand.works:
-                    rec = works.setdefault(work.key, {"name": work.name, "state": ""})
+                    if work.key not in works and work.key in before:
+                        other, found = before[work.key]
+                        works[work.key] = dict(found)
+                        taken.add((other, work.key))
+                        if (items.get(other) or {}).get("hand") == MANGA and not cand.refused:
+                            item.setdefault("hand", MANGA)       # «Это манга» said of the сборка it was in
+                    rec = works.setdefault(work.key, {"name": work.name, "state": "", "rule": RULE})
                     rec["name"] = work.name
                     alone = bool(work.roots) and all(MD._under(Path(r), refused) for r in work.roots)
                     if alone and rec.get("hand") != MANGA:
@@ -210,6 +236,16 @@ class Store:
                         rec.pop("hand", None)
                 for key in [k for k in works if k not in {w.key for w in cand.works}]:
                     works.pop(key, None)
+            for other, work_key in taken:              # the candidate they were of: its manga no more
+                old = items.get(other) or {}
+                (old.get("works") or {}).pop(work_key, None)
+                made = old.get("cand")
+                if isinstance(made, dict):
+                    made["works"] = [w for w in made.get("works") or [] if not (isinstance(w, dict) and
+                                                                             w.get("key") == work_key)]
+            for other in {other for other, _key in taken}:
+                if not (items.get(other) or {}).get("works"):
+                    items.pop(other, None)
             if whole:
                 for key in [k for k, v in items.items() if k not in seen and MD._norm(v.get("root") or "") == mine]:
                     items.pop(key, None)
@@ -352,7 +388,7 @@ class Asker:
     # SauceNAO
     def sauce(self, data: bytes) -> dict:
         from core import manga_pictures as P
-        return P.ask_one(self.settings, self.http, data, dbs=(*P.INDEXES, E621_INDEX))
+        return P.ask_one(self.settings, self.http, data, dbs=(*P.INDEXES, E621_INDEX, *P.HENTAI_INDEXES))
 
 
 E621_INDEX = 29                 # SauceNAO's index of e621 (its post's pools: names to search by)
@@ -433,9 +469,26 @@ def search_wait() -> float:
         return max(1.0, 3600.0 - (now - _SEARCHES[0]))
 
 
-def _search_taken() -> None:
+def search_left() -> int:
+    """(v5.44.169) How many searches of the sites of manga the hour has left."""
     with _SEARCH_LOCK:
-        _SEARCHES.append(time.monotonic())
+        now = time.monotonic()
+        while _SEARCHES and now - _SEARCHES[0] >= 3600:
+            _SEARCHES.pop(0)
+        return max(0, int(SEARCHES_PER_HOUR) - len(_SEARCHES))
+
+
+_SEARCH_PART = [0.0]                    # (v5.44.169) the parts of a search taken so far (a few sites asked again)
+
+
+def _search_taken(part: float = 1.0) -> None:
+    """A search of the sites of manga counted in the hour's pace; (v5.44.169) ``part`` — of a search: a few sites
+    asked again about a name (``parser_manga_pages.by_names``'s «late») are a part of one."""
+    with _SEARCH_LOCK:
+        _SEARCH_PART[0] += max(0.0, float(part))
+        while _SEARCH_PART[0] >= 1.0 - 1e-9:
+            _SEARCH_PART[0] -= 1.0
+            _SEARCHES.append(time.monotonic())
 
 
 def paced(wait: float) -> "Verdict":
@@ -459,11 +512,15 @@ class Verdict:
     first: str = ""                     # the site's chapter the folder's first part is (its pages compared): the copy's
     #                                     chapters are named by the site's numbers — «Загрузки» fetch only the missing
     sauce_at: int = 0                   # «not a manga» for now: when SauceNAO may be asked again (0 — not to be)
+    late: "dict | None" = None          # (v5.44.169) it waits for the sites that said nothing about its names: what
+    #                                     the next check goes on from (:func:`late_kept`)
+    eh_photo: bool = False             # a matching public image gallery uses the complete manga download
 
     def record(self) -> dict:
         return {"state": self.state, "how": self.how, "by": self.by, "sim": round(float(self.sim or 0), 1),
                 "title": self.title, "url": self.url, "later_at": int(self.later_at or 0), "why": self.why,
-                "first": self.first, "sauce_at": int(self.sauce_at or 0), "at": int(time.time())}
+                "first": self.first, "sauce_at": int(self.sauce_at or 0), "at": int(time.time()),
+                "late": dict(self.late or {}), "eh_photo": self.eh_photo}
 
 
 def _md5_file(path: Path) -> str:
@@ -587,147 +644,14 @@ def _limit(settings: dict) -> int:
         return 10
 
 
-def _local(work: "MD.Work", listed: list) -> list:
-    """[(part index, page number, path)] of the folder's pages compared and searched: the first :data:`LOCAL_PAGES` of
-    its first part with pages."""
-    for index, pages in enumerate(listed):
-        if pages:
-            return [(index, n, p) for n, p in pages[:LOCAL_PAGES]]
-    return []
-
-
-def _chapter_of(work: "MD.Work", index: int) -> str:
-    """The number of the site's chapter a part is (its folder's number: «Сильвер Соул 7» → «7»; a manga of one folder
-    named with a number at its end — that number); "" — the title's first chapter."""
-    part = work.parts[index] if 0 <= index < len(work.parts) else None
-    if part is not None and part.label.startswith(MD.PARTS_WORD + " "):
-        return part.label.split(" ", 1)[1].strip()
-    _base, number = MD.tail_number(work.name)
-    return str(number) if number is not None and len(work.parts) == 1 else ""
-
-
-def names_of(work: "MD.Work", extra=()) -> list:
-    """The names a manga is searched by on the sites: its own (its folder's, without «М4.» and a part's number; with a
-    number at its end — without it too) and ``extra`` (ComicInfo's «Series», e621's pools, SauceNAO's answers) — never
-    a name that names nothing («Новая папка», «123», «1»); :data:`NAMES` at most."""
-    from core import manga_clues as C
-    own = [work.name]
-    base, number = MD.tail_number(work.name)
-    if number is not None:
-        own.append(base)
-    return [n for n in C.good_names([*own, *extra]) if not re.fullmatch(r"[\W\d_]+", n)][:NAMES]
-
-
-def _title_pages(asker: Asker, url: str, number: str) -> tuple:
-    """(the pHashes of the first :data:`SITE_PAGES` pages of the chapter ``number`` of the title at ``url`` — its first
-    free chapter when it has no such one —, the title's name); asked once a round.  ``manhwa_sources.SourceError`` —
-    the site gave none (a paid chapter, a sign-in, no answer)."""
-    from core import manhwa_sources as S
-    kept = asker._titles.get((url, number))
-    if kept is not None:
-        return kept
-    source, key = S.source_for(url)
-    if source is None:
-        raise S.SourceError("не сайт манги программы")
-    net = asker.net()
-    title = source.title(net, key)
-    chapters = [c for c in source.chapters(net, title) if c.free]
-    chosen = next((c for c in chapters if number and S._num(c.number) == S._num(number)), None)
-    if chosen is None and chapters:
-        chosen = min(chapters, key=lambda c: (c.index, S._number_key(c.number)))
-    if chosen is None:
-        raise S.SourceError("у тайтла нет бесплатных глав")
-    hashes = []
-    for pic in source.pictures(net, title, chosen)[:SITE_PAGES]:  # (a paid one — ``Paid``, a SourceError: none)
-        if asker.stopped():
-            break
-        data, _ctype = S.fetch_picture(net, pic, what=source.label,
-                                       headers={"Referer": source.referer(title),
-                                                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"})
-        mark = _phash(data)
-        if mark:
-            hashes.append(mark)
-    got = (hashes, title.title, source.label, S._num(chosen.number))
-    asker._titles[(url, number)] = got
-    return got
-
-
-def _by_names(asker: Asker, work: "MD.Work", listed: list, names: list, *, how: str = "site",
-              said: str = "", searched: "set | None" = None) -> tuple:
-    """2. ``names`` searched on the sites of manga, the pages of the best :data:`TILES` titles of each compared with the
-    folder's (pHash): two pages alike, or one and the very name — (the :class:`Verdict`, its link, its name); none — (None,
-    {a name's key: (the link of a title of that name found, its name)}).  :class:`Pace` — the hour's searches spent.
-    ``searched`` — the keys of the names searched already (nothing found): not searched again (a check gone on after the
-    hour's pace), the ones searched now added."""
-    from core import manga_archive as A, manhwa_search as MS, manhwa_sources as S
-    local = _local_marks(work, listed)
-    found: dict = {}
-    if not local:
-        return None, found
-    limit = _limit(asker.settings)
-    chapter = _chapter_of(work, local[0][0])
-    for name in names:
-        if asker.stopped():
-            break
-        key = S.name_key(name)
-        if searched is not None and key in searched:
-            continue
-        wait = search_wait()
-        if wait:
-            raise Pace(wait)
-        _search_taken()
-        down = asker.down
-        try:
-            tiles, missed = MS.search_now(name, asker.stop_check, net=asker.net())
-        except Exception as exc:  # noqa: BLE001 - the sites' trouble: this name says nothing now
-            _LOG.info("parser manga: the sites not asked about %r: %s", name, exc)
-            asker.down += 1
-            continue
-        if not tiles and missed and len(missed) >= len(MS.sources()):
-            asker.down += 1                         # no site of manga answered: the name said nothing now
-            continue
-        mine = S.names_of(name)
-        named = [t for t in tiles if mine & S.names_of(*t.names)]
-        named.sort(key=lambda t: (A._tile_kind(t) not in ("", "manga"), key not in {S.name_key(n) for n in t.names}))
-        for tile in named[:TILES]:
-            url = A._best_url(tile)
-            if not url:
-                continue
-            exact = key in {S.name_key(n) for n in tile.names}
-            for wanted in ([chapter, ""] if chapter else [""]):     # the part's own chapter, then the title's first
-                try:
-                    hashes, title_name, label, first = _title_pages(asker, url, wanted)
-                except S.SourceError as exc:
-                    _LOG.info("parser manga: the pages of %s not had: %s", url, exc)
-                    if isinstance(exc, S.Silent) or " не ответил" in str(exc):
-                        asker.down += 1                 # the site did not answer at all: not «not alike»
-                    found.setdefault(key, (url, tile.names[0] if tile.names else name))
-                    break
-                found.setdefault(key, (url, title_name or name))
-                alike = sum(1 for _i, mark in local if any(_alike(mark, h, limit) for h in hashes))
-                if alike >= 2 or (alike >= 1 and exact):
-                    return Verdict(MANGA, how, f"{said}«{name}» → тайтл «{title_name}»" + (
-                        f" на {label}" if label else "") + f": страницы совпали ({alike} из {len(local)})",
-                        title=title_name, url=url, first=first), found
-                if not wanted or first != S._num(wanted):
-                    break                               # (its first chapter was the one compared)
-        if searched is not None and asker.down == down and not asker.stopped():
-            searched.add(key)                           # (the sites answered: this name is done)
-    return None, found
+# (v5.44.166) The folder's pages against a title's — its names, its pages, the title's pages, what «the same» is —
+# are ``core/parser_manga_pages.py`` (taken out of this file and widened); the names of before stay.
+_local, _local_marks, _chapter_of, names_of = PP.local, PP.local_marks, PP.chapter_of, PP.names_of
+_by_names, _by_link = PP.by_names, PP.by_link
 
 
 def _e621_link(url: str) -> bool:
     return (urlparse(str(url or "")).hostname or "").lower().removeprefix("www.") in ("e621.net", "e926.net")
-
-
-def _local_marks(work: "MD.Work", listed: list) -> list:
-    """[(part index, pHash)] of the folder's pages compared with a title's (:func:`_local`)."""
-    out = []
-    for index, _number, path in _local(work, listed):
-        mark = _phash(_bytes(work.parts[index], path))
-        if mark:
-            out.append((index, mark))
-    return out
 
 
 LINK_RULE = 2                   # (v5.44.127) a link of the folder's files confirms only by the title's pages
@@ -738,34 +662,14 @@ class Removed(CM.ComicError):
     """(v5.44.127) A copy the rule of 5.44.125 made, taken out of the manga folder by the person: never again."""
 
 
-def _by_link(asker: Asker, work: "MD.Work", listed: list, url: str, *, said: str) -> "Verdict | None":
-    """(v5.44.127) A link of a title of a site of manga in the folder's files — «Из архива»'s ``.lb/source.json`` (the
-    versions 5.44.84–5.44.124 wrote it into the parser's folder by the old guesses), a description's, ComicInfo's «Web»,
-    a shortcut — confirms only when that title's pages are the folder's (one page alike: the link names the title, as
-    the very name does in :func:`_by_names`).  A link alone never (the owner: «если оно как то записалось что это манга и
-    оно не будет парсить это пиздец»).  None — not confirmed (the names, SauceNAO go on; no site answering — counted in
-    ``asker.down``: it waits)."""
-    from core import manhwa_sources as S
-    local = _local_marks(work, listed)
-    if not local:
-        return None
-    limit = _limit(asker.settings)
-    chapter = _chapter_of(work, local[0][0])
-    for wanted in ([chapter, ""] if chapter else [""]):
-        try:
-            hashes, title_name, label, first = _title_pages(asker, url, wanted)
-        except S.SourceError as exc:
-            _LOG.info("parser manga: the pages of %s not had: %s", url, exc)
-            if isinstance(exc, S.Silent) or " не ответил" in str(exc):
-                asker.down += 1
-            return None
-        alike = sum(1 for _i, mark in local if any(_alike(mark, h, limit) for h in hashes))
-        if alike >= 1:
-            return Verdict(MANGA, "link", f"{said} → тайтл «{title_name}»" + (f" на {label}" if label else "")
-                           + f": страницы совпали ({alike} из {len(local)})", title=title_name, url=url, first=first)
-        if not wanted or first != S._num(wanted):
-            break
-    return None
+class Had(CM.ComicError):
+    """(v5.44.169) The gallery of nhentai that confirmed a folder is in the manga folder already (downloaded by the
+    program, or by hand): no copy is made beside it — ``folder`` is the one there."""
+
+    def __init__(self, words: str, folder: str, kind: str = "manga"):
+        super().__init__(words)
+        self.folder = str(folder)
+        self.kind = "manhwa" if kind == "manhwa" else "manga"
 
 
 def _by_files(asker: Asker, cand: "MD.Candidate", work: "MD.Work", listed: "list | None" = None) -> tuple:
@@ -810,7 +714,8 @@ def _by_files(asker: Asker, cand: "MD.Candidate", work: "MD.Work", listed: "list
             tried.add(url)
             found = _by_link(asker, work, listed, url, said="ComicInfo.xml в папке и ссылка в ней")
             if found is not None:
-                found.how = "comicinfo"
+                if found.state == MANGA:
+                    found.how = "comicinfo"
                 return found, names
         return Verdict(MANGA, "comicinfo", "ComicInfo.xml в папке", title=series), names
     for folder in folders[:6]:
@@ -821,8 +726,20 @@ def _by_files(asker: Asker, cand: "MD.Candidate", work: "MD.Work", listed: "list
                 found = _by_link(asker, work, listed, url, said=f"ссылка на тайтл сайта манги в {where}")
                 if found is not None:
                     return found, names
+        for number, where in clue.galleries:        # (v5.44.169) a gallery of nhentai: by its pages, as any link
+            if ("nhentai", number) not in tried:
+                tried.add(("nhentai", number))
+                found = PN.by_number(asker, work, listed, number, said=f"ссылка на галерею nhentai в {where}")
+                if found is not None:
+                    return found, names
         if clue.pools and asker.e621_ok():          # a link of a pool of e621: its name — a name to search by
             names += asker.pool_names([pid for pid, _w in clue.pools])
+    number = PN.number_in_name(work.name)           # (v5.44.169) «nhentai-123456 - Title», «123456»: that gallery
+    if number and ("nhentai", number) not in tried:  # — only when two of its pages are the folder's
+        found = PN.by_number(asker, work, listed, number, how="site", exact=False,
+                             said=f"номер галереи nhentai в названии папки ({number})")
+        if found is not None:
+            return found, names
     return None, names
 
 
@@ -871,18 +788,25 @@ def _dex_names(asker: Asker, links: list) -> list:
     return []
 
 
-def _by_pictures(asker: Asker, work: "MD.Work", listed: list, searched: set, kept: "dict | None" = None) -> Verdict:
+def _by_pictures(asker: Asker, work: "MD.Work", listed: list, searched: set, kept: "dict | None" = None,
+                 seen: "list | None" = None, late: "dict | None" = None) -> Verdict:
     """3. SauceNAO, only when the files and the names said nothing: the indexes of manga and e621's in one search,
     :data:`PROBES` pictures at most (the second only when the first named something not confirmed): the names it gives
     (a manga's; e621's post — its pools') → :func:`_by_names` (not the ones ``searched`` already); sure on two pages
     (:data:`SURE` %) of one name whose title a site has — confirmed too.  ``kept`` — SauceNAO's answers of this check
-    ({a page: its answer}): a check gone on after the hour's pace does not ask SauceNAO twice."""
-    from core import manga_clues as C, manhwa_sources as S
+    ({a page: its answer}): a check gone on after the hour's pace does not ask SauceNAO twice.  (v5.44.166) ``seen`` —
+    what the names gave (``parser_manga_pages.by_names``): «не манга» says it (None — the names were not asked in
+    this check).  (v5.44.169) Its indexes of hentai manga too (``manga_pictures.HENTAI_INDEXES`` — the pages of
+    nhentai's and e-hentai's galleries, in the same search): the gallery it names is found on nhentai and its pages
+    compared (``parser_manga_nhentai.by_hits``), its name is one more name for the sites of manga; ``late`` — the
+    sites that said nothing about the folder's names (the words of «не манга» name them)."""
+    from core import manga_clues as C, manga_pictures as P, manhwa_sources as S, parser_gallery_sources as PG
     kept = kept if kept is not None else {}
     probes = _local(work, listed)[:PROBES]
     if not probes:
         return Verdict(NOT, "nothing", "в папке нет картинок, которые можно спросить")
     asked, later, off = 0, None, ""
+    knew: tuple = ()                                # (v5.44.169) the gallery SauceNAO named: (its name, %, whose index)
     sure: dict = {}                                 # a name's key -> the pictures that named it SURE % and more
     found: dict = {}                                # a name's key -> (a title of that name on a site, its name)
     for index, _number, path in probes:
@@ -913,37 +837,97 @@ def _by_pictures(asker: Asker, work: "MD.Work", listed: list, searched: set, kep
             raw = (asker.posts([posts[0][0]]) or {}).get(posts[0][0]) or {}
             extra = asker.pool_names(_pools_of(raw))
         extra += _dex_names(asker, links)
-        for name, sim in names:
-            if sim >= SURE:
-                sure[S.name_key(name)] = sure.get(S.name_key(name), 0) + 1
+        # A page may have several results or aliases for the same title. It is still one page of evidence.
+        for name_key in {S.name_key(name) for name, sim in names if sim >= SURE} - {""}:
+            sure[name_key] = sure.get(name_key, 0) + 1
+        hentai = got.get("eh_hits") or P.hentai_hits(got.get("data") or {})
+        if hentai:
+            verdict, titles, named = None, {}, []
+            if not got.get("eh_done") and any(PG.source_link(hit.get("link")) for hit in hentai):
+                verdict, titles, named = PG.by_hits(asker, work, listed, hentai, searched=searched, seen=seen, late=late)
+                if verdict is not None and verdict.state == WAIT:
+                    verdict.late["eh_path"] = str(path)
+                    return verdict
+            if verdict is None:
+                verdict, other_titles, other_names = PN.by_hits(asker, work, listed, hentai, searched=searched,
+                                                              seen=seen, late=late)
+                titles.update(other_titles)
+                named = list(dict.fromkeys([*named, *other_names]))
+            if verdict is None:
+                verdict, other_titles, other_names = PG.by_hits(asker, work, listed, hentai, search=True,
+                                                              searched=searched, seen=seen, late=late)
+                titles.update(other_titles)
+                named = list(dict.fromkeys([*named, *other_names]))
+            if verdict is not None:
+                return verdict
+            found.update({k: v for k, v in titles.items() if k not in found})
+            if named and not knew:
+                knew = (named[0], float(hentai[0]["sim"]), "nhentai" if hentai[0]["index"] == 18 else "e-hentai")
+            extra += named
+            # Galleries with the same title can contain different translations. Only their pages confirm them.
+            from core.nhentai import pretty
+            names = [*names, *((pretty(name) or name, hit["sim"]) for hit in hentai
+                               for name in hit["names"] if (pretty(name) or name) in named)]
         new = [n for n in C.good_names([*(n for n, _s in names), *extra]) if S.name_key(n) not in searched][:NAMES]
         if new:
             best = max((s for _n, s in names), default=0.0)
-            verdict, seen = _by_names(asker, work, listed, new, how="saucenao", searched=searched,
-                                      said=f"SauceNAO ({best:.0f} %) — " if best else "SauceNAO (e621) — ")
+            verdict, titles = _by_names(asker, work, listed, new, how="saucenao", searched=searched,
+                                        said=f"SauceNAO ({best:.0f} %) — " if best else "SauceNAO (e621) — ")
             if verdict is not None:
                 verdict.sim = best
                 return verdict
-            found.update({k: v for k, v in seen.items() if k not in found})
+            found.update({k: v for k, v in titles.items() if k not in found})
         if not names and not extra:
             break                                   # nothing at all on the first: the second would be a search spent
     for key, count in sure.items():
         if count >= 2 and key in found:
             url, title = found[key]
+            if PN.number_of(url) or PG.public_link(url):
+                continue
             return Verdict(MANGA, "saucenao", f"SauceNAO — две страницы ≥ {SURE:.0f} % → тайтл «{title}» на сайте "
                                               "манги", sim=SURE, title=title, url=url)
     if later is not None:
         return Verdict(WAIT, "saucenao", str(later.get("later") or "SauceNAO недоступен"),
                        later_at=int(later.get("until") or 0) or int(time.time()) + LATER,
                        why=str(later.get("later") or ""))
+    said = PP.not_words(seen, late) if seen is not None else "по названию тайтл на сайтах манги не подтвердился"
+    if asked and knew:                              # (v5.44.169) it knows the page — no gallery of the program's has it
+        return Verdict(NOT, "nothing", f"{said}; SauceNAO узнал страницу — «{knew[0]}» ({knew[2]}, {knew[1]:.0f} %), "
+                                       "но страницы доступных галерей не подтвердились: если это она — "
+                                       "«Указать ссылку» или «Это манга»", sim=knew[1])
     if asked:
-        return Verdict(NOT, "nothing", "ни тайтла на сайтах манги, ни ответа SauceNAO, который к нему ведёт")
-    return Verdict(NOT, "off", "на сайтах манги по имени не нашлось, а SauceNAO спросить нельзя: " + (
-        off or "он выключен"))
+        return Verdict(NOT, "nothing", f"{said}; SauceNAO тоже не назвал мангу, которая подтвердилась бы")
+    return Verdict(NOT, "off", f"{said}, а SauceNAO спросить нельзя: " + (off or "он выключен"))
+
+
+def late_kept(rec: "dict | None") -> dict:
+    """(v5.44.169) What a check that waits for the sites that said nothing keeps for the next one (a record's or a
+    mark's ``late``): {"tries", "names": {a name's key: {"name", "sites"}}, "searched", "seen"} — {} — nothing."""
+    kept = (rec or {}).get("late")
+    return kept if isinstance(kept, dict) and isinstance(kept.get("names"), dict) else {}
+
+
+def _late_wait(memo: dict) -> "Verdict | None":
+    """(v5.44.169) A folder whose names some sites said nothing about waits for them (:data:`LATE_WAIT`,
+    :data:`LATE_TRIES` times) before SauceNAO is asked and before it is called «не манга»: the verdict — or None:
+    every site answered, or they were waited for long enough (the check goes on without them)."""
+    late = memo.get("late") or {}
+    tries = int(memo.get("late_tries") or 0)
+    if not late or tries >= LATE_TRIES:
+        return None
+    quiet = PP.late_words(late)
+    return Verdict(WAIT, "down", f"не ответили: {quiet} — переспрошу их", later_at=int(time.time()) + LATE_WAIT,
+                   why=f"не ответили: {quiet}", late=_late_state(memo, tries + 1))
+
+
+def _late_state(memo: dict, tries: int) -> dict:
+    """What a check that waits keeps of itself for the next one (:func:`late_kept`)."""
+    return {"tries": int(tries), "names": dict(memo.get("late") or {}),
+            "searched": sorted(memo.get("searched") or ()), "seen": list(memo.get("seen") or [])[-12:]}
 
 
 def check_work(asker: Asker, cand: "MD.Candidate", work: "MD.Work", *, steps: tuple = STEPS,
-               memo: "dict | None" = None, later_not: bool = False) -> "Verdict | None":
+               memo: "dict | None" = None, later_not: bool = False, kept: "dict | None" = None) -> "Verdict | None":
     """One manga of a candidate checked by the ways of ``steps`` («files», «names», «pictures» — the module's words) —
     its :class:`Verdict`; None — those steps said nothing (the next ones are to ask); a verdict of no state — stopped
     half-way (nothing kept).  ``memo`` — what the steps of one manga hand on (the names to search by, the names
@@ -952,11 +936,46 @@ def check_work(asker: Asker, cand: "MD.Candidate", work: "MD.Work", *, steps: tu
     A «not» while no site of manga answered a search of it (no network) — it waits instead («down»).  SauceNAO not to
     be asked now (the day's searches spent, its pause) while the sites answered — ``later_not`` (the parser's folder):
     «not a manga» for now (how «later», ``sauce_at``: its pages are parsed, SauceNAO is asked by the background
-    later); else (a comic of the gallery) it waits."""
+    later); else (a comic of the gallery) it waits.
+
+    (v5.44.169) ``kept`` — the manga's record of before (or its mark «look again»): given, the folder **waits for the
+    sites that said nothing about its names** (:func:`_late_wait`; what it waits with — the verdict's ``late``, kept in
+    the record) and this check goes on from there: the names done are not searched again, the sites that were silent
+    are asked alone.  Not given (a comic of the gallery: nothing is kept of its check) — it does not wait for them.
+    The names are asked of nhentai too (``parser_manga_nhentai``: before the sites of manga when the folder is named
+    as a gallery).  (v5.44.170) ``memo["wide"]`` — the owner's own «Перепроверить» of this folder: its names are asked
+    of the sites of the window's browser too (``parser_manga_pages.by_names``' ``wide``)."""
     memo = memo if memo is not None else {}
     listed = memo.get("listed")
     if listed is None:
-        listed = memo["listed"] = [MD.pages_of(part) for part in work.parts]
+        try:
+            listed = [MD.pages_of(part, strict=True) for part in work.parts]
+        except OSError:
+            words = "Не удалось прочитать папку с картинками"
+            return Verdict(WAIT, "files", words, why=words, later_at=int(time.time()) + LATER,
+                           late=(kept or {}).get("late"))
+        memo["listed"] = listed
+    if kept is not None and "late" not in memo:         # what the check of before waits with
+        before = late_kept(kept)
+        memo["late"] = {str(k): dict(v) for k, v in (before.get("names") or {}).items() if isinstance(v, dict)}
+        memo["late_tries"] = int(before.get("tries") or 0)
+        if before:
+            memo.setdefault("searched", set()).update(str(k) for k in before.get("searched") or [])
+            memo.setdefault("seen", []).extend(n for n in before.get("seen") or [] if isinstance(n, dict))
+    previous = (kept or {}).get("late") or {}
+    previous_hits = previous.get("eh_hits") or []
+    if previous_hits and not memo.get("eh_resumed"):
+        from core import parser_gallery_sources as PG
+        memo["eh_resumed"] = True
+        found, _titles, _names = PG.by_hits(asker, work, listed, previous_hits, said=str(previous.get("eh_said") or ""))
+        if found is not None:
+            if found.state == WAIT:
+                found.late["eh_path"] = str(previous.get("eh_path") or "")
+            return found
+        if asker.stopped():
+            return Verdict("")
+        if previous.get("eh_path"):
+            memo.setdefault("sauce", {})[previous["eh_path"]] = {"data": {}, "eh_hits": previous_hits, "eh_done": True}
     down = asker.down
     if "files" in steps:
         found, extra = _by_files(asker, cand, work, listed)
@@ -972,8 +991,21 @@ def check_work(asker: Asker, cand: "MD.Candidate", work: "MD.Work", *, steps: tu
         if closed:
             return Verdict(NOT, "forbidden", closed)               # a gate closed the folder: the words — its
         names = names_of(work, [*memo.get("extra", []), *pools])
+        if memo.get("late"):                            # (a name of before the folder is searched by no more)
+            from core import manhwa_sources as S
+            mine = {S.name_key(n) for n in names}
+            for key in [k for k in memo["late"] if k not in mine]:
+                memo["late"].pop(key, None)
+        asks = {"searched": memo.setdefault("searched", set()), "seen": memo.setdefault("seen", []),
+                "late": memo.get("late")}
+        ways = (lambda: _by_names(asker, work, listed, names, said="имя ", wide=bool(memo.get("wide")), **asks),
+                lambda: PN.by_names(asker, work, listed, names, said="имя ", raw=work.name, **asks))
+        found = None
         try:
-            found, _seen = _by_names(asker, work, listed, names, said="имя ", searched=memo.setdefault("searched", set()))
+            for way in (reversed(ways) if PN.first(work) else ways):
+                found, _seen = way()
+                if found is not None or asker.stopped():
+                    break
         finally:
             memo["down"] = memo.get("down", 0) + asker.down - down
             down = asker.down
@@ -981,16 +1013,21 @@ def check_work(asker: Asker, cand: "MD.Candidate", work: "MD.Work", *, steps: tu
             return found
         if asker.stopped():
             return Verdict("")
+        waits = _late_wait(memo) if kept is not None else None
+        if waits is not None:
+            return waits
     if "pictures" in steps:
         try:
-            found = _by_pictures(asker, work, listed, memo.setdefault("searched", set()), memo.setdefault("sauce", {}))
+            found = _by_pictures(asker, work, listed, memo.setdefault("searched", set()), memo.setdefault("sauce", {}),
+                                 seen=memo.get("seen"), late=memo.get("late"))
         finally:
             memo["down"] = memo.get("down", 0) + asker.down - down
             down = asker.down
         if memo["down"] and (found.state == WAIT and found.how == "saucenao" or
                              found.state == NOT and found.how in ("nothing", "off")):
             return Verdict(WAIT, "down", "сайты манги не ответили", later_at=int(time.time()) + LATER,
-                           why="сайты манги не ответили")
+                           why="сайты манги не ответили",
+                           late=_late_state(memo, int(memo.get("late_tries") or 0)) if kept is not None else None)
         if later_not and found.state == WAIT and found.how == "saucenao":
             return Verdict(NOT, "later", LATER_BY, sauce_at=int(found.later_at or 0) or int(time.time()) + LATER,
                            why=found.why or found.by)
@@ -1088,14 +1125,17 @@ def _plan(work: "MD.Work", first: str = "") -> list:
 
 def copy_name(work: "MD.Work", verdict: dict) -> str:
     """The copy's name: the manga's own (its folder's, without «М4.» and a part's number) — or, the folder's name
-    naming nothing («Скачанное 3», «Новая папка (2)»), the one its confirmation gave (the site's title's, ComicInfo's)."""
+    naming nothing («Скачанное 3», «Новая папка (2)»), the one its confirmation gave (the site's title's, ComicInfo's);
+    (v5.44.169) one a gallery of nhentai confirmed — «nhentai-<number> - <that name>»."""
     from core.manga_clues import junk_name
     title = str(verdict.get("title") or "").strip()
     try:
         junk = junk_name(work.name)
     except Exception:  # noqa: BLE001 - the words of the names not there: its own name
         junk = False
-    return title if junk and title else (work.name or title or Path(work.path).name)
+    name = title if junk and title else (work.name or title or Path(work.path).name)
+    number = PN.number_of(verdict.get("url"))           # (v5.44.169) a gallery of nhentai confirmed it: the folder
+    return PN.copy_name(number, name) if number else name      # the program's downloader takes for that gallery
 
 
 def info_of(cand: "MD.Candidate", work: "MD.Work", verdict: dict) -> dict:
@@ -1134,6 +1174,20 @@ def copy_work(settings: dict, cand: "MD.Candidate", work: "MD.Work", verdict: di
         if record.get("done", True) and record.get("pages"):
             raise Removed(f"«{work.name}»: её копию убрали из папки манги — не копирую снова")
         kept = None
+    number = PN.number_of(verdict.get("url"))
+    if number and kept is None:                         # (v5.44.169) the gallery is in «Манга» already: no second one
+        there = PN.had_folder(root, number)
+        if there is not None:
+            raise Had(f"«{work.name}»: эта галерея уже есть в «Манге» (папка «{there.name}») — вторая копия не "
+                      "делается", str(there))
+    if not number and kept is None and verdict.get("url"):
+        from core import manhwa_download as D, manhwa_sources as S
+        source, title_key = S.source_for(str(verdict["url"]))
+        existing = D.linked_folder(settings, source.name, title_key) if source and title_key else None
+        if existing is not None and Path(existing[1]).is_dir():
+            there = Path(existing[1])
+            raise Had(f"«{work.name}»: этот тайтл уже есть в библиотеке (папка «{there.name}») — вторая копия "
+                      "не делается", str(there), existing[0])
     plan = _plan(work, str(verdict.get("first") or ""))
     pages = [t for _s, t in plan if t.suffix.lower() in MD.IMAGES | {".cbz", ".zip", ".pdf"}]
     if not pages:
@@ -1205,6 +1259,8 @@ def link_folder(settings: dict, key: str, name: str, folder: Path, url: str, *, 
     say = say or (lambda _text: None)
     entry = _entry_of(key, name, folder, chapters)
     out = {"counts": {}, "queued": 0, "error": ""}
+    if stop_check and stop_check():
+        return out
     try:
         if not (entry.linked and entry.linked.get("url")):
             done = A.link(settings, entry, url, net=S.Net(stop_check), say=lambda text: say("  " + text))
@@ -1214,6 +1270,8 @@ def link_folder(settings: dict, key: str, name: str, folder: Path, url: str, *, 
     except (A.LinkError, D.DownloadError, S.SourceError) as exc:
         out["error"] = str(exc)
         return out
+    if stop_check and stop_check():
+        return {"counts": {}, "queued": 0, "error": ""}
     A.STORE.put(entry.key, {"state": "linked", "path": str(folder), "counts": out["counts"],
                             "how": "pictures" if how == "saucenao" else "link", "by": by, "tried": [], "later_at": 0,
                             "why": ""})
@@ -1362,71 +1420,161 @@ def size_words(work: "MD.Work") -> str:
     return f"{pages} стр."
 
 
+class _WorkGuard:
+    """A result may only update the same folder choice it started with."""
+
+    def __init__(self, cand, work, expected: dict, stop_check=None):
+        self.cand, self.work = cand, work
+        self.expected = dict(expected)
+        self.stop = stop_check or (lambda: False)
+        self._revision = -1
+        self._cancelled = False
+
+    def stopped(self) -> bool:
+        if self.stop():
+            self._cancelled = True
+        if self._cancelled:
+            return True
+        with STORE._lock:
+            if self._revision != STORE.rev:
+                current = state_of(STORE.items().get(self.cand.key) or {}, self.work)
+                fields = ("state", "hand", "url", "copy", "copied", "eh_photo", PA.AGAIN)
+                if any(current.get(k) != self.expected.get(k) for k in fields):
+                    self._cancelled = True
+                self._revision = STORE.rev
+            return self._cancelled
+
+    def put(self, values: dict) -> bool:
+        with STORE._lock:
+            if self.stopped():
+                return False
+            STORE.put_work(self.cand.key, self.work.key, values)
+            self.expected.update(values)
+            self._revision = -1
+            return True
+
+
 def apply(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.Work", verdict: Verdict, *, say=None,
-          said=None, stop_check=None, deadline: float = 0.0, extra: "dict | None" = None) -> dict:
+          said=None, stop_check=None, deadline: float = 0.0, extra: "dict | None" = None,
+          expected: "dict | None" = None) -> dict:
     """A verdict kept, and done: a manga — copied and linked to its title; not a manga — its pages are the parser's.
     The record kept (with ``extra``: «handed» — its pages gone into a run, «cards_to_trash»); ``said(rec)`` — told
     before the copy is made (the journal: what it is first, then its copy)."""
     say = say or (lambda _text: None)
     said = said or (lambda _rec: None)
+    guard = _WorkGuard(cand, work, expected if expected is not None else
+                       state_of(STORE.items().get(cand.key) or {}, work), stop_check)
     rec = verdict.record()
     rec["link_rule"] = LINK_RULE                        # (v5.44.127) a link of its files was checked by the pages
+    rec["rule"] = RULE                                  # (v5.44.169) …by the rules of now
+    rec[PA.AGAIN] = {}                                  # (v5.44.166) looked at: a mark «look again» is done with
     rec.update(extra or {})
-    STORE.put_work(cand.key, work.key, rec)
+    if not guard.put(rec):
+        return {"state": "", "more": True}
     said(rec)
     if verdict.state != MANGA:
         return rec
-    return place(settings, asker, cand, work, rec, say=say, stop_check=stop_check, deadline=deadline)
+    return place(settings, asker, cand, work, rec, say=say, stop_check=stop_check, deadline=deadline, guard=guard)
 
 
 def place(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.Work", rec: dict, *, say=None,
-          stop_check=None, deadline: float = 0.0) -> dict:
+          stop_check=None, deadline: float = 0.0, guard=None) -> dict:
     """A confirmed manga's copy made (or gone on with), linked to the title that confirmed it, the chapters it misses
     queued."""
     from core import comic_manga as CM
     say = say or (lambda _text: None)
+    guard = guard or _WorkGuard(cand, work, rec, stop_check)
+    stop_check = guard.stopped
+    if stop_check():
+        return {"state": "", "more": True}
+    if rec.get("eh_photo"):
+        from core import parser_ehentai_photos
+        return parser_ehentai_photos.place(settings, cand, work, rec, guard, say=say)
     try:
         got = copy_work(settings, cand, work, rec, stop_check=stop_check, deadline=deadline)
     except CM.NoRoom as exc:                            # the disk freed — copied by the next round
-        STORE.put_work(cand.key, work.key, {"copy_error": str(exc), "copy_retry_at": int(time.time())})
+        guard.put({"copy_error": str(exc), "copy_retry_at": int(time.time())})
         say(line("МАНГА", str(exc)))                    # (its words name the manga)
         return {**rec, "copy_error": str(exc), "no_room": str(exc)}
     except CM.ComicError as exc:                        # its copy removed by the person, nothing to copy: never again
-        STORE.put_work(cand.key, work.key, {"copy_error": str(exc), "copy_retry_at": 0,
-                                            "copy_removed": REMOVED_RULE if isinstance(exc, Removed) else 0})
+        values = {"copy_error": str(exc), "copy_retry_at": 0,
+                  "copy_removed": REMOVED_RULE if isinstance(exc, Removed) else 0,
+                  "had": getattr(exc, "folder", ""), "had_kind": getattr(exc, "kind", "manga")}
+        guard.put(values)
         say(line("МАНГА", str(exc)))
-        return {**rec, "copy_error": str(exc)}
+        return {**rec, **values}
     except OSError as exc:                              # a file that did not read, a folder busy: later
-        STORE.put_work(cand.key, work.key, {"copy_error": str(exc), "copy_retry_at": int(time.time()) + LATER})
+        guard.put({"copy_error": str(exc), "copy_retry_at": int(time.time()) + LATER})
         say(line("МАНГА", f"«{work.name}»: копия не сделалась ({exc}) — попробую позже"))
         return {**rec, "copy_error": str(exc)}
-    if got is None:
+    if got is None or stop_check():
         return rec                                      # cut short: the next time goes on
     values = {"copy": got["key"], "folder": got["name"], "copied": True, "copy_error": "", "copy_retry_at": 0,
               "pages": got["pages"]}
     rec["fresh_copy"] = bool(got.get("new"))
     if rec.get("cards_to_trash"):                       # confirmed after its pages were parsed: their cards go
-        trashed = trash_cards(settings, work, got["name"])
-        STORE.put_work(cand.key, work.key, {"cards_to_trash": False, "cards_trashed": trashed})
+        with STORE._lock:
+            if stop_check():
+                return {"state": "", "more": True}
+            trashed = trash_cards(settings, work, got["name"])
+            guard.put({"cards_to_trash": False, "cards_trashed": trashed})
         values["cards_trashed"] = trashed
         rec["cards_to_trash"] = False
-        say(line("МАНГА", f"«{work.name}» — SauceNAO подтвердил позже → в «Мангу»" + (
-            f"; {plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)" if trashed else "")))
-    if rec.get("url"):
-        linked = link_copy(settings, work, Path(got["folder"]), rec["url"], rec, stop_check=stop_check, say=say)
-        counts = linked.get("counts") or {}
-        values["site"] = {"counts": counts, "queued": linked.get("queued", 0), "error": linked.get("error", "")}
-        if counts.get("missing") and linked.get("queued"):
-            values["fill"] = {"state": "queued", "missing": int(counts["missing"]),
-                              "words": f"на сайте ещё {plural(int(counts['missing']), CHAPTERS)}, которых нет в папке"}
-            say(line("МАНГА", f"«{work.name}» — на сайте ещё {plural(int(counts['missing']), CHAPTERS)}, которых нет "
-                              f"в папке → докачиваю (видно в «Загрузках»)"))
-        elif counts:
-            values["fill"] = {"state": "done", "missing": int(counts.get("missing") or 0),
-                              "words": "все главы на месте" if not counts.get("missing") else "докачка выключена"}
-    STORE.put_work(cand.key, work.key, values)
+        if rec.get("how") == "saucenao":
+            say(line("МАНГА", f"«{work.name}» — SauceNAO подтвердил позже → в «Мангу»" + (
+                f"; {plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)" if trashed else "")))
+        elif trashed:                                   # (v5.44.169) confirmed another way (a second look by its
+            say(line("МАНГА", f"«{work.name}» — её страницы парсер уже разобрал: "      # name, the owner's link)
+                              f"{plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)"))
+    values.update(linked_values(settings, work, Path(got["folder"]), rec, say=say, stop_check=stop_check))
+    if not guard.put(values):
+        return {"state": "", "more": True}
     rec.update(values)
     return rec
+
+
+def linked_values(settings: dict, work: "MD.Work", folder: Path, rec: dict, *, say, stop_check=None) -> dict:
+    """A copy linked to the title that confirmed it (``rec["url"]``; :func:`link_copy` — its description, the
+    chapters it misses into «Загрузки») — the values of its record: {"site", "fill"}; {} — no title to link to.
+    ((v5.44.166) of :func:`place`; a manga confirmed again asks it too — ``parser_manga_again``.)"""
+    if not rec.get("url") or stop_check and stop_check():
+        return {}
+    number = PN.number_of(rec["url"])
+    if number:                                          # (v5.44.169) a gallery of nhentai: its own description
+        values = PN.describe_copy(settings, Path(folder), number, stop_check=stop_check, was=rec.get("gallery"))
+        if stop_check and stop_check():
+            return {}
+        numbers = values["site"].get("counts") or {}
+        if values["site"].get("error"):
+            say(line("МАНГА", f"«{work.name}» — описание галереи nhentai не взято: {values['site']['error']}"))
+        elif numbers.get("missing"):
+            # (v5.44.170) the pages the copy misses are downloaded by themselves, as a title's chapters are
+            # («Докачивать главы, которых нет в папке») — into a copy whose pages are numbered as the gallery's
+            began = bool(values["site"].get("fill")) and fill_on(settings) and bool(PN.fill(settings, number).get("ok"))
+            values["site"]["queued"] = 1 if began else 0
+            say(line("МАНГА", f"«{work.name}» — в папке {numbers['have']} стр. из {numbers['total']} галереи nhentai"
+                              + (" → докачиваю недостающие (видно в «Загрузках»)" if began else
+                                 " — недостающие можно докачать со страницы «Парсер → Манга из папки»"
+                                 if values["site"].get("fill") else "")))
+        return values
+    values: dict = {}
+    if rec.get("gallery"):                              # (the copy was a gallery's before: its description goes)
+        PN.forget_copy(Path(folder), rec.get("gallery"))
+        values["gallery"] = {}
+    linked = link_copy(settings, work, Path(folder), rec["url"], rec, stop_check=stop_check, say=say)
+    if stop_check and stop_check():
+        return {}
+    counts = linked.get("counts") or {}
+    values["site"] = {"counts": counts, "queued": linked.get("queued", 0), "error": linked.get("error", "")}
+    if counts.get("missing") and linked.get("queued"):
+        values["fill"] = {"state": "queued", "missing": int(counts["missing"]),
+                          "words": f"на сайте ещё {plural(int(counts['missing']), CHAPTERS)}, которых нет в папке"}
+        say(line("МАНГА", f"«{work.name}» — на сайте ещё {plural(int(counts['missing']), CHAPTERS)}, которых нет "
+                          f"в папке → докачиваю (видно в «Загрузках»)"))
+    elif counts:
+        values["fill"] = {"state": "done", "missing": int(counts.get("missing") or 0),
+                          "words": "все главы на месте" if not counts.get("missing") else "докачка выключена"}
+    return values
 
 
 def trash_cards(settings: dict, work: "MD.Work", name: str) -> int:
@@ -1534,6 +1682,7 @@ class RunWatch:
         self._runner_stopped = lambda: False
         self._open: dict = {}               # work key -> (cand, work): not decided yet
         self._memos: dict = {}              # work key -> what its steps handed on (``check_work``'s memo)
+        self.before: dict = {}              # (v5.44.169) work key -> its record of before (what a check waits with)
         self._files_done = threading.Event()        # the run's own files are done: only these checks are left
         self._left_said = False
 
@@ -1581,7 +1730,7 @@ class RunWatch:
         """One step of one manga's check (:class:`Pace` — the hour's searches spent: it goes on later from there)."""
         try:
             return check_work(asker, cand, work, steps=(step,), memo=self._memos.setdefault(work.key, {}),
-                              later_not=True)
+                              later_not=True, kept=self.before.get(work.key) or {})
         except Pace:
             raise
         except Exception as exc:  # noqa: BLE001 - one manga's trouble: the others go on, it waits
@@ -1705,7 +1854,8 @@ class RunWatch:
         state = rec.get("state")
         inside = f" (из «{cand.name}»)" if cand.is_set else ""
         if state == MANGA:
-            where = "описание, теги и главы — со страницы тайтла" if rec.get("url") else ""
+            where = ("описание и теги — со страницы галереи nhentai" if PN.number_of(rec.get("url")) else
+                     "описание, теги и главы — со страницы тайтла" if rec.get("url") else "")
             self.log(line("МАНГА", f"«{work.name}»{inside} — {size_words(work)}: {rec.get('by')} → в «Мангу»"
                                    + (f"; {where}" if where else "")))
         elif state == NOT:
@@ -1806,13 +1956,16 @@ def for_run(settings: dict, root: Path, files: list, libraries: tuple = (), *, l
                 watch.parsed[work.key] = (cand, work)
                 continue
             watch.held[work.key] = []
-            if state == MANGA:
+            if (rec.get(PA.AGAIN) or {}).get("link"):   # (v5.44.169) the owner gave its link: the background takes
+                decided["wait"] += 1                    # it (after the run) — a check here would drop his word
+            elif state == MANGA:
                 decided["manga"] += 1
                 if not rec.get("copied") and copy_due(rec, now):
                     watch.places.append((cand, work))
             elif state == WAIT and float(rec.get("later_at") or 0) > now:
                 decided["wait"] += 1                    # SauceNAO's limit, the sites' searches of the hour
             else:
+                watch.before[work.key] = rec
                 watch.todo.append((cand, work))
     handed: set = set()                                 # (cand key, work key) «not a manga» whose pages go in now
     for path in files:
@@ -1852,6 +2005,9 @@ _ROUND = threading.Lock()
 def copy_due(rec: dict, now: float) -> bool:
     """A confirmed manga's copy is to be made: never tried, or tried and its trouble may be over (no room, a file busy
     — :data:`LATER`); its copy removed by the person — never again."""
+    if rec.get("eh_photo"):
+        at = float(rec.get("copy_retry_at") or 0)
+        return at <= now and (rec.get("fill") or {}).get("state") != "failed"
     if not rec.get("copy_error"):
         return True
     if "убрали из папки манги" in str(rec.get("copy_error")) and int(rec.get("copy_removed") or 0) < REMOVED_RULE:
@@ -1861,9 +2017,10 @@ def copy_due(rec: dict, now: float) -> bool:
 
 
 def _due(items: dict, now: float) -> tuple:
-    """(to check, to place, «not a manga» for now whose SauceNAO may be asked) — [(cand, work)] in the folder's
-    order."""
-    check, places, later = [], [], []
+    """(to check, to place, «not a manga» for now whose SauceNAO may be asked, (v5.44.166) to look at again — the
+    owner's «Перепроверить»: ``parser_manga_again``, (v5.44.169) to look at again by the program itself — the folders
+    of the rules of before: ``parser_manga_again.mark_old``) — [(cand, work)] in the folder's order."""
+    check, places, later, again, auto = [], [], [], [], []
     for item in items.values():
         cand = _cand(item)
         if cand is None:
@@ -1871,6 +2028,18 @@ def _due(items: dict, now: float) -> tuple:
         for work in cand.works:
             rec = state_of(item, work)
             state = rec.get("state")
+            mark = rec.get(PA.AGAIN)
+            if mark and (state in (MANGA, NOT, WAIT) or mark.get("link")):
+                # (one not looked at yet is checked as any new one — but for the owner's link of it: v5.44.169)
+                if float(mark.get("later_at") or 0) <= now and not (item.get("hand") == NOT or
+                                                                  rec.get("hand") == NOT):
+                    # (v5.44.169) what the owner asked for goes first: his link, then his «Перепроверить»; the
+                    # folders the program looks at again by itself — a list of their own (after everything new)
+                    if mark.get("auto") and not mark.get("link"):
+                        auto.append((cand, work))
+                    else:
+                        again.append((0 if mark.get("link") else 1, len(again), cand, work))
+                continue
             if state == MANGA:
                 if not rec.get("copied") and copy_due(rec, now):
                     places.append((cand, work))
@@ -1882,7 +2051,110 @@ def _due(items: dict, now: float) -> tuple:
                     later.append((cand, work))
             else:
                 check.append((cand, work))
-    return check, places, later
+    return (check, places, later, [(cand, work) for _first, _n, cand, work in sorted(again, key=lambda x: x[:2])],
+            auto)
+
+
+FILLS_A_ROUND = 3               # (v5.44.170) copies of galleries whose missing pages are asked for a round at most
+
+
+def _fill_galleries(settings: dict, items: dict, tell, *, stop_check=None) -> int:
+    """(v5.44.170) The copies a gallery of nhentai confirmed whose missing pages were not asked for yet (a copy made
+    by the version before, «Докачивать главы, которых нет в папке» was off then, the downloader was busy): their
+    download begun (``parser_manga_nhentai.fill``) — once a copy (``site["queued"]``; after that its row keeps
+    «Докачать»). A saved cursor rotates pending copies so a few silent galleries cannot starve the rest.
+    How many were begun."""
+    if not fill_on(settings):
+        return 0
+    moved = None
+    began = 0
+    looked = 0
+    stop = stop_check or (lambda: False)
+    cursor_root = MD._norm(str(settings.get("root") or ""))
+    saved = (STORE.read().get("fill_cursors") or {}).get(cursor_root)
+    after = tuple(saved) if isinstance(saved, list) and len(saved) == 2 else ("", "")
+    rows = sorted((str(cand_key), str(key), item, rec) for cand_key, item in items.items()
+                  for key, rec in (item.get("works") or {}).items())
+    rows = [row for row in rows if row[:2] > after] + [row for row in rows if row[:2] <= after]
+    for cand_key, key, item, rec in rows:
+        cand = _cand(item)
+        if cand is not None:
+            if stop() or looked >= FILLS_A_ROUND:
+                return began
+            site = rec.get("site") if isinstance(rec, dict) else None
+            if not isinstance(site, dict) or not site.get("gallery") or site.get("queued") or \
+                    rec.get("state") != MANGA or not rec.get("copied") or rec.get(PA.AGAIN) or \
+                    (site.get("order") or {}).get("state") == "unmatched":
+                continue
+            if (site.get("order") or {}).get("state") == "ready" and not site.get("fill"):
+                continue
+            number = PN.number_of(rec.get("url"))
+            work = next((w for w in cand.works if w.key == key), None) if cand is not None else None
+            if not number or work is None or PN.going(number):
+                continue
+            if moved is None:
+                from core import comic_manga as CM
+                moved = CM.moved()
+            copy = moved.get(str(rec.get("copy") or ""))
+            folder = Path(str(copy["folder"])) if isinstance(copy, dict) and copy.get("folder") else None
+            if folder is None or not folder.is_dir():
+                continue
+
+            choice = {"revision": -1, "current": False}
+
+            def still_current() -> bool:
+                with STORE._lock:
+                    if choice["revision"] != STORE.rev:
+                        latest = STORE.items().get(cand.key, {})
+                        current = (latest.get("works") or {}).get(key, {})
+                        choice["current"] = (latest.get("hand") != NOT and current.get("hand") != NOT and
+                                             current.get("url") == rec.get("url") and
+                                             current.get("copy") == rec.get("copy") and
+                                             current.get("state") == MANGA and not current.get(PA.AGAIN))
+                        choice["revision"] = STORE.rev
+                    return choice["current"]
+
+            cancelled = [False]
+
+            def copy_stopped() -> bool:
+                if stop() or not cancelled[0] and not still_current():
+                    cancelled[0] = True
+                return cancelled[0]
+
+            if copy_stopped():
+                continue
+            looked += 1
+            # Persist before network work: interrupted rounds and program restarts continue after this copy.
+            with STORE._lock:
+                state = STORE.read()
+                state.setdefault("fill_cursors", {})[cursor_root] = [cand_key, key]
+                STORE._write(state)
+            values = {}
+            if (site.get("order") or {}).get("state") != "ready":
+                values = PN.describe_copy(settings, folder, number, stop_check=copy_stopped, was=rec.get("gallery"))
+                site = values["site"]
+                with STORE._lock:
+                    if copy_stopped():
+                        continue
+                    STORE.put_work(cand.key, key, values)
+                if (site.get("order") or {}).get("state") != "ready" or stop():
+                    continue
+            numbers = PN.counts(folder, int((site.get("counts") or {}).get("total") or 0), True)
+            new = {**site, "counts": numbers, "fill": bool(numbers["missing"])}
+            with STORE._lock:
+                if copy_stopped():
+                    continue
+                if numbers["missing"]:
+                    if not PN.fill(settings, number).get("ok"):
+                        return began                    # (the downloader is busy, no manga folder: the next round)
+                    new["queued"] = 1
+                    began += 1
+                    tell(line("МАНГА", f"«{work.name}» — в папке {numbers['have']} стр. из {numbers['total']} галереи "
+                                       "nhentai → докачиваю недостающие (видно в «Загрузках»)"))
+                STORE.put_work(cand.key, key, {"site": new})
+            if began >= FILLS_A_ROUND:
+                return began
+    return began
 
 
 def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_SECONDS, say=None) -> dict:
@@ -1916,11 +2188,51 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
         cands = MD.STORE.candidates(root)
         if cands:
             STORE.register(root, [c for c in cands if not _in_libraries(settings, c)], whole=True)
+        try:                                            # (v5.44.166) a folder of a kind is a сборка no more
+            PA.unset_copies(settings, root)
+            PA.mark_old(root)                           # (v5.44.169) «не манга» of the rules of before: again
+        except Exception as exc:  # noqa: BLE001 - its trouble does not stop the round: asked again next time
+            _LOG.warning("parser manga: the сборки of before not taken off: %s: %s", type(exc).__name__, exc)
         items = STORE.items(root)
-        check, places, later = _due(items, time.time())
-        if not (check or places or later):
+        try:                                            # (v5.44.170) the pages a gallery's copy misses
+            if _fill_galleries(settings, items, tell,
+                               stop_check=lambda: stop_check() or time.monotonic() > deadline):
+                items = STORE.items(root)
+        except Exception as exc:  # noqa: BLE001 - its trouble does not stop the round: asked again next time
+            _LOG.warning("parser manga: the pages of the galleries not asked for: %s: %s", type(exc).__name__, exc)
+        check, places, later, again, auto = _due(items, time.time())
+        if not (check or places or later or again or auto):
             return out
         asker = background_asker(settings, stop_check)
+
+        def look(pairs: list, keeps: int = 0) -> bool:
+            """Each of ``pairs`` looked at again (``parser_manga_again.look_again``); ``keeps`` — not while the hour
+            has so many searches left or fewer.  False — the round ends here (stopped, out of time, no room)."""
+            for cand, work in pairs:
+                if stop_check() or time.monotonic() > deadline:
+                    out["more"] = True
+                    return False
+                if keeps and search_left() <= keeps:
+                    return True                         # (the hour's last searches are the others': a later round)
+                got = PA.look_again(settings, asker, cand, work, say=tell, stop_check=stop_check, deadline=deadline)
+                if got is None:
+                    out["more"] = True
+                    return False
+                if got.get("wait"):
+                    out["wait"] = float(got["wait"])
+                    return True                         # the hour's searches spent: the others — later too
+                if got.get("state") in (MANGA, NOT):
+                    out["checked"] += 1
+                if got.get("state") == MANGA and not got.get("kept"):
+                    out["manga"].append(work.name)
+                    if got.get("copied") and got.get("fresh_copy"):
+                        out["copied"].append(got.get("folder") or work.name)
+                if got.get("no_room"):
+                    out["no_room"] = got["no_room"]
+                    return False
+            return True
+        if not look(again):                             # (v5.44.166) «Перепроверить»: the owner waits for these
+            return out
         for cand, work in places:
             if stop_check() or time.monotonic() > deadline:
                 out["more"] = True
@@ -1942,7 +2254,7 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
                     return out
                 try:
                     verdict = check_work(asker, cand, work, steps=(step,), memo=memo.setdefault(work.key, {}),
-                                         later_not=True)
+                                         later_not=True, kept=state_of(items.get(cand.key) or {}, work))
                 except Pace as pace:
                     verdict = paced(pace.wait)
                     out["wait"] = round(pace.wait, 1)
@@ -1980,6 +2292,9 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
             if got.get("no_room"):
                 out["no_room"] = got["no_room"]
                 return out
+        # (v5.44.169) the folders of the rules of before, looked at again by the program itself: after everything
+        # that is new (a long queue of them never holds a new folder), and never by the hour's last searches
+        look(auto, AUTO_KEEPS)
         return out
     finally:
         _ROUND.release()
@@ -1993,7 +2308,8 @@ def _sauce_again(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.W
     answering, the hour's searches spent — asked again later (it stays «not a manga» for now: its pages are parsed).
     The record; None — stopped half-way."""
     try:
-        verdict = check_work(asker, cand, work, steps=("pictures",), memo={}, later_not=True)
+        before = state_of(STORE.items().get(cand.key) or {}, work)
+        verdict = check_work(asker, cand, work, steps=("pictures",), memo={}, later_not=True, kept=before)
     except Pace as pace:
         STORE.put_work(cand.key, work.key, {"sauce_at": int(time.time() + max(60.0, pace.wait))})
         return {"state": "", "wait": round(pace.wait, 1)}
@@ -2001,7 +2317,12 @@ def _sauce_again(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.W
         return None
     if verdict.state == MANGA:
         return apply(settings, asker, cand, work, verdict, say=say, stop_check=stop_check, deadline=deadline,
-                     extra={"cards_to_trash": True})
+                     extra={"cards_to_trash": not verdict.eh_photo}, expected=before)
+    if verdict.state == WAIT and (verdict.late or {}).get("eh_hits"):
+        # The files already went through booru parsing. Keep that decision while the gallery is still being checked.
+        guard = _WorkGuard(cand, work, before, stop_check)
+        guard.put({"sauce_at": verdict.later_at, "late": verdict.late})
+        return {"state": ""}
     if verdict.state == NOT and verdict.how != "later":
         return apply(settings, asker, cand, work, verdict, say=say, stop_check=stop_check, deadline=deadline)
     again = int(verdict.sauce_at or verdict.later_at or 0) or int(time.time()) + LATER
@@ -2038,6 +2359,8 @@ def say_not(settings: dict, key: str) -> dict:
     def put(items: dict) -> None:
         if key in items:
             items[key]["hand"] = NOT
+            for rec in (items[key].get("works") or {}).values():      # (v5.44.166) his word: no second look
+                rec.pop(PA.AGAIN, None)
     STORE.change(put)
     return {"ok": True}
 
@@ -2061,6 +2384,8 @@ def say_manga(settings: dict, key: str) -> dict:
         if key in items:
             items[key]["hand"] = MANGA
             items[key]["cand"]["refused"] = False
+            for rec in (items[key].get("works") or {}).values():      # (v5.44.166) his word: no second look
+                rec.pop(PA.AGAIN, None)
     STORE.change(put)
     return {"ok": True}
 
@@ -2129,18 +2454,36 @@ def rows(settings: dict) -> list:
         for work in cand.works:
             rec = state_of(item, work)
             copy = moved.get(str(rec.get("copy") or "")) if rec.get("copy") else None
-            page = ""
+            page, own = "", ""                          # (``own`` — the folder of its copy, when it is there)
             if isinstance(copy, dict) and copy.get("folder") and manga_root and Path(str(copy["folder"])).is_dir():
-                page = CM.page_of(settings, copy["folder"])
+                own = str(copy["folder"])
+                page = CM.page_of(settings, own)
+            elif rec.get("had") and Path(str(rec["had"])).is_dir():
+                page = CM.page_of(settings, rec["had"], rec.get("had_kind") or "manga")
+            mark = rec.get(PA.AGAIN) or {}
+            site, fill = dict(rec.get("site") or {}), rec.get("fill") or {}
+            if site.get("gallery") and site.get("fill") and own:       # (v5.44.169) «Докачать» of its card downloaded
+                site["counts"] = PN.counts(Path(own), int((site.get("counts") or {}).get("total") or 0), True)
+                site["fill"] = bool(site["counts"]["missing"])
+                fill = {**fill, "missing": site["counts"]["missing"], "words": PN.pages_words(site["counts"])}
+                # (v5.44.170) …its missing pages are being downloaded now (by themselves, or by his «Докачать»)
+                site["going"] = site["fill"] and PN.going(int(site.get("gallery") or 0))
             works.append({"key": work.key, "name": work.name, "state": rec.get("state") or "",
+                          "eh_photo": bool(rec.get("eh_photo")),
                           "how": rec.get("how", ""), "by": rec.get("by", ""), "sim": rec.get("sim", 0),
+                          # (v5.44.166) «Перепроверить»: marked to be looked at again (when, why later), and
+                          # what the last second look said
+                          "again": bool(mark), "again_at": int(mark.get("later_at") or 0),
+                          "again_why": str(mark.get("why") or ""), "again_said": rec.get(PA.SAID) or {},
+                          "again_link": bool(mark.get("link")),       # (v5.44.169) …by the owner's link of it
+                          "again_auto": bool(mark.get("auto")),       # …by itself: the rules of before (``RULE``)
                           "later_at": int(rec.get("later_at") or 0), "size": sizes.get(work.key, ""),
                           "sauce_at": int(rec.get("sauce_at") or 0) if rec.get("how") == "later" else 0,
                           "handed": bool(rec.get("handed")), "trashed": int(rec.get("cards_trashed") or 0),
                           "parts": len(work.parts), "first": Path(work.roots[0]).name if work.roots else "",
-                          "page": page, "fill": rec.get("fill") or {},
+                          "page": page, "fill": fill,
                           "url": rec.get("url", ""), "folder": rec.get("folder", ""),
-                          "error": rec.get("copy_error", ""), "site": rec.get("site") or {},
+                          "error": rec.get("copy_error", ""), "site": site,
                           "parts_of": [{"label": p.label, "name": Path(p.path).name} for p in work.parts][:40]})
         states = [w["state"] for w in works]
         if all(s == MANGA for s in states):
@@ -2157,6 +2500,10 @@ def rows(settings: dict) -> list:
         pages = int(item.get("pages") or 0)
         out.append({"key": key, "name": cand.name, "where": _where(root, cand.path), "set": cand.is_set,
                     "state": state, "hand": item.get("hand", ""), "works": works, "pages": pages,
+                    "again": any(w["again"] for w in works),
+                    # (v5.44.169) …by the program itself alone (the rules of before): a row in a queue, its buttons
+                    # stay
+                    "again_auto": any(w["again"] for w in works) and all(w["again_auto"] for w in works if w["again"]),
                     "size": (f"{plural(folders, FOLDERS)} · {pages} стр." if cand.is_set else
                              works[0]["size"] if works else ""), "at": int(item.get("at") or 0)})
     try:                                                # (v5.44.164) the manga found among the loose pictures

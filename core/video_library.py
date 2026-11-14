@@ -139,13 +139,6 @@ class Series:
         """The episode (:class:`Unit`) a file is a variant of."""
         return next((u for u in self.units() if any(f.id == episode.id for f in u.files)), None)
 
-    def unit_neighbours(self, unit) -> tuple:
-        units = self.units()
-        index = next((i for i, u in enumerate(units) if u.key == unit.key), -1)
-        if index < 0:
-            return None, None
-        return (units[index - 1] if index > 0 else None), (units[index + 1] if index + 1 < len(units) else None)
-
     def neighbours(self, episode: Episode) -> tuple[Episode | None, Episode | None]:
         """The episodes before and after it — in its group first, then the next group's first."""
         index = next((i for i, e in enumerate(self.episodes) if e.id == episode.id), -1)

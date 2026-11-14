@@ -18,6 +18,7 @@ import urllib.request
 import zipfile
 import threading
 from typing import Iterable
+from core.quiet import passed as let_pass
 
 
 def _safe_filename(name: str) -> str:
@@ -48,9 +49,9 @@ def cleanup_old_drag_exports(settings: dict | None = None, *, max_age_hours: int
                 elif child.is_file() and child.stat().st_mtime < cutoff:
                     child.unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.metadata_export.cleanup_old_drag_exports")
     except Exception:
-        pass
+        let_pass("core.metadata_export.cleanup_old_drag_exports#2")
 
 
 _EXIFTOOL_LOCK = threading.Lock()
@@ -78,18 +79,18 @@ def _embedded_exiftool_dirs(settings: dict | None = None) -> list[Path]:
         out.append(install / "tools" / "exiftool")
         out.append(install / "tools")
     except Exception:
-        pass
+        let_pass("core.metadata_export._embedded_exiftool_dirs")
     if getattr(sys, "frozen", False):
         try:
             out.append(Path(sys.executable).resolve().parent / "tools" / "exiftool")
             out.append(Path(sys.executable).resolve().parent / "tools")
         except Exception:
-            pass
+            let_pass("core.metadata_export._embedded_exiftool_dirs#2")
         try:
             out.append(Path(getattr(sys, "_MEIPASS")) / "tools" / "exiftool")
             out.append(Path(getattr(sys, "_MEIPASS")) / "tools")
         except Exception:
-            pass
+            let_pass("core.metadata_export._embedded_exiftool_dirs#3")
     seen: set[str] = set(); deduped: list[Path] = []
     for d in out:
         try:
@@ -218,7 +219,7 @@ def _ensure_embedded_exiftool(settings: dict | None = None) -> str:
                 try:
                     tmp_zip.unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    let_pass("core.metadata_export._ensure_embedded_exiftool")
                 found = _find_exiftool_no_download(settings)
                 if found:
                     return found
@@ -226,7 +227,7 @@ def _ensure_embedded_exiftool(settings: dict | None = None) -> str:
                 try:
                     tmp_zip.unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    let_pass("core.metadata_export._ensure_embedded_exiftool#2")
                 continue
     return ""
 

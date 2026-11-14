@@ -415,9 +415,6 @@ class VideoPlayer(QWidget):
         self.video_area.insertWidget(0, self.backend.widget, 1)
         return True
 
-    def backend_name(self) -> str:
-        return {"_MpvBackend": "mpv", "_QtBackend": "qt"}.get(type(self.backend).__name__, "")
-
     # ── public ───────────────────────────────────────────────────────────────
     def play(self, path: str, title: str = "", *, prefer: dict | None = None, on_choice=None,
              top: str | None = None, start_at: float = 0.0, paused: bool = False, resume: float = 0.0,

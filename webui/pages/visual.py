@@ -7,6 +7,7 @@ import time
 
 from webui.html import esc
 from webui.server import Request, Response
+from core.quiet import passed as let_pass
 
 KIND = "visual"
 CHECK_PER_GROUP = 100           # pictures of each kind the check asks the models about
@@ -107,7 +108,7 @@ def extra(settings: dict) -> str:
         waiting = visual_work.pending_count(settings)
         lines.append(f"Файлов Брака без ответа этой модели: {waiting}." if waiting else "Все файлы Брака проверены.")
     except Exception:  # an old base without the Брак table: the rest of the section still works
-        pass
+        let_pass("webui.pages.visual.extra")
     buttons = []
     if not state["ok"]:
         buttons.append('<button type="button" class="primary" data-action="visual-act" data-act="install">'

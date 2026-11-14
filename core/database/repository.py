@@ -11,6 +11,7 @@ from core.performance import timed as _perf_timed
 from core.tag_utils import normalize_tag, should_hide_tag
 from .connection import db
 from .tag_consensus import CATEGORY_PRIORITY as _CATEGORY_PRIORITY
+from core.quiet import passed as let_pass
 
 _LOG = logging.getLogger(__name__)
 
@@ -676,13 +677,13 @@ def tag_group_counts(settings, source="all"):
             except Exception:
                 # Missing/stale/corrupt external cache is disposable.  Fall
                 # through to the exact ranked query over primary tables.
-                pass
+                let_pass("core.database.repository.tag_group_counts")
             finally:
                 if attached is not None:
                     try:
                         attached.__exit__(None, None, None)
                     except Exception:
-                        pass
+                        let_pass("core.database.repository.tag_group_counts#2")
 
         provenance_count = int(con.execute("SELECT COUNT(*) AS c FROM image_source_tags").fetchone()["c"] or 0)
         if provenance_count:
@@ -900,7 +901,7 @@ def delete_images(settings, image_rows, delete_files=True, reason="delete", tag_
                     try:
                         mark_deleted(p, reason=reason, settings=settings, manual_delete=True)
                     except Exception:
-                        pass
+                        let_pass("core.database.repository.delete_images")
                     if unlink_managed(settings, p, operation="repository.delete_images"):
                         deleted_files += 1
             except Exception:

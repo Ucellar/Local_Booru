@@ -9,6 +9,7 @@ import time
 import warnings
 import subprocess
 import shutil
+from core.quiet import passed as let_pass
 
 _LOG = logging.getLogger("local_booru.thumbs")
 
@@ -29,9 +30,9 @@ def configure_pillow():
         try:
             warnings.simplefilter("default", Image.DecompressionBombWarning)
         except Exception:
-            pass
+            let_pass("core.image_safe.configure_pillow")
     except Exception:
-        pass
+        let_pass("core.image_safe.configure_pillow#2")
 
 configure_pillow()
 
@@ -58,7 +59,7 @@ def _remember_thumb_source(out: Path, source: Path) -> None:
         tmp.write_text(str(source.resolve()), encoding="utf-8")
         tmp.replace(marker)
     except Exception:
-        pass
+        let_pass("core.image_safe._remember_thumb_source")
 
 def _cache_name(path, width, height, flavor: str = ""):
     p = Path(path)

@@ -21,9 +21,13 @@ cookies, not the pass of his own browser's check) is given to the window's brows
 """
 from __future__ import annotations
 
+import html as html_text
 import ipaddress
+import json
+import re
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -42,6 +46,10 @@ class BrowserError(RuntimeError):
     """The window's browser did not open the page — the words are for the page."""
 
 
+class BrowserCancelled(BrowserError):
+    """The task no longer needs its turn at the hidden browser."""
+
+
 @dataclass
 class Page:
     html: str
@@ -52,6 +60,27 @@ class Page:
 
 _LOCK = threading.Lock()
 _KEPT: dict = {}           # the site («com-x.life») → (cookies, agent, when)
+_PAGE_LOCK = threading.RLock()       # all tasks share one full page; nested Net/open_page calls share their turn
+_MANUAL_CHECK = threading.Lock()
+MANUAL_CHECK_SECONDS = 120
+_MANUAL_CHECK_SITES = ("nudemoon", "mangadex", "mangabuff", "comx")
+
+
+@contextmanager
+def page_turn(stop_check=None):
+    """One full browser page in the program; waiting tasks can leave when stopped or past their deadline."""
+    stopped = stop_check or (lambda: False)
+    if stopped():
+        raise BrowserCancelled("остановлено")
+    while not _PAGE_LOCK.acquire(timeout=0.1):
+        if stopped():
+            raise BrowserCancelled("остановлено")
+    try:
+        if stopped():
+            raise BrowserCancelled("остановлено")
+        yield
+    finally:
+        _PAGE_LOCK.release()
 
 
 def site_of(host: str) -> str:
@@ -78,6 +107,11 @@ def open_page(url: str, still_check=None) -> Page:
     """The page as the window's browser opens it — out of sight, with the site's check run as any browser runs it
     (``still_check(html, url)`` — the page is still the check: the browser waits for the next one).  What the site
     gave is kept for the run.  :class:`BrowserError` with words."""
+    with page_turn():
+        return _open_page(url, still_check)
+
+
+def _open_page(url: str, still_check) -> Page:
     if OPENER is not None:
         page = OPENER(url, still_check)
     else:
@@ -96,6 +130,89 @@ def open_page(url: str, still_check=None) -> Page:
                     agent=str(box.get("agent") or ""))
     remember(url, page.cookies, page.agent)
     return page
+
+
+def manual_check_sites() -> dict:
+    from core import manhwa_sources as S
+    return {source.name: source.label for source in S.SOURCES if source.name in _MANUAL_CHECK_SITES}
+
+
+def _manual_target(source) -> tuple:
+    """The fixed first page and the exact HTTPS hosts it may navigate to, including challenge redirects."""
+    if source.name == "nudemoon":
+        return source.feed_url("new", 1), source.hosts
+    if source.name == "mangadex":
+        return source.api().rstrip("/") + "/manga?limit=1&contentRating[]=safe", (*source.hosts, "api.mangadex.org")
+    if source.name == "mangabuff":
+        return source.site().rstrip("/") + "/manga?sort=updated_at", source.hosts
+    return source.site().rstrip("/") + "/", source.hosts
+
+
+def _manual_ready(source, page: str, address: str) -> bool:
+    from core import manhwa_sources as S
+    parsed = urlparse(address)
+    path = parsed.path.rstrip("/")
+    if S.still_check(page, address):
+        return False
+    if source.name == "nudemoon":
+        return path == "/all_manga" and bool(source.ROW.search(page) and source.ENTRY.search(page))
+    if source.name == "mangabuff":
+        return path == "/manga" and any(hit.names and hit.names[0] for hit in source._cards(page))
+    if source.name == "mangadex":
+        if parsed.hostname != "api.mangadex.org" or path != "/manga":
+            return False
+        pre = re.search(r"<pre\b[^>]*>(.*?)</pre>", page, re.S)
+        try:
+            data = json.loads(html_text.unescape(pre.group(1)) if pre else page)
+        except (ValueError, RecursionError):
+            return False
+        if not isinstance(data, dict) or data.get("result") != "ok" or not isinstance(data.get("data"), list):
+            return False
+        return any(isinstance(item, dict) and item.get("type") == "manga"
+                   and re.fullmatch(source.UUID, str(item.get("id") or ""))
+                   and isinstance(item.get("attributes"), dict) for item in data["data"])
+    from core import manhwa_comx as X
+    return not path and 'id="dle-content"' in page and bool(X.hits_of(page))
+
+
+def verify_site(site: str) -> bool:
+    """Show a supported site to the user. The shared browser profile keeps the site's own session."""
+    from core import manhwa_sources as S
+    from webui import service
+    source = S.by_name(site) if site in _MANUAL_CHECK_SITES else None
+    if source is None:
+        raise BrowserError("Ручная проверка для этого сайта не поддерживается")
+    if service.bridge() is None:
+        raise BrowserError("Откройте Local Booru со встроенным браузером и повторите проверку")
+    url, hosts = _manual_target(source)
+
+    def same_site(address: str) -> bool:
+        try:
+            parsed = urlparse(address)
+            return (parsed.scheme == "https" and parsed.hostname in hosts and parsed.port in (None, 443)
+                    and parsed.username is None and parsed.password is None)
+        except ValueError:
+            return False
+
+    if not same_site(url) or (site == "mangadex" and urlparse(url).hostname != "api.mangadex.org"):
+        raise BrowserError(f"Для проверки нужен официальный HTTPS-адрес {source.label} в настройках сайта")
+    if not _MANUAL_CHECK.acquire(blocking=False):
+        raise BrowserError("Окно проверки сайта уже открыто")
+
+    def waiting(html: str, address: str) -> bool:
+        return not same_site(address) or not _manual_ready(source, html, address)
+
+    try:
+        box: dict = {}
+        payload = {"url": url, "box": box, "guard": waiting, "manual": same_site, "manual_label": source.label}
+        state = service.call_window("fetch_page", payload, wait=WAIT, finish_wait=MANUAL_CHECK_SECONDS + WAIT)
+        if state != "done":
+            raise BrowserError(f"Окно программы не завершило проверку {source.label}")
+        if box.get("error"):
+            raise BrowserError(str(box["error"]))
+        return not waiting(str(box.get("html") or ""), str(box.get("url") or ""))
+    finally:
+        _MANUAL_CHECK.release()
 
 
 def fetch_bytes(url: str, referer: str = "", limit: int = 0) -> tuple:

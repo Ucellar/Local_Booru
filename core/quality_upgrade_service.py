@@ -21,6 +21,7 @@ from typing import Any, Callable
 from core.database.connection import db
 from core.media_revision_service import create_revision_plan, commit_revision_metadata, rebind_media_paths
 from core.upgrade_verification import MediaDescriptor, build_verification_plan, compare_quality, ram_budget_allows
+from core.quiet import passed as let_pass
 
 _LOG = logging.getLogger("local_booru.quality_upgrade")
 
@@ -144,7 +145,7 @@ def _fsync_parent(path: Path) -> None:
             finally:
                 os.close(fd)
     except Exception:
-        pass
+        let_pass("core.quality_upgrade_service._fsync_parent")
 
 
 def _mark(settings: dict, revision_id: int, **values: Any) -> None:

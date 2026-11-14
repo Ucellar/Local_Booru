@@ -11,6 +11,7 @@ from core.performance import record_slow_operation
 from core.background_tasks import get_background_task_registry
 
 from PySide6.QtCore import QObject, Signal
+from core.quiet import passed as let_pass
 
 
 class TaskSignals(QObject):
@@ -42,12 +43,12 @@ class TaskHandle:
                     self.registry_task_id, "cancelling", progress_text=self.progress_text
                 )
         except Exception:
-            pass
+            let_pass("core.task_manager.TaskHandle.cancel")
         try:
             if self.future is not None:
                 self.future.cancel()
         except Exception:
-            pass
+            let_pass("core.task_manager.TaskHandle.cancel#2")
 
     def cancelled(self):
         return self._cancelled or bool(self.future and self.future.cancelled())
@@ -77,7 +78,7 @@ class TaskManager(QObject):
             from core.shutdown import register
             register("task manager", self.shutdown)
         except Exception:
-            pass
+            let_pass("core.task_manager.TaskManager.__init__")
         self.pool = ThreadPoolExecutor(max_workers=max(1, int(max_workers or 2)), thread_name_prefix="local-booru")
         self.tasks: list[TaskHandle] = []
         self._logger = logging.getLogger("local_booru.tasks")
@@ -195,40 +196,8 @@ class TaskManager(QObject):
         try:
             self.tasks = [task for task in self.tasks if task is not handle and not bool(task.future and task.future.done())]
         except Exception:
-            pass
+            let_pass("core.task_manager.TaskManager._forget_finished")
 
-
-    def cancel_by_name(self, *names: str) -> int:
-        """Cancel queued/running tasks with exact names. Returns number requested."""
-        wanted = {str(n) for n in names if str(n)}
-        if not wanted:
-            return 0
-        count = 0
-        for task in list(self.tasks):
-            try:
-                if task.name in wanted and (task.future is None or not task.future.done()):
-                    task.cancel()
-                    self.task_cancelled.emit(task.name)
-                    count += 1
-            except Exception:
-                pass
-        return count
-
-    def cancel_name_prefix(self, *prefixes: str) -> int:
-        """Cancel queued/running tasks whose name starts with one of prefixes."""
-        prefixes = tuple(str(p) for p in prefixes if str(p))
-        if not prefixes:
-            return 0
-        count = 0
-        for task in list(self.tasks):
-            try:
-                if str(task.name).startswith(prefixes) and (task.future is None or not task.future.done()):
-                    task.cancel()
-                    self.task_cancelled.emit(task.name)
-                    count += 1
-            except Exception:
-                pass
-        return count
 
     def active_snapshot(self):
         """Return process-wide task state, including parser and maintenance work."""
@@ -243,12 +212,6 @@ class TaskManager(QObject):
         except Exception:
             return []
 
-    def cancel_task_id(self, task_id: str) -> bool:
-        try:
-            return bool(get_background_task_registry().request_cancel(str(task_id or "")))
-        except Exception:
-            return False
-
     def cancel_all(self) -> int:
         count = 0
         for task in list(self.tasks):
@@ -258,7 +221,7 @@ class TaskManager(QObject):
                     self.task_cancelled.emit(task.name)
                     count += 1
             except Exception:
-                pass
+                let_pass("core.task_manager.TaskManager.cancel_all")
         return count
 
     def shutdown(self):
@@ -267,4 +230,4 @@ class TaskManager(QObject):
             self.pool.shutdown(wait=False, cancel_futures=True)
         except TypeError:
             try: self.pool.shutdown(wait=False)
-            except Exception: pass
+            except Exception: let_pass("core.task_manager.TaskManager.shutdown")

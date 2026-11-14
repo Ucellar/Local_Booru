@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from core.database.connection import db
-
-VALID_CLASSES = {"booru_illustration", "real_photo", "mixed_or_3d", "uncertain"}
+from core.quiet import passed as let_pass
 
 
 def _session(model_path: str):
@@ -161,7 +160,7 @@ class LocalNoMatchModelLane:
                 str(content.get("model") or ""), settings=self.settings,
             )
         except Exception:
-            pass
+            let_pass("core.local_nomatch_models.LocalNoMatchModelLane._execute")
 
     @staticmethod
     def _retry(job: LaneJob, exc: BaseException) -> tuple[bool, int, str]:
@@ -205,7 +204,7 @@ def get_local_nomatch_lane(settings: dict) -> LocalNoMatchModelLane | None:
                     register(f"local NO_MATCH models [{key}]", lane.stop)
                     _SHUTDOWN_REGISTERED.add(key)
                 except Exception:
-                    pass
+                    let_pass("core.local_nomatch_models.get_local_nomatch_lane")
         return lane
 
 

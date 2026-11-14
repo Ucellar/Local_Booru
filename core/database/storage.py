@@ -18,6 +18,7 @@ from core.media_utils import (
 )
 from core.tag_utils import normalize_tag
 from core.stability import swallow
+from core.quiet import passed as let_pass
 
 
 _META_TAG_OVERRIDES = {"artist_request"}
@@ -374,7 +375,7 @@ def refresh_effective_tag_categories(con, image_id: int | None = None) -> None:
         if not main_cache_writes_enabled(con, "image_effective_tag_category"):
             return
     except Exception:
-        pass
+        let_pass("core.database.storage.refresh_effective_tag_categories")
     try:
         con.execute("SELECT 1 FROM image_effective_tag_category LIMIT 1")
     except Exception:
@@ -570,17 +571,6 @@ def replace_image_sources(con, image_id, source_text="", extra_sources=None):
 
 
 
-def replace_media_tag_groups(settings, media_path, groups) -> bool:
-    """Apply a user edit to one card using SQLite only; no sidecar files exist in live mode."""
-    with db(settings, write=True) as con:
-        row = con.execute("SELECT id FROM images WHERE path=? AND deleted=0", (str(Path(media_path)),)).fetchone()
-        if not row:
-            return False
-        replace_image_tags(con, int(row["id"]), groups or {})
-        _cleanup_orphan_rows(con)
-    return True
-
-
 def remove_media_tag_link(settings, media_path, tag_name, source_host="all") -> bool:
     """Remove one visible tag while respecting per-source metadata sets.
 
@@ -616,34 +606,6 @@ def remove_media_tag_link(settings, media_path, tag_name, source_host="all") -> 
         _cleanup_orphan_rows(con)
     return True
 
-
-def remove_media_source_link(settings, media_path, source_url="", source_host="") -> bool:
-    """Remove selected source link from one live card while retaining other confirmations."""
-    path = str(Path(media_path))
-    url = str(source_url or "").strip()
-    host = str(source_host or "").strip()
-    with db(settings, write=True) as con:
-        row = con.execute("SELECT id FROM images WHERE path=? AND deleted=0", (path,)).fetchone()
-        if not row:
-            return False
-        image_id = int(row["id"])
-        if url:
-            source_ids = [int(r["id"]) for r in con.execute("SELECT id FROM sources WHERE url=?", (url,)).fetchall()]
-        elif host:
-            source_ids = [int(r["id"]) for r in con.execute("SELECT id FROM sources WHERE host=?", (host,)).fetchall()]
-        else:
-            return False
-        dropped = set()
-        for source_id in source_ids:
-            dropped.update(int(r[0]) for r in con.execute(
-                "SELECT tag_id FROM image_source_tags WHERE image_id=? AND source_id=?", (image_id, source_id)))
-            con.execute("DELETE FROM image_source_tags WHERE image_id=? AND source_id=?", (image_id, source_id))
-            con.execute("DELETE FROM image_sources WHERE image_id=? AND source_id=?", (image_id, source_id))
-        _sync_merged_image_tags(con, image_id, dropped)
-        refresh_effective_tag_categories(con, image_id)
-        from .repository import cleanup_orphans
-        cleanup_orphans(con)
-    return True
 
 def media_path_by_md5(settings, md5: str, *, preferred_bucket: str = "", require_bucket: bool = False, exclude_path: str = "") -> str:
     """Return one existing live canonical media path for an exact MD5.
@@ -993,11 +955,6 @@ def refine_source_tag_categories(settings, media_path, source_url, groups, *, me
         return {"updated": updated, "ignored": ignored, "known": len(known)}
 
 
-def mark_processed(settings, media_path, status="nomatch", original_path=""):
-    with db(settings, write=True) as con:
-        return _ensure_image(con, media_path, status=status, original_path=original_path)
-
-
 def processed_status(settings, original_path):
     """Result of the earlier processing of this source file, while that result is still in the library.
 
@@ -1054,68 +1011,6 @@ def processed_kinds_many(settings, original_paths) -> dict:
                                    chunk):
                 out[str(row["original_path"])] = str(row["status"] or "")
     return out
-
-
-def processed_status_many(settings, original_paths):
-    paths = [Path(x) for x in (original_paths or [])]
-    if not paths:
-        return {}
-    result = {}
-    # Uses write=True only to allow self-healing CREATE TABLE/INDEX for users
-    # who opened a DB that predates the v024 migration import fix.
-    with db(settings, write=True) as con:
-        _ensure_reverse_branch_status_table(con)
-        for i in range(0, len(paths), 500):
-            chunk = paths[i:i+500]
-            keys = [str(x) for x in chunk]
-            placeholders = ",".join(["?"] * len(keys))
-            rows = con.execute(f"""
-                SELECT original_path, status, media_path, processed_at FROM processed_files
-                WHERE original_path IN ({placeholders})
-                ORDER BY processed_at DESC
-            """, keys).fetchall()
-            seen = set()
-            for r in rows:
-                op = r["original_path"]
-                if op in seen:
-                    continue
-                seen.add(op)
-                try:
-                    if Path(r["media_path"]).exists():
-                        result[op] = r["status"]
-                except Exception:
-                    pass
-    return result
-
-
-def processed_records_many(settings, original_paths):
-    """Return latest existing archive status and media path for original inputs."""
-    paths = [Path(x) for x in (original_paths or [])]
-    if not paths:
-        return {}
-    result = {}
-    # Uses write=True only to allow self-healing CREATE TABLE/INDEX for users
-    # who opened a DB that predates the v024 migration import fix.
-    with db(settings, write=True) as con:
-        _ensure_reverse_branch_status_table(con)
-        for i in range(0, len(paths), 500):
-            keys = [str(x) for x in paths[i:i+500]]
-            placeholders = ",".join(["?"] * len(keys))
-            rows = con.execute(f"""
-                SELECT original_path, status, media_path, processed_at FROM processed_files
-                WHERE original_path IN ({placeholders})
-                ORDER BY processed_at DESC
-            """, keys).fetchall()
-            for row in rows:
-                original = str(row["original_path"] or "")
-                if original in result:
-                    continue
-                try:
-                    if Path(row["media_path"]).exists():
-                        result[original] = {"status": str(row["status"] or ""), "media_path": str(row["media_path"] or "")}
-                except Exception:
-                    pass
-    return result
 
 
 def mark_site_scanned_many(settings, rows):
@@ -1180,23 +1075,6 @@ def mark_site_scanned(settings, original_path, site_key, *, engine="", scan_revi
     }])
 
 
-def matched_site_md5_samples(settings, site_key, *, scan_revision=1, limit=2):
-    """Return previously verified exact-MD5 matches for a site capability probe."""
-    key = str(site_key or "").strip().lower()
-    if not key or int(limit or 0) <= 0:
-        return []
-    with db(settings, readonly=True) as con:
-        rows = con.execute("""
-            SELECT DISTINCT checked_md5
-            FROM site_scan_status
-            WHERE site_key=? AND scan_revision=? AND outcome='match'
-              AND length(checked_md5)=32
-            ORDER BY checked_at DESC
-            LIMIT ?
-        """, (key, int(scan_revision or 1), int(limit))).fetchall()
-    return [str(row["checked_md5"] or "").lower() for row in rows if str(row["checked_md5"] or "")]
-
-
 def site_md5_samples(settings, host, *, limit=4):
     """MD5 that the site is known to have (earlier exact matches of any parser version), newest first.
 
@@ -1234,40 +1112,6 @@ def site_misses(settings, original_path, md5, *, since=0) -> set:
             "SELECT site_key FROM site_scan_status WHERE original_path=? AND +outcome='miss' AND +checked_md5=? "
             "AND +checked_at>=?", (str(Path(str(original_path))), md5, int(since or 0))).fetchall()
     return {str(row[0]).split("::", 1)[0].strip().lower().replace("www.", "") for row in rows if row[0]}
-
-
-def site_scan_status_many(settings, original_paths, site_keys, *, scan_revision=1):
-    """Return {original_path: {site_key: outcome}} for the active site set."""
-    paths = [str(Path(x)) for x in (original_paths or [])]
-    keys = [str(x or "").strip().lower() for x in (site_keys or []) if str(x or "").strip()]
-    if not paths or not keys:
-        return {}
-    result = {}
-    with db(settings) as con:
-        for i in range(0, len(paths), 400):
-            chunk = paths[i:i+400]
-            pp = ",".join(["?"] * len(chunk))
-            kk = ",".join(["?"] * len(keys))
-            rows = con.execute(f"""
-                SELECT original_path, site_key, outcome FROM site_scan_status
-                WHERE scan_revision=? AND original_path IN ({pp}) AND site_key IN ({kk})
-            """, [int(scan_revision or 1), *chunk, *keys]).fetchall()
-            for row in rows:
-                result.setdefault(str(row["original_path"]), {})[str(row["site_key"])] = str(row["outcome"] or "")
-    return result
-
-
-def pending_site_scan_paths(settings, original_paths, site_keys, *, scan_revision=1):
-    """Return paths that still need at least one of the requested site checks."""
-    paths = [Path(x) for x in (original_paths or [])]
-    keys = {str(x or "").strip().lower() for x in (site_keys or []) if str(x or "").strip()}
-    if not keys:
-        return paths, {}, 0
-    done_map = site_scan_status_many(settings, paths, keys, scan_revision=scan_revision)
-    pending = [p for p in paths if not keys.issubset(set(done_map.get(str(p), {})))]
-    completed = len(paths) - len(pending)
-    return pending, done_map, completed
-
 
 
 # ── v158: shared category cache for flat-tag sites ───────────────────────────
@@ -1353,60 +1197,6 @@ def enqueue_tag_enrichment(settings, original_path, media_path, source_url, *, j
         """, (original, key, media, source, now, now))
 
 
-def seed_background_tag_enrichment(settings, *, job_key="flat-sites::tag-groups-v4-gelbooru-live-markup-guard", hosts=("gelbooru.com", "rule34.xxx", "xbooru.com", "hypnohub.net")):
-    """Backfill low-priority category jobs for sources that return flat post tags.
-
-    Native grouped JSON sources (Danbooru/e621/ATF where categories exist in the
-    same response) do not need another network pass. Gelbooru-family flat-tag
-    matches are enriched later so exact-search lanes never wait for category I/O.
-    """
-    key = str(job_key or "").strip().lower()
-    normalized = []
-    for host in hosts or ():
-        host = str(host or "").strip().lower().replace("www.", "")
-        if host and host not in normalized:
-            normalized.append(host)
-    if not key or not normalized:
-        return 0
-    clauses = []
-    args = [key, int(time.time()), int(time.time())]
-    for host in normalized:
-        clauses.append("(s.site_key=? OR s.site_key LIKE ?)")
-        args.extend([host, host + "::%"])
-    where_hosts = " OR ".join(clauses)
-    with db(settings, write=True) as con:
-        before = con.total_changes
-        con.execute(f"""
-            INSERT OR IGNORE INTO tag_enrichment_queue
-            (original_path, job_key, media_path, source_url, status, retry_after, attempts, last_error, queued_at, updated_at)
-            SELECT s.original_path, ?, p.media_path, s.source_url, 'pending', 0, 0, '', ?, ?
-            FROM site_scan_status s
-            JOIN processed_files p ON p.original_path=s.original_path
-            WHERE ({where_hosts})
-              AND s.outcome='match' AND COALESCE(s.source_url, '') <> ''
-              AND p.status IN ('found','tagged')
-        """, tuple(args))
-        return max(0, con.total_changes - before)
-
-
-def seed_rule34_category_enrichment(settings, *, job_key="rule34.xxx::html-categories-v1"):
-    """Compatibility wrapper for older rule34-only queue versions/tests."""
-    return seed_background_tag_enrichment(settings, job_key=job_key, hosts=("rule34.xxx",))
-
-
-def pending_tag_enrichments(settings, *, job_key="rule34.xxx::html-categories-v1", now=None, limit=10000):
-    key = str(job_key or "").strip().lower()
-    stamp = int(time.time() if now is None else now)
-    with db(settings) as con:
-        rows = con.execute("""
-            SELECT original_path, media_path, source_url, job_key, attempts
-            FROM tag_enrichment_queue
-            WHERE job_key=? AND status='pending' AND retry_after<=?
-            ORDER BY queued_at, original_path LIMIT ?
-        """, (key, stamp, int(limit))).fetchall()
-    return [dict(row) for row in rows]
-
-
 def complete_tag_enrichment(settings, original_path, source_url, *, job_key="rule34.xxx::html-categories-v1", status="done", error=""):
     now = int(time.time())
     with db(settings, write=True) as con:
@@ -1423,284 +1213,6 @@ def retry_tag_enrichment(settings, original_path, source_url, *, job_key="rule34
             UPDATE tag_enrichment_queue SET status='pending', retry_after=?, attempts=attempts+1, last_error=?, updated_at=?
             WHERE original_path=? AND job_key=? AND source_url=?
         """, (now + int(delay_seconds), str(error or "")[:1000], now, str(Path(original_path)), str(job_key).lower(), str(source_url or "")))
-
-
-def enqueue_reverse_retry(settings, original_path, *, service="saucenao", retry_after=0, reason="limit"):
-    """Persist a reverse-search retry without marking the file as NO_MATCH."""
-    original = str(Path(original_path))
-    svc = str(service or "saucenao").strip().lower()
-    when = int(retry_after or time.time())
-    if not original or not svc:
-        return
-    with db(settings, write=True) as con:
-        con.execute("""
-            INSERT INTO reverse_retry_queue(original_path, service, retry_after, reason, queued_at, attempts)
-            VALUES(?,?,?,?,?,1)
-            ON CONFLICT(original_path, service) DO UPDATE SET
-                retry_after=excluded.retry_after, reason=excluded.reason,
-                queued_at=excluded.queued_at, attempts=reverse_retry_queue.attempts + 1
-        """, (original, svc, when, str(reason or "limit"), int(time.time())))
-
-
-def remove_reverse_retry(settings, original_path, *, service="saucenao"):
-    original = str(Path(original_path))
-    svc = str(service or "saucenao").strip().lower()
-    with db(settings, write=True) as con:
-        con.execute("DELETE FROM reverse_retry_queue WHERE original_path=? AND service=?", (original, svc))
-
-
-def due_reverse_retry_paths(settings, *, service="saucenao", now=None, limit=10000):
-    svc = str(service or "saucenao").strip().lower()
-    stamp = int(time.time() if now is None else now)
-    with db(settings) as con:
-        rows = con.execute("""
-            SELECT original_path, retry_after, reason FROM reverse_retry_queue
-            WHERE service=? AND retry_after<=?
-            ORDER BY retry_after, queued_at LIMIT ?
-        """, (svc, stamp, int(limit))).fetchall()
-    return [(Path(r["original_path"]), int(r["retry_after"] or 0), str(r["reason"] or "")) for r in rows]
-
-
-def _reverse_retry_cursor_values(cursor_after):
-    """Normalize a retry keyset cursor to the durable SQL sort tuple."""
-    if not cursor_after:
-        return None
-    if isinstance(cursor_after, dict):
-        values = (
-            cursor_after.get("retry_after", 0),
-            cursor_after.get("queued_at", 0),
-            cursor_after.get("path") or cursor_after.get("original_path") or "",
-            cursor_after.get("service") or "",
-        )
-    else:
-        values = tuple(cursor_after)
-    if len(values) != 4:
-        raise ValueError("reverse retry cursor must contain 4 values")
-    return (
-        int(values[0] or 0),
-        int(values[1] or 0),
-        str(values[2] or ""),
-        str(values[3] or "").strip().lower(),
-    )
-
-
-def _reverse_retry_cursor_clause(cursor):
-    if cursor is None:
-        return "", ()
-    retry_after, queued_at, original_path, service = cursor
-    return (
-        """
-        AND (
-            retry_after > ?
-            OR (retry_after = ? AND queued_at > ?)
-            OR (retry_after = ? AND queued_at = ? AND original_path > ?)
-            OR (retry_after = ? AND queued_at = ? AND original_path = ? AND service > ?)
-        )
-        """,
-        (
-            retry_after,
-            retry_after, queued_at,
-            retry_after, queued_at, original_path,
-            retry_after, queued_at, original_path, service,
-        ),
-    )
-
-
-def _reverse_retry_rows_to_dicts(rows):
-    return [
-        {
-            "path": Path(row["original_path"]),
-            "service": str(row["service"] or "").strip().lower(),
-            "retry_after": int(row["retry_after"] or 0),
-            "reason": str(row["reason"] or ""),
-            "attempts": int(row["attempts"] or 0),
-            "queued_at": int(row["queued_at"] or 0),
-        }
-        for row in rows
-    ]
-
-
-def due_reverse_retry_rows(settings, *, now=None, limit=1000, services=None, cursor_after=None):
-    """Return one keyset page of due durable reverse retries.
-
-    Filtering by service and keyset cursor happens inside SQL before ``LIMIT``.
-    Callers may therefore keep reading pages until they have admitted enough
-    eligible rows or the due set is exhausted; old rows from another parser run
-    can no longer permanently hide a current-run retry behind the first page.
-
-    Rows are not removed here.  The corresponding branch removes its row only
-    after a final non-deferred result, so a process crash cannot lose retries.
-    """
-    stamp = int(time.time() if now is None else now)
-    normalized = []
-    for service in list(services or []):
-        value = str(service or "").strip().lower()
-        if value and value not in normalized:
-            normalized.append(value)
-    cursor = _reverse_retry_cursor_values(cursor_after)
-    cursor_sql, cursor_args = _reverse_retry_cursor_clause(cursor)
-    with db(settings) as con:
-        if normalized:
-            placeholders = ",".join("?" for _ in normalized)
-            rows = con.execute(
-                f"""
-                SELECT original_path, service, retry_after, reason, attempts, queued_at
-                FROM reverse_retry_queue
-                WHERE retry_after<=? AND service IN ({placeholders})
-                {cursor_sql}
-                ORDER BY retry_after, queued_at, original_path, service
-                LIMIT ?
-                """,
-                (stamp, *normalized, *cursor_args, int(limit)),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                f"""
-                SELECT original_path, service, retry_after, reason, attempts, queued_at
-                FROM reverse_retry_queue
-                WHERE retry_after<=?
-                {cursor_sql}
-                ORDER BY retry_after, queued_at, original_path, service
-                LIMIT ?
-                """,
-                (stamp, *cursor_args, int(limit)),
-            ).fetchall()
-    return _reverse_retry_rows_to_dicts(rows)
-
-
-def reverse_retry_cursor(row):
-    """Return the stable keyset cursor for a row returned by retry queries."""
-    return (
-        int((row or {}).get("retry_after") or 0),
-        int((row or {}).get("queued_at") or 0),
-        str((row or {}).get("path") or ""),
-        str((row or {}).get("service") or "").strip().lower(),
-    )
-
-
-def remove_reverse_retry_rows(settings, rows):
-    """Delete exact ``(original_path, service)`` pairs in one write transaction."""
-    pairs = []
-    seen = set()
-    for row in list(rows or []):
-        if isinstance(row, dict):
-            original = str(Path(row.get("path") or row.get("original_path") or ""))
-            service = str(row.get("service") or "").strip().lower()
-        else:
-            original, service = row
-            original = str(Path(original))
-            service = str(service or "").strip().lower()
-        token = (original, service)
-        if original and service and token not in seen:
-            seen.add(token)
-            pairs.append(token)
-    if not pairs:
-        return 0
-    removed = 0
-    with db(settings, write=True) as con:
-        for original, service in pairs:
-            cur = con.execute(
-                "DELETE FROM reverse_retry_queue WHERE original_path=? AND service=?",
-                (original, service),
-            )
-            removed += max(0, int(cur.rowcount or 0))
-    return removed
-
-
-def pending_reverse_retry_paths(settings, *, service="saucenao", limit=100000):
-    """Return every durable retry row, including entries still in cooldown.
-
-    The live conveyor restores these rows on application restart so a file that
-    already exhausted IQDB/Ascii2D is not sent through those services again just
-    because SauceNAO was cooling down when the previous run stopped.
-    """
-    svc = str(service or "saucenao").strip().lower()
-    with db(settings) as con:
-        rows = con.execute("""
-            SELECT original_path, retry_after, reason FROM reverse_retry_queue
-            WHERE service=?
-            ORDER BY retry_after, queued_at LIMIT ?
-        """, (svc, int(limit))).fetchall()
-    return [(Path(r["original_path"]), int(r["retry_after"] or 0), str(r["reason"] or "")) for r in rows]
-
-
-def pending_reverse_retry_rows(settings, *, services=None, limit=1000000, cursor_after=None):
-    """Return one keyset page of future and due durable reverse retries."""
-    normalized = []
-    for service in list(services or []):
-        value = str(service or "").strip().lower()
-        if value and value not in normalized:
-            normalized.append(value)
-    cursor = _reverse_retry_cursor_values(cursor_after)
-    cursor_sql, cursor_args = _reverse_retry_cursor_clause(cursor)
-    with db(settings) as con:
-        if normalized:
-            placeholders = ",".join("?" for _ in normalized)
-            rows = con.execute(
-                f"""
-                SELECT original_path, service, retry_after, reason, attempts, queued_at
-                FROM reverse_retry_queue
-                WHERE service IN ({placeholders})
-                {cursor_sql}
-                ORDER BY retry_after, queued_at, original_path, service
-                LIMIT ?
-                """,
-                (*normalized, *cursor_args, int(limit)),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                f"""
-                SELECT original_path, service, retry_after, reason, attempts, queued_at
-                FROM reverse_retry_queue
-                WHERE 1=1
-                {cursor_sql}
-                ORDER BY retry_after, queued_at, original_path, service
-                LIMIT ?
-                """,
-                (*cursor_args, int(limit)),
-            ).fetchall()
-    return _reverse_retry_rows_to_dicts(rows)
-
-
-def pending_reverse_retry_info(settings, *, service="saucenao"):
-    svc = str(service or "saucenao").strip().lower()
-    with db(settings) as con:
-        row = con.execute("""
-            SELECT COUNT(*) AS n, MIN(retry_after) AS next_retry FROM reverse_retry_queue
-            WHERE service=?
-        """, (svc,)).fetchone()
-    return int(row["n"] or 0), int(row["next_retry"] or 0)
-
-
-def delete_image_records(settings, media_paths):
-    with db(settings, write=True) as con:
-        for p in media_paths:
-            originals = [r["original_path"] for r in con.execute("SELECT original_path FROM processed_files WHERE media_path=?", (str(p),)).fetchall()]
-            con.execute("DELETE FROM images WHERE path=?", (str(p),))
-            con.execute("DELETE FROM processed_files WHERE media_path=?", (str(p),))
-            for original in originals:
-                con.execute("DELETE FROM site_scan_status WHERE original_path=?", (str(original),))
-        _cleanup_orphan_rows(con)
-
-
-def get_nomatches_for_tineye(settings) -> list:
-    """Return paths of files with no tags that are candidates for TinEye search."""
-    from pathlib import Path as _P
-    try:
-        with db(settings) as con:
-            rows = con.execute(
-                "SELECT path FROM images WHERE "
-                "(tags IS NULL OR tags = '' OR tags = '[]') "
-                "ORDER BY indexed_at DESC"
-            ).fetchall()
-        result = []
-        for row in rows:
-            p = str(row["path"] if hasattr(row, "keys") else row[0])
-            if _P(p).exists():
-                result.append(p)
-        return result
-    except Exception:
-        return []
 
 
 class TooManyMissing(RuntimeError):
@@ -1889,24 +1401,6 @@ def _cleanup_orphan_rows(con):
     from core.database.repository import cleanup_orphans
     cleanup_orphans(con)
 
-# --- v27 compatibility aliases -------------------------------------------------
-def cleanup_orphan_rows(settings):
-    from core.database.repository import cleanup_orphans
-    with db(settings, write=True) as con:
-        cleanup_orphans(con)
-
-
-def database_stats(settings):
-    with db(settings, readonly=True) as con:
-        out = {}
-        for name in ("images", "tags", "image_tags", "sources", "image_sources", "processed_files", "delete_log"):
-            try:
-                out[name] = int(con.execute(f"SELECT COUNT(*) AS c FROM {_safe_ident(name)}").fetchone()["c"] or 0)
-            except Exception:
-                out[name] = 0
-        return out
-
-
 
 def _ensure_reverse_branch_status_table(con) -> None:
     """Compatibility guard for databases opened before m024 was recorded.
@@ -1929,16 +1423,6 @@ def _ensure_reverse_branch_status_table(con) -> None:
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_reverse_branch_status_path ON reverse_branch_status(original_path, scan_revision, status)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_reverse_branch_status_branch ON reverse_branch_status(branch_key, scan_revision, status)")
-
-# --- v115 diagnostics event audit ------------------------------------------------
-def record_task_event(settings, task_type, status, message=""):
-    """Persist a lightweight operational proof for the diagnostics page."""
-    now = int(time.time())
-    with db(settings, write=True) as con:
-        con.execute(
-            "INSERT INTO task_log(task_type,status,message,created_at,updated_at) VALUES(?,?,?,?,?)",
-            (str(task_type or ""), str(status or ""), str(message or ""), now, now),
-        )
 
 
 def mark_reverse_branch_status(settings, original_path, branch_key, *, status="done_miss", reason="", scan_revision=1):

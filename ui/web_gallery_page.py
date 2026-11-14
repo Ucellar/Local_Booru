@@ -178,6 +178,10 @@ def _full_player(on: bool) -> None:
 
 
 def _download_requested(download) -> None:
+    from ui.page_fetch import _ManualPage
+    if isinstance(download.page(), _ManualPage):
+        download.cancel()
+        return
     page = _DOWNLOADS() if _DOWNLOADS is not None else None
     if page is None:
         download.cancel()

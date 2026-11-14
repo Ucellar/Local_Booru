@@ -36,6 +36,16 @@ it.
 * **The page** — rows of the block «Манга в исходной папке» (:func:`rows`; ``webui/pages/parser_manga.py``), a
   picture by the row's id (:func:`cover_of`), the owner's word (:func:`say_manga`, :func:`say_not`, «Скачать сейчас»
   — :func:`download_now`).
+
+(v5.44.170) **A page of a gallery of nhentai** lying loose is a page of a manga too (the owner, of 5.44.169's «не
+сделано: отдельные картинки по базе nhentai»: «почему?»).  SauceNAO's answer names such a page by its indexes of
+hentai (``manga_pictures.gallery_hits``: the gallery's names, and — hints — its number and the page's); the manga it
+makes is marked ``gallery`` and is nhentai's to confirm, not the sites': ``parser_manga_nhentai.check_loose`` finds the
+gallery (the one the index pointed at, then by its names — through the program's gates) and looks for the picture
+among its pages.  Confirmed — the gallery is downloaded whole by the program's own downloader of nhentai
+(``parser_manga_nhentai.fetch``; the same switch, the same «while nobody is at the computer»), and its pictures leave
+Брак once its folder is in «Манга».  Брак's old pictures whose «источник без тегов» is an index of hentai are asked
+again as the ones of the indexes of manga (:func:`_sweep`).
 """
 from __future__ import annotations
 
@@ -64,6 +74,8 @@ QUEUE_TRIES = 3                 # a title's download begun so many times at most
 QUEUE_AGAIN = 12 * 3600         # …the next one so much after the one before (it ended, and the title is not there)
 LISTED = 12                     # pictures of a row named on the page
 HELD_FOR = 90 * 86400           # an answer kept for a picture put off is forgotten after so long
+GALLERY_RULE = 4                # E-Hentai image hash links and public photo galleries
+OLD_GALLERIES_A_ROUND = 32       # upgrade bookkeeping is bounded; normal rounds retain their time/search limits
 
 _INDEX = re.compile(r"Index #(\d+)")
 
@@ -131,32 +143,106 @@ def _open_hits(hits: list) -> list:
         key = S.name_key(name)
         if not key or key in had or not S.names_of(name) or C.junk_name(name):
             continue
-        if G.title("saucenao", names=[name]):
+        whole = " ".join(str(hit.get("whole") or "").split())[:300]
+        others = [" ".join(str(n).split())[:300] for n in hit.get("names") or [] if str(n).strip()][:3]
+        if G.title("saucenao", names=[n for n in (name, whole, *others) if n]):
             continue                                    # (closed: neither noted nor said)
         had.add(key)
-        out.append({"name": name, "part": " ".join(str(hit.get("part") or "").split())[:80],
-                    "link": str(hit.get("link") or "")[:300], "sim": round(float(hit.get("sim") or 0), 1),
-                    "index": int(hit.get("index") or 0)})
+        kept = {"name": name, "part": " ".join(str(hit.get("part") or "").split())[:80],
+                "link": str(hit.get("link") or "")[:300], "sim": round(float(hit.get("sim") or 0), 1),
+                "index": int(hit.get("index") or 0)}
+        if kept["index"] in _galleries():               # (v5.44.170) a page of a gallery: what finds the gallery
+            kept.update(whole=whole, names=others, gallery=int(hit.get("gallery") or 0),
+                        page=int(hit.get("page") or 0))
+        out.append(kept)
         if len(out) >= HITS:
             break
     return out
 
 
+def _galleries() -> tuple:
+    from core.manga_pictures import HENTAI_INDEXES
+    return HENTAI_INDEXES
+
+
 def _told(name: str, hit: dict) -> str:
+    if int(hit.get("index") or 0) in _galleries():      # (v5.44.170)
+        return f"«{name}» — SauceNAO: страница галереи «{hit['name']}» ({float(hit.get('sim') or 0):.0f} %)"
     _tome, number = LP.chapter_of(hit.get("part"))
     return (f"«{name}» — SauceNAO: страница манги «{hit['name']}»" + (f", глава {number}" if number else "")
             + f" ({float(hit.get('sim') or 0):.0f} %)")
+
+
+def _group_for(data: dict, hit: dict) -> str:
+    """Same short gallery title is not evidence of the same translation or gallery."""
+    from core import manhwa_sources as S
+    key = S.name_key(hit["name"])
+    if int(hit.get("index") or 0) not in _galleries():
+        return key
+    group = data["groups"].get(key) or {}
+    number = str(hit.get("gallery") or "")
+    whole = S.name_key(hit.get("whole") or "")
+    if group and (not group.get("gallery") or not hit_matches(hit, key, group)):
+        source = _gallery_source(hit.get("link"))
+        identity = number or hashlib.sha256((source or whole).encode("utf-8")).hexdigest()[:16]
+        return key + ":gallery:" + identity
+    return key
+
+
+def _gallery_source(link) -> str:
+    from core import manhwa_sources as S, parser_manga_nhentai as PN
+    number = PN.number_of(link)
+    if number:
+        return f"{PN.SITE}:{number}"
+    try:
+        source, key = S.source_for(str(link or ""))
+    except ValueError:
+        return ""
+    return f"{source.name}:{key}" if source and key else ""
+
+
+def hit_matches(hit: dict, key: str, group: dict) -> bool:
+    """A saved hit belongs to this row; a source number is stronger than the row's short title."""
+    from core import manhwa_sources as S
+    if S.name_key(hit.get("name")) != S.name_key(group.get("name") or key.split(":gallery:")[0]):
+        return False
+    number = str(hit.get("gallery") or "")
+    expected = str(group.get("source_gallery") or (group.get("key") if group.get("site") == _nhentai() else "") or "")
+    source = _gallery_source(hit.get("link"))
+    previous = _gallery_source(group.get("source_link"))
+    if not previous and group.get("site") == "ehentai" and group.get("key"):
+        previous = "ehentai:" + str(group["key"])
+    if source and previous and source != previous or number and expected and number != expected:
+        return False
+    if source and source == previous or number and number == expected:
+        return True
+    whole, before = S.name_key(hit.get("whole")), S.name_key(group.get("source_whole"))
+    return not (whole and before and whole != before)
 
 
 def _note(data: dict, path: str, md5: str, kept: list, media: str, now: int) -> str:
     """A picture and the manga its answer names put into ``data``; the journal's line ("" — nothing new to say)."""
     from core import manhwa_sources as S
     best = kept[0]
-    key = S.name_key(best["name"])
+    key = _group_for(data, best)
     norm = MD._norm(path)
-    group = data["groups"].setdefault(key, {"name": best["name"], "at": now, "state": ""})
+    fresh = {"name": best["name"], "at": now, "state": ""}
+    if best["index"] in _galleries():                   # (v5.44.170) a gallery: nhentai confirms it, not the sites
+        fresh["gallery"] = True
+        fresh["gallery_rule"] = GALLERY_RULE
+        fresh["source_gallery"] = best.get("gallery") or 0
+        fresh["source_whole"] = best.get("whole") or ""
+        fresh["source_link"] = best.get("link") or ""
+    group = data["groups"].setdefault(key, fresh)
+    from core import parser_gallery_sources as PG
+    new_source = bool(PG.source_link(best.get("link")) and not PG.source_link(group.get("source_link"))
+                      and not group.get("site"))
+    if new_source:
+        group["source_link"] = best["link"]
+        if group.get("state") == NOT and not group.get("hand"):
+            group.update(state="", later_at=0)
     rec = dict(data["files"].get(norm) or {})
-    known = rec.get("state") in (MANGA, NOT) and rec.get("group") == key
+    known = not new_source and rec.get("state") in (MANGA, NOT) and rec.get("group") == key
     rec.update(path=str(path), md5=str(md5 or rec.get("md5") or ""), hits=kept, group=key, at=now)
     if media:
         rec["media"] = str(media)
@@ -173,14 +259,20 @@ def _note(data: dict, path: str, md5: str, kept: list, media: str, now: int) -> 
         return ""
     if known:
         return ""
+    gallery = bool(group.get("gallery"))
     if group.get("state") == MANGA:
         title = group.get("title") or group["name"]
-        if best["sim"] >= PM.SURE or group.get("hand") == MANGA:      # (the owner's word is of all its pictures)
+        if (not gallery and best["sim"] >= PM.SURE) or group.get("hand") == MANGA:
             rec.update(state=MANGA, how="sure" if best["sim"] >= PM.SURE else "hand")
-            return PM.line("МАНГА", f"{told} — манга «{title}» уже подтверждена: картинка уйдёт из «Брака»")
-        return PM.line("ЖДЁТ", f"{told} — манга «{title}» уже подтверждена; эту картинку сверю со страницами главы")
+            return PM.line("МАНГА", f"{told} — " + ("галерея" if gallery else "манга")
+                           + f" «{title}» уже подтверждена: картинка уйдёт из «Брака»")
+        return PM.line("ЖДЁТ", f"{told} — " + ("галерея" if gallery else "манга") + f" «{title}» уже подтверждена; "
+                       "эту картинку сверю со страницами " + ("галереи" if gallery else "главы"))
     if group.get("state") == NOT:
         group["state"] = ""                             # one more picture of it: compared with the title's pages too
+    if gallery:
+        return PM.line("ЖДЁТ", f"{told} — сверю со страницами галереи на nhentai: совпадёт — галерея в «Мангу», "
+                               "картинка уйдёт из «Брака»")
     return PM.line("ЖДЁТ", f"{told} — сверю со страницами тайтла на сайтах манги: совпадёт — тайтл в «Мангу», "
                            "картинка уйдёт из «Брака»")
 
@@ -274,15 +366,21 @@ def _person_busy() -> bool:
 
 
 def _going(url: str) -> bool:
-    """The title's download waits in the queue of «Загрузки» or goes now."""
-    from core import manhwa_queue as Q
+    """The title's download waits in the queue of «Загрузки» or goes now ((v5.44.170) a gallery's — in the program's
+    download of nhentai)."""
+    from core import manhwa_queue as Q, parser_manga_nhentai as PN
+    number = PN.number_of(url)
+    if number:
+        return PN.going(number)
     current = Q.current_record() or {}
     return bool(Q.queued(url, "")) or current.get("url") == url
 
 
 def _open_link(settings: dict, site: str, tkey: str) -> str:
     """The page of the title in the library ("" — not found by its link's site)."""
-    from core import manhwa_download as D, manhwa_queue as Q
+    from core import manhwa_download as D, manhwa_queue as Q, parser_manga_nhentai as PN
+    if site == PN.SITE:                                 # (v5.44.170) a gallery: its folder of the manga folder
+        return PN.page_link(settings, int(tkey)) if str(tkey).isdigit() else ""
     try:
         linked = D.linked_folder(settings, site, tkey) if site and tkey else None
         return Q.open_link(settings, str(linked[1]), linked[0]) if linked else ""
@@ -310,16 +408,27 @@ def _in_brak(settings: dict, paths: list) -> "set | None":
     return out
 
 
+def _choice_of(group: dict) -> tuple:
+    """The decision a background operation started with; a newer user choice invalidates its answer."""
+    return tuple(group.get(name) for name in ("hand", "pending_link", "again", "state", "url", "site", "key",
+                                               "source_link", "eh_photo"))
+
+
+def _picture_revision(rec: dict) -> tuple:
+    """A picture's evidence when it was selected for comparison (a later parser result must be checked anew)."""
+    return tuple(rec.get(name) for name in ("state", "hits", "group", "path", "md5", "media"))
+
+
 def _place(settings: dict, key: str, say, *, asked: bool = False) -> dict:
     """A confirmed manga put into «Манга»: its download begun (once nobody is at the computer; never twice at a
     time; ``asked`` — «Скачать сейчас», the person's own word: now, and whatever was tried before), and — when the
     title is in the library — the cards of its pictures out of Брак (the trash, «перенесено в мангу»).
     {"queued", "trashed", "fill" — what its download is doing now}."""
-    from core import catalog_have, manhwa_queue as Q, manhwa_sources as S
+    from core import catalog_have, manhwa_download as D, manhwa_queue as Q
     out = {"queued": 0, "trashed": 0}
     data = STORE.read()
     group = dict(data["groups"].get(key) or {})
-    if group.get("state") != MANGA or not group.get("url"):
+    if group.get("pending_link") or group.get("state") != MANGA or not group.get("url"):
         return out
     mine = [(norm, rec) for norm, rec in data["files"].items()
             if rec.get("group") == key and rec.get("state") == MANGA and not rec.get("done")]
@@ -327,17 +436,42 @@ def _place(settings: dict, key: str, say, *, asked: bool = False) -> dict:
     url, site, tkey = str(group["url"]), str(group.get("site") or ""), str(group.get("key") or "")
     now = int(time.time())
     values: dict = {}
-    have = catalog_have.downloaded("manga", settings)
-    there = have.holds([(site, tkey)] if site and tkey else [], S.names_of(title, str(group.get("name") or "")))
+    photo = bool(group.get("eh_photo")) and site == "ehentai"
+    # (v5.44.171) a gallery is «there» by its own number alone — not by a name: a manga of the library that is merely
+    # called so (another work — «Summer»; the same one in another language) is not this gallery, and its pictures
+    # would leave Брак «перенесено в мангу» with nothing of theirs in «Манга»
+    # A name can belong to another work, scan or translation on every site. Only the confirmed source identity
+    # proves that the download exists before the source pictures are moved out of Брак.
+    # The feed also remembers possible helper sites. Merely discovering one does not download its translation.
+    if photo:
+        from core import parser_ehentai_photos
+        there = bool(parser_ehentai_photos.complete(settings, url))
+    else:
+        have = catalog_have.downloaded("manga", settings)
+        there = bool(site and tkey and (site, tkey) in have.primary_keys)
+    if not photo and not there and site and tkey and site != _nhentai():
+        # A source was just attached to an existing folder: the catalogue's brief cache may not see it yet.
+        linked = D.linked_folder(settings, site, tkey)
+        there = bool(linked and Path(linked[1]).is_dir())
     done: dict = {}                     # a picture nothing more is to be done with -> whether its card went to the trash
     still: set = set()                  # the ones whose card is in Брак after all (the person's own сборка, no backup)
     if there:
         gone = 0
-        if mine:
+        if photo:
+            done = {norm: False for norm, _rec in mine}
+        elif mine:
             paths = [str(rec.get("path") or "") for _n, rec in mine]
             was = _in_brak(settings, paths)
             if was:
-                gone = PM.trash_paths(settings, paths, title, brak_only=True)
+                with STORE._lock:
+                    current = STORE.read()
+                    if _choice_of(current["groups"].get(key) or {}) != _choice_of(group):
+                        return out
+                    # A new parser result may move a picture to another group without changing this group.
+                    if any(_picture_revision(current["files"].get(norm) or {}) != _picture_revision(rec)
+                           or (current["files"].get(norm) or {}).get("done") for norm, rec in mine):
+                        return out
+                    gone = PM.trash_paths(settings, paths, title, brak_only=True)
             left = _in_brak(settings, paths) if was is not None else None
             for norm, rec in mine if left is not None else []:        # (the base not read: next round)
                 path = str(rec.get("path") or "")
@@ -364,25 +498,45 @@ def _place(settings: dict, key: str, say, *, asked: bool = False) -> dict:
         values["fill"] = {"state": "again", "at": int(group["queued_at"]) + QUEUE_AGAIN}
     elif not asked and _person_busy():
         values["fill"] = {"state": "held"}
+    elif site == _nhentai():                            # (v5.44.170) a gallery: the program's download of nhentai
+        from core import parser_manga_nhentai as PN
+        with STORE._lock:
+            if _choice_of(STORE.read()["groups"].get(key) or {}) != _choice_of(group):
+                return out
+            queued = PN.fetch(settings, int(tkey)).get("ok")
+        if queued:
+            values.update(queued_at=now, queue_tries=int(group.get("queue_tries") or 0) + 1,
+                          fill={"state": "queued"})
+            out["queued"] = 1
+            say(PM.line("МАНГА", f"«{title}» — скачиваю галерею в «Мангу» (видно в «Загрузках»); её картинки уйдут "
+                                 "из «Брака», когда она появится в «Манге»"))
+        else:                                           # (its downloader is busy, no manga folder: the next round
+            values["fill"] = {"state": "soon"}          # — the row says «Сейчас скачаю», not «жду, пока вы отойдёте»)
     else:
-        record = {"url": url, "title": title, "branch": "", "where": "", "follow": True, "helpers": True,
+        record = {"url": url, "title": title, "branch": "", "where": "manga" if photo else "",
+                  "follow": not photo, "helpers": not photo,
                   "chapters": None, "hentai": bool(group.get("adult"))}
 
         def work(say_, stop_, record=record):
             return Q.work(record, settings, say_, stop_)
-        Q.start(f"Скачать: {title}", work, record=record, about=PREFIX + gid_of(key), title=title, count=0)
+        with STORE._lock:
+            if _choice_of(STORE.read()["groups"].get(key) or {}) != _choice_of(group):
+                return out
+            Q.start(f"Скачать: {title}", work, record=record, about=PREFIX + gid_of(key), title=title, count=0)
         values.update(queued_at=now, queue_tries=int(group.get("queue_tries") or 0) + 1, fill={"state": "queued"})
         out["queued"] = 1
-        say(PM.line("МАНГА", f"«{title}» — скачиваю в «Мангу» (видно в «Загрузках»); её картинки уйдут из «Брака», "
-                             "когда тайтл появится в «Манге»"))
+        say(PM.line("МАНГА", f"«{title}» — скачиваю в «Мангу» (видно в «Загрузках»)" +
+                    ("" if photo else "; её картинки уйдут из «Брака», когда тайтл появится в «Манге»")))
     if values and any(group.get(k) != v for k, v in values.items()) or mine and there:
         def put(found: dict) -> None:
             kept = found["groups"].get(key)
-            if kept is not None:
-                kept.update(values)
+            if kept is None or _choice_of(kept) != _choice_of(group):
+                return
+            kept.update(values)
             if there:
-                for norm, _rec in mine:
-                    if norm not in found["files"]:
+                for norm, rec in mine:
+                    current = found["files"].get(norm)
+                    if current is None or _picture_revision(current) != _picture_revision(rec) or current.get("done"):
                         continue
                     if norm in done:
                         found["files"][norm].update(done=1, trashed=1 if done[norm] else 0)
@@ -391,6 +545,11 @@ def _place(settings: dict, key: str, say, *, asked: bool = False) -> dict:
         STORE.change(put)
     out["fill"] = str((values.get("fill") or group.get("fill") or {}).get("state") or "")
     return out
+
+
+def _nhentai() -> str:
+    from core import parser_manga_nhentai as PN
+    return PN.SITE
 
 
 # ── Брак as it was before this version ──────────────────────────────────────────────────────────────────────────────
@@ -403,14 +562,15 @@ def _sweep(settings: dict) -> int:
         with db(settings, readonly=True) as con:
             rows = [(str(r[0] or ""), str(r[1] or ""), str(r[2] or ""), float(r[3] or 0)) for r in con.execute(
                 "SELECT original_path, media_path, source_label, source_similarity FROM no_match_items "
-                "WHERE +active=1 AND reason='source_only' AND source_label LIKE 'SauceNAO Index #3%'")]
+                "WHERE +active=1 AND reason='source_only' AND (source_label LIKE 'SauceNAO Index #3%' "
+                "OR source_label LIKE 'SauceNAO Index #18%')")]        # ((v5.44.170) #18, #38: the galleries)
     except Exception as exc:  # noqa: BLE001 - the base busy (or older than the columns): looked through next time
         _LOG.info("parser loose: Брак not looked through: %s", type(exc).__name__)
         return 0
     wanted = []
     for path, media, label, sim in rows:
         index = _INDEX.search(label)
-        if index and int(index.group(1)) in P.INDEXES and sim >= P.SIMILAR and path \
+        if index and int(index.group(1)) in (*P.INDEXES, *P.HENTAI_INDEXES) and sim >= P.SIMILAR and path \
                 and Path(path).suffix.lower() in MD.IMAGES:
             wanted.append((path, media))
     now = int(time.time())
@@ -492,6 +652,58 @@ def _ask(settings: dict, asker, stop_check, deadline: float, say) -> int:
 _ROUND = threading.Lock()
 
 
+def mark_old_galleries(limit: int = OLD_GALLERIES_A_ROUND) -> int:
+    """Once per gallery rule, queue old automatic negatives with their saved SauceNAO evidence.
+
+    The cursor advances across at most ``limit`` rows per call. Manual choices, pending links, placed
+    pictures and confirmed galleries remain untouched. No request is made here and no quota is reset.
+    """
+    from core import parser_manga_nhentai as PN
+    progress = STORE.read().get("gallery_upgrade") or {}
+    if int(progress.get("rule") or 0) >= GALLERY_RULE and progress.get("done"):
+        return 0
+    now = int(time.time())
+    limit = min(OLD_GALLERIES_A_ROUND, max(1, int(limit)))
+
+    def put(data: dict) -> int:
+        saved = data.get("gallery_upgrade") or {}
+        if int(saved.get("rule") or 0) >= GALLERY_RULE and saved.get("done"):
+            return 0
+        after = str(saved.get("after") or "") if int(saved.get("rule") or 0) == GALLERY_RULE else ""
+        remaining = sorted(key for key in data["groups"] if key > after)
+        selected = remaining[:limit]
+        candidates = {}
+        for key in selected:
+            group = data["groups"][key]
+            if not isinstance(group, dict) or int(group.get("gallery_rule") or 0) >= GALLERY_RULE:
+                continue
+            if group.get("state") != NOT or not PN.is_gallery(group):
+                continue
+            if any(group.get(field) for field in ("hand", "placed", "trashed", "pending_link", "again")) \
+                    or group.get("how") in ("hand", "forbidden"):
+                continue
+            candidates[key] = []
+        for rec in data["files"].values():
+            key = rec.get("group")
+            if key in candidates and rec.get("state") in ("", NOT) and not any(
+                    rec.get(field) for field in ("done", "trashed", "hand")) and rec.get("how") != "hand":
+                candidates[key].append(rec)
+        count = 0
+        for key, records in candidates.items():
+            if not records:
+                continue
+            data["groups"][key].update(state="", how="", by="", later_at=0, searched_at=0,
+                                       eh_searched_at=0, files_at=0, tries=0, again=now, gallery_rule=GALLERY_RULE)
+            for rec in records:
+                rec.update(state="", why="", how="")
+                rec.pop("page", None)
+            count += 1
+        data["gallery_upgrade"] = {"rule": GALLERY_RULE, "after": selected[-1] if selected else after,
+                                   "done": len(remaining) <= limit}
+        return count
+    return int(STORE.change(put) or 0)
+
+
 def _due(data: dict, now: float) -> list:
     """The manga to look at now, the cheapest first: the ones confirmed with pictures not compared yet (no search),
     then the new ones and the ones whose wait is over — the ones SauceNAO is surest of first."""
@@ -501,6 +713,9 @@ def _due(data: dict, now: float) -> list:
             waiting[rec["group"]] = max(waiting.get(rec["group"], 0.0), LP.sim_of(rec, rec["group"]))
     out = []
     for key, group in data["groups"].items():
+        if group.get("pending_link") and float(group.get("later_at") or 0) <= now:
+            out.append((False, -101.0, int(group.get("at") or 0), key))
+            continue
         if key not in waiting or group.get("hand") == NOT:
             continue
         state = group.get("state") or ""
@@ -515,6 +730,9 @@ def _one(settings: dict, asker, key: str, deadline: float, tell) -> dict:
     """One manga checked and what came of it kept: {"state", "more", "wait"}."""
     data = STORE.read()
     group = dict(data["groups"].get(key) or {})
+    if group.get("pending_link"):
+        from core import parser_loose_link
+        return parser_loose_link.settle(settings, asker, key, group, tell)
     every = [rec for rec in data["files"].values() if rec.get("group") == key and rec.get("state") in ("", MANGA)]
     mine = sorted(((norm, rec) for norm, rec in data["files"].items()
                    if rec.get("group") == key and rec.get("state") == ""), key=lambda x: -LP.sim_of(x[1], key))
@@ -546,18 +764,35 @@ def _one(settings: dict, asker, key: str, deadline: float, tell) -> dict:
     elif len(mine) > FILES and values.get("state") in (MANGA, None):
         more = True                                     # (the rest of a confirmed manga's pictures: next round)
     if values or files:
-        def put(found: dict) -> None:
+        negative = values.get("state") == NOT
+        def put(found: dict) -> bool:
+            nonlocal more
             kept = found["groups"].get(key)
-            if kept is not None and values:
+            if kept is None or _choice_of(kept) != _choice_of(group):
+                return False
+            unchanged = {norm for norm, rec in data["files"].items()
+                         if norm in found["files"] and _picture_revision(found["files"][norm]) == _picture_revision(rec)}
+            if any(norm not in unchanged for norm, _rec in mine[:FILES]):
+                return False                           # the pixels/evidence just compared are no longer current
+            new_waiting = any(norm not in unchanged and rec.get("group") == key and rec.get("state") == ""
+                              for norm, rec in found["files"].items())
+            more = more or new_waiting
+            if negative and new_waiting:
+                values["state"] = ""                   # a newly arrived picture may identify what the old ones could not
+            if values:
                 kept.update(values)
+                if values.get("state") in (MANGA, NOT):  # (v5.44.166) looked at: «Перепроверить» is done with
+                    kept.pop("again", None)
             for norm, new in files.items():
-                if norm in found["files"]:
+                if norm in unchanged:
                     found["files"][norm].update(new)
-            if values.get("state") == NOT:              # the ones not compared this round are not a manga's either
-                for rec in found["files"].values():
-                    if rec.get("group") == key and rec.get("state") == "":
+            if negative:
+                for norm, rec in found["files"].items():
+                    if norm in unchanged and rec.get("group") == key and rec.get("state") == "":
                         rec.update(state=NOT, why=str(values.get("by") or ""))
-        STORE.change(put)
+            return True
+        if not STORE.change(put):
+            return {"state": "", "more": True, "wait": 0.0}
     name = str(group.get("name") or "")
     number = len(every) or len(mine)
     count = PM.plural(number, PM.PICTURES)
@@ -597,7 +832,8 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
         data = STORE.read()
         if time.time() - float(data.get("swept_at") or 0) >= SWEEP_EVERY:
             _sweep(settings)
-            data = STORE.read()
+        mark_old_galleries()
+        data = STORE.read()
         if not data["files"]:
             return out
 
@@ -654,19 +890,26 @@ def say_manga(settings: dict, row_key: str) -> dict:
     group = data["groups"].get(key) if key else None
     if group is None:
         return {"ok": False, "error": "Такой строки в списке нет — откройте страницу заново"}
+    from core import parser_manga_nhentai as PN
     url = str(group.get("url") or group.get("seen_url") or "")
-    source, tkey = S.source_for(url)
-    if source is None:
-        return {"ok": False, "error": "На сайтах манги программы тайтла с таким названием не нашлось — скачать нечего"}
+    number = PN.number_of(url)
+    source, tkey = (None, str(number)) if number else S.source_for(url)
+    if source is None and not number:
+        return {"ok": False, "error": ("На nhentai галереи с таким названием не нашлось — скачать нечего"
+                                       if group.get("gallery") else
+                                       "На сайтах манги программы тайтла с таким названием не нашлось — скачать нечего")}
+    site, label, adult = ((PN.SITE, PN.LABEL, True) if number else
+                          (source.name, source.label, bool(source.adult_only)))
 
     def put(found: dict) -> None:
         kept = found["groups"].get(key)
         if kept is None:
             return
-        kept.update(hand=MANGA, state=MANGA, how="hand", by="вы сказали: «Это манга»", url=url, site=source.name,
+        kept.update(hand=MANGA, state=MANGA, how="hand", by="вы сказали: «Это манга»", url=url, site=site,
                     key=tkey, title=kept.get("title") or kept.get("seen_title") or kept.get("name"),
-                    label=kept.get("label") or kept.get("seen_label") or source.label,
-                    adult=bool(kept.get("adult") or kept.get("seen_adult") or source.adult_only), later_at=0)
+                    label=kept.get("label") or kept.get("seen_label") or label,
+                    adult=bool(kept.get("adult") or kept.get("seen_adult") or adult), later_at=0)
+        kept.pop("again", None)                         # (v5.44.166) his word: no second look
         for rec in found["files"].values():
             if rec.get("group") == key and rec.get("state") in ("", NOT):
                 rec.update(state=MANGA, how="hand")
@@ -704,6 +947,9 @@ def say_not(settings: dict, row_key: str) -> dict:
         if kept is None:
             return
         kept.update(hand=NOT, state=NOT, how="hand", by="вы сказали: «Это не манга»", later_at=0)
+        kept.pop("pending_link", None)
+        kept.pop("link_previous", None)
+        kept.pop("again", None)                         # (v5.44.166) his word: no second look
         for rec in found["files"].values():
             if rec.get("group") == key and not rec.get("trashed") and rec.get("state") in ("", MANGA, NOT):
                 rec.update(state=NOT, why="вы сказали: «Это не манга»")
@@ -727,6 +973,17 @@ def cover_of(row_key: str):
     return None
 
 
+def _gallery_label(group: dict, records: list) -> str:
+    from core import parser_gallery_sources as PG
+    if group.get("site") == _nhentai():
+        return ""
+    if group.get("site") == "ehentai" or PG.source_link(group.get("source_link")) or PG.public_link(group.get("seen_url")):
+        return "E-Hentai"
+    if not group.get("site") and any(hit.get("index") == 38 for rec in records for hit in rec.get("hits") or []):
+        return "E-Hentai"
+    return ""
+
+
 def rows(settings: dict) -> list:
     """The rows of the block «Манга в исходной папке» of the manga found among the loose pictures — shaped as
     ``parser_manga.rows``' (``loose`` marks them): a manga, its pictures, what the check said, where they went."""
@@ -745,14 +1002,21 @@ def rows(settings: dict) -> list:
         accepted = [rec for rec in mine if rec.get("state") == MANGA]
         size = PM.plural(len(mine), PM.PICTURES)
         name = str(group.get("title") or group.get("name") or "")
+        # (v5.44.166) «Перепроверить» pressed and not looked at yet (``parser_manga_again._loose_mark``)
+        again = bool(group.get("again")) and state in ("check", WAIT) and not group.get("hand")
         work = {"key": key, "name": name, "state": "" if state == "check" else state, "how": group.get("how", ""),
+                "eh_photo": bool(group.get("eh_photo")),
+                "again": again, "again_at": int(group.get("later_at") or 0) if again and state == WAIT else 0,
+                "again_why": str(group.get("by") or "") if again and state == WAIT else "", "again_said": {},
                 "by": group.get("by", ""), "sim": max((LP.sim_of(rec, key) for rec in mine), default=0.0),
                 "later_at": int(group.get("later_at") or 0), "size": size, "sauce_at": 0, "handed": True,
                 "trashed": int(group.get("trashed") or 0), "parts": 1, "first": "", "page": group.get("open") or "",
                 "fill": dict(group.get("fill") or {}), "url": group.get("url", ""), "folder": "", "error": "",
                 "site": {}, "parts_of": []}
         out.append({"key": PREFIX + gid_of(key), "name": name, "said": str(group.get("name") or ""),
-                    "where": "отдельные картинки", "set": False, "loose": True, "state": state,
+                    "gallery": bool(group.get("gallery")) or str(group.get("site") or "") == _nhentai(),
+                    "gallery_label": _gallery_label(group, mine),
+                    "where": "отдельные картинки", "set": False, "loose": True, "state": state, "again": again,
                     "hand": group.get("hand", ""), "works": [work], "pages": len(mine), "size": size,
                     "at": int(group.get("at") or 0), "accepted": len(accepted),
                     "placed": bool(group.get("placed")), "can_say": bool(group.get("url") or group.get("seen_url")),

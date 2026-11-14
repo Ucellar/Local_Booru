@@ -7,6 +7,7 @@ from core.file_safety import atomic_write_bytes
 from urllib.parse import urlparse
 from core import site_agent
 from core.net import http_request
+from core.quiet import passed as let_pass
 
 try:
     from curl_cffi import requests
@@ -330,7 +331,7 @@ def _find_similar_in_db(settings: dict, file_path, threshold: int = 3):
             try:
                 con.close()
             except Exception:
-                pass
+                let_pass("core.downloader_utils._find_similar_in_db")
 
 
 def _rate_limited_get(session, url, settings=None, **kwargs):
@@ -398,7 +399,7 @@ def _session(host: str, settings: dict | None = None, log=None):
         from core.network import install_safe_session
         install_safe_session(s, settings=settings or {}, log_func=log)
     except Exception:
-        pass
+        let_pass("core.downloader_utils._session")
     return s
 
 
@@ -609,25 +610,6 @@ def _extract_posts(data) -> list[dict]:
     return []
 
 
-def _post_tags(post: dict) -> set[str]:
-    """Return set of lowercase tag strings from a post dict (any booru format)."""
-    tags: set[str] = set()
-    for key in (
-        "tag_string", "tags", "tag_string_general", "tag_string_artist",
-        "tag_string_character", "tag_string_copyright", "tag_string_meta",
-    ):
-        raw = post.get(key, "")
-        if isinstance(raw, str):
-            tags.update(t.strip().lower() for t in raw.split() if t.strip())
-        elif isinstance(raw, list):
-            tags.update(str(t).strip().lower() for t in raw if t)
-        elif isinstance(raw, dict):
-            for v in raw.values():
-                if isinstance(v, list):
-                    tags.update(str(t).strip().lower() for t in v if t)
-    return tags
-
-
 def _post_md5(post: dict) -> str:
     """Extract MD5 hash from a post dict (any booru format)."""
     for key in ("md5", "hash", "file_md5"):
@@ -703,7 +685,7 @@ def _media_url_groups(post: dict, site: str = "") -> tuple[list[str], list[str],
             if is_permanently_disabled_url(u):
                 return
         except Exception:
-            pass
+            let_pass("core.downloader_utils._media_url_groups.add")
         seen.add(u)
         groups[group].append(u)
 
@@ -829,7 +811,7 @@ def download_media_to_staging(
             if isinstance(exc, DownloadBlockedByPolicy):
                 return {"ok": False, "status": "blocked_by_policy", "error": str(exc), "intent_id": int(exc.decision.intent_id or 0)}
         except Exception:
-            pass
+            let_pass("core.downloader_utils.download_media_to_staging")
         raise
 
     last_error = ""
@@ -911,7 +893,7 @@ def download_media_to_staging(
                 try:
                     dest.unlink(missing_ok=True)
                 except Exception:
-                    pass
+                    let_pass("core.downloader_utils.download_media_to_staging#2")
                 last_error = f"downloaded MD5 mismatch: expected={expected} observed={observed}"
                 continue
             return {
@@ -927,20 +909,20 @@ def download_media_to_staging(
             try:
                 dest.unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.downloader_utils.download_media_to_staging#3")
             raise
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             try:
                 dest.unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.downloader_utils.download_media_to_staging#4")
         finally:
             if response is not None:
                 try:
                     response.close()
                 except Exception:
-                    pass
+                    let_pass("core.downloader_utils.download_media_to_staging#5")
     return {"ok": False, "status": "failed", "error": last_error or "all_media_candidates_failed"}
 
 def fetch_posts_for_query(
@@ -1135,7 +1117,7 @@ def download_post_file(
             from core.library_lifecycle import update_url_history
             update_url_history(settings, url, status=status, error=error)
         except Exception:
-            pass
+            let_pass("core.downloader_utils.download_post_file._history")
 
     from datetime import datetime as _dt
     _ts = session_folder or _dt.now().strftime("%Y-%m-%d_%H-%M")
@@ -1162,14 +1144,14 @@ def download_post_file(
                     for _u in file_urls: _history(_u, "skipped_deleted", "exact MD5 previously deleted")
                     return False, None
         except Exception:
-            pass
+            let_pass("core.downloader_utils.download_post_file")
         try:
             from core.database.storage import md5_exists as _md5_exists
             if _md5_exists(settings, post_hash):
                 for _u in file_urls: _history(_u, "duplicate", "exact MD5 already in library")
                 return False, None
         except Exception:
-            pass
+            let_pass("core.downloader_utils.download_post_file#2")
 
     last_error = ""
     try:
@@ -1243,7 +1225,7 @@ def download_post_file(
                 from core.library_lifecycle import update_url_history
                 update_url_history(settings, file_url, status="failed_disk_space", error=_space_msg)
             except Exception:
-                pass
+                let_pass("core.downloader_utils.download_post_file#3")
             return False, None
         atomic_write_bytes(dest, raw)
         log(f"  DL [{site}]: {fname}")
@@ -1256,7 +1238,7 @@ def download_post_file(
             from core.library_lifecycle import update_url_history
             update_url_history(settings, file_url, status="downloaded")
         except Exception:
-            pass
+            let_pass("core.downloader_utils.download_post_file#4")
         time.sleep(0.2)
         return True, dest
     except Exception as e:
@@ -1266,5 +1248,5 @@ def download_post_file(
             if 'file_url' in locals() and file_url:
                 update_url_history(settings, file_url, status="failed_temp", error=str(e))
         except Exception:
-            pass
+            let_pass("core.downloader_utils.download_post_file#5")
         return False, None

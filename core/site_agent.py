@@ -28,7 +28,9 @@ import threading
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-VERSION = "5.44"
+from core import version as _version
+
+VERSION = _version.short()                 # (v5.44.165) «5.44» — the program's own version without its third number
 PRODUCT = f"LocalBooru/{VERSION}"
 _BROWSER_WORDS = ("mozilla/", "applewebkit", "chrome/", "safari/", "firefox/", "gecko/", "edg/", "opera")
 

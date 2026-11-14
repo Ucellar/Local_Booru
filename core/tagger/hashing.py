@@ -19,6 +19,7 @@ except Exception:  # pragma: no cover - optional Pillow component
 
 from core.paths import CACHE_DIR
 from core.tagger.site_frames import START   # the search picture of a video: its start (v5.44.36)
+from core.quiet import passed as let_pass
 
 VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
 _DEFAULT_MAX_FILE_MB = 64.0
@@ -48,7 +49,7 @@ def _emit(log: Callable[[str], None] | None, message: str) -> None:
     try:
         log(str(message))
     except Exception:
-        pass
+        let_pass("core.tagger.hashing._emit")
 
 
 def _size_bytes(path: Path) -> int:
@@ -78,28 +79,6 @@ def _skip_big_dimensions(path: Path, width: int, height: int, settings=None, log
         )
         return True
     return False
-
-
-def phash_input_allowed(path, settings=None, log=None) -> bool:
-    """Cheap preflight gate using file stat and image header only.
-
-    Videos are not rejected by total file size: only one frame is decoded, so
-    a long/high-bitrate file is not intrinsically more expensive than a short
-    one. Their frame dimensions are checked after VideoCapture opens in
-    :func:`video_frame_image`.
-    """
-    path = Path(path)
-    if path.suffix.lower() in VIDEO_EXTS:
-        return True
-    if _skip_big_file(path, settings, log):
-        return False
-    try:
-        with Image.open(path) as img:
-            width, height = img.size
-        return not _skip_big_dimensions(path, width, height, settings, log)
-    except Exception:
-        # Let the normal decoder report/fallback behavior handle malformed media.
-        return True
 
 
 def is_md5(text) -> bool:
@@ -134,7 +113,7 @@ def file_md5(path) -> str:
             try:
                 gc.collect()
             except Exception:
-                pass
+                let_pass("core.tagger.hashing.file_md5")
             continue
     raise MemoryError(f"not enough memory to hash file with 4 KiB buffer: {path}") from last_memory_error
 
@@ -168,13 +147,13 @@ def file_phash(path, settings=None, log=None) -> str:
                     try:
                         small.close()
                     except Exception:
-                        pass
+                        let_pass("core.tagger.hashing.file_phash")
             finally:
                 if working is not img:
                     try:
                         working.close()
                     except Exception:
-                        pass
+                        let_pass("core.tagger.hashing.file_phash#2")
     except Exception:
         return ""
 
@@ -238,13 +217,13 @@ def danbooru_pixel_hash(path) -> str:
                 if bool(getattr(img, "is_animated", False)) and int(getattr(img, "n_frames", 1) or 1) > 1:
                     return file_md5(path).lower()
             except Exception:
-                pass
+                let_pass("core.tagger.hashing.danbooru_pixel_hash")
             try:
                 converted = ImageOps.exif_transpose(img)
                 if converted is not img:
                     img = converted
             except Exception:
-                pass
+                let_pass("core.tagger.hashing.danbooru_pixel_hash#2")
             try:
                 icc = img.info.get("icc_profile") if hasattr(img, "info") else None
                 if icc and ImageCms is not None:
@@ -323,7 +302,7 @@ def video_frame_image(path, settings=None, log=None):
                     try:
                         img.seek(0)
                     except Exception:
-                        pass
+                        let_pass("core.tagger.hashing.video_frame_image")
                 tmp = make_temp_frame_path(path)
                 frame = img.convert("RGB")
                 try:
@@ -332,7 +311,7 @@ def video_frame_image(path, settings=None, log=None):
                     try:
                         frame.close()
                     except Exception:
-                        pass
+                        let_pass("core.tagger.hashing.video_frame_image#2")
                 return tmp
         except Exception:
             return path
@@ -351,7 +330,7 @@ def video_frame_image(path, settings=None, log=None):
             try:
                 cap.release()
             except Exception:
-                pass
+                let_pass("core.tagger.hashing.video_frame_image#3")
         # (v5.44.36) through video_frame: a video OpenCV cannot decode (AV1) is read with PyAV
         frame = video_frame(path, max(0, frames // 2) if frames > 5 else 0)
         if frame is None:
@@ -363,7 +342,7 @@ def video_frame_image(path, settings=None, log=None):
             try:
                 del frame
             except Exception:
-                pass
+                let_pass("core.tagger.hashing.video_frame_image#4")
         return tmp
     except Exception:
         return path

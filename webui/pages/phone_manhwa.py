@@ -108,8 +108,10 @@ def _nothing(req: Request, query: str, every: list) -> str:
         why = "в папке только хентай" if now == "sfw" else "хентая в папке нет"
         return (f'<div class="m-empty"><h2>Здесь пусто</h2><p>В режиме «{content_mode.LABELS[now]}» {why}.</p>'
                 f'<p><button type="button" class="m-button" data-mode-set="all">Показать всё</button></p></div>')
-    return ('<div class="m-empty"><h2>Манхвы пока нет</h2><p>Скачайте её по ссылке на тайтл — Remanga, ReComics, '
-            'MangaLib, MangaBuff, ReadManga, Desu, Manga One Love. Папку манхвы выбирают на компьютере: «Настройки → '
+    from core import manhwa_sources as S          # (v5.44.169) the sites named — the ones found by a name too
+    sites = ", ".join(s.label for s in S.SOURCES if s.by_name and not s.adult_only)
+    return ('<div class="m-empty"><h2>Манхвы пока нет</h2><p>Скачайте её по ссылке на тайтл — '
+            f'{esc(sites)}. Папку манхвы выбирают на компьютере: «Настройки → '
             'Хранение и копии».</p>'
             '<p><a class="m-button" href="/m/get">Скачать по ссылке</a></p></div>')
 

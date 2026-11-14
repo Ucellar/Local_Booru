@@ -707,7 +707,12 @@ def state_api(req: Request) -> Response:
 
 
 def count_api(req: Request) -> Response:
-    return Response.json({"ok": True, "count": light_count()})
+    out = {"ok": True, "count": light_count()}
+    from webui import html
+    notice = html.update_notice()                # (v5.44.165) «Установлено обновление…» for a page already open
+    if notice:
+        out["notice"] = notice
+    return Response.json(out)
 
 
 def _entry_hidden(entry: dict, settings: dict) -> bool:

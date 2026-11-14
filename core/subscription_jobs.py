@@ -267,6 +267,7 @@ class SubscriptionJob:
     def _run(self) -> None:
         global _CURRENT, _LAST
         from core.subscriptions import run_subscription
+        from core.redaction import sanitize_text
         try:
             for n, queued in enumerate(self.subs, 1):
                 if self._stop_requested:
@@ -288,7 +289,7 @@ class SubscriptionJob:
                                            confirm_plan=self._confirm_plan)
                     result["downloaded"] = int(got or 0)
                 except Exception as exc:      # one subscription failing does not stop the others
-                    result["error"] = f"{type(exc).__name__}: {exc}"
+                    result["error"] = sanitize_text(f"{type(exc).__name__}: {exc}")
                     self._say(f"ОШИБКА ПОДПИСКИ «{self.current_name}»: {result['error']}")
                     self._say(traceback.format_exc()[-2000:])
                     continue
@@ -307,7 +308,7 @@ class SubscriptionJob:
             with self._ask_lock:                  # a «Остановить» pressed just now does not undo the end
                 self.status = "done"
         except BaseException as exc:              # shown on the page, never a silent death
-            self.error = f"{type(exc).__name__}: {exc}"
+            self.error = sanitize_text(f"{type(exc).__name__}: {exc}")
             with self._ask_lock:
                 self.status = "failed"
             self._say(f"ПОДПИСКИ ОСТАНОВЛЕНЫ ОШИБКОЙ: {self.error}")

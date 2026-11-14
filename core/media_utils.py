@@ -16,12 +16,7 @@ MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 # a downloaded ``.hta`` / ``.exe`` must never reach the program Windows starts for it.
 CARD_FILE_EXTS = MEDIA_EXTS | {".avif", ".bmp", ".jxl", ".tif", ".tiff", ".m4v", ".jfif"}
 CARD_VIDEO_EXTS = VIDEO_EXTS | {".m4v"}
-SIDECAR_EXTS = {".txt", ".json"}
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
-
-
-def is_image(path) -> bool:
-    return Path(path).suffix.lower() in IMAGE_EXTS
 
 
 def is_video(path) -> bool:
@@ -37,13 +32,6 @@ def has_copy_suffix(path) -> bool:
         return bool(COPY_SUFFIX_RE.search(Path(path).stem))
     except Exception:
         return False
-
-
-def base_name_without_copy_suffix(path) -> str:
-    try:
-        return COPY_SUFFIX_RE.sub("", Path(path).stem)
-    except Exception:
-        return Path(path).stem
 
 
 def file_md5(path: Path, chunk: int = 1024 * 1024) -> str:

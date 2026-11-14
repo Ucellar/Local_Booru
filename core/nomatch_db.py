@@ -12,6 +12,7 @@ import threading
 import time
 from pathlib import Path
 from core.paths import CACHE_DIR
+from core.quiet import passed as let_pass
 
 NO_MATCH_DB_FILE = CACHE_DIR / "nomatch_cache.json"
 _MIGRATION_MARK = CACHE_DIR / "nomatch_cache.migrated_to_sqlite"
@@ -36,7 +37,7 @@ def _ensure_source_only_columns(con) -> None:
             if name not in cols:
                 con.execute(f"ALTER TABLE no_match_items ADD COLUMN {name} {ddl}")
     except Exception:
-        pass
+        let_pass("core.nomatch_db._ensure_source_only_columns")
 
 
 def _column_names(con, table: str) -> set[str]:
@@ -61,7 +62,7 @@ def ensure_nomatch_schema(settings: dict | None) -> None:
         with db(settings, write=True) as con:
             _ensure_source_only_columns(con)
     except Exception:
-        pass
+        let_pass("core.nomatch_db.ensure_nomatch_schema")
 
 
 def _host_from_url(url: str) -> str:
@@ -79,7 +80,7 @@ def _legacy_items() -> list[dict]:
         if isinstance(data, list):
             return [dict(x) for x in data if isinstance(x, dict) and x.get("path")]
     except Exception:
-        pass
+        let_pass("core.nomatch_db._legacy_items")
     return []
 
 
@@ -225,7 +226,7 @@ def list_nomatches(root=None, *, settings: dict | None = None):
                 return False
             items = [x for x in items if _inside_root(x)]
         except Exception:
-            pass
+            let_pass("core.nomatch_db.list_nomatches")
     return sorted(items, key=lambda x: float(x.get("ts", 0)), reverse=True)
 
 
@@ -309,7 +310,7 @@ def upsert_nomatch(
         from core.local_nomatch_models import enqueue_local_nomatch_analysis
         enqueue_local_nomatch_analysis(settings, media_path or p)
     except Exception:
-        pass
+        let_pass("core.nomatch_db.upsert_nomatch")
 
 
 MANUAL = "manual"                 # visual_model of a mark the person set («Это фото» / «Это рисунок»)

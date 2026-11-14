@@ -22,12 +22,15 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from core import manhwa_sources as S
 
@@ -36,6 +39,10 @@ _LOG = logging.getLogger("local_booru.manhwa")
 API = "https://saucenao.com/search.php"
 HOST = "saucenao.com"
 INDEXES = (36, 37, 371)                # Madokami (Manga), MangaDex, MangaDex (its newer index)
+# (v5.44.169) …and its indexes of hentai manga and doujinshi: «H-Misc» — the pages of nhentai's galleries (18) and
+# of e-hentai's (38).  The owner (12.11.2026): «проверил мангу которую написало "не манга" snao выдал 91.45% на
+# nhentai» — they were never asked about: only :data:`INDEXES` were (``core/parser_manga``: a folder's pages)
+HENTAI_INDEXES = (18, 38)
 PER_TITLE = 2                          # pictures of one title asked at most
 PER_DAY = 40                           # searches a day for the archive (``manga_archive_pictures_per_day``)
 SIMILAR = 70.0                         # an answer taken at least this alike (%)
@@ -229,7 +236,7 @@ def answers(data: dict) -> tuple:
             sim = float(head.get("similarity") or 0)
         except (TypeError, ValueError):
             continue
-        if index not in INDEXES or sim < floor:
+        if index not in INDEXES or not math.isfinite(sim) or not floor <= sim <= 100:
             continue
         for key in ("source", "title", "eng_name"):
             value = body.get(key)
@@ -242,6 +249,95 @@ def answers(data: dict) -> tuple:
             own = [f"https://mangadex.org/chapter/{md}"]
         links += [(url, sim) for url in own]
     return names, links
+
+
+_PAGE_FILE = re.compile(r"(?:^|[\s/\\-])0*(\d{1,4})\.(?:jpe?g|png|gif|webp|avif)\s*$", re.I)
+_NH_FOLDER = re.compile(r"/nhentai/(?:[^?#]*?/)?(\d{4,7})(?:%20|%28|[\s_(])", re.I)
+_EH_SHA1 = re.compile(r" - ([a-f0-9]{40})\.(?:jpe?g|png|gif|webp|avif)$", re.I)
+
+
+def hentai_hint(head: dict, index: int, body: "dict | None" = None) -> tuple:
+    """(v5.44.170) (the gallery's number, the page's number) a result of an index of hentai may say beside its names —
+    0 where it does not: the page — the name of the file the index keeps («Index #18: H-Misc (nhentai) - 12.jpg»: a
+    page of nhentai is «12.jpg»), the gallery — the folder of that file in the address of the result's small picture
+    («…/nhentai/123456 (7654321) -- Title/12.jpg»; the index of nhentai alone).  **Hints, nothing more**: they say
+    which gallery and which page to look at first — what confirms is the page itself
+    (``core/parser_manga_nhentai.py``), so a hint that is wrong costs a request and confirms nothing."""
+    page = _PAGE_FILE.search(unquote(str(head.get("index_name") or "")))
+    folder = _NH_FOLDER.search(unquote(str(head.get("thumbnail") or ""))) if int(index) == 18 else None
+    number, at = (int(folder.group(1)) if folder else 0), (int(page.group(1)) if page else 0)
+    # Prefer an explicit source link over a filename convention. Never turn an e-hentai id into a nhentai id.
+    own = body or {}
+    for value in [*(own.get("ext_urls") or []), own.get("source")]:
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = urlparse(value)
+            if parsed.hostname not in ("nhentai.net", "www.nhentai.net"):
+                continue
+        except ValueError:
+            continue
+        linked = re.fullmatch(r"/g/(\d{1,7})(?:/(\d{1,4}))?/?", parsed.path)
+        if linked:
+            return int(linked.group(1)), int(linked.group(2) or at)
+    return number, at
+
+
+def hentai_hits(data: dict) -> list:
+    """(v5.44.169) The galleries a SauceNAO answer names — of :data:`HENTAI_INDEXES`, :data:`SIMILAR` % alike at least
+    (or as alike as the answer says is worth it): [{"names": the gallery's names as the index gives them (its English
+    one, its Japanese one, its «source»), "sim", "index", (v5.44.170) "gallery", "page" — :func:`hentai_hint`}], the
+    best first.  The index gives no link of the gallery: it is found on nhentai by these names, and its pages decide
+    (``core/parser_manga_nhentai.py``)."""
+    from core.manhwa_sites.ehentai import hash_link
+
+    header = data.get("header") if isinstance(data.get("header"), dict) else {}
+    try:
+        floor = max(SIMILAR, float(header.get("minimum_similarity") or 0))
+    except (TypeError, ValueError):
+        floor = SIMILAR
+    out = []
+    for result in data.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        head = result.get("header") if isinstance(result.get("header"), dict) else {}
+        body = result.get("data") if isinstance(result.get("data"), dict) else {}
+        try:
+            index = int(head.get("index_id"))
+            sim = float(head.get("similarity") or 0)
+        except (TypeError, ValueError):
+            continue
+        if index not in HENTAI_INDEXES or not math.isfinite(sim) or not floor <= sim <= 100:
+            continue
+        names = []
+        for key in ("eng_name", "jp_name", "source", "title"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip() and not value.strip().lower().startswith("http"):
+                name = " ".join(value.split())[:300]
+                if name not in names:
+                    names.append(name)
+        if names:
+            gallery, page = hentai_hint(head, index, body)
+            link, by_hash = "", ""
+            for value in [*(body.get("ext_urls") or []), body.get("source")]:
+                if not isinstance(value, str):
+                    continue
+                by_hash = by_hash or hash_link(value)
+                try:
+                    parsed = urlparse(value)
+                except ValueError:
+                    continue
+                if parsed.scheme in ("http", "https") and parsed.hostname in ("e-hentai.org", "www.e-hentai.org") \
+                        and re.fullmatch(r"/g/\d{1,10}/[a-f0-9]{10}/?", parsed.path, re.I):
+                    link = "https://e-hentai.org" + parsed.path.rstrip("/") + "/"
+                    break
+            # Index 38 may provide only the SHA-1 filename in the index header, without an external URL.
+            match = _EH_SHA1.search(str(head.get("index_name") or "").strip()) if index == 38 else None
+            if not link and not by_hash and match:
+                by_hash = f"https://e-hentai.org/?f_shash={match.group(1).lower()}&f_sh=on"
+            out.append({"names": names, "sim": round(sim, 2), "index": index, "gallery": gallery, "page": page,
+                        "link": link or by_hash})
+    return sorted(out, key=lambda hit: -hit["sim"])
 
 
 def manga_hits(data: dict) -> list:
@@ -267,7 +363,7 @@ def manga_hits(data: dict) -> list:
             sim = float(head.get("similarity") or 0)
         except (TypeError, ValueError):
             continue
-        if index not in INDEXES or sim < floor:
+        if index not in INDEXES or not math.isfinite(sim) or not floor <= sim <= 100:
             continue
         name = ""
         for key in ("source", "title", "eng_name"):
@@ -284,7 +380,26 @@ def manga_hits(data: dict) -> list:
         part = body.get("part")
         out.append({"name": name, "part": " ".join(str(part).split())[:80] if isinstance(part, (str, int, float)) else "",
                     "link": link, "sim": round(sim, 2), "index": index})
+    out += gallery_hits(data)                           # (v5.44.170) a page of a gallery of nhentai, of e-hentai
     return sorted(out, key=lambda hit: -hit["sim"])
+
+
+def gallery_hits(data: dict) -> list:
+    """(v5.44.170) :func:`hentai_hits` in the shape of :func:`manga_hits` — for a picture lying loose
+    (``core/parser_loose.py``): ``name`` — the gallery's title without its brackets («[Circle (Artist)] Title (C99)
+    [English]» → «Title»: what its pictures are grouped and shown by), ``whole`` — its name as the index gives it (the
+    words nhentai is searched by), ``names`` — its other names, ``gallery`` and ``page`` — the hints; no ``part``, no
+    ``link``."""
+    from core import nhentai as N
+    out = []
+    for hit in hentai_hits(data):
+        whole = hit["names"][0]
+        name = N.pretty(whole) or whole
+        out.append({"name": name[:200], "part": "1" if hit.get("link") else "", "link": hit.get("link", ""),
+                    "sim": hit["sim"], "index": hit["index"],
+                    "whole": whole, "names": [n for n in hit["names"][1:] if n != name][:3],
+                    "gallery": int(hit.get("gallery") or 0), "page": int(hit.get("page") or 0)})
+    return out
 
 
 def _ask(settings: dict, http, path: Path, *, dbs: tuple = INDEXES) -> dict:
@@ -292,14 +407,16 @@ def _ask(settings: dict, http, path: Path, *, dbs: tuple = INDEXES) -> dict:
     {"stopped"}; (v5.44.125) ``dbs`` — the indexes asked (``core/parser_manga``: the manga's and e621's at once),
     ``data`` — SauceNAO's answer as it came (the key is not in it)."""
     from core.http_rate_limiter import SauceNAOQuotaDeferred, take_saucenao_admission_serial
-    from core.parser.http import Cancelled, HttpFailure
-    params = {"api_key": key_of(settings), "output_type": 2, "numres": 8, "dedupe": 2, "dbs[]": list(dbs)}
+    from core.parser.http import Cancelled, HttpFailure, UploadUnavailable
+    params = {"api_key": key_of(settings), "output_type": 2, "numres": 16, "dedupe": 2, "dbs[]": list(dbs)}
     try:
         response = http.post_file(API, path, params=params)
     except SauceNAOQuotaDeferred as exc:
         return {"later": "бережём суточный лимит SauceNAO", "until": int(exc.retry_after or 0) or _tomorrow()}
     except Cancelled:
         return {"stopped": True}
+    except UploadUnavailable as exc:
+        return {"later": str(exc), "until": int(time.time()) + 1800}
     except HttpFailure:
         return {"later": "SauceNAO не ответил", "until": int(time.time()) + 1800, "sent": True}
     finally:

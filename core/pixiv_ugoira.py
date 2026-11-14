@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from core.database.connection import db
 from core.download_policy import require_allowed
 from core.paths import result_output_base
+from core.quiet import passed as let_pass
 
 
 class UgoiraError(RuntimeError):
@@ -78,7 +79,7 @@ def _download_zip(settings: dict, *, illust_id: str, url: str, post_url: str, de
         try:
             if tmp.exists(): tmp.unlink()
         except Exception:
-            pass
+            let_pass("core.pixiv_ugoira._download_zip")
 
 
 def _extract(zip_path: Path, frames: list[dict], work: Path, *, settings: dict, stop_check) -> list[tuple[Path, int]]:
@@ -155,7 +156,7 @@ def _ffmpeg_convert(frames: list[tuple[Path, int]], output: Path, *, stop_check)
         return output.is_file() and output.stat().st_size > 0
     finally:
         try: concat.unlink(missing_ok=True)
-        except Exception: pass
+        except Exception: let_pass("core.pixiv_ugoira._ffmpeg_convert")
 
 
 def _pillow_convert(frames: list[tuple[Path, int]], output: Path, *, settings: dict, stop_check) -> bool:
@@ -181,7 +182,7 @@ def _pillow_convert(frames: list[tuple[Path, int]], output: Path, *, settings: d
     finally:
         for image in images:
             try: image.close()
-            except Exception: pass
+            except Exception: let_pass("core.pixiv_ugoira._pillow_convert")
 
 
 def process_ugoira(settings: dict, *, item: dict, log=None, stop_check=None) -> dict:

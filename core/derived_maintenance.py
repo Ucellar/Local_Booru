@@ -29,6 +29,7 @@ from core.derived_cache_db import (
     publish_stage_generation,
     validate_external_cache,
 )
+from core.quiet import passed as let_pass
 
 CACHE_VP_TREE = "vp_tree"
 CACHE_EFFECTIVE_TAG_CATEGORIES = "image_effective_tag_category"
@@ -70,7 +71,7 @@ def _remove_stage(path: Path | None) -> None:
         try:
             Path(str(path) + suffix).unlink(missing_ok=True)
         except Exception:
-            pass
+            let_pass("core.derived_maintenance._remove_stage")
 
 
 def _mark_building(settings: dict, cache_name: str) -> None:
@@ -134,7 +135,7 @@ def _mark_terminal(settings: dict, cache_name: str, status: str, error: str = ""
                 (cache_name, str(status), str(error or "")[:1000], now),
             )
     except Exception:
-        pass
+        let_pass("core.derived_maintenance._mark_terminal")
 
 
 def get_derived_cache_states(settings: dict) -> list[dict]:
@@ -702,14 +703,14 @@ def _atomic_replace(
             try:
                 Path(published["path"]).unlink(missing_ok=True)
             except Exception:
-                pass
+                let_pass("core.derived_maintenance._atomic_replace")
         raise
 
     if use_external:
         try:
             garbage_collect_external_generations(settings, keep_per_cache=2)
         except Exception:
-            pass
+            let_pass("core.derived_maintenance._atomic_replace#2")
     return generation
 
 
@@ -810,10 +811,10 @@ def _rebuild_derived_cache_locked(
             try:
                 source_con.close()
             except Exception:
-                pass
+                let_pass("core.derived_maintenance._rebuild_derived_cache_locked")
         if stage_con is not None:
             try:
                 stage_con.close()
             except Exception:
-                pass
+                let_pass("core.derived_maintenance._rebuild_derived_cache_locked#2")
         _remove_stage(stage_path)

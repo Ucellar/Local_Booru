@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from core.quiet import passed as let_pass
 
 _log = logging.getLogger("local_booru.watcher")
 
@@ -63,7 +64,7 @@ class LibraryWatcher:
             if self._timer:
                 self._timer.cancel()
         except Exception:
-            pass
+            let_pass("core.filesystem_watcher.LibraryWatcher._schedule")
         self._timer = threading.Timer(delay, self._run_incremental_index)
         self._timer.daemon = True
         self._timer.start()
@@ -112,14 +113,14 @@ class LibraryWatcher:
             if self._timer:
                 self._timer.cancel()
         except Exception:
-            pass
+            let_pass("core.filesystem_watcher.LibraryWatcher.stop")
         try:
             if self._observer:
                 self._observer.stop(); self._observer.join(3000)
         except Exception:
-            pass
+            let_pass("core.filesystem_watcher.LibraryWatcher.stop#2")
         try:
             if self._thread and self._thread.is_alive():
                 self._thread.join(3)
         except Exception:
-            pass
+            let_pass("core.filesystem_watcher.LibraryWatcher.stop#3")

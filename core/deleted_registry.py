@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from core.paths import SETTINGS_DIR
 from core.media_utils import file_md5
+from core.quiet import passed as let_pass
 
 DELETED_FILES_FILE = SETTINGS_DIR / "deleted_files_ignore.json"
 _MIGRATION_MARK = SETTINGS_DIR / "deleted_files_ignore.migrated_to_sqlite"
@@ -41,7 +42,7 @@ def _load_legacy() -> dict:
                 _CACHE, _CACHE_MTIME = data, mtime
                 return data
     except Exception:
-        pass
+        let_pass("core.deleted_registry._load_legacy")
     _CACHE, _CACHE_MTIME = {"version": 1, "items": []}, 0
     return _CACHE
 
@@ -217,28 +218,6 @@ def forget_deleted_md5(md5: str, *, settings: dict | None = None) -> int:
     removed = len(items)-len(kept)
     if removed: data["items"] = kept; _save_legacy(data)
     return sql_removed + removed
-
-
-def should_skip_deleted_file(path: Path, *, md5: str = "", size: int | None = None, settings: dict | None = None) -> bool:
-    value = str(md5 or "").strip().lower()
-    if value:
-        return has_deleted_md5(value, settings=settings)
-    # No name/size suppression in the live SQLite model: only exact MD5 can block content.
-    if settings is not None:
-        return False
-    path = Path(path); name = path.name.lower()
-    if size is None:
-        try: size = path.stat().st_size
-        except Exception: size = 0
-    return any(str(x.get("name", "")).lower()==name and int(x.get("size") or 0)==int(size or 0) and not str(x.get("md5") or "").strip() for x in _load_legacy().get("items", []))
-
-
-def has_deleted_record_for_name(path: Path, *, settings: dict | None = None) -> bool:
-    if settings is not None:
-        # Live filtering is exact-MD5 only; never pay hash cost based on stale filenames.
-        return False
-    name = Path(path).name.lower()
-    return any(str(x.get("name", "")).lower() == name for x in _load_legacy().get("items", []))
 
 
 def mark_deleted(path: Path, *, reason: str = "duplicate_delete", md5: str = "", size: int | None = None, pixels=None, settings: dict | None = None, manual_delete: bool | None = None) -> None:

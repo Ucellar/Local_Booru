@@ -138,9 +138,6 @@ class Book:
         """The address of page ``n`` (from 1, or «last», «end») of the chapter open."""
         return self.href + ("&" if "?" in self.href else "?") + f"p={n}"
 
-    def chapter_href(self, key: str) -> str:
-        return self.base.replace("{key}", key)
-
 
 # ── words ───────────────────────────────────────────────────────────────────────────────────────────────────────────
 def day_of(text) -> str:

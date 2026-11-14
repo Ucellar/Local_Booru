@@ -1,4 +1,5 @@
 from __future__ import annotations
+from core.quiet import passed as let_pass
 
 NAME = "v158_maintenance_indexes_wal_tag_category_cache"
 
@@ -92,4 +93,4 @@ def apply(con) -> None:
     try:
         con.execute("PRAGMA journal_size_limit=536870912")
     except Exception:
-        pass
+        let_pass("core.database.migrations.m021_v158_maintenance_indexes.apply")

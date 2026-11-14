@@ -35,25 +35,21 @@ _LOG = logging.getLogger("local_booru.manhwa")
 
 TASK = "manhwa_search"                 # the page task
 # (v5.44.99) AllHentai; (v5.44.132) not Nude-Moon: it lets in nothing but the browser itself, and a search by a name
-# never opens the window's browser — its search is in «Лента» (``catalog.nudemoon_url``), its titles by a link
-ASKED = ("remanga", "recomics", "mangalib", "mangabuff", "readmanga", "desu", "onelove", "hentailib", "allhentai",
-         "hentaichan")                         # (v5.44.143) Manga One Love
+# never opens the window's browser — its search is in «Лента» (``catalog.nudemoon_url``), its titles by a link;
+# (v5.44.143) Manga One Love.  (v5.44.169) Which site is asked — the site says (``Source.by_name``): remanga,
+# recomics, mangalib, mangabuff, readmanga, desu, onelove, hentailib, allhentai, hentaichan
+ASKED = S.sites_by_name()
 MAX_QUERY = 120
 MAX_TILES = 80
 DEADLINE = 30.0                        # seconds the search waits for the slowest site
-COVER_HOSTS = ("remanga.org", "recomics.org", "imglib.info", "mangalib.me", "mangalib.org", "cdnlibs.org",
-               "lib.social", "mangabuff.ru",
-               "one-way.work", "zazaza.me", "readmanga.live", "readmanga.io", "desu.uno", "desu.me",   # (v5.44.77)
-               "mangadex.org",                                                                        # (v5.44.79)
-               "mangaonelove.space",                                                                  # (v5.44.143)
-               "imgschan.xyz", "hentaichan.live", "h-chan.me", "henchan.pro",                        # (v5.44.85)
-               "yani.tv",                     # (v5.44.90) the posters of YummyAnime («Видео → Лента», core/catalog.py)
-               "hentasis1.top",               # (v5.44.93) …of Hentasis
-               "nhentai.net",                 # (v5.44.97) the thumbnails of nhentai (t1…t4.nhentai.net)
-               "aaa200.one", "allhen.online",  # (v5.44.99) AllHentai's covers (staticahen2.aaa200.one)
-               "nude-moon.org", "nude-moon.net", "nude-moon.fun",    # (v5.44.131) Nude-Moon's (/images/thumb/…)
-               "hentaihaven.xxx",                                   # (v5.44.138) HentaiHaven's (img.hentaihaven.xxx)
-               "hentai-xs.com", "hfshare.me")                       # (v5.44.139) Hentai-XS's, HFShare's (v2.hfshare.me)
+# the hosts a cover may come from.  (v5.44.169) A site of manga names its own (``Source.cover_hosts``); here — the
+# sites of «Лента» that are no sites of manga:
+FEED_COVER_HOSTS = ("yani.tv",                # (v5.44.90) the posters of YummyAnime («Видео → Лента», core/catalog.py)
+                    "hentasis1.top",          # (v5.44.93) …of Hentasis
+                    "nhentai.net",            # (v5.44.97) the thumbnails of nhentai (t1…t4.nhentai.net)
+                    "hentaihaven.xxx",        # (v5.44.138) HentaiHaven's (img.hentaihaven.xxx)
+                    "hentai-xs.com", "hfshare.me")     # (v5.44.139) Hentai-XS's, HFShare's (v2.hfshare.me)
+COVER_HOSTS = (*S.cover_hosts(), *FEED_COVER_HOSTS)
 COVER_LIMIT = 4 * 1024 * 1024
 COVER_TIMEOUT = (6, 15)                # (v5.44.95) a cover: (connect, read) seconds, asked once
 COVER_FAILED_FOR = 5 * 60              # …one that did not come is not asked again this long
@@ -201,18 +197,22 @@ class Search:
 _LOCK = threading.Lock()
 _SEARCHES: "OrderedDict[int, Search]" = OrderedDict()
 _COVERS: "OrderedDict[str, tuple]" = OrderedDict()       # the cover's address → (bytes, type)
-_COVERS_FAILED: dict = {}                                  # (v5.44.95) the cover's address → when it did not come
+_COVERS_FAILED: dict = {}                                  # (address, referer) → when the cover did not come
 _COVER_NET: "list" = []                                  # one session per site for the covers (kept alive)
 
 
 def _fetch_cover(net, address: str, referer: str) -> tuple:
+    from core.manhwa_download import _picture_type
     first = None
     for link in S.picture_links(address):
         try:
-            got = net.fetch(link, headers={"Accept": "image/avif,image/webp,image/*,*/*;q=0.8", "Referer": referer},
-                            limit=COVER_LIMIT, paced=False, what="обложка", timeout=COVER_TIMEOUT, tries=1)
+            body, ctype = net.fetch(link, headers={"Accept": "image/avif,image/webp,image/*,*/*;q=0.8", "Referer": referer},
+                                    limit=COVER_LIMIT, paced=False, what="обложка", timeout=COVER_TIMEOUT, tries=1)
+            ext = _picture_type(body, ctype)
+            if not ext:
+                raise S.SourceError("сайт вернул ответ без картинки")
             S.gave_picture(link)
-            return got
+            return body, ext
         except S.Closed:
             raise
         except S.SourceError as exc:
@@ -232,12 +232,28 @@ def sources(adult: bool = True) -> list:
     return [s for s in S.SOURCES if s.name in ASKED and s.readable and (adult or not s.adult_only)]
 
 
-def ask_all(query: str, asked: list, put, stop_check, *, net=None, said=None, deadline: float = DEADLINE) -> None:
+def sources_wide(adult: bool = True) -> list:
+    """(v5.44.170) The sites that are not asked by a name (:func:`sources`: their search lets in the program window's
+    browser alone — com-x.life, Nude-Moon, MangaDex's check for browsers) and yet can be searched: asked only at the
+    owner's own word about one folder (``parser_manga_again.recheck`` — his «Перепроверить» of a row), through the
+    window's browser, as his search in their «Лента» goes.  Never by the background's queues: a name of every folder
+    searched there would be the browser sent through their check hundreds of times."""
+    return [s for s in S.SOURCES if s.name not in ASKED and not s.by_name and s.readable
+            and (adult or not s.adult_only)]
+
+
+def ask_all(query: str, asked: list, put, stop_check, *, net=None, said=None, deadline: "float | None" = None,
+            fell=None) -> None:
     """The sites' searches of ``query`` side by side: ``put(source, hits)`` as each answers, ``put(source, None,
-    words)`` when it does not; the slow ones left after ``deadline`` (their requests stop)."""
+    words)`` when it does not; the slow ones left after ``deadline`` (their requests stop).  (v5.44.169) ``fell(source,
+    how)`` — how a site did not answer: «quiet» (silent, busy, the line broke: it may answer the next time —
+    ``manhwa_sources.transient``), «closed» (it lets in only browsers), «refused» (it will not: asking again gives the
+    same), «odd» (the program did not understand it)."""
     started = time.monotonic()
+    deadline = float(DEADLINE if deadline is None else deadline)
     late = lambda: stop_check() or time.monotonic() - started > deadline        # noqa: E731
     quiet = net or _QuietNet(late)
+    fell = fell or (lambda _source, _how: None)
 
     def ask(source):
         if stop_check():
@@ -245,13 +261,16 @@ def ask_all(query: str, asked: list, put, stop_check, *, net=None, said=None, de
         try:
             hits = S.checked_hits(source.search(quiet, query))  # (v5.44.143) past the program's gate
         except S.Closed as exc:
+            fell(source, "closed")
             put(source, None, f"не пускает программу ({exc})"[:200])
             return
         except S.SourceError as exc:
+            fell(source, "quiet" if S.transient(exc) else "refused")
             put(source, None, str(exc)[:200])
             return
         except Exception as exc:                         # noqa: BLE001 - one site's surprise: the others are shown
             _LOG.warning("%s: the search for %r failed: %s", source.label, query, exc)
+            fell(source, "odd")
             put(source, None, "ответил непонятно")
             return
         put(source, hits)
@@ -271,13 +290,17 @@ def ask_all(query: str, asked: list, put, stop_check, *, net=None, said=None, de
         pool.shutdown(wait=False, cancel_futures=True)
 
 
-def search_now(query: str, stop_check=None, *, net=None, asked: "list | None" = None) -> "tuple[list, dict]":
+def search_now(query: str, stop_check=None, *, net=None, asked: "list | None" = None,
+               quiet: "list | None" = None) -> "tuple[list, dict]":
     """(v5.44.76) A search asked and waited for (``core/manga_archive.py``): (the tiles in their order, {site label:
-    words of the ones that did not answer})."""
+    words of the ones that did not answer}).  (v5.44.169) ``quiet`` — a list the sites that said nothing this time
+    and may the next are put into (their names: silent, busy, slower than the search waits) — the ones worth asking
+    again; a site that refused, or lets in only browsers, is not one."""
     asked = sources() if asked is None else asked
     stop_check = stop_check or (lambda: False)
     answers: dict = {}
     failed: dict = {}
+    hows: dict = {}
     lock = threading.Lock()
 
     def put(source, hits, error=""):
@@ -286,12 +309,20 @@ def search_now(query: str, stop_check=None, *, net=None, asked: "list | None" = 
                 failed[source.label] = error
             else:
                 answers[source.name] = hits
-    ask_all(query, asked, put, stop_check, net=net)
+
+    def fell(source, how):
+        with lock:
+            hows[source.name] = how
+    ask_all(query, asked, put, stop_check, net=net, fell=fell)
     key = S.name_key(query)
     tiles = sorted(merge(answers, tuple(s.name for s in asked)), key=lambda t: _order_key(t, key))
-    for source in asked:
-        if source.name not in answers and source.label not in failed:
-            failed[source.label] = "не ответил вовремя"
+    with lock:
+        for source in asked:
+            if source.name not in answers and source.label not in failed:
+                failed[source.label] = "не ответил вовремя"
+                hows[source.name] = "quiet"
+        if quiet is not None:
+            quiet += [s.name for s in asked if hows.get(s.name) == "quiet" and s.name not in answers]
     return tiles, failed
 
 
@@ -348,8 +379,15 @@ def get(search_id) -> "Search | None":
 
 
 def _cover_ok(address: str) -> bool:
-    host = (urlparse(str(address or "")).hostname or "").lower()
-    return urlparse(str(address or "")).scheme in ("http", "https") and any(
+    try:
+        parsed = urlparse(str(address or ""))
+        host = (parsed.hostname or "").lower()
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        parsed.port  # Validate the port before handing the URL to the HTTP client.
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and any(
         host == h or host.endswith("." + h) for h in (*COVER_HOSTS, *S.address_hosts()))   # (v5.44.78) a moved site
 
 
@@ -385,33 +423,32 @@ def fetch_cover(address: str, page: str = "", *, net=None, shrink: int = 0) -> "
     """A cover by its address — from the sites' own hosts only (:data:`COVER_HOSTS`), with its site as the Referer,
     kept in memory a while; None — none, or not a picture.  (v5.44.90) ``shrink`` — a picture wider than this is
     kept and given smaller (:func:`_smaller`)."""
-    from core import manhwa_download as D
     if not _cover_ok(address):
         return None
     # (v5.44.123) a smaller one is kept apart: the menu of covers shows a cover whole (its size is the site's), «Лента»
     # the same address smaller
     key = f"{address}#{shrink}" if shrink else address
+    site = urlparse(page or address)
+    referer = f"{site.scheme}://{site.netloc}/" if site.netloc else ""
+    failure = (address, referer)
     with _LOCK:
         if key in _COVERS:
             _COVERS.move_to_end(key)
             return _COVERS[key]
-        failed = _COVERS_FAILED.get(address)
+        failed = _COVERS_FAILED.get(failure)
         if failed is not None and time.monotonic() - failed < COVER_FAILED_FOR:
             return None
-    site = urlparse(page or address)
-    referer = f"{site.scheme}://{site.netloc}/" if site.netloc else ""
     try:
         # (v5.44.95) short and once, on each of its hosts (Хентай-тян's mirrors: ``S.picture_links``): a picture host
         # that hangs held a thread of the program's server three times 40 s for every cover of a page
-        body, ctype = _fetch_cover(net or _cover_net(), address, referer)
+        body, ext = _fetch_cover(net or _cover_net(), address, referer)
     except S.SourceError as exc:
         _LOG.info("a cover of the search not taken (%s): %s", address, exc)
         with _LOCK:
-            _COVERS_FAILED[address] = time.monotonic()
+            _COVERS_FAILED[failure] = time.monotonic()
             while len(_COVERS_FAILED) > COVERS_KEPT:
                 _COVERS_FAILED.pop(next(iter(_COVERS_FAILED)))
         return None
-    ext = D._picture_type(body, ctype)
     kinds = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
              ".avif": "image/avif", ".bmp": "image/bmp"}
     if ext not in kinds:

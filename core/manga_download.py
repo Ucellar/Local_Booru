@@ -626,6 +626,13 @@ def waiting() -> list:
         return [{"number": x["number"], "title": x["title"]} for x in (_RUN["items"] or []) if x["state"] == "wait"]
 
 
+def going(number: int) -> bool:
+    """(v5.44.170) The gallery waits in the download going, or is being downloaded in it now."""
+    with _RUN_LOCK:
+        return bool(_RUN["open"]) and any(x["number"] == int(number) and x["state"] in ("wait", "reading", "pages")
+                                          for x in _RUN["items"] or [])
+
+
 def move(number: int, step: int) -> bool:
     """(v5.44.120) «↑» / «↓» of «Загрузки → Очередь»: a gallery waiting in the download going one place sooner
     (``step`` < 0) or later among the waiting ones (the download takes them in the order of its list); False — it does

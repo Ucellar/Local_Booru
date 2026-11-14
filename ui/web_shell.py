@@ -116,10 +116,6 @@ class WebShell(QMainWindow):
     def save_settings(self) -> None:
         self.context.save_settings()
 
-    def release_open_media_handles(self) -> None:
-        """Before the program moves or deletes files: the player and the web server let go of them."""
-        self.web_gallery_page.release_media()
-
     # ── the window ─────────────────────────────────────────────────────────
     def _saved_size(self) -> tuple[int, int]:
         from PySide6.QtGui import QGuiApplication

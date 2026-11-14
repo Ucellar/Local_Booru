@@ -9,10 +9,8 @@ parser, exact-MD5 source fanout, source merge, or no-match recovery.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
-import mimetypes
 import secrets
 import logging
 import re
@@ -20,7 +18,6 @@ import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -31,6 +28,7 @@ from core.browser_import import BrowserImportManager
 from core.browser_pairing import PAIRING_HEADER, authenticate as authenticate_pairing, exchange_pairing_code, issue_task_token, validate_task_token, list_extensions, revoke_extension
 from core.browser_site_profiles import list_profiles
 from core.domain_credentials import store_domain_credentials, list_domain_credentials, revoke_domain
+from core.quiet import passed as let_pass
 
 log = logging.getLogger("local_booru.browser_companion")
 
@@ -73,7 +71,7 @@ def normalize_host(value: Any) -> str:
         try:
             raw = urlparse(raw).netloc.lower()
         except Exception:
-            pass
+            let_pass("core.browser_companion_api.normalize_host")
     raw = raw.split("@")[-1].split(":")[0].strip().lstrip(".")
     if raw.startswith("www."):
         raw = raw[4:]
@@ -367,7 +365,7 @@ def check_one(settings: dict | None, item: dict[str, Any]) -> dict[str, Any]:
                             "family_status": str(family["completion_status"] or "unknown"),
                         })
                 except Exception:
-                    pass
+                    let_pass("core.browser_companion_api.check_one")
     except Exception as exc:
         # Do not log every companion DB miss/error here. During heavy parser runs
         # SQLite can briefly return disk I/O/busy errors, and RotatingFileHandler
@@ -438,7 +436,7 @@ def check_items(settings: dict | None, items: list[dict[str, Any]]) -> dict[str,
             try:
                 _IMPORT_MANAGER.refresh_visible_metadata(item, str(result.get("path") or ""))
             except Exception:
-                pass
+                let_pass("core.browser_companion_api.check_items")
     for result in results:              # the extension never gets paths of the archive
         result.pop("path", None)
     return {
@@ -611,55 +609,6 @@ def e621_bridge_status() -> dict[str, Any]:
 # app with the discovered original URL + Referer and then MD5 is computed locally.
 _PIXIV_TASK_COND = threading.Condition()
 _PIXIV_TASKS: dict[str, dict[str, Any]] = {}
-_PIXIV_TASK_SEQ = 0
-
-
-def enqueue_pixiv_browser_fetch(url: str, *, referer: str = "", timeout_s: float = 30.0) -> dict[str, Any] | None:
-    """Ask the companion extension to fetch Pixiv JSON or artwork HTML.
-
-    Pixiv's managed-tab fallback alone can take more than twelve seconds, so
-    old 6-8 second settings are clamped to a safe minimum.  The execution timer
-    begins only after the extension claims the task.
-    """
-    global _PIXIV_TASK_SEQ
-    raw_url = str(url or "").strip()
-    if not raw_url.startswith(("https://www.pixiv.net/", "https://pixiv.net/")):
-        return None
-    try:
-        timeout_s = max(30.0, min(180.0, float(timeout_s or 30.0)))
-    except Exception:
-        timeout_s = 30.0
-    with _PIXIV_TASK_COND:
-        _PIXIV_TASK_SEQ += 1
-        now = time.time()
-        task_id = f"pixiv-{int(now)}-{_PIXIV_TASK_SEQ}"
-        _PIXIV_TASKS[task_id] = {
-            "id": task_id,
-            "url": raw_url,
-            "referer": str(referer or ""),
-            "created_at": now,
-            "queue_deadline": now + timeout_s,
-            "deadline": 0.0,
-            "timeout_seconds": timeout_s,
-            "state": "pending",
-            "result": None,
-        }
-        _PIXIV_TASK_COND.notify_all()
-        while True:
-            task = _PIXIV_TASKS.get(task_id)
-            if not task:
-                return None
-            if task.get("state") in {"done", "error"}:
-                result = task.get("result") if isinstance(task.get("result"), dict) else None
-                _PIXIV_TASKS.pop(task_id, None)
-                return result
-            deadline = _bridge_task_deadline(task)
-            now = time.time()
-            if not deadline or now >= deadline:
-                _PIXIV_TASKS.pop(task_id, None)
-                _PIXIV_TASK_COND.notify_all()
-                return None
-            _PIXIV_TASK_COND.wait(timeout=min(0.75, max(0.1, deadline - now)))
 
 
 def _pixiv_bridge_next_task() -> dict[str, Any]:
@@ -719,24 +668,9 @@ def pixiv_bridge_status() -> dict[str, Any]:
     return {"pending": pending, "inflight": inflight}
 
 
-def pixiv_bridge_status_detail() -> dict[str, Any]:
-    now = time.time()
-    with _PIXIV_TASK_COND:
-        pending = sum(1 for t in _PIXIV_TASKS.values() if t.get("state") == "pending")
-        inflight = sum(1 for t in _PIXIV_TASKS.values() if t.get("state") == "inflight")
-        oldest_age = 0.0
-        for t in _PIXIV_TASKS.values():
-            try:
-                oldest_age = max(oldest_age, now - float(t.get("created_at") or now))
-            except Exception:
-                pass
-    return {"pending": pending, "inflight": inflight, "oldest_age": round(oldest_age, 1)}
-
-
 # Generic resolver for protected pages in the user's ordinary browser.
 _EXTERNAL_BROWSER_TASK_COND = threading.Condition()
 _EXTERNAL_BROWSER_TASKS: dict[str, dict[str, Any]] = {}
-_EXTERNAL_BROWSER_TASK_SEQ = 0
 _EXTERNAL_BROWSER_ACTIVE_ID = ""
 _EXTERNAL_BROWSER_BOOTSTRAP_ID = ""
 _EXTERNAL_BROWSER_HEARTBEAT: dict[str, Any] = {
@@ -786,181 +720,6 @@ def external_browser_bridge_status() -> dict[str, Any]:
             "page_url": str(_EXTERNAL_BROWSER_HEARTBEAT.get("page_url") or ""),
         }
 
-
-
-def _external_browser_connected_for_task_locked(task: dict[str, Any], now: float | None = None) -> bool:
-    current = float(now if now is not None else time.time())
-    last_seen = float(_EXTERNAL_BROWSER_HEARTBEAT.get("last_seen") or 0.0)
-    connected = bool(last_seen and current - last_seen <= 15.0)
-    preferred = str(task.get("preferred_browser") or "")
-    if connected and preferred:
-        try:
-            from core.external_browser import browser_family_matches
-            connected = browser_family_matches(preferred, str(_EXTERNAL_BROWSER_HEARTBEAT.get("browser") or ""))
-        except Exception:
-            connected = True
-    return connected
-
-
-def _external_browser_prepare_bootstrap_locked() -> tuple[str, str, dict[str, Any]] | None:
-    """Assign at most one Python-opened bootstrap tab across the whole queue."""
-    global _EXTERNAL_BROWSER_BOOTSTRAP_ID
-    now = time.time()
-    if _EXTERNAL_BROWSER_BOOTSTRAP_ID:
-        current = _EXTERNAL_BROWSER_TASKS.get(_EXTERNAL_BROWSER_BOOTSTRAP_ID)
-        if current and current.get("state") in {"pending", "inflight"} and not _bridge_task_expired(current, now):
-            return None
-        _EXTERNAL_BROWSER_BOOTSTRAP_ID = ""
-
-    for tid, task in _EXTERNAL_BROWSER_TASKS.items():
-        if task.get("state") != "pending":
-            continue
-        if _bridge_task_expired(task, now):
-            continue
-        if not bool(task.get("auto_open", False)):
-            continue
-        last_attempt = float(task.get("bootstrap_last_attempt") or 0.0)
-        if last_attempt and now - last_attempt < 15.0:
-            # Preserve queue order and avoid shell-open retry storms.
-            return None
-        if _external_browser_connected_for_task_locked(task, now):
-            # A live matching Companion will create/reuse its managed worker tab.
-            return None
-        marker = str(task.get("claim_marker") or "") or secrets.token_urlsafe(12)
-        task["claim_marker"] = marker
-        raw_url = str(task.get("url") or "")
-        joiner = "&" if "#" in raw_url else "#"
-        task["launch_url"] = f"{raw_url}{joiner}local-booru-resolver={marker}"
-        task["bootstrap_last_attempt"] = now
-        _EXTERNAL_BROWSER_BOOTSTRAP_ID = tid
-        return tid, str(task["launch_url"]), dict(task.get("_open_settings") or {})
-    return None
-
-
-def _external_browser_open_bootstrap_locked(request: tuple[str, str, dict[str, Any]] | None) -> None:
-    global _EXTERNAL_BROWSER_BOOTSTRAP_ID
-    if not request:
-        return
-    tid, launch_url, open_settings = request
-    try:
-        from core.external_browser import open_external_browser_url
-        opened = bool(open_external_browser_url(launch_url, open_settings, log_fn=log.info))
-    except Exception:
-        opened = False
-    if not opened and _EXTERNAL_BROWSER_BOOTSTRAP_ID == tid:
-        # Do not leave a phantom bootstrap owner. A waiting task can retry or a
-        # later task can be promoted without opening multiple tabs at once.
-        _EXTERNAL_BROWSER_BOOTSTRAP_ID = ""
-
-
-def enqueue_external_browser_resolve(
-    url: str,
-    *,
-    settings: dict[str, Any] | None = None,
-    timeout_s: float = 120.0,
-    action: str = "navigate",
-    upload_path: str | None = None,
-    file_selectors: list[str] | None = None,
-    submit_selectors: list[str] | None = None,
-) -> dict[str, Any] | None:
-    global _EXTERNAL_BROWSER_TASK_SEQ, _EXTERNAL_BROWSER_BOOTSTRAP_ID
-    raw_url = str(url or "").strip()
-    if not raw_url.startswith(("http://", "https://")) or not _external_browser_host_allowed(raw_url):
-        return None
-    action = str(action or "navigate").strip().lower()
-    if action not in {"navigate", "upload_form"}:
-        return None
-    try:
-        timeout_s = max(5.0, min(600.0, float(timeout_s or 120.0)))
-    except Exception:
-        timeout_s = 120.0
-
-    file_b64 = ""
-    file_name = ""
-    file_mime = ""
-    if action == "upload_form":
-        try:
-            media = Path(str(upload_path or ""))
-            if not media.is_file():
-                return None
-            raw = media.read_bytes()
-            max_bytes = int((settings or {}).get("external_browser_upload_max_mb", 12) or 12) * 1024 * 1024
-            max_bytes = max(1024 * 1024, min(32 * 1024 * 1024, max_bytes))
-            if len(raw) > max_bytes:
-                return {"status": 0, "error": "external_browser_upload_too_large", "url": raw_url}
-            file_b64 = base64.b64encode(raw).decode("ascii")
-            file_name = media.name[:240]
-            file_mime = mimetypes.guess_type(media.name)[0] or "application/octet-stream"
-        except Exception as exc:
-            return {"status": 0, "error": f"external_browser_upload_read_failed:{type(exc).__name__}", "url": raw_url}
-
-    with _EXTERNAL_BROWSER_TASK_COND:
-        _EXTERNAL_BROWSER_TASK_SEQ += 1
-        task_id = f"browser-{int(time.time())}-{_EXTERNAL_BROWSER_TASK_SEQ}-{secrets.token_hex(8)}"
-        task = {
-            "id": task_id,
-            "token": secrets.token_urlsafe(24),
-            "url": raw_url,
-            "action": action,
-            "created_at": time.time(),
-            "queue_deadline": time.time() + timeout_s,
-            "deadline": 0.0,
-            "timeout_seconds": timeout_s,
-            "state": "pending",
-            "result": None,
-            "file_b64": file_b64,
-            "file_name": file_name,
-            "file_mime": file_mime,
-            "file_selectors": [str(x)[:200] for x in (file_selectors or ["input[type='file']"]) if str(x).strip()][:12],
-            "submit_selectors": [str(x)[:200] for x in (submit_selectors or []) if str(x).strip()][:12],
-            "preferred_browser": "",
-            "claim_marker": "",
-            "launch_url": raw_url,
-        }
-        try:
-            from core.external_browser import preferred_browser_family
-            task["preferred_browser"] = preferred_browser_family(settings)
-        except Exception:
-            task["preferred_browser"] = ""
-        auto_open = bool((settings or {}).get("external_browser_auto_open", True))
-        task["auto_open"] = auto_open
-        task["_open_settings"] = dict(settings or {})
-
-        # A live paired Companion owns navigation through one reusable worker
-        # tab. When no matching Companion heartbeat exists, only the oldest
-        # pending task may bootstrap one explicitly marked browser tab.
-        _EXTERNAL_BROWSER_TASKS[task_id] = task
-        bootstrap = _external_browser_prepare_bootstrap_locked()
-        _EXTERNAL_BROWSER_TASK_COND.notify_all()
-        _external_browser_open_bootstrap_locked(bootstrap)
-
-        while True:
-            current = _EXTERNAL_BROWSER_TASKS.get(task_id)
-            if not current:
-                return None
-            if current.get("state") in {"done", "error"}:
-                result = current.get("result") if isinstance(current.get("result"), dict) else None
-                _EXTERNAL_BROWSER_TASKS.pop(task_id, None)
-                if _EXTERNAL_BROWSER_BOOTSTRAP_ID == task_id:
-                    _EXTERNAL_BROWSER_BOOTSTRAP_ID = ""
-                bootstrap = _external_browser_prepare_bootstrap_locked()
-                _EXTERNAL_BROWSER_TASK_COND.notify_all()
-                _external_browser_open_bootstrap_locked(bootstrap)
-                return result
-            deadline = _bridge_task_deadline(current)
-            now = time.time()
-            if not deadline or now >= deadline:
-                break
-            _EXTERNAL_BROWSER_TASK_COND.wait(timeout=min(1.0, max(0.1, deadline - now)))
-            bootstrap = _external_browser_prepare_bootstrap_locked()
-            _external_browser_open_bootstrap_locked(bootstrap)
-        _EXTERNAL_BROWSER_TASKS.pop(task_id, None)
-        if _EXTERNAL_BROWSER_BOOTSTRAP_ID == task_id:
-            _EXTERNAL_BROWSER_BOOTSTRAP_ID = ""
-        bootstrap = _external_browser_prepare_bootstrap_locked()
-        _EXTERNAL_BROWSER_TASK_COND.notify_all()
-        _external_browser_open_bootstrap_locked(bootstrap)
-        return {"status": 0, "url": raw_url, "error": "external_browser_timeout", "challenge": True}
 
 
 def _external_browser_next_task(client: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1065,16 +824,16 @@ class CompanionServerHandle:
         try:
             self.server.shutdown()
         except Exception:
-            pass
+            let_pass("core.browser_companion_api.CompanionServerHandle.stop")
         try:
             self.server.server_close()
         except Exception:
-            pass
+            let_pass("core.browser_companion_api.CompanionServerHandle.stop#2")
         if self.importer is not None:
             try:
                 self.importer.stop()
             except Exception:
-                pass
+                let_pass("core.browser_companion_api.CompanionServerHandle.stop#3")
 
 
 def _json_bytes(payload: Any) -> bytes:
@@ -1151,9 +910,6 @@ class _Handler(BaseHTTPRequestHandler):
     def _authorized_companion(self) -> bool:
         return self._paired_client() is not None
 
-    def _authorized_post(self) -> bool:
-        return self._authorized_companion()
-
     def _authorized_get(self) -> bool:
         return self._authorized_companion()
 
@@ -1165,12 +921,6 @@ class _Handler(BaseHTTPRequestHandler):
                 ttl_seconds=max(300, int(task.get("timeout_seconds") or 300) + 180),
             )
         return payload
-
-    def _valid_result_task(self, data: dict[str, Any], lane: str, client) -> bool:
-        return validate_task_token(
-            self.settings, task_id=str(data.get("id") or ""), extension_id=str(client.extension_id), lane=lane,
-            token=str(data.get("task_token") or self.headers.get("X-Local-Booru-Task-Token", "")), consume=True,
-        )
 
     def _status_payload(self) -> dict[str, Any]:
         profile_payload = list_profiles(self.settings)
@@ -1248,7 +998,7 @@ class _Handler(BaseHTTPRequestHandler):
             from core import manhwa_access
             manhwa_access.browser_seen(str(data.get("version") or ""), manga=path.startswith("/extension/manga/"))
         except Exception:                     # noqa: BLE001 — a note for a page, never the extension's answer
-            pass
+            let_pass("core.browser_companion_api._Handler.do_POST")
         if path in {"/extension/status", "/extension/health"}:
             self._send_json(200, self._status_payload())
             return

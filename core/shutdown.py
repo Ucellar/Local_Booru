@@ -5,6 +5,7 @@ import threading
 import time
 import weakref
 from typing import Callable, Iterable, Any
+from core.quiet import passed as let_pass
 
 _log = logging.getLogger("local_booru.shutdown")
 _callbacks: list[tuple[str, Callable[[], None]]] = []
@@ -53,7 +54,7 @@ def register_qthread(thread: Any, name: str | None = None) -> None:
         if finished is not None:
             finished.connect(lambda _nm=nm, _ref=ref: unregister_qthread_ref(_ref))
     except Exception:
-        pass
+        let_pass("core.shutdown.register_qthread")
 
 
 def unregister_qthread_ref(ref: weakref.ReferenceType[Any]) -> None:
@@ -78,7 +79,7 @@ def _iter_obj_graph(obj: Any, seen: set[int], depth: int = 0):
         for ch in list(obj.children() or []):
             yield from _iter_obj_graph(ch, seen, depth + 1)
     except Exception:
-        pass
+        let_pass("core.shutdown._iter_obj_graph")
     # Python attributes of pages/main window.  Keep this deliberately shallow.
     try:
         vals = list(getattr(obj, "__dict__", {}).values())
@@ -135,7 +136,7 @@ def join_qthreads(timeout_budget: float = 15.0, roots: Iterable[Any] | None = No
             if th.isRunning():
                 running.append((name, th))
         except Exception:
-            pass
+            let_pass("core.shutdown.join_qthreads")
     for name, th in running:
         try:
             th.requestInterruption()
@@ -186,7 +187,7 @@ def request_shutdown(timeout_hint: float = 15.0, qt_roots: Iterable[Any] | None 
             from core.database.connection import close_pooled_connections
             close_pooled_connections()
         except Exception:
-            pass
+            let_pass("core.shutdown.request_shutdown")
     else:
         _log.warning("Skipping pooled SQLite close because worker threads are still alive")
     return join_result

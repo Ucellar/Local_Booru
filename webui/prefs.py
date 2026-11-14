@@ -19,6 +19,8 @@ from pathlib import Path
 _LOG = logging.getLogger("local_booru.webui")
 _LOCK = threading.Lock()
 _CACHE: dict = {"stamp": None, "data": {}}
+# (v5.44.165) what a page is told when the file stays held by another program and :func:`save` gave up (``OSError``)
+HELD_WORDS = "Не сохранилось: файл настроек страниц занят другой программой. Попробуйте ещё раз."
 THUMB_SIZES = {"s", "m", "l"}
 MANGA_STRIP_PLACES = ("bottom", "side", "off")     # the strip of page thumbnails in the manga reader
 MANGA_SETS = ("on", "off")                         # (v5.44) the parts of one work as one tile of «Вся манга»
@@ -114,16 +116,34 @@ def load() -> dict:
     path = _file()
     try:
         stamp = path.stat().st_mtime_ns
-    except OSError:
+    except FileNotFoundError:
         return {}
+    except OSError:                              # (not looked at this time: what was read before)
+        with _LOCK:
+            return dict(_CACHE["data"])
     with _LOCK:
         if _CACHE["stamp"] != stamp:
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                _LOG.warning("web gallery preferences unreadable (%s), using defaults", exc)
-                data = {}
-            _CACHE["stamp"], _CACHE["data"] = stamp, data if isinstance(data, dict) else {}
+                text = path.read_text(encoding="utf-8")
+                data = json.loads(text)
+                if not isinstance(data, dict):
+                    raise ValueError("not a JSON object")
+            except OSError as exc:
+                # (v5.44.165) held for a moment (Windows: a save putting the new file in its place, an antivirus):
+                # what was read before stays, and the file is asked again by the next page.  Taken for «no
+                # preferences» it was remembered so — every page in the default look until the next save.
+                _LOG.warning("web gallery preferences not read this time (%s)", exc)
+                return dict(_CACHE["data"])
+            except ValueError as exc:
+                # a damaged file (power cut while writing): kept aside, the last good copy takes its place
+                from core.file_safety import read_json_kept
+                _LOG.warning("web gallery preferences damaged (%s)", exc)
+                try:
+                    data = read_json_kept(path, dict, what="web gallery preferences") or {}
+                except OSError as held:
+                    _LOG.warning("web gallery preferences not read this time (%s)", held)
+                    return dict(_CACHE["data"])
+            _CACHE["stamp"], _CACHE["data"] = stamp, data
         return dict(_CACHE["data"])
 
 
@@ -191,21 +211,19 @@ def save(update: dict) -> dict:
     for key in ("feed_manga", "feed_manhwa", "feed_video"):
         if key in update and len(str(update[key])) <= 4000 and not re.search(r"[\s<>\"']", str(update[key])):
             clean[key] = str(update[key])
+    # (v5.44.165) The file through ``core.file_safety`` (rule 14), as the settings and the subscriptions are kept.
+    # On Windows a file is held for a moment by whoever reads it — an antivirus looking at the file just written:
+    # putting the new file in its place then failed («Не сохранилось», seen in the checks under load), and a file
+    # not read at that moment was taken for «nothing kept yet» — the save wrote the one new choice over every
+    # other.  Now both are tried again for a couple of seconds; a file that stays held is an error said to the
+    # page, and nothing is written over what was not read.
+    from core.file_safety import read_json_kept, write_json_kept
     path = _file()
     with _LOCK:
-        current = {}
-        try:
-            current = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            current = {}
-        if not isinstance(current, dict):
-            current = {}
+        current = read_json_kept(path, dict, what="web gallery preferences") or {}
         current.update(clean)
         for key in drop:
             current.pop(key, None)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(current, ensure_ascii=False, indent=1), encoding="utf-8")
-        tmp.replace(path)
+        write_json_kept(path, json.dumps(current, ensure_ascii=False, indent=1), dict)
         _CACHE["stamp"] = None
     return current

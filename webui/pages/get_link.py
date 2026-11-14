@@ -69,6 +69,13 @@ def classify(text: str, settings: dict, now: str | None = None) -> dict:
             return {"error": f"За один раз — не больше {manga_download.MAX_AT_ONCE} галерей", "label": "Хентай"}
         return {"kind": "nhentai", "ids": numbers, "label": "Хентай · nhentai"}
     if link:
+        from core.manhwa_sites.ehentai import hash_of
+        if hash_of(link):
+            if sfw:
+                return {"error": "E-Hentai скрыт в режиме «SFW». Для его галерей выберите «Показать всё».",
+                        "sfw": True, "label": "Хентай"}
+            return {"error": "Это результаты поиска E-Hentai по картинке. Откройте одну найденную галерею "
+                             "и вставьте ссылку на её страницу.", "label": "E-Hentai · результаты поиска"}
         source, _key = manhwa_sources.source_for(link)
         if source is not None:
             from webui.pages.manhwa_get import adult_refusal

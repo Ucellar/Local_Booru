@@ -58,7 +58,7 @@ class Candidate:
 class ReverseOutcome:
     """Result of one reverse-search service for one file."""
 
-    status: str               # complete | deferred | failed | bad_input | disabled (see reverse/base.py)
+    status: str               # complete | deferred | failed | local_input | bad_input | disabled (see reverse/base.py)
     candidates: list = field(default_factory=list)
     source_only: list = field(default_factory=list)   # dicts: url, label, similarity
     retry_after: float = 0.0

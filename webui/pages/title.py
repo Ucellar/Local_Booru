@@ -97,7 +97,8 @@ def opens(url: str) -> bool:
 def kind_for(url: str, settings: dict, hint: str = "") -> str:
     """The tab of the title at ``url``: a gallery of nhentai — «Манга»; the folder the title has (either library —
     its ``.lb/source.json``), the title found a while ago (the kind its download would take), ``hint`` (the way in
-    knows it: a tile, a title picked by its name), else «Манхва» (the program's own default kind of a site's title)."""
+    knows it: a tile, a title picked by its name), else «Манхва». Public E-Hentai galleries default to «Манга»
+    after an exact existing folder or cached title has had its say."""
     from core import manhwa_download as D, manhwa_sources as S
     if gallery_of(url):
         return "manga"
@@ -113,6 +114,8 @@ def kind_for(url: str, settings: dict, hint: str = "") -> str:
         kept = _kept_found((source.name, key, "", ""))
         if kept is not None and getattr(kept, "kind", "") in KINDS:
             return kept.kind
+        if source.name == "ehentai":
+            return "manga"
     return hint if hint in KINDS else "manhwa"
 
 
@@ -461,6 +464,7 @@ def shelf_of(found, settings: dict, *, phone: bool = False, now: "float | None" 
     phone's «Это хентай» / «Это не хентай» of the title in its library (``phone.mark_box``; "" — not a library's)."""
     from core import manga_library as M, manga_online as O, manhwa_download as D, manhwa_library as H
     from core import manhwa_sources as S
+    from core.manhwa_sites.ehentai import is_photo
     now = time.time() if now is None else now
     m = "/m" if phone else ""
     folder = Path(found.folder)
@@ -469,6 +473,8 @@ def shelf_of(found, settings: dict, *, phone: bool = False, now: "float | None" 
     takes = found.takes(True)                   # the page's list, in its order (``Found.public`` «list»)
     exists = folder.is_dir()
     have, infos = _folder_of(folder, site) if exists else ({}, {})
+    if exists and is_photo(found.title):
+        have = D.owned_chapters(folder, found.title)
     by_number = found.by_number()
     paths = {}
     for take in takes:

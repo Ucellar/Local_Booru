@@ -11,7 +11,6 @@ from pathlib import Path
 from core.paths import CACHE_DIR, ERROR_LOG_FILE, ensure_output_base
 from core.redaction import sanitize_text
 from core.services.media_storage_service import copy_into_managed, delete_bucket_artifacts, unlink_managed
-from core.tagger.hashing import file_md5
 from core.tagger.tag_groups import groups_to_tags, unique_keep_order
 
 COPY_SUFFIX_RE = re.compile(r"\s*\((\d+)\)$")
@@ -199,7 +198,3 @@ def cleanup_preview_cache(settings=None):
                 p.unlink(missing_ok=True)
             except OSError:
                 continue
-
-
-def file_md5_lower(path) -> str:
-    return file_md5(path).lower()

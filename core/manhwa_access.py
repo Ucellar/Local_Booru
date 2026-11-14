@@ -211,9 +211,6 @@ def put_cookies(name: str, text: str) -> dict:
 
 
 # ── MangaLib's token ─────────────────────────────────────────────────────────────────────────────────────────────
-_JWT = re.compile(r"^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$")
-
-
 def _jwt_until(token: str) -> int:
     """When a token of the JWT kind ends (its «exp»); 0 — it does not say."""
     try:

@@ -9,6 +9,7 @@ Typical "similar" threshold: distance <= 10 (Hydrus default).
 from __future__ import annotations
 import struct
 from typing import Iterator
+from core.quiet import passed as let_pass
 
 
 # ── Hamming distance (Hydrus algorithm) ──────────────────────────────────────
@@ -203,87 +204,10 @@ class VPTree:
             if mismatch is not None:
                 self.rebuild()
         except Exception:
-            pass
+            let_pass("core.vptree.VPTree.ensure_fresh_enough")
 
 
 # ── Duplicate groups ──────────────────────────────────────────────────────────
-
-def build_duplicate_groups(conn, max_distance: int = 10,
-                            progress_cb=None) -> int:
-    """Find all duplicate groups using VP-tree search.
-
-    Uses connected-components algorithm:
-    - For each image, find similar images
-    - Merge into groups (union-find)
-    Returns number of groups created.
-    """
-    tree = VPTree(conn)
-
-    # Get all images with phash
-    rows = conn.execute(
-        "SELECT id, hash_phash FROM images WHERE hash_phash IS NOT NULL AND hash_phash != ''"
-    ).fetchall()
-
-    # Union-Find
-    parent: dict[int, int] = {}
-
-    def find(x):
-        while parent.get(x, x) != x:
-            parent[x] = parent.get(parent.get(x, x), parent.get(x, x))
-            x = parent.get(x, x)
-        return x
-
-    def union(a, b):
-        a, b = find(a), find(b)
-        if a != b:
-            parent[b] = a
-
-    edges: list[tuple[int, int, float]] = []
-
-    for i, (img_id, phash) in enumerate(rows):
-        if progress_cb and i % 200 == 0:
-            progress_cb(i, len(rows))
-        matches = tree.search(phash, max_distance)
-        for other_id, dist in matches:
-            if other_id != img_id:
-                sim = max(0.0, 100.0 * (1.0 - dist / 64.0))
-                edges.append((img_id, other_id, sim))
-                union(img_id, other_id)
-
-    # Assign group IDs
-    root_to_gid: dict[int, int] = {}
-    gid = 0
-    conn.execute("DELETE FROM dup_groups")
-    for img_id, _ in rows:
-        root = find(img_id)
-        if root not in root_to_gid:
-            root_to_gid[root] = gid
-            gid += 1
-    # Only store groups with >1 member
-    root_count: dict[int, int] = {}
-    for img_id, _ in rows:
-        r = find(img_id)
-        root_count[r] = root_count.get(r, 0) + 1
-
-    inserted = 0
-    for img_id, _ in rows:
-        r = find(img_id)
-        if root_count.get(r, 1) > 1:
-            g = root_to_gid[r]
-            # Find best similarity for this member
-            best_sim = 100.0
-            for a, b, sim in edges:
-                if (a == img_id or b == img_id):
-                    best_sim = min(best_sim, 100.0 - (100.0 - sim))
-            conn.execute(
-                "INSERT OR REPLACE INTO dup_groups (group_id, image_id, similarity) VALUES (?,?,?)",
-                (g, img_id, best_sim)
-            )
-            inserted += 1
-
-    conn.commit()
-    return gid
-
 
 # ── Tag siblings ──────────────────────────────────────────────────────────────
 
@@ -293,20 +217,3 @@ def resolve_tag(conn, tag: str) -> str:
         "SELECT canonical FROM tag_siblings WHERE tag=?", (tag,)
     ).fetchone()
     return row[0] if row else tag
-
-
-def add_sibling(conn, tag: str, canonical: str) -> None:
-    conn.execute(
-        "INSERT OR REPLACE INTO tag_siblings (tag, canonical) VALUES (?,?)",
-        (tag.strip().lower(), canonical.strip().lower())
-    )
-    conn.commit()
-
-
-def remove_sibling(conn, tag: str) -> None:
-    conn.execute("DELETE FROM tag_siblings WHERE tag=?", (tag.strip().lower(),))
-    conn.commit()
-
-
-def get_all_siblings(conn) -> list[tuple[str, str]]:
-    return conn.execute("SELECT tag, canonical FROM tag_siblings ORDER BY canonical, tag").fetchall()

@@ -17,6 +17,9 @@
   const confirmed = LB.confirmed || (() => true);
   const form = box.querySelector("[data-ms-addresses]");
   const MAX_FILE = 2000000;
+  const localDesktop = ["127.0.0.1", "localhost"].includes(location.hostname) && !location.pathname.startsWith("/m/");
+  if (localDesktop) box.querySelectorAll("[data-ms-browser-tools]").forEach((node) => { node.hidden = false; });
+  let manualChecking = false;
 
   const day = (stamp) => new Date(stamp * 1000).toLocaleDateString("ru-RU");
   const moment = (stamp) => new Date(stamp * 1000).toLocaleString("ru-RU", { day: "numeric", month: "numeric",
@@ -160,6 +163,30 @@
       say(li.querySelector(".tool-actions"), "Токен сохранён" + (reply.until ? `, до ${day(reply.until)}` : ""));
     } catch (err) {
       say(li.querySelector(".tool-actions"), err.message, true);
+    }
+  };
+
+  // A separate, explicit check in the program window; the server selects its fixed official page.
+  actions["ms-browser-check"] = async (button) => {
+    if (!localDesktop || manualChecking) return;
+    const li = button.closest("li.ms-site");
+    const status = button.closest(".tool-actions");
+    const label = button.dataset.msBrowserLabel || "сайта";
+    const buttons = box.querySelectorAll('[data-action="ms-browser-check"]');
+    manualChecking = true;
+    buttons.forEach((b) => { b.disabled = true; });
+    button.setAttribute("aria-busy", "true");
+    say(status, `Пройдите проверку ${label} в отдельном окне программы…`);
+    try {
+      const reply = await postJson("/api/catalog/browser-check", { site: li.dataset.site });
+      if (reply.ok !== true) throw new Error("Программа не подтвердила проверку. Попробуйте ещё раз.");
+      say(status, `Проверка ${label} пройдена. Повторите открытие ленты или загрузку.`);
+    } catch (err) {
+      say(status, err.message || "Проверка не завершена. Попробуйте ещё раз.", true);
+    } finally {
+      manualChecking = false;
+      buttons.forEach((b) => { b.disabled = false; });
+      button.removeAttribute("aria-busy");
     }
   };
 

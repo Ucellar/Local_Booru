@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
+from core.quiet import passed as let_pass
 
 MAX_SIDE = 1920            # the frames are made no bigger than this (and than the place on the page)
 
@@ -111,7 +112,7 @@ class FrameRelay:
             try:
                 fn(key, wait)
             except Exception:  # a player that fails to let go must not stop the move; the move reports its error
-                pass
+                let_pass("webui.video_relay.FrameRelay.release")
 
 
 RELAY = FrameRelay()

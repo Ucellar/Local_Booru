@@ -15,7 +15,6 @@ from typing import Any
 from core.database.connection import db
 
 PAIRING_HEADER = "X-Local-Booru-Pairing"
-TASK_TOKEN_HEADER = "X-Local-Booru-Task-Token"
 
 
 def _hash(value: str) -> str:

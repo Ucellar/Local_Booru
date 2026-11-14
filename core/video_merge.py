@@ -828,16 +828,6 @@ def picture_info(folder: Path, stem: str):
     return best
 
 
-def picture_height(folder: Path, stem: str) -> int:
-    """The largest picture an episode has in the series folder already: its MKV, its voice-overs' files (0 — none)."""
-    if not available():
-        return 0
-    found = [folder / f"{stem}.mkv"] + [p for sub in folder.iterdir() if sub.is_dir() and not sub.name.startswith(".")
-                                        and not sub.name.lower().startswith("субтитры")
-                                        for p in (sub / f"{stem}.mp4", sub / f"{stem}.ts")] if folder.is_dir() else []
-    return max((_height(p) for p in found if p.is_file()), default=0)
-
-
 def _prints_place(folder: Path, path: Path) -> Path:
     import hashlib
     name = hashlib.sha1(str(path.relative_to(folder) if path.is_relative_to(folder) else path).encode("utf-8"))

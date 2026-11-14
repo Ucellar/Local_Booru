@@ -38,7 +38,11 @@ pages are the folder's — by its name or SauceNAO's) or parses it as the booru'
 * folders side by side whose names are one name with a number at the end («М4. Сильвер Соул 0» … «М4. Сильвер Соул
   12») — the parts of one manga, by that number (:class:`Work`: its parts — its chapters);
 * a folder holding several manga («silver soul»: «Сильвер Соул», «Сильвер Соул Близнецы», «Восхождение драконов»…) —
-  their сборка, by its own name (never the parser's folder itself, never one named «манга», «Новая папка»…).
+  their сборка, by its own name (never the parser's folder itself, never one named «манга», «Новая папка»…);
+  (v5.44.166) **only a folder named after one of its manga** (:func:`named_after`: «silver soul» — «Сильвер Соул»,
+  the Latin and the Cyrillic spelling read as one).  A folder of a kind is not a work: the owner (12.11.2026): «у
+  меня манга собралась в сборку из за того что она в папке в папке (у меня манга по категориям была и bdsm собрало в
+  сборку хотя не надо было)» — the manga of «bdsm», «яой», an author's folder are each a manga by itself.
 """
 from __future__ import annotations
 
@@ -47,6 +51,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -65,9 +70,10 @@ RUN = 0.8                               # the numbers one run: as many as the ru
 STORE_FILE = "parser_manga.json"
 NOT_FILE = "parser_not_manga.json"
 SCAN_EVERY = 6 * 3600                   # the whole folder looked at again after this long (seconds)
-RULES = 4                               # (v5.44.113) +1 when the rules change: the folder is looked at again at once
+RULES = 5                               # (v5.44.113) +1 when the rules change: the folder is looked at again at once
                                         # (2: v5.44.111 — 15 pages by numbers of any sizes; 3: v5.44.115 — taken back;
-                                        # 4: v5.44.125 — candidates: VK's names, parts of one manga, сборки)
+                                        # 4: v5.44.125 — candidates: VK's names, parts of one manga, сборки;
+                                        # 5: v5.44.166 — a сборка only of a folder named after one of its manga)
 FIRST_PAGES = 3                         # pages kept of a title (for SauceNAO and its cover on the page)
 # pictures beside the pages that are none of them (a cover the program or a reader put there)
 ASIDE = {"cover", "folder", "poster", "thumb", "thumbnail", "back", "preview", "banner"}
@@ -253,6 +259,44 @@ def _series_name(name: str) -> str:
     return re.sub(r"[\W\d_]+", " ", str(name or "").lower()).strip()
 
 
+# (v5.44.166) a name as its Cyrillic and its Latin spelling agree on it: «Сильвер Соул» — «silver soul»
+_LATIN = str.maketrans({
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh", "з": "z", "и": "i",
+    "й": "i", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t",
+    "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "i", "ь": "",
+    "э": "e", "ю": "iu", "я": "ia"})
+# …and the ways one sound is written in Latin letters («kh» — «h», «ts» — «c», «yu» — «iu», «w» — «v»)
+_SOUNDS = (("shch", "sch"), ("kh", "h"), ("ts", "c"), ("tz", "c"), ("yu", "iu"), ("ju", "iu"), ("ya", "ia"),
+           ("ja", "ia"), ("yo", "e"), ("jo", "e"), ("ye", "e"), ("je", "e"), ("ph", "f"), ("y", "i"), ("j", "i"),
+           ("w", "v"), ("x", "ks"))
+
+
+def name_skeleton(name: str) -> str:
+    """(v5.44.166) A folder's or a manga's name as its spellings agree on it: no order («М4.»), no numbers and signs,
+    one case, Cyrillic letters as Latin ones, one sound written one way, no letter twice in a row — «Сильвер Соул»
+    and «silver soul» are «silversoul»."""
+    text = _series_name(bare_name(name)).translate(_LATIN)
+    for wrote, sound in _SOUNDS:
+        text = text.replace(wrote, sound)
+    return re.sub(r"(.)\1+", r"\1", text.replace(" ", ""))
+
+
+def named_after(folder_name: str, works: list) -> bool:
+    """(v5.44.166) A folder holding several manga is named after one of them («silver soul»: «Сильвер Соул», its
+    twins and the others) — the works of one name: their сборка.  A folder of a kind («bdsm», «яой», «прочитано»,
+    an author's) is named after none of its manga: each of them is a manga by itself."""
+    mine = name_skeleton(folder_name)
+    if len(mine) < 3:
+        return False
+    for work in works:
+        if name_skeleton(work.name) == mine:
+            return True
+        base, number = tail_number(bare_name(work.name))
+        if number is not None and name_skeleton(base) == mine:
+            return True
+    return False
+
+
 # ── (v5.44.125) candidates: what may be a manga, by the names alone ─────────────────────────────────────────────────
 PARTS_WORD = "Глава"                    # the parts of one manga in its copy — its chapters: «Глава 0» … «Глава 12»
 
@@ -350,7 +394,8 @@ def find(folders: dict, root: Path, refused: set, *, linked: "set | None" = None
     alone (v5.44.125): a folder of pages by numbers (:data:`LONE_PAGES` at least; a folder named as a chapter — two),
     one with ComicInfo.xml, one of archives only; folders of numbered pages side by side with one name and a number at
     its end — one manga's parts; a folder of numbered pages beside a manga — a manga too (its folder holds manga); a
-    folder of several manga — their сборка.  ``linked`` — folders «Из архива» linked where they lie (a title there)."""
+    folder of several manga named after one of them — their сборка ((v5.44.166) :func:`named_after`; a folder of a
+    kind — each manga by itself).  ``linked`` — folders «Из архива» linked where they lie (a title there)."""
     root = Path(root)
     rk = _norm(root)
     linked = linked or set()
@@ -447,7 +492,7 @@ def find(folders: dict, root: Path, refused: set, *, linked: "set | None" = None
             works.append((path, Work(key=key_of(lone), name=bare_name(Path(name).stem), path=str(lone),
                                      parts=[Part(path=str(lone), label="", number=0, archive=True)],
                                      roots=[str(lone)], why="архив главы (.cbz)")))
-    # a folder of several manga — their сборка (by its own name), the others — each its own
+    # a folder of several manga named after one of them — their сборка (by its own name), the others — each its own
     homes: dict = {}
     for parent, work in works:
         homes.setdefault(parent, []).append(work)
@@ -455,7 +500,8 @@ def find(folders: dict, root: Path, refused: set, *, linked: "set | None" = None
     for parent, items in homes.items():
         items.sort(key=lambda w: _natural(Path(w.roots[0]).name if w.roots else w.name))
         named = _norm(parent) != rk and not _junk(bare_name(parent.name))
-        if len(items) >= 2 and named and not any(_norm(parent) in {_norm(r) for r in w.roots} for w in items):
+        if len(items) >= 2 and named and not any(_norm(parent) in {_norm(r) for r in w.roots} for w in items) \
+                and named_after(parent.name, items):
             out.append(Candidate(key=key_of(parent), path=str(parent), name=parent.name, works=items, is_set=True,
                                  refused=_under(parent, refused)))
             continue
@@ -469,17 +515,22 @@ def find(folders: dict, root: Path, refused: set, *, linked: "set | None" = None
     return sorted(out, key=lambda c: _natural(c.path))
 
 
-def pages_of(part: "Part") -> list:
+def pages_of(part: "Part", *, strict: bool = False) -> list:
     """(v5.44.125) [(the page's number or None, its file)] of a part — by their numbers (the names alone; an archive —
-    [(None, the archive)])."""
+    [(None, the archive)]). Recognition can request an error when a folder or one of its pages cannot be listed."""
     path = Path(part.path)
     if part.archive:
         return [(None, path)]
     try:
         names = [n for n in os.listdir(path) if Path(n).suffix.lower() in IMAGES and not _aside(n)]
+        if strict:
+            names = [n for n in names if stat.S_ISREG((path / n).stat().st_mode)]
+        else:
+            names = [n for n in names if (path / n).is_file()]
     except OSError:
+        if strict:
+            raise
         return []
-    names = [n for n in names if (path / n).is_file()]
     numbers = dict(zip(names, page_numbers([Path(n).stem for n in names])))
     names.sort(key=lambda n: (numbers.get(n) is None, numbers.get(n) or 0, _natural(n)))
     return [(numbers.get(n), path / n) for n in names]
@@ -671,6 +722,26 @@ class Store:
                             _under(Path(str(r)), {key}) for w in cand.get("works") or [] for r in w.get("roots") or [])):
                         cand["refused"] = True
                 write_json_kept(_settings_file(STORE_FILE), json.dumps(data, ensure_ascii=False, indent=1), dict)
+
+    def accept(self) -> None:
+        """(v5.44.166) The owner's «Это не манга» taken back (``set_not_manga(path, False)`` — «Перепроверить» of a
+        row he refused): the candidates kept say «refused» by what he refuses now (as :func:`find` says it), and
+        the folder is looked at anew at its next look (the titles of the ones taken back are in the list then)."""
+        from core.file_safety import write_json_kept
+        refused = not_manga()
+        with self._lock:
+            data = self.read()
+            if not data:
+                return
+            for made in data.get("candidates") or []:
+                if not isinstance(made, dict):
+                    continue
+                cand = Candidate.of(made)
+                alone = [any(_under(Path(r), refused) for r in w.roots) for w in cand.works]
+                made["refused"] = (_under(Path(cand.path), refused) or (bool(alone) and all(alone))) \
+                    if cand.is_set else any(alone)
+            write_json_kept(_settings_file(STORE_FILE), json.dumps(data, ensure_ascii=False, indent=1), dict)
+            self.stale = True
 
 
 STORE = Store()

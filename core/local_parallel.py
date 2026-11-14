@@ -51,20 +51,6 @@ def local_workers(settings: dict | None, key: str, default: int, *, minimum: int
     return max(int(minimum), min(int(value), int(cap)))
 
 
-def apply_legacy_thread_aliases(settings: dict | None) -> dict:
-    """Fill old keys from the new thread menu without deleting user values."""
-    s = settings if isinstance(settings, dict) else {}
-    if "local_tagger_workers" in s and "tagger_parallel_workers" not in s:
-        s["tagger_parallel_workers"] = s.get("local_tagger_workers")
-    if "local_thumb_workers" in s and "thumb_threads" not in s:
-        s["thumb_threads"] = s.get("local_thumb_workers")
-    if "local_thumb_pregen_workers" in s and "thumb_pregen_workers" not in s:
-        s["thumb_pregen_workers"] = s.get("local_thumb_pregen_workers")
-    if "local_background_workers" in s and "task_max_workers" not in s:
-        s["task_max_workers"] = s.get("local_background_workers")
-    return s
-
-
 def snapshot(settings: dict | None) -> dict[str, int]:
     """Human/debug summary of effective local worker limits."""
     s = settings or {}

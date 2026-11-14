@@ -245,6 +245,25 @@ table.job-activity { border-collapse: collapse; width: 100%; margin: 0 0 12px; f
   font-size: 12.5px; line-height: 1.5; }
 .pm-more { color: var(--muted); }
 .pm-more button.link { padding: 0; border: 0; background: none; color: var(--link, var(--accent)); cursor: pointer; }
+/* (v5.44.166) «Перепроверить все «не манга»» over the list, and the line of a look going on */
+.pm-again { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; color: var(--muted); line-height: 1.5; }
+.pm-again button.link { padding: 0; border: 0; background: none; color: var(--link, var(--accent)); font: inherit; cursor: pointer; }
+.pm-again button.link:hover { text-decoration: underline; }
+/* (v5.44.169) «Указать ссылку»: a line under the row with the field for the link of the manga's page */
+.pm-link { grid-column: 2 / -1; display: grid; gap: 6px; padding: 10px 14px 12px; border-radius: calc(var(--radius) * 2);
+  background: var(--panel-2, var(--bg)); }
+.pm-link[hidden] { display: none; }
+.pm-link label { font-size: 13px; font-weight: bold; overflow-wrap: anywhere; }
+.pm-link-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.pm-link-row input { flex: 1 1 320px; min-width: 0; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); background: var(--field-bg, var(--bg)); font: inherit; }
+.pm-link-row input::placeholder { color: var(--muted); }
+.pm-link-row input:focus-visible { outline: 2px solid var(--focus, var(--accent)); outline-offset: 1px; }
+.pm-link-row .button { padding: 6px 14px; font-size: 12.5px; }
+.pm-link button.link, .pm-pt button.link { padding: 0; border: 0; background: none; color: var(--link, var(--accent));
+  font-size: 12px; cursor: pointer; }
+.pm-link .pm-sub { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.pm-link .action-status:empty { display: none; }
 @media (max-width: 1000px) {
   .mx-flow { grid-template-columns: minmax(0, 1fr); }
   .mx-arrow { display: none; }
@@ -253,7 +272,7 @@ table.job-activity { border-collapse: collapse; width: 100%; margin: 0 0 12px; f
 }
 @media (max-width: 760px) {
   .pm-row.mx-item { grid-template-columns: 52px minmax(0, 1fr); }
-  .pm-tools, .pm-open, .mx-track { grid-column: 1 / -1; }
+  .pm-tools, .pm-open, .pm-link, .mx-track { grid-column: 1 / -1; }
   .mx-track { grid-row: auto; grid-template-columns: minmax(0, 1fr); gap: 0; }
   .mx-node { padding: 0 0 12px 22px; }
   .mx-node::after { left: 5px; right: auto; top: 12px; bottom: 0; width: 2px; height: auto; }
@@ -718,6 +737,14 @@ table.diag-table { border-collapse: collapse; width: 100%; margin: 0 0 8px; font
 .reset-notice { margin: 0; padding: 8px 16px; color: var(--text); background: var(--panel);
   border-top: 3px solid var(--danger); border-bottom: 1px solid var(--border); }
 .reset-notice b { color: var(--danger); }
+/* (v5.44.165) «Установлено обновление … — перезапустите»: on every page until the program is started again */
+.update-notice { margin: 0; padding: 7px 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  color: var(--text); background: var(--panel); border-top: 3px solid var(--accent);
+  border-bottom: 1px solid var(--border); }
+.update-notice .update-said { flex: 1 1 320px; min-width: 0; }
+.update-notice button { margin: 0; flex: none; }
+.update-notice .action-status { color: var(--muted); }
+.update-notice .action-status:empty { display: none; }
 
 /* «Настройки»: tabs on top, one part at a time; a section is a framed group; «Сохранить» is one bar at the bottom
    that shows only when something changed */
@@ -895,6 +922,8 @@ table.info .path { font-size: 11px; }
 .sx-nav a.on svg { color: var(--accent); }
 .sx-nav a.changed::after { content: ""; flex: none; width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: var(--warn, #e08a00); }
 .sx-nav hr { width: 100%; margin: 8px 0; border: 0; border-top: 1px solid var(--border); }
+/* (v5.44.165) which version is running — a quiet line under the sections */
+.sx-version { margin: 10px 0 0; padding: 0 10px 0 13px; color: var(--muted); font-size: 12px; }
 .sx-main { display: grid; gap: 8px; min-width: 0; max-width: 940px; }
 /* the pages of a section that is pages of its own («Проверка и починка»): tabs above its content */
 .sx-tabs { display: flex; flex-wrap: wrap; gap: 2px; margin: 0 0 6px; border-bottom: 1px solid var(--border); }
@@ -1045,7 +1074,7 @@ table.info .path { font-size: 11px; }
   .sx-body { grid-template-columns: minmax(0, 1fr); gap: 14px; }
   .sx-nav { position: static; max-height: none; overflow: visible; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
   .sx-nav a { padding: 7px 8px; gap: 8px; }
-  .sx-search, .sx-nav hr { grid-column: 1 / -1; }
+  .sx-search, .sx-nav hr, .sx-version { grid-column: 1 / -1; }
   .sx-nav hr { margin: 2px 0; }
 }
 @media (max-width: 640px) {

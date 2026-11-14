@@ -15,7 +15,6 @@ from pathlib import Path
 
 CHUNK = 1 << 20
 MAX_HEADER = 32 * 1024 * 1024           # a moov or a moof bigger than this is not a stream's
-_DROP = {b"styp", b"sidx", b"ssix", b"prft", b"emsg", b"free", b"skip"}
 _LOCKED = (b"encv", b"enca", b"sinf", b"pssh", b"senc", b"tenc")
 
 

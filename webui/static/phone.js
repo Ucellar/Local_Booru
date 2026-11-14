@@ -68,7 +68,7 @@
       actions: actions,
       postJson: function (address, body) { return send(address, body); },
       say: function (_el, text) { say(text); },
-      programBefore: programBefore                    // (v5.44.116) title.js, watch.js: «назад» of the bar
+      programBefore: programBefore                    // (v5.44.116) title.js, series.js: «назад» of the bar
     };
     document.addEventListener("click", function (event) {
       var el = event.target.closest("[data-action]");

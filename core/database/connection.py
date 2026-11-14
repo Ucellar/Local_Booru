@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
-import re
 import sqlite3
 import threading
 import time
 import weakref
 from contextlib import contextmanager
 from threading import Lock, RLock, local
+from core.quiet import passed as let_pass
 
 _INIT_LOCK = Lock()
 _INIT_DONE = set()
@@ -99,7 +99,7 @@ def _db_root(settings, *, create: bool = True) -> Path:
             try:
                 root.mkdir(parents=True, exist_ok=True)
             except Exception:
-                pass
+                let_pass("core.database.connection._db_root")
     return root
 
 
@@ -119,7 +119,7 @@ def _allow_missing_db_recreate(settings, path: Path) -> bool:
         if bool((settings or {}).get("sqlite_allow_recreate_missing_db", False)):
             return True
     except Exception:
-        pass
+        let_pass("core.database.connection._allow_missing_db_recreate")
     # Manual emergency override: create this file beside the expected DB.
     # It is intentionally explicit so accidental disconnected drives do not
     # silently create a fresh empty SQLite.
@@ -210,7 +210,7 @@ def _guard_missing_existing_db(settings, path: Path, *, readonly: bool) -> None:
                 state = check_storage_root(path.parent)
             root_detail = f" storage_root_status={state.status}; storage_root={state.root}; detail={state.detail}."
         except Exception:
-            pass
+            let_pass("core.database.connection._guard_missing_existing_db")
         raise DatabaseMissingError(
             "SQLite database is missing and Local Booru will not create a new empty DB automatically: "
             + str(path)
@@ -238,7 +238,7 @@ def _mark_db_initialized(settings, path: Path) -> None:
             encoding="utf-8",
         )
     except Exception:
-        pass
+        let_pass("core.database.connection._mark_db_initialized")
 
 
 def _sqlite_cache_mb(settings) -> int:
@@ -268,7 +268,7 @@ def connect(settings, *, readonly: bool = False):
         try:
             con.execute("PRAGMA query_only=ON")
         except Exception:
-            pass
+            let_pass("core.database.connection.connect")
     else:
         con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
@@ -334,7 +334,7 @@ def ensure_initialized(con, *, force=False, settings=None) -> bool:
         try:
             _mark_db_initialized(settings, Path(path))
         except Exception:
-            pass
+            let_pass("core.database.connection.ensure_initialized")
         _INIT_DONE.add(path)
         return True
 
@@ -363,27 +363,18 @@ def ensure_database_schema(settings, *, force: bool = False) -> dict:
         try:
             con.rollback()
         except Exception:
-            pass
+            let_pass("core.database.connection.ensure_database_schema")
         raise
     finally:
         try:
             con.close()
         except Exception:
-            pass
+            let_pass("core.database.connection.ensure_database_schema#2")
 
 
 
 def _pooled_key(settings, readonly: bool) -> str:
     return f"{db_path(settings)}|ro={int(bool(readonly))}"
-
-
-def _normalize_pool_thread_name(name: str) -> str:
-    """Collapse executor instance/worker suffixes into readable forensic buckets."""
-    value = str(name or "unknown").strip() or "unknown"
-    if value.startswith("rule34_sha1_locator"):
-        return "rule34_sha1_locator"
-    value = re.sub(r"-\d+_\d+$", "", value)
-    return value
 
 
 def _register_pooled_connection(con, *, key: str, settings, readonly: bool) -> None:
@@ -460,72 +451,8 @@ def reap_dead_pooled_connections() -> int:
             con.close()
             closed += 1
         except Exception:
-            pass
+            let_pass("core.database.connection.reap_dead_pooled_connections")
     return closed
-
-
-def snapshot_pooled_connections() -> dict:
-    """Return lock-safe SQLite pool diagnostics without touching live connections.
-
-    ``cache_cap_mb`` is a configured upper bound, not allocated memory.  Owner
-    liveness is derived from a weak reference to the original Thread object so
-    recycled numeric thread identifiers cannot make dead owners look alive.
-    """
-    with _POOL_LOCK:
-        connections = list(_ALL_CONNECTIONS)
-        info_by_id = dict(_CONNECTION_INFO)
-
-    unique = []
-    seen = set()
-    for con in connections:
-        marker = id(con)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        unique.append(con)
-
-    owner_alive = 0
-    owner_dead = 0
-    owner_unknown = 0
-    readonly_count = 0
-    cache_cap_mb = 0
-    groups = {}
-    now = time.monotonic()
-    oldest_seconds = 0.0
-
-    for con in unique:
-        info = info_by_id.get(id(con)) or {}
-        cache_cap_mb += int(info.get("cache_mb") or 0)
-        readonly_count += int(bool(info.get("readonly")))
-        created_at = float(info.get("created_at") or now)
-        oldest_seconds = max(oldest_seconds, max(0.0, now - created_at))
-
-        state = _pooled_owner_state(info)
-        if state == "alive":
-            owner_alive += 1
-        elif state == "dead":
-            owner_dead += 1
-        else:
-            owner_unknown += 1
-
-        bucket = _normalize_pool_thread_name(info.get("owner_name") or "unknown")
-        row = groups.setdefault(bucket, {"name": bucket, "total": 0, "alive": 0, "dead": 0, "unknown": 0})
-        row["total"] += 1
-        row[state] += 1
-
-    group_rows = sorted(groups.values(), key=lambda row: (-int(row["total"]), str(row["name"])))
-    return {
-        "pooled": len(unique),
-        "open": len(unique),
-        "owner_alive": owner_alive,
-        "owner_dead": owner_dead,
-        "owner_unknown": owner_unknown,
-        "readonly": readonly_count,
-        "writable": max(0, len(unique) - readonly_count),
-        "cache_cap_mb": cache_cap_mb,
-        "oldest_seconds": oldest_seconds,
-        "thread_groups": group_rows,
-    }
 
 
 def get_pooled_connection(settings, *, readonly: bool = False):
@@ -547,7 +474,7 @@ def get_pooled_connection(settings, *, readonly: bool = False):
             return con
         except Exception:
             try: con.close()
-            except Exception: pass
+            except Exception: let_pass("core.database.connection.get_pooled_connection")
             cache.pop(key, None)
             _unregister_pooled_connection(con)
     # A new owner thread is about to add a pooled connection. Reap exited
@@ -588,15 +515,15 @@ def close_thread_pooled_connections(settings=None, *, readonly: bool | None = No
             con.close()
             n += 1
         except Exception:
-            pass
+            let_pass("core.database.connection.close_thread_pooled_connections")
         try:
             cache.pop(key, None)
         except Exception:
-            pass
+            let_pass("core.database.connection.close_thread_pooled_connections#2")
         try:
             _unregister_pooled_connection(con)
         except Exception:
-            pass
+            let_pass("core.database.connection.close_thread_pooled_connections#3")
     return n
 
 def close_pooled_connections() -> int:
@@ -610,11 +537,11 @@ def close_pooled_connections() -> int:
         try:
             con.close(); n += 1
         except Exception:
-            pass
+            let_pass("core.database.connection.close_pooled_connections")
     try:
         _TLS.connections = {}
     except Exception:
-        pass
+        let_pass("core.database.connection.close_pooled_connections#2")
     return n
 
 @contextmanager
@@ -647,14 +574,14 @@ def write_txn(settings, *, allow_blocked_write: bool = False):
             try:
                 con.rollback()
             except Exception:
-                pass
+                let_pass("core.database.connection.write_txn")
             raise
         finally:
             if not use_pool:
                 try:
                     con.close()
                 except Exception:
-                    pass
+                    let_pass("core.database.connection.write_txn#2")
 
 
 @contextmanager
@@ -679,7 +606,7 @@ def db(settings, write: bool = False, readonly: bool = False, allow_blocked_writ
             try:
                 con.close()
             except Exception:
-                pass
+                let_pass("core.database.connection.db")
 
 
 def get_connection(settings):

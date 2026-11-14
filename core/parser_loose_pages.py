@@ -115,23 +115,33 @@ def pages_of(asker, url: str, tome: int, number: str, deadline: float) -> tuple:
             try:
                 pictures = source.pictures(net, title, chapter)[:PAGES]
             except S.SourceError as exc:                # (a paid one, a sign-in: this chapter says nothing)
+                if S.transient(exc):
+                    raise
                 from core.redaction import sanitize_text
                 why = sanitize_text(str(exc))[:160]     # (the words go to the page)
                 continue
-            for picture in pictures[len(marks):]:
-                if asker.stopped() or time.monotonic() > deadline:
-                    break
-                try:
-                    data, _ctype = S.fetch_picture(net, picture, what=source.label,
-                                                   headers={"Referer": source.referer(title),
-                                                            "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"})
-                except S.SourceError as exc:
-                    _LOG.info("parser loose: a page of %s not had: %s", url, exc)
-                    data = b""
-                marks.append(PM._phash(data))           # ("" — not a picture: its place is kept)
-            kept = {"at": time.monotonic(), "marks": marks, "whole": len(marks) >= len(pictures)}
-            with _KEPT_LOCK:
-                _KEPT[(url, chapter.id)] = kept
+            try:
+                for picture in pictures[len(marks):]:
+                    if asker.stopped() or time.monotonic() > deadline:
+                        break
+                    try:
+                        data, _ctype = S.fetch_picture(net, picture, what=source.label,
+                                                       headers={"Referer": source.referer(title),
+                                                                "Accept": "image/avif,image/webp,image/*,*/*;q=0.8"})
+                    except S.SourceError as exc:
+                        if S.transient(exc) or asker.stopped():
+                            raise
+                        _LOG.info("parser loose: a page of %s not had: %s", url, exc)
+                        data = b""
+                    mark = PM._phash(data)
+                    if data and not mark:
+                        raise S.Silent("сайт прислал нечитаемую картинку страницы")
+                    marks.append(mark)
+            finally:
+                # A timeout is no evidence about a page: retain completed progress, retry the failed page.
+                kept = {"at": time.monotonic(), "marks": marks, "whole": len(marks) >= len(pictures)}
+                with _KEPT_LOCK:
+                    _KEPT[(url, chapter.id)] = kept
         out += [(chapter.label, n, mark) for n, mark in enumerate(kept["marks"], 1) if mark and not flat(mark)]
         whole = whole and kept["whole"]
     return out, whole, why
@@ -199,7 +209,9 @@ class Compare:
             return None
         except S.SourceError as exc:
             _LOG.info("parser loose: the title %s not had: %s", url, exc)
-            if isinstance(exc, S.Silent) or " не ответил" in str(exc):
+            if self.asker.stopped():
+                self.cut = True
+            elif S.transient(exc):
                 self.down += 1
             return None
         return title.title, source.label, source.name, title.key
@@ -332,7 +344,7 @@ def _unconfirmed(look: Compare, group: dict, sure: int, now: int) -> dict:
         return {"values": {"state": WAIT, "how": "site", "later_at": int(time.time() + max(60.0, look.paced)),
                            "by": f"сайты манги — не больше {PM.SEARCHES_PER_HOUR} поисков в час, очередь", **seen},
                 "files": {}, "wait": look.paced}
-    if look.down and look.found is None and not look.closed:
+    if look.down and not look.closed:
         tries = int(group.get("tries") or 0) + 1
         return {"values": {"state": WAIT, "how": "down", "tries": tries, "by": "сайты манги не ответили",
                            "later_at": int(time.time()) + (PM.LATER if tries <= TRIES else SEARCH_AGAIN), **seen},
@@ -356,6 +368,23 @@ def check(settings: dict, asker, key: str, group: dict, probes: list, sure: int,
     had is kept: it goes on next round).  Nothing is asked twice: a manga confirmed already — its title's pages
     alone; a title of that name found before — its pages first, and the sites are searched again only
     :data:`SEARCH_AGAIN` seconds after the last search."""
+    from core import parser_manga_nhentai as PN, parser_gallery_sources as PG
+    if PN.is_gallery(group):
+        if group.get("state") == MANGA and PN.number_of(group.get("url")):
+            return PN.check_loose(settings, asker, key, group, probes, deadline)
+        direct = PG.check_loose(settings, asker, key, group, probes, deadline)
+        if direct is not None and (PG.public_link(group.get("url")) or direct.get("more")
+                                   or (direct.get("values") or {}).get("state") in (MANGA, WAIT)):
+            return direct
+        gallery = PN.check_loose(settings, asker, key, group, probes, deadline)
+        if gallery.get("more") or (gallery.get("values") or {}).get("state") == MANGA:
+            return gallery
+        fallback = PG.check_loose(settings, asker, key, group, probes, deadline, search=True)
+        if fallback is not None and (fallback.get("more") or (fallback.get("values") or {}).get("state") == MANGA):
+            return fallback
+        if (gallery.get("values") or {}).get("state") == WAIT:
+            return gallery
+        return fallback if fallback is not None else direct if direct is not None else gallery
     look = Compare(settings, asker, key, probes, deadline)
     now = int(time.time())
     if group.get("state") == MANGA and group.get("url"):

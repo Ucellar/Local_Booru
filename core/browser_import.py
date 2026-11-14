@@ -28,6 +28,7 @@ from core.grabber_md5_cache import upsert_item
 from core.network import is_permanently_disabled_url
 from core.path_utils import path_key as _path_key, same_path as _same_path
 from core.site_posts import PAGE_METHODS
+from core.quiet import passed as let_pass
 
 
 def _host(value: Any) -> str:
@@ -36,7 +37,7 @@ def _host(value: Any) -> str:
         try:
             raw = urlparse(raw).netloc
         except Exception:
-            pass
+            let_pass("core.browser_import._host")
     raw = raw.lower().split("@")[ -1].split(":")[0].lstrip(".")
     if raw.startswith("www."):
         raw = raw[4:]
@@ -212,13 +213,6 @@ def _existing_path(settings: dict, md5: str) -> str:
     )
 
 
-def _existing_path_for_site_md5(settings: dict, site_md5: str) -> str:
-    """Resolve an authoritative site MD5 without confusing it with local bytes."""
-    if not site_md5:
-        return ""
-    return _existing_path(settings, site_md5) or media_path_by_site_md5(settings, site_md5)
-
-
 def _cleanup_staging(settings: dict, staging_path: str | Path, canonical_path: str | Path, *, operation: str) -> None:
     if not staging_path or not canonical_path or _same_path(staging_path, canonical_path):
         return
@@ -226,7 +220,7 @@ def _cleanup_staging(settings: dict, staging_path: str | Path, canonical_path: s
         from core.services.media_storage_service import unlink_managed
         unlink_managed(settings, Path(staging_path), operation=operation)
     except Exception:
-        pass
+        let_pass("core.browser_import._cleanup_staging")
 
 
 # (v5.44.10) What a page of a site shows is not always what the site says about its post.  A card on a search grid is a
@@ -357,12 +351,12 @@ class BrowserImportManager:
             try:
                 self.family_lane.stop()
             except Exception:
-                pass
+                let_pass("core.browser_import.BrowserImportManager.stop")
         self._stop.set()
         try:
             self._queue.put_nowait(("", "stop", {}, ""))
         except Exception:
-            pass
+            let_pass("core.browser_import.BrowserImportManager.stop#2")
         self._thread.join(timeout=5.0)
 
     def status(self) -> dict[str, Any]:
@@ -452,7 +446,7 @@ class BrowserImportManager:
                     },
                 )
             except Exception:
-                pass
+                let_pass("core.browser_import.BrowserImportManager._enqueue")
             while len(self._states) > 200:
                 old_id, old = next(iter(self._states.items()))
                 if old.get("status") in {"queued", "running"}:
@@ -467,7 +461,7 @@ class BrowserImportManager:
             try:
                 self._task_registry.fail(task_id, "browser_import_queue_full")
             except Exception:
-                pass
+                let_pass("core.browser_import.BrowserImportManager._enqueue#2")
             return {"ok": False, "error": "browser_import_queue_full"}
         return {"ok": True, "queued": True, "task_id": task_id}
 
@@ -496,7 +490,7 @@ class BrowserImportManager:
             else:
                 self._task_registry.progress(task_id, text=message, detail=message)
         except Exception:
-            pass
+            let_pass("core.browser_import.BrowserImportManager._set")
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -734,7 +728,7 @@ class BrowserImportManager:
                 if row and rw <= int(row["width"] or 0) and rh <= int(row["height"] or 0):
                     return False, image_id, "remote_not_larger"
             except Exception:
-                pass
+                let_pass("core.browser_import.BrowserImportManager._should_probe_upgrade")
         basis = "site_md5_alias" if canonical_alias and site_md5 else "pixiv_work_page"
         return True, image_id, basis
 

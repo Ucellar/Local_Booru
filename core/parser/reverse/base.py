@@ -5,8 +5,9 @@ ReverseOutcome.status values returned by search():
     deferred  — quota/limit; retry_after says when (the file is deferred);
     failed    — temporary trouble: network, HTTP 429/5xx, a page that is not a result
                 (the file is deferred; three in a row pause the service for a while);
-    bad_input — this particular file cannot be searched (too large, unreadable);
+    bad_input — this particular file is incompatible with the service (e.g. too large);
     disabled  — the service switched itself off (bad key, Cloudflare); see Availability.
+The engine adds local_input when the picture cannot be read (defer the file without pausing the service).
 """
 from __future__ import annotations
 

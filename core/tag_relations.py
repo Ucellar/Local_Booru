@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from core.database.connection import db
 from core.tag_utils import canonical_tag_key, normalize_tag
+from core.quiet import passed as let_pass
 
 
 ALIAS_SOURCES = {
@@ -254,7 +255,7 @@ def sync_alias_page(
                     (site, url, f"{type(exc).__name__}: {exc}"[:4000], int(time.time()) + 300),
                 )
         except Exception:
-            pass
+            let_pass("core.tag_relations.sync_alias_page")
         raise
 
 

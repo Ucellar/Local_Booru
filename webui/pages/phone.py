@@ -62,7 +62,6 @@ SAVE = '<path d="M12 4v11M7 10l5 5 5-5"/><path d="M5 20h14"/>'
 FULL = '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'
 TICK = '<path d="M5 12.5l4.5 4.5L19 7.5"/>'
 PLAY = '<path d="M7 5l12 7-12 7z"/>'
-SWAP = '<path d="M7 7h13M16 3l4 4-4 4"/><path d="M17 17H4M8 13l-4 4 4 4"/>'
 ROWS = '<rect x="5" y="3" width="14" height="8" rx="1"/><rect x="5" y="13" width="14" height="8" rx="1"/>'
 EYE = '<path d="M2.5 12c1-2 4.5-6 9.5-6s8.5 4 9.5 6c-1 2-4.5 6-9.5 6s-8.5-4-9.5-6z"/><circle cx="12" cy="12" r="3"/>'
 EYE_OFF = ('<path d="M3 3l18 18"/><path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 8.5 4 9.5 6-.4.9-1.2 2.1-2.3 3.2"/>'
@@ -440,9 +439,11 @@ def icon(req: Request) -> Response:
 
 
 def service_worker(req: Request) -> Response:
-    from webui.server import STATIC_DIR
-    return Response(200, (STATIC_DIR / "phone-sw.js").read_bytes(), "text/javascript; charset=utf-8",
-                    {"Cache-Control": "no-cache"})
+    from core import started_code                 # (v5.44.165) the file the program started with
+    data = started_code.static("phone-sw.js")
+    if data is None:
+        return Response.not_found()
+    return Response(200, data, "text/javascript; charset=utf-8", {"Cache-Control": "no-cache"})
 
 
 def hidden_page(req: Request) -> Response:

@@ -248,35 +248,3 @@ def admission(settings: dict, *, now: int | None = None) -> QuotaAdmission:
             reason=f"governor_state_unavailable:{type(exc).__name__}",
             reserve=reserve,
         )
-
-
-def public_state(settings: dict) -> dict:
-    """Return governor diagnostics without exposing credentials."""
-    reserve = reserve_for(settings)
-    try:
-        with db(settings, readonly=True) as con:
-            row = con.execute(
-                """SELECT short_remaining,long_remaining,quota_checked_at,
-                          quota_probe_after,quota_last_admitted_at,
-                          quota_admissions_since_snapshot,quota_admission_serial,
-                          quota_snapshot_serial,reason
-                   FROM service_state WHERE service=?""",
-                (SERVICE,),
-            ).fetchone()
-        if not row:
-            return {"enabled": enabled(settings), "reserve": reserve}
-        return {
-            "enabled": enabled(settings),
-            "reserve": reserve,
-            "short_remaining": int(row["short_remaining"] if row["short_remaining"] is not None else -1),
-            "long_remaining": int(row["long_remaining"] if row["long_remaining"] is not None else -1),
-            "quota_checked_at": int(row["quota_checked_at"] or 0),
-            "quota_probe_after": int(row["quota_probe_after"] or 0),
-            "quota_last_admitted_at": int(row["quota_last_admitted_at"] or 0),
-            "quota_admissions_since_snapshot": int(row["quota_admissions_since_snapshot"] or 0),
-            "quota_admission_serial": int(row["quota_admission_serial"] or 0),
-            "quota_snapshot_serial": int(row["quota_snapshot_serial"] or 0),
-            "reason": str(row["reason"] or ""),
-        }
-    except Exception as exc:
-        return {"enabled": enabled(settings), "reserve": reserve, "error": f"{type(exc).__name__}: {exc}"}

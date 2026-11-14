@@ -34,10 +34,3 @@ def set_family_item(con, *, family_id: int, family_index: int, image_id: int | N
              is_missing=excluded.is_missing, source_url=excluded.source_url, updated_at=excluded.updated_at""",
         (int(family_id), int(family_index), image_id, str(external_item_id), str(page_label), str(relation_type), 1 if missing else 0, str(source_url), int(time.time())),
     )
-
-
-def ordered_family_items(con, family_id: int):
-    return con.execute(
-        "SELECT * FROM media_family_items WHERE family_id=? ORDER BY family_index, image_id",
-        (int(family_id),),
-    ).fetchall()

@@ -65,11 +65,6 @@ class Tagger:
         from core.parser.sites import build_sites
         return [dict(site.cfg, domain=site.host, engine=site.engine) for site in build_sites(self._ctx)]
 
-    @staticmethod
-    def _site_label(site):
-        site = site if isinstance(site, dict) else {}
-        return str(site.get("name") or site.get("domain") or site.get("base_url") or "site").strip() or "site"
-
     # ── URL -> tags ─────────────────────────────────────────────────────────
     def site_post_from_url(self, url):
         """The site's own post of a post page's URL — a parser ``Post``: the tags by category, the MD5, the uploader

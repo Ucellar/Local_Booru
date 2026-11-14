@@ -1,4 +1,5 @@
 from .migrations import CURRENT_SCHEMA_VERSION as SCHEMA_VERSION, run_migrations
+from core.quiet import passed as let_pass
 
 
 def init_db(con, force=False):
@@ -382,4 +383,4 @@ def _ensure_column(con, table, column, ddl):
         if column not in cols:
             con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
     except Exception:
-        pass
+        let_pass("core.database.schema._ensure_column")

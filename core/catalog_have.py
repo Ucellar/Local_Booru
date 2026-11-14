@@ -22,6 +22,7 @@ class Have:
     other sites), the name keys (``manhwa_sources.names_of``) of every one there."""
     keys: set = field(default_factory=set)
     names: set = field(default_factory=set)
+    primary_keys: set = field(default_factory=set)    # downloaded identities, without merely discovered helpers
 
     def holds(self, ids, names) -> bool:
         return bool(set(ids or ()) & self.keys) or bool(set(names or ()) & self.names)
@@ -79,7 +80,9 @@ def _have_books(settings: dict, roots: tuple) -> Have:
     from core import manga_library as M, manhwa_download as D, manhwa_library as H, manhwa_sources as S
     have = Have()
     for _folder, data in D.followed(settings):
-        have.keys.add((str(data.get("site")), str(data.get("key"))))
+        identity = (str(data.get("site")), str(data.get("key")))
+        have.keys.add(identity)
+        have.primary_keys.add(identity)
         for other in data.get("helpers") or []:
             if isinstance(other, dict) and other.get("site") and other.get("key"):
                 have.keys.add((str(other["site"]), str(other["key"])))
@@ -93,7 +96,9 @@ def _have_books(settings: dict, roots: tuple) -> Have:
             have.names |= S.names_of(item.title, item.title_pretty, item.title_japanese)
             gallery = re.search(r"nhentai\.net/g/(\d+)", str(item.source_url or ""))
             if gallery:                               # (v5.44.97) a gallery of nhentai — by its number
-                have.keys.add(("nhentai", str(int(gallery.group(1)))))
+                identity = ("nhentai", str(int(gallery.group(1))))
+                have.keys.add(identity)
+                have.primary_keys.add(identity)
     return have
 
 

@@ -13,19 +13,10 @@ from pathlib import Path
 from typing import Iterable
 
 from core.paths import SETTINGS_DIR
+from core.quiet import passed as let_pass
 
 SEED_CACHE_DB = SETTINGS_DIR / "subscription_seed_cache.sqlite3"
 OLD_JSON_FILE = SETTINGS_DIR / "subscription_seed_cache.json"
-
-TERMINAL_STATUSES = {
-    "downloaded",
-    "skipped_duplicate",
-    "skipped_blacklist",
-    "skipped_no_file",
-    "failed_perm",
-    "auth_required",
-}
-RETRYABLE_STATUSES = {"pending", "downloading", "failed_temp", "failed"}
 
 
 def _now() -> int:
@@ -124,7 +115,7 @@ def _migrate_json_once(con: sqlite3.Connection) -> None:
         con.commit()
         marker.write_text(str(_now()), encoding="utf-8")
     except Exception:
-        pass
+        let_pass("core.subscription_engine.seed_cache._migrate_json_once")
 
 
 def _row_to_seed(row: sqlite3.Row) -> dict:
@@ -160,12 +151,6 @@ def load_seeds(sub_id: str | None = None, limit: int | None = None) -> list[dict
         return [_row_to_seed(r) for r in con.execute(sql, args).fetchall()]
 
 
-def get_seed(sub_id: str, site: str, post_id: int | str, md5: str = "") -> dict | None:
-    with _connect() as con:
-        row = con.execute("SELECT * FROM subscription_seeds WHERE key=?", (seed_key(sub_id, site, post_id, md5),)).fetchone()
-        return _row_to_seed(row) if row else None
-
-
 def clear_seeds_for_subscription(subscription_id: str, settings: dict | None = None) -> int:
     """Delete all seeds for a subscription. Uses the same seed_cache DB as all other functions."""
     try:
@@ -180,24 +165,6 @@ def clear_seeds_for_subscription(subscription_id: str, settings: dict | None = N
         return deleted
     except Exception as e:
         return 0
-
-
-def has_seen_post(subscription_id: str, site: str, post_id: int | str, md5: str = "") -> bool:
-    with _connect() as con:
-        if post_id:
-            row = con.execute(
-                "SELECT 1 FROM subscription_seeds WHERE subscription_id=? AND site=? AND post_id=? LIMIT 1",
-                (subscription_id, site, int(post_id or 0)),
-            ).fetchone()
-            if row:
-                return True
-        if md5:
-            row = con.execute(
-                "SELECT 1 FROM subscription_seeds WHERE subscription_id=? AND md5=? LIMIT 1",
-                (subscription_id, str(md5).lower()),
-            ).fetchone()
-            return bool(row)
-    return False
 
 
 def upsert_seed(

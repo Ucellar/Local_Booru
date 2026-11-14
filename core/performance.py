@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from core.paths import LOGS_DIR
+from core.quiet import passed as let_pass
 
 PERFORMANCE_LOG_FILE = Path(LOGS_DIR) / "performance.jsonl"
 _LOCK = threading.RLock()
@@ -41,7 +42,7 @@ def _rotate_locked() -> None:
                 older.replace(newer)
         PERFORMANCE_LOG_FILE.replace(PERFORMANCE_LOG_FILE.with_suffix(".jsonl.1"))
     except Exception:
-        pass
+        let_pass("core.performance._rotate_locked")
 
 
 def record_slow_operation(name: str, duration_ms: float, *, settings: dict | None = None, detail: dict[str, Any] | None = None, force: bool = False) -> bool:

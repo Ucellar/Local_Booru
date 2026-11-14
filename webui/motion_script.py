@@ -17,8 +17,9 @@ from pathlib import Path
 
 _PATH = Path(__file__).with_name("static") / "motion.js"
 try:
-    TEXT = _PATH.read_text(encoding="utf-8")
-except OSError:                                   # no file: pages without softness, nothing else changes
+    from core import started_code                 # (v5.44.165) the file the program started with, whenever first read
+    TEXT = started_code.read_text(_PATH)
+except (OSError, UnicodeDecodeError):             # no file: pages without softness, nothing else changes
     TEXT = ""
 if "</script" in TEXT.lower():                    # it would end the page's <script> early
     TEXT = ""

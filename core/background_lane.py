@@ -14,10 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from core.database.connection import db
-
-
-ACTIVE_JOB_STATES = {"pending", "waiting", "retry"}
-TERMINAL_JOB_STATES = {"completed", "failed", "cancelled"}
+from core.quiet import passed as let_pass
 
 
 @dataclass(frozen=True)
@@ -187,10 +184,6 @@ class BackgroundLane:
                     break
         return selected, report
 
-    def pending_state(self, context: Any = None) -> tuple[LaneJob | None, DrainReport]:
-        jobs, report = self.scan_eligible(context, target=1)
-        return (jobs[0] if jobs else None), report
-
     def claim(self, job: LaneJob) -> bool:
         now = int(time.time())
         with db(self.settings, write=True) as con:
@@ -269,7 +262,7 @@ class BackgroundLane:
             from core.background_tasks import get_background_task_registry
             get_background_task_registry().set_state(self.registry_task_id, state, detail=detail, progress_text=progress_text)
         except Exception:
-            pass
+            let_pass("core.background_lane.BackgroundLane._registry")
 
     def drain_once(self, context: Any = None, *, target: int = 1, should_stop: Callable[[], bool] | None = None) -> DrainReport:
         # A cheap periodic lease recovery makes durable lanes restart-safe

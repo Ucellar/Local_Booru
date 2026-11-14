@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from core.quiet import passed as let_pass
 
 _LOG = logging.getLogger("local_booru.visual")
 
@@ -398,7 +399,7 @@ def classify(settings: dict | None, choice: str, path) -> dict:
         try:
             image.close()
         except Exception:
-            pass
+            let_pass("core.visual_models.classify")
 
 
 def load_problem(settings: dict | None, choice: str) -> str:

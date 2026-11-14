@@ -19,6 +19,7 @@ from typing import Iterable, Any
 
 from core.paths import CACHE_DIR
 from core.cache_db import connect as _cache_connect
+from core.quiet import passed as let_pass
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS grabber_preview_exclusions (
@@ -76,7 +77,7 @@ def _migrate_legacy_if_needed(con: sqlite3.Connection) -> None:
         try:
             con.rollback()
         except Exception:
-            pass
+            let_pass("core.grabber_exclusions._migrate_legacy_if_needed")
 
 
 def _connect(settings: dict | None = None) -> sqlite3.Connection:
@@ -190,20 +191,3 @@ def active_identity_set(settings: dict | None = None) -> set[str]:
             if norm:
                 out.add(f"{norm[0]}:{norm[1]}")
     return out
-
-
-def deactivate(settings: dict | None, identities: Iterable[tuple[str, Any]] | None) -> int:
-    rows = compact_identities(identities)
-    if not rows:
-        return 0
-    clauses = " OR ".join(["(identity_type=? AND identity_value=?)" for _ in rows])
-    params: list[str] = []
-    for typ, value in rows:
-        params.extend([typ, value])
-    with _connect(settings) as con:
-        cur = con.execute(
-            f"UPDATE grabber_preview_exclusions SET active=0 WHERE {clauses}",
-            params,
-        )
-        con.commit()
-        return int(cur.rowcount or 0)

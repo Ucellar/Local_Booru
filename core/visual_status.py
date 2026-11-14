@@ -20,13 +20,13 @@ import urllib.request
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from core.quiet import passed as let_pass
 
 PHOTO = "real"
 BOORU = "booru"
 UNKNOWN = "unknown"
 HEURISTIC_MODEL_NAME = "local_visual_real_booru_v1"
 AI_MODEL_PREFIX = "local_clip_photo_illustration"
-MODEL_NAME = HEURISTIC_MODEL_NAME  # legacy import name used by old tests/UI
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".webm", ".mkv", ".mov", ".avi"}
@@ -49,20 +49,6 @@ ILLUSTRATION_PROMPTS = [
     "game character art",
 ]
 
-# Files needed for transformers.CLIPModel/CLIPProcessor.  This is a plain
-# model download, not an image API: user media is never uploaded anywhere.
-CLIP_DOWNLOAD_REPO = "openai/clip-vit-base-patch32"
-CLIP_DOWNLOAD_BASE_URL = "https://huggingface.co/openai/clip-vit-base-patch32/resolve/main"
-CLIP_REQUIRED_FILES = [
-    "config.json",
-    "preprocessor_config.json",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-    "special_tokens_map.json",
-    "pytorch_model.bin",
-]
 CLIP_LARGE_FILES = {"pytorch_model.bin": 100 * 1024 * 1024, "model.safetensors": 100 * 1024 * 1024}
 # Used only for progress display. The exact HTTP size may differ a little, but
 # this prevents the UI from looking frozen when Hugging Face does not expose a
@@ -94,7 +80,7 @@ def _open_analysis_image(path: Path, size: int = 224):
     try:
         im.seek(0)
     except Exception:
-        pass
+        let_pass("core.visual_status._open_analysis_image")
     im = ImageOps.exif_transpose(im)
     if im.mode in ("LA", "PA") or (im.mode == "P" and "transparency" in im.info):
         im = im.convert("RGBA")              # transparency goes on white, as the models were taught
@@ -243,7 +229,7 @@ def _bundled_clip_model_candidates(settings: dict | None = None) -> list[Path]:
             app_base / "assets" / "models" / "clip",
         ])
     except Exception:
-        pass
+        let_pass("core.visual_status._bundled_clip_model_candidates")
     try:
         import sys
         meipass = getattr(sys, "_MEIPASS", None)
@@ -251,14 +237,14 @@ def _bundled_clip_model_candidates(settings: dict | None = None) -> list[Path]:
             root = Path(str(meipass))
             candidates.extend([root / "models" / "clip", root / "assets" / "models" / "clip"])
     except Exception:
-        pass
+        let_pass("core.visual_status._bundled_clip_model_candidates#2")
     # Keep the portable archive path as a last-resort compatibility location,
     # but it is not the primary UX anymore.
     try:
         from core.paths import suggested_settings_storage_dir
         candidates.append(suggested_settings_storage_dir(settings or {}) / "models" / "clip")
     except Exception:
-        pass
+        let_pass("core.visual_status._bundled_clip_model_candidates#3")
     # Stable fallback for tests/source checkouts.
     candidates.append(Path("models") / "clip")
     out: list[Path] = []
@@ -349,22 +335,8 @@ def _clip_available_files(model_dir: Path) -> bool:
             if weight.is_file() and weight.stat().st_size >= CLIP_LARGE_FILES.get(weight_name, 100 * 1024 * 1024):
                 return True
         except Exception:
-            pass
+            let_pass("core.visual_status._clip_available_files")
     return False
-
-
-def missing_clip_model_files(model_dir: Path | None = None, settings: dict | None = None) -> list[str]:
-    model_dir = Path(model_dir) if model_dir is not None else _settings_model_dir(settings)
-    missing: list[str] = []
-    for name in CLIP_REQUIRED_FILES:
-        p = model_dir / name
-        min_size = CLIP_LARGE_FILES.get(name, 1)
-        try:
-            if not p.is_file() or p.stat().st_size < min_size:
-                missing.append(name)
-        except Exception:
-            missing.append(name)
-    return missing
 
 
 def _format_bytes(n: int | float | None) -> str:
@@ -461,7 +433,7 @@ def _download_one_file(url: str, dest: Path, *, progress=None, stop_check=None, 
             if tmp.is_file() and tmp.stat().st_size < 1024 * 1024:
                 tmp.unlink(missing_ok=True)
         except Exception:
-            pass
+            let_pass("core.visual_status._download_one_file")
         raise
 
 
@@ -470,86 +442,6 @@ def _download_progress_text(label: str, downloaded: int, total: int = 0, tmp: Pa
         pct = max(0.0, min(100.0, downloaded * 100.0 / total))
         return f"AI-модель: {label} {_format_bytes(downloaded)} / {_format_bytes(total)} ({pct:.1f}%)"
     return f"AI-модель: {label} {_format_bytes(downloaded)}"
-
-
-def _clip_partial_download_state(model_dir: Path) -> dict[str, Any]:
-    partials: list[dict[str, Any]] = []
-    total_bytes = 0
-    try:
-        if model_dir.exists():
-            for p in model_dir.glob("*.download"):
-                try:
-                    size = int(p.stat().st_size)
-                except Exception:
-                    size = 0
-                name = p.name[:-9] if p.name.endswith(".download") else p.name
-                expected = int(CLIP_EXPECTED_SIZES.get(name, 0) or 0)
-                total_bytes += size
-                partials.append({
-                    "name": name,
-                    "path": str(p),
-                    "bytes": size,
-                    "expected": expected,
-                    "text": _download_progress_text(name, size, expected, p),
-                })
-    except Exception:
-        pass
-    return {
-        "active": bool(partials),
-        "files": partials,
-        "bytes": total_bytes,
-        "text": "; ".join(x.get("text", "") for x in partials if x.get("text")),
-    }
-
-
-def download_clip_model(settings: dict | None = None, *, progress=None, stop_check=None) -> dict[str, Any]:
-    """Download CLIP files once for local NO_MATCH classification.
-
-    This only downloads public model weights/configs from Hugging Face.  It does
-    not upload user files and the classifier still runs with local_files_only.
-    """
-    settings = settings or {}
-    target = auto_clip_model_dir(settings)
-    target.mkdir(parents=True, exist_ok=True)
-    if progress:
-        progress(f"AI-модель: папка {target}")
-    downloaded: list[str] = []
-    skipped: list[str] = []
-    for name in CLIP_REQUIRED_FILES:
-        if stop_check and stop_check():
-            raise RuntimeError("download cancelled")
-        dest = target / name
-        min_size = CLIP_LARGE_FILES.get(name, 1)
-        try:
-            if dest.is_file() and dest.stat().st_size >= min_size:
-                skipped.append(name)
-                if progress:
-                    progress(f"AI-модель: уже есть {name}")
-                continue
-        except Exception:
-            pass
-        url = f"{CLIP_DOWNLOAD_BASE_URL}/{name}"
-        if progress:
-            progress(f"AI-модель: скачиваю {name}")
-        _download_one_file(url, dest, progress=progress, stop_check=stop_check, label=name)
-        downloaded.append(name)
-    missing = missing_clip_model_files(target, settings)
-    if missing:
-        raise RuntimeError("CLIP model download incomplete: missing " + ", ".join(missing))
-    try:
-        marker = target / "LOCAL_BOORU_DOWNLOADED_MODEL.txt"
-        marker.write_text(
-            "Downloaded by Local Booru for local NO_MATCH photo/illustration classification.\n"
-            "User media is not uploaded; the model is used offline after this download.\n"
-            f"Repository: {CLIP_DOWNLOAD_REPO}\n",
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
-    _AI_CACHE.clear()
-    if progress:
-        progress("AI-модель: готово")
-    return {"model_dir": str(target), "downloaded": downloaded, "skipped": skipped, "missing": []}
 
 
 def _load_clip_backend(settings: dict | None = None) -> dict[str, Any]:
@@ -676,57 +568,6 @@ def _clip_zero_shot_classify(path: str | Path, settings: dict | None = None) -> 
 
 
 
-
-def local_clip_model_state(settings: dict | None = None) -> dict[str, Any]:
-    """Human-readable state for the local NO_MATCH AI model.
-
-    Used by UI self-checks.  This does not access the network.
-    """
-    settings = settings or {}
-    candidates = _bundled_clip_model_candidates(settings)
-    model_dir = _settings_model_dir(settings)
-    available = _clip_available_files(model_dir)
-    partial = _clip_partial_download_state(auto_clip_model_dir(settings))
-    deps_ok = True
-    deps_error = ""
-    missing_deps: list[str] = []
-    try:
-        import torch  # noqa: F401
-    except Exception as exc:
-        deps_ok = False
-        missing_deps.append("torch")
-        deps_error = f"torch: {type(exc).__name__}: {exc}"
-    try:
-        import transformers  # noqa: F401
-    except Exception as exc:
-        deps_ok = False
-        missing_deps.append("transformers")
-        deps_error = (deps_error + "; " if deps_error else "") + f"transformers: {type(exc).__name__}: {exc}"
-    try:
-        import sys
-        python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-        python_executable = sys.executable
-    except Exception:
-        python_version = "?"
-        python_executable = ""
-    return {
-        "backend": str(settings.get("visual_nomatch_backend", "clip_local") or "clip_local"),
-        "available": bool(available),
-        "deps_ok": bool(deps_ok),
-        "deps_error": deps_error,
-        "missing_deps": missing_deps,
-        "model_dir": str(model_dir),
-        "download_dir": str(auto_clip_model_dir(settings)),
-        "download_active": bool(partial.get("active")),
-        "download_bytes": int(partial.get("bytes", 0) or 0),
-        "download_text": str(partial.get("text", "") or ""),
-        "download_files": partial.get("files", []),
-        "missing_files": missing_clip_model_files(model_dir, settings) if not available else [],
-        "checked": [str(x) for x in candidates],
-        "model_name": current_visual_model_name(settings),
-        "python_version": python_version,
-        "python_executable": python_executable,
-    }
 
 def classify_visual_status(path: str | Path, settings: dict | None = None) -> dict[str, Any]:
     """Return durable NO_MATCH sorting status.

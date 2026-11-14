@@ -86,23 +86,61 @@ _TAIL_WORDS = re.compile(
 # words after the name only (a title may have «End» or «Manga» in it): «Berserk Complete», «Solo Leveling RAW»
 _NOISE = re.compile(r"(?:(?:^|[\s\-–—])(?:complete[d]?|end|ongoing|raw|rus|eng|jpn?|scan(?:s|lation)?|digital|"
                     r"colou?red|webtoon|manga|манга|manhwa|манхва|manhua|маньхуа|завершен[оа]?|онгоинг|перевод|"
-                    r"сканы?|cbz|zip))+\s*$", re.I)
+                    r"сканы?|cbz|zip|hentai|хентай|uncensored|decensored|без\s+цензуры))+\s*$", re.I)
 _SEPARATORS = re.compile(r"[_.]+")
+# (v5.44.169) the marks of an adult title a folder's name carries besides the title — «18+», «+18», «18 +», «R-18»,
+# «NSFW» — anywhere in it (the owner, 12.11.2026: «даже если название 100% правильное оно не находит просто из за _
+# или 18+»: no site finds «Название 18+»)
+_AGE_MARKS = re.compile(r"(?<![\w+])(?:\+\s?(?:16|18|21)|(?:16|18|21)\s?\+|r[-\s]?18\+?g?|nsfw)(?![\w+])", re.I)
+# …and the number of nhentai's gallery before the title, as its downloaders name a folder: «nhentai-123456 - Title»,
+# «123456 - Title» (five to seven digits and a dash: no title begins so)
+_GALLERY_HEAD = re.compile(r"^\s*(?:nhentai[-_ #]*\d{1,7}(?!\d)[\s\-–—_]*|#?\d{5,7}\s*[-–—_]+\s*(?=\S))", re.I)
+# a name of one word made of words with dashes between them («solo-leveling», «Ван-Пис»): a site may call the title
+# with spaces there — :func:`spellings`
+_SLUG = re.compile(r"[^\W_]+(?:-[^\W_]+)+")
+
+
+def site_label(name: str) -> str:
+    """(v5.44.169) A site's name as a page says it («remanga» → «Remanga») — the site's own word
+    (``Source.label``; the page kept a table of its own); a name that is no site's — as it is."""
+    source = S.by_name(str(name or ""))
+    return source.label if source is not None else str(name or "")
 
 
 def clean_name(name: str) -> str:
     """A folder's name without the group, the year, the tomes and chapters it holds, «complete»…: «[Kirei] Berserk
     (1989) Vol 1-41 [Complete]» → «Berserk»."""
     text = re.sub(r"\.(?:zip|cbz|cbr|pdf)$", "", str(name or ""), flags=re.I)
+    text = _GALLERY_HEAD.sub("", text)               # (v5.44.169) «nhentai-123456 - Title» → «Title»
     text = _BRACKETS.sub(" ", text)
     if not re.search(r"\s", text.strip()):          # «Some_Title_Vol_1» — the separators are the spaces
         text = _SEPARATORS.sub(" ", text)
     else:
         text = text.replace("_", " ")
+    text = _AGE_MARKS.sub(" ", text)                 # (v5.44.169) «Название 18+», «+18 Название», «Название R-18»
     text = _TAIL_WORDS.sub(" ", text)
     text = _NOISE.sub(" ", text)
     text = re.sub(r"\s+[-–—:|]+\s*$", "", re.sub(r"\s+", " ", text)).strip(" -–—:|,.")
     return text
+
+
+def plain_name(name: str) -> str:
+    """(v5.44.169) A folder's name as the sites are asked for it when nothing of it is taken for more than the title:
+    «_» as spaces and the marks of an adult title out («Название_18+» → «Название») — the words themselves all stay
+    (:func:`clean_name` takes more away: the tomes, «complete», «hentai» at the end)."""
+    text = re.sub(r"\.(?:zip|cbz|cbr|pdf)$", "", str(name or ""), flags=re.I)
+    text = _AGE_MARKS.sub(" ", _GALLERY_HEAD.sub("", text).replace("_", " "))
+    return re.sub(r"\s+[-–—:|]+\s*$", "", re.sub(r"\s+", " ", text)).strip(" -–—:|,.")
+
+
+def spellings(name: str) -> list:
+    """(v5.44.169) The ways a name is asked of a site: itself — and, a name of one word with dashes in it
+    («solo-leveling», «Ван-Пис»), the same with spaces (a site that calls it «Solo Leveling» finds nothing by the
+    dashes; one that calls it «Ван-Пис» — nothing by the spaces): the second is asked when the first found nothing."""
+    text = " ".join(str(name or "").split())
+    if text and _SLUG.fullmatch(text):
+        return [text, text.replace("-", " ")]
+    return [text] if text else []
 
 
 @dataclass
@@ -134,6 +172,7 @@ class Entry:
                 "chapters": self.chapters, "pages": self.pages, "folder_name": Path(self.path).name,
                 "linked": bool(self.linked), "archive": bool(self.linked.get("archive")),
                 "site": self.linked.get("site", ""), "site_title": self.linked.get("title", ""),
+                "site_label": site_label(self.linked.get("site", "")),      # (v5.44.169) not the page's own table
                 "url": self.linked.get("url", ""), "follow": bool(self.linked.get("follow")),
                 "cover": f"/api/archive/folder-cover?k={self.key}", "where": self.where, "found_as": self.why,
                 "page": (f"/manga/g/{self.lib_id}" if self.library == "manga" else
@@ -456,6 +495,8 @@ def link(settings: dict, entry: Entry, url: str, *, net=None, say=None) -> dict:
         title = source.title(net, key)
     except S.SourceError as exc:
         raise LinkError(f"{source.label}: {exc}") from exc
+    if net.stop_check():
+        raise LinkError("привязка отменена")
     other = D.linked_folder(settings, title.site, title.key)
     if other is not None and Path(other[1]) != folder:
         raise LinkError(f"«{title.title}» с {source.label} уже привязан к папке «{Path(other[1]).name}»")
@@ -467,20 +508,33 @@ def link(settings: dict, entry: Entry, url: str, *, net=None, say=None) -> dict:
              "kind": entry.kind or D.kind_of(title), "archive": True, "follow": bool(stored.get("follow", False)),
              "linked_at": stored.get("linked_at") or int(time.time())}
     D.write_source(folder, first)                    # look() finds this folder by it
+
+    def cancelled():
+        if not net.stop_check():
+            return False
+        if D.read_source(folder) == first:          # Never roll back another writer's newer association.
+            _forget(folder, stored)
+        return True
+
     try:
         found = D.look(title.url, settings, net=net, where=first["kind"], say=say, deadline=D.QUIET_DEADLINE)
     except D.DownloadError as exc:
-        _forget(folder, stored)
+        if D.read_source(folder) == first:
+            _forget(folder, stored)
         raise LinkError(str(exc)) from exc
+    if cancelled():
+        raise LinkError("привязка отменена")
     if Path(found.folder) != folder:
         _forget(folder, stored)
         raise LinkError("Программа не нашла эту папку по её привязке — попробуйте ещё раз")
     before = _before(folder)
     try:
-        D._write_title(net, source, found, folder)
+        D._write_title(net, source, found, folder, stop_check=net.stop_check)
     except OSError as exc:
         _forget(folder, stored)
         raise LinkError(f"описание и обложка не записались в папку: {exc}") from exc
+    if cancelled():
+        raise LinkError("привязка отменена")
     record = {**D.read_source(folder), "branch": found.branch.id if found.branch else "",
               "branch_name": found.branch.name if found.branch else "", **found.helper_record,
               "helpers_on": found.helpers_on, "licensed": found.title.licensed,

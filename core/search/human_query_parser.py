@@ -84,7 +84,8 @@ _ALIASES_PATH = Path(__file__).parent / "aliases.json"
 
 def _load_aliases() -> dict:
     try:
-        return json.loads(_ALIASES_PATH.read_text(encoding="utf-8"))
+        from core import started_code             # (v5.44.165) the file the program started with
+        return json.loads(started_code.read_text(_ALIASES_PATH))
     except Exception:
         return {"fields": {}, "operators": {}, "units": {}}
 
@@ -98,13 +99,6 @@ def _build_reverse(section: str) -> dict[str, str]:
         for alias in aliases:
             rev[alias.lower()] = canonical
     return rev
-
-def _rebuild_maps():
-    global _FIELD_MAP, _OP_MAP, _UNIT_MAP, _ALIASES
-    _ALIASES = _load_aliases()
-    _FIELD_MAP  = _build_reverse("fields")
-    _OP_MAP     = _build_reverse("operators")
-    _UNIT_MAP   = _build_reverse("units")
 
 _FIELD_MAP  = _build_reverse("fields")
 _OP_MAP     = _build_reverse("operators")
@@ -413,6 +407,3 @@ _PARSER = HumanQueryParser()
 
 def parse_query(text: str) -> ParseResult:
     return _PARSER.parse(text)
-
-def get_autocomplete(partial: str) -> list[str]:
-    return _PARSER.autocomplete(partial)

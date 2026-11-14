@@ -56,12 +56,6 @@ def local_phashes(ctx: ParserContext, path: Path) -> tuple:
     return ((one, ""),) if one else ()
 
 
-def remote_phash(ctx: ParserContext, url: str) -> tuple[str, str, bool]:
-    """(hash, why it is missing, transient). A transient miss is a network problem."""
-    value, _aspect, why, transient = remote_preview(ctx, url)
-    return value, why, transient
-
-
 def remote_preview(ctx: ParserContext, url: str) -> tuple[str, float, str, bool]:
     """(hash, the preview's width / height, why it is missing, transient)."""
     if not url or not url.startswith("http"):

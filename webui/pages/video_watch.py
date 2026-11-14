@@ -86,10 +86,6 @@ def _rating(text: str) -> float:
     return value if 0 < value <= 10 else 0.0
 
 
-def _in_app(req: Request) -> bool:
-    return "QtWebEngine" in str(req.headers.get("User-Agent") or req.headers.get("user-agent") or "")
-
-
 def _frame(req: Request, title: str, body: str, *, phone: bool, status: int = 200) -> Response:
     """A page of its own (a link the program does not show online): the frame of the one page of a series."""
     if phone:

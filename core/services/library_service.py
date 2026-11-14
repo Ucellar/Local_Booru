@@ -303,23 +303,6 @@ def trash_duplicate_groups(settings, plans) -> dict:
     return result
 
 
-def trash_duplicate_paths(settings, deleted_paths, kept_path="", keep_path=""):
-    """Compatibility wrapper: single-group deletion uses the batch-safe path."""
-    if keep_path and not kept_path:
-        kept_path = keep_path
-    paths = [str(p) for p in (deleted_paths or []) if str(p)]
-    if not paths:
-        return {"deleted_files": 0, "errors": 0, "deleted_records": 0}
-    return trash_duplicate_groups(
-        settings,
-        [{
-            "group_index": 1,
-            "group_label": "Группа",
-            "keep_path": str(kept_path or ""),
-            "delete_paths": paths,
-        }],
-    )
-
 def remember_duplicate_relation(settings, infos, relation="not_duplicate") -> int:
     """Remember exact content pairs and mark their current visual relation reviewed.
 
@@ -377,15 +360,6 @@ def remember_duplicate_relation(settings, infos, relation="not_duplicate") -> in
                         (relation, now, image_a, image_b, snapshot_a, snapshot_b),
                     )
     return count
-
-
-def ignored_duplicate_pair(settings, md5_a, md5_b) -> bool:
-    a, b = sorted((str(md5_a or "").lower(), str(md5_b or "").lower()))
-    if not a or not b or a == b:
-        return False
-    from core.database.connection import db
-    with db(settings, readonly=True) as con:
-        return con.execute("SELECT 1 FROM ignored_duplicate_pairs WHERE md5_a=? AND md5_b=? LIMIT 1", (a, b)).fetchone() is not None
 
 
 # UI-facing read operations: widgets depend on the service boundary, not SQL modules.

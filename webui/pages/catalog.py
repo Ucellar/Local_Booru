@@ -20,6 +20,8 @@ tags, type, status, «от — до» of chapters, rating and year, «Сброс
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from urllib.parse import parse_qs, urlencode
 
@@ -27,6 +29,7 @@ from core import catalog as C
 from webui.html import esc, page_frame
 from webui.server import Request, Response
 
+_LOG = logging.getLogger("local_booru.webui")
 PATHS = {"manga": "/manga/feed", "manhwa": "/manhwa/feed", "video": "/videos/feed"}
 HEADS = {"manga": "Манга онлайн", "manhwa": "Манхва онлайн", "video": "Сериалы онлайн"}
 PREF = {"manga": "feed_manga", "manhwa": "feed_manhwa", "video": "feed_video"}
@@ -50,6 +53,38 @@ def register(router) -> None:
     router.add("GET", r"/api/catalog/cover", cover)
     router.add("GET", r"/api/catalog/filters", filters_json)          # (v5.44.130) a page's genres as searches
     router.add("GET", r"/api/catalog/tags", tags_json)                # (v5.44.148) a site's own tags for «Найти тег»
+    router.add("POST", r"/api/catalog/browser-check", browser_check)
+
+
+def browser_check(req: Request) -> Response:
+    """An explicit local desktop action: an allowlisted site's fixed page, never a caller's URL."""
+    from core import manhwa_sources as S, site_browser
+    from webui import content_mode
+    headers = {str(k).lower(): str(v) for k, v in req.headers.items()}
+    if (req.peer not in ("127.0.0.1", "::1") or req.server is None
+            or not req.server.host_ok(headers.get("host", ""))
+            or not req.server.origin_ok(headers.get("origin", "")) or content_mode.of_phone(req)):
+        return Response.json({"ok": False, "error": "Откройте проверку в программе на компьютере."}, 403)
+    try:
+        body = json.loads(req.body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return Response.json({"ok": False, "error": "Не удалось прочитать запрос проверки сайта."}, 400)
+    if not isinstance(body, dict):
+        return Response.json({"ok": False, "error": "Не удалось прочитать запрос проверки сайта."}, 400)
+    site = body.get("site", "nudemoon")       # the original button sent {}; it still means Nude-Moon alone
+    allowed = site_browser.manual_check_sites()
+    if set(body) - {"site"} or not isinstance(site, str) or site not in allowed or S.by_name(site) is None:
+        return Response.json({"ok": False, "error": "Для этого сайта ручная проверка недоступна."}, 400)
+    label = allowed[site]
+    if content_mode.mode() == "sfw" and S.by_name(site).adult_only:
+        return Response.json({"ok": False, "error": f"{label} скрыт в режиме SFW."}, 409)
+    try:
+        done = site_browser.verify_site(site)
+    except site_browser.BrowserError as exc:
+        return Response.json({"ok": False, "error": str(exc)}, 409)
+    if not done:
+        return Response.json({"ok": False, "error": f"Проверка {label} не завершена. Откройте её ещё раз."}, 409)
+    return Response.json({"ok": True})
 
 
 # ── what is asked ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -150,7 +185,10 @@ def _remember(kind: str, asked: Asked) -> None:
     from webui import prefs
     text = urlencode(asked.pairs())
     if str(prefs.load().get(PREF[kind]) or "") != text:
-        prefs.save({PREF[kind]: text})
+        try:
+            prefs.save({PREF[kind]: text})
+        except OSError as exc:             # (v5.44.165) the file held (Windows): the page opens, the choice is
+            _LOG.warning("the feed's choice was not remembered: %s", exc)       # remembered by the next one
 
 
 # ── tiles ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -201,6 +239,21 @@ def _had_note(had: int) -> str:
     return (f'<p class="cat-note quiet">Уже скачанные не показаны: {had} — они в папке программы.</p>')
 
 
+def _browser_check_control(asked: Asked, label: str, why: str, n: int) -> str:
+    """Offer the human check only for its matching error; ordinary failures keep their existing retry."""
+    from core import manhwa_sources as S, site_browser
+    if asked.phone or "ждет человека" not in why.lower().replace("ё", "е"):
+        return ""
+    site = next((key for key, shown in site_browser.manual_check_sites().items() if shown == label), "")
+    source = S.by_name(site)
+    if source is None or asked.query.mode == "sfw" and source.adult_only:
+        return ""
+    return (f' <button type="button" class="cat-btn quiet" data-cat-browser-check '
+            f'data-cat-browser-site="{esc(site)}" data-cat-browser-label="{esc(label)}" '
+            f'data-cat-retry="{esc(asked.href(page=n, again=1))}">Пройти проверку {esc(label)}</button>'
+            ' <span data-cat-browser-status role="status" aria-live="polite"></span>')
+
+
 def _answer(req: Request, asked: Asked, n: int, wait: float, rest: bool = False) -> Answer:
     again = req.arg("again") == "1"
     have = C.downloaded(asked.kind, req.settings)
@@ -226,7 +279,8 @@ def _answer(req: Request, asked: Asked, n: int, wait: float, rest: bool = False)
             continue
         said = why if why.startswith(label) else f"{label} не ответил: {why}"     # (v5.44.98) the label once
         notes.append(f'<p class="cat-note bad" role="alert">{esc(said)} '
-                     f'<a href="{esc(asked.href(page=n, again=1))}">Спросить ещё раз</a></p>')
+                     f'<a href="{esc(asked.href(page=n, again=1))}">Спросить ещё раз</a>'
+                     f'{_browser_check_control(asked, label, why, n)}</p>')
     rest_href = ""
     if got.late:                     # (v5.44.98) a site that is late: the others' tiles now, its own come after
         rest_href = asked.href(page=n, part=1, rest=1)
@@ -297,7 +351,8 @@ def _alone(asked: Asked, n: int, wait: float, again: bool, have: "C.Have | None"
     label = source.label if source is not None else asked.site
     if got.error:
         return Answer([], False, f'<p class="cat-note bad" role="alert">{esc(got.error)} <a href="'
-                                 f'{esc(asked.href(page=n, again=1))}">Попробовать ещё раз</a></p>')
+                                 f'{esc(asked.href(page=n, again=1))}">Попробовать ещё раз</a>'
+                                 f'{_browser_check_control(asked, label, got.error, n)}</p>')
     rows = [(h, list(h.names)) for h in got.hits]
     if asked.site in ("hentaichan", "nudemoon"):   # (v5.44.95) the parts of one work — one tile (v5.44.131 Nude-Moon)
         rows = C.works_of(got.hits)

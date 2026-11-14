@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
+from core.quiet import passed as let_pass
 
 TRANSIENT_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
 class PermanentlyDisabledHostError(RuntimeError):
@@ -163,44 +164,12 @@ def _retry_after_seconds(response) -> float:
     return retry_after_seconds(response)
 
 
-def adaptive_retry_delay(reported_delay, fallback_delay, previous_delay=0, *, repeated_failure=False, minimum=60, maximum=3600) -> int:
-    """Choose one bounded retry delay with exponential growth after a failed probe.
-
-    A valid service-provided delay wins over the configured fallback. When the
-    post-cooldown canary fails, the previous delay doubles up to ``maximum``.
-    """
-    try:
-        low = max(0, int(minimum or 0))
-    except Exception:
-        low = 0
-    try:
-        high = max(low, int(maximum or 3600))
-    except Exception:
-        high = max(low, 3600)
-    try:
-        fallback = max(low, min(high, int(fallback_delay or low)))
-    except Exception:
-        fallback = low
-    try:
-        reported = max(0, int(reported_delay or 0))
-    except Exception:
-        reported = 0
-    try:
-        previous = max(0, int(previous_delay or 0))
-    except Exception:
-        previous = 0
-    chosen = reported or fallback
-    if repeated_failure and previous > 0:
-        chosen = max(chosen, min(high, previous * 2))
-    return max(low, min(high, int(chosen)))
-
-
 def _safe_log(log_func, message: str) -> None:
     if callable(log_func):
         try:
             log_func(message)
         except Exception:
-            pass
+            let_pass("core.network._safe_log")
 
 
 def request_with_retries(raw_call, method: str, url: str, *, settings: dict | None = None, log_func=None, cancel_callback=None, max_attempts: int | None = None, **kwargs):
@@ -238,7 +207,7 @@ def request_with_retries(raw_call, method: str, url: str, *, settings: dict | No
             except InterruptedError:
                 raise
             except Exception:
-                pass
+                let_pass("core.network.request_with_retries")
         try:
             response = raw_call(url, **kwargs)
             status = int(getattr(response, "status_code", 0) or 0)
@@ -293,7 +262,7 @@ def _sleep_interruptible(seconds: float, cancel_callback=None) -> None:
             except InterruptedError:
                 raise
             except Exception:
-                pass
+                let_pass("core.network._sleep_interruptible")
         time.sleep(min(0.25, max(0.0, end - time.time())))
 
 

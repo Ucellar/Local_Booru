@@ -9,38 +9,7 @@ from threading import Lock, Thread
 import time
 
 from core.database.connection import db
-
-
-def _live_paths(settings: dict) -> list[Path]:
-    with db(settings, readonly=True) as con:
-        return [Path(r["path"]) for r in con.execute("SELECT path FROM images WHERE deleted=0 ORDER BY indexed_at DESC").fetchall()]
-
-
-def repair_missing_thumbnails(settings: dict, progress: Callable[[str], None] | None = None, stop_check=None) -> dict:
-    from core.image_safe import safe_thumbnail_path
-    paths = _live_paths(settings)
-    created = errors = skipped = 0
-    w = max(256, int(settings.get("thumb_cache_card_w", 240) or 240) * 2)
-    h = max(256, int(settings.get("thumb_cache_card_h", 220) or 220) * 2)
-    for idx, p in enumerate(paths, 1):
-        if stop_check and stop_check():
-            break
-        if not p.exists():
-            skipped += 1
-            continue
-        try:
-            safe_thumbnail_path(str(p), w, h)
-            created += 1
-        except Exception:
-            errors += 1
-        if progress and idx % 100 == 0:
-            progress(f"Превью: {idx}/{len(paths)}")
-    return {"checked": len(paths), "created": created, "missing": skipped, "errors": errors}
-
-
-def validate_recent_media(settings: dict, limit: int = 1000, progress: Callable[[str], None] | None = None) -> dict:
-    from core.stability import check_recent_media_after_crash
-    return check_recent_media_after_crash(settings, log=progress, limit=int(limit))
+from core.quiet import passed as let_pass
 
 
 CATEGORY_RECHECK_HOSTS = (
@@ -152,7 +121,7 @@ def _canonical_category_recheck_host(host_or_url: str) -> str:
             from urllib.parse import urlparse
             text = urlparse(text).netloc.lower()
         except Exception:
-            pass
+            let_pass("core.maintenance_tasks._canonical_category_recheck_host")
     text = text.replace("www.", "")
     if text in ("api.rule34.xxx",):
         return "rule34.xxx"
@@ -508,7 +477,7 @@ def recheck_general_only_tag_categories(
                 with write_lock:
                     retry_tag_enrichment(worker_settings, original_path, source_url, job_key=CATEGORY_RECHECK_JOB_KEY, delay_seconds=300, error=str(exc))
             except Exception:
-                pass
+                let_pass("core.maintenance_tasks.recheck_general_only_tag_categories.process_network_row")
             with log_lock:
                 if len(log_samples) < 16:
                     log_samples.append(f"{host or 'source'}: {type(exc).__name__}: {exc}")
@@ -578,7 +547,7 @@ def recheck_general_only_tag_categories(
                 try:
                     q.task_done()
                 except Exception:
-                    pass
+                    let_pass("core.maintenance_tasks.recheck_general_only_tag_categories.site_worker")
 
     for host, rows, workers in worker_plan:
         q: Queue = Queue()

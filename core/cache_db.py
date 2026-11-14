@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 
 from core.paths import CACHE_DIR
+from core.quiet import passed as let_pass
 
 _SCHEMA_LOCK = threading.RLock()
 _INITIALIZED: set[str] = set()
@@ -69,7 +70,7 @@ def close_thread_cache_connections() -> None:
         try:
             con.close()
         except Exception:
-            pass
+            let_pass("core.cache_db.close_thread_cache_connections")
     conns.clear()
 
 

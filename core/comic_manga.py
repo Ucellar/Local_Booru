@@ -629,8 +629,12 @@ def move(settings: dict, comic: Comic, *, say=None) -> dict:
             "page": page_of(settings, folder), "error": str(result.get("error") or "")}
 
 
-def page_of(settings: dict, folder) -> str:
-    """The address of the manga's page in «Манга» (its id — of its place in the manga folder)."""
+def page_of(settings: dict, folder, kind: str = "manga") -> str:
+    """The library page of an existing copy, using the library that owns its folder."""
+    if kind == "manhwa":
+        from core import manhwa_library as H
+        root = H.manhwa_root(settings)
+        return f"/manhwa/t/{H._id_for(Path(root), Path(str(folder)))}" if root else "/manhwa"
     from core import manga_library as M
     root = M.manga_root(settings)
     if not root:
@@ -712,10 +716,14 @@ def _round(settings: dict, *, stop_check=None, parser: bool = False, say=None) -
             continue
         out["moved"].append(got["name"])
         if said.get("url") and not comic.more:          # its copy linked to the title that confirmed it
-            from core import parser_manga
-            parser_manga.link_folder(settings, f"comic:{comic.key}", comic.title, Path(got["folder"]), said["url"],
-                                     how=str(said.get("how") or ""), by=str(said.get("by") or ""),
-                                     stop_check=stop_check)
+            from core import parser_manga, parser_manga_nhentai
+            number = parser_manga_nhentai.number_of(said["url"])
+            if number:                                  # (v5.44.169) a gallery of nhentai: its own description
+                parser_manga_nhentai.describe_copy(settings, Path(got["folder"]), number, stop_check=stop_check)
+            else:
+                parser_manga.link_folder(settings, f"comic:{comic.key}", comic.title, Path(got["folder"]),
+                                         said["url"], how=str(said.get("how") or ""), by=str(said.get("by") or ""),
+                                         stop_check=stop_check)
     from core import parser_loose                       # (v5.44.164) the pages of manga among the loose pictures:
     left = deadline - time.monotonic()                  # a short part of the round (it works only when it has what)
     if left > 1 and not stop_check():

@@ -18,6 +18,7 @@ import threading
 import time
 
 from core.work_timing import BASE, IMPORT_WAIT, STEPS
+from core.quiet import passed as let_pass
 
 _LOG = logging.getLogger("local_booru.md5_invariant")
 
@@ -41,15 +42,7 @@ def _log_exact_md5_merge(canonical: Path, md5: str, added_sources, *, discarded_
                 str(canonical), str(md5 or ""), str(origin or ""),
             )
     except Exception:
-        pass
-
-def _urls_from_sources(source_list) -> set[str]:
-    urls: set[str] = set()
-    for line in source_list or []:
-        for part in str(line or "").split():
-            if part.startswith(("http://", "https://")):
-                urls.add(part.strip())
-    return urls
+        let_pass("core.import_pipeline._log_exact_md5_merge")
 
 def _linked_source_urls(settings: dict, media_path: Path) -> set[str]:
     try:
@@ -77,7 +70,7 @@ def _deleted_action(settings: dict, md5: str) -> str:
         if has_deleted_md5(md5, settings=settings):
             return "return_inbox" if str(settings.get("deleted_reimport_policy", "skip")) == "return_inbox" else "skip"
     except Exception:
-        pass
+        let_pass("core.import_pipeline._deleted_action")
     return "allow"
 
 
@@ -367,7 +360,7 @@ def _discard_transient_exact_copy(settings: dict, incoming: Path, canonical: Pat
             from core.services.media_storage_service import unlink_managed
             return bool(unlink_managed(settings, incoming, operation="import_pipeline.discard_exact_copy"))
     except Exception:
-        pass
+        let_pass("core.import_pipeline._discard_transient_exact_copy")
     return False
 
 
@@ -394,7 +387,7 @@ def _cleanup_promoted_nomatch(settings: dict, md5: str, original_path: str, prom
                     int(result.get("errors", 0) or 0),
                 )
         except Exception:
-            pass
+            let_pass("core.import_pipeline._cleanup_promoted_nomatch")
         return dict(result)
     except Exception:
         return {"rows_deactivated": 0, "image_rows_removed": 0, "files_removed": 0, "errors": 1}
@@ -570,12 +563,12 @@ def _register_locked(
             from core.deleted_registry import forget_deleted_md5
             forget_deleted_md5(md5, settings=settings)
         except Exception:
-            pass
+            let_pass("core.import_pipeline._register_locked")
         for url in source_list:
             try:
                 update_url_history(settings, url, status="merged_exact_md5", image_id=image_id)
             except Exception:
-                pass
+                let_pass("core.import_pipeline._register_locked#2")
         removed_copy = _discard_transient_exact_copy(settings, p, canonical)
         sources_after = _linked_source_urls(settings, canonical)
         added_sources = sorted(sources_after - sources_before)
@@ -604,7 +597,7 @@ def _register_locked(
             from core.deleted_registry import forget_deleted_md5
             forget_deleted_md5(md5, settings=settings)
         except Exception:
-            pass
+            let_pass("core.import_pipeline._register_locked#3")
     else:
         deleted_action = _deleted_action(settings, md5)
     if deleted_action == "skip":
@@ -616,7 +609,7 @@ def _register_locked(
                     if url:
                         update_url_history(settings, url, status="skipped_deleted", error="exact MD5 previously deleted")
         except Exception:
-            pass
+            let_pass("core.import_pipeline._register_locked#4")
         return {"action": "skip_deleted", "image_id": 0, "md5": md5}
 
     if not already_live_current and not p.is_file():
@@ -653,7 +646,7 @@ def _register_locked(
         try:
             update_url_history(settings, url, status="downloaded", image_id=image_id)
         except Exception:
-            pass
+            let_pass("core.import_pipeline._register_locked#5")
     added_sources = []
     if already_live_current:
         sources_after = _linked_source_urls(settings, p)

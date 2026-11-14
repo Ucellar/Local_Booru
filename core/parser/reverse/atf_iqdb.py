@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from core.parser.http import HttpFailure
+from core.parser.http import HttpFailure, UploadUnavailable
 from core.parser.models import Candidate, ReverseOutcome
 from core.parser.reverse.base import ReverseService
 from core.parser.sites.base import SiteUnavailable
@@ -183,8 +183,8 @@ class AtfIqdb(ReverseService):
             return f"{path.suffix or 'без расширения'} — ATF IQDB ищет по JPEG и PNG, не спрашиваю"
         try:
             size = path.stat().st_size
-        except OSError:
-            return "картинки для поиска нет"
+        except OSError as exc:
+            raise UploadUnavailable(exc) from exc
         if size > UPLOAD_MAX:
             return f"картинка {size // (1024 * 1024)} МБ — для ATF IQDB больше {UPLOAD_MAX // (1024 * 1024)} МБ не шлю"
         return ""

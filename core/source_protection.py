@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Iterable
 
 from core.paths import LOGS_DIR
 from core.storage_roots import configured_output_root
+from core.quiet import passed as let_pass
 
 EVENT_LOG = Path(LOGS_DIR) / "protected_source_actions.jsonl"
 
@@ -111,7 +111,7 @@ def log_blocked_mutation(settings: dict, path: str | Path, operation: str, *, de
         with EVENT_LOG.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
     except Exception:
-        pass
+        let_pass("core.source_protection.log_blocked_mutation")
 
 
 def require_managed_media_mutation(settings: dict, path: str | Path, operation: str) -> bool:
@@ -127,18 +127,6 @@ def require_managed_media_mutation(settings: dict, path: str | Path, operation: 
     return False
 
 
-def filter_managed_mutations(settings: dict, paths: Iterable[str | Path], operation: str) -> tuple[list[Path], list[Path]]:
-    allowed: list[Path] = []
-    blocked: list[Path] = []
-    for raw in paths or []:
-        p = Path(raw)
-        if require_managed_media_mutation(settings, p, operation):
-            allowed.append(p)
-        else:
-            blocked.append(p)
-    return allowed, blocked
-
-
 def recent_blocked_events(limit: int = 100) -> list[dict]:
     try:
         if not EVENT_LOG.exists():
@@ -149,7 +137,7 @@ def recent_blocked_events(limit: int = 100) -> list[dict]:
             try:
                 result.append(dict(json.loads(line)))
             except Exception:
-                pass
+                let_pass("core.source_protection.recent_blocked_events")
         return result
     except Exception:
         return []

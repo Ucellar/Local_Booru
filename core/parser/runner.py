@@ -40,6 +40,7 @@ from core.parser.reverse import build_reverse
 from core.parser.sites import SiteUnavailable, build_sites
 from core.parser.tally import Tally
 from core.parser.util import clean_host, short
+from core.quiet import passed as let_pass
 
 __all__ = ["ParserRunner", "OPEN_FILES", "OFF_HOW", "ASKING_AGAIN", "MEDIA_EXTS"]
 
@@ -610,7 +611,7 @@ class ParserRunner:
         try:
             engine.ctx.activity(service.name, word, str(ticket.state.path))
         except Exception:  # the page's view of the run, not the run
-            pass
+            let_pass("core.parser.runner.ParserRunner._take_answer")
         return matches
 
     def estimate(self) -> tuple[int | None, str]:
@@ -860,7 +861,7 @@ class ParserRunner:
                 from core.tagger.results import append_error_log
                 append_error_log(f"PARSER {job.path}: {traceback.format_exc()}")
             except Exception:
-                pass
+                let_pass("core.parser.runner.ParserRunner._one")
             return FileResult(job.path, "error", f"{type(exc).__name__}: {exc}")
 
     def _wait_for_database(self) -> bool:

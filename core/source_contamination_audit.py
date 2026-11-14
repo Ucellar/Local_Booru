@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 
 from core.database.connection import db, db_path
 from core.redaction import sanitize_text
+from core.quiet import passed as let_pass
 
 
 CLASSIFICATIONS = (
@@ -72,7 +73,7 @@ def _post_id(url: str) -> str:
             if value.isdigit():
                 return value
     except Exception:
-        pass
+        let_pass("core.source_contamination_audit._post_id")
     return ""
 
 
@@ -740,11 +741,3 @@ def audit_source_contamination(
     report["summary_text"] = format_source_contamination_text(report)
     progress("Source audit: готово; база и файлы не изменялись.")
     return report
-
-
-def save_source_contamination_json(report: dict[str, Any], destination: str) -> str:
-    from pathlib import Path
-    path = Path(destination)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(path)

@@ -94,7 +94,7 @@
   }
 
   function signature(e) {
-    return JSON.stringify([e.state, e.counts, e.query, e.why, e.site, e.site_title, e.url, e.title, e.chapters,
+    return JSON.stringify([e.state, e.counts, e.query, e.why, e.site, e.site_label, e.site_title, e.url, e.title, e.chapters,
       (e.candidates || []).map((c) => c.url), working.has(e.key), e.how, e.by, e.tried, e.later]);
   }
 
@@ -188,7 +188,7 @@
     if (e.state === "linked" || e.state === "own") {
       const site = e.site_title ? `«${e.site_title}»` : "";
       out.push(el("p", "ar-state ok", (e.state === "own" ? "Скачан программой" : "Узнан") + (site ? ": " + site : "")
-        + (e.site ? ` (${siteLabel(e.site)})` : "")));
+        + (e.site ? ` (${e.site_label || e.site})` : "")));     // (v5.44.169) the site's name — the server's
       if (e.state === "linked" && e.how && HOWS[e.how]) {
         out.push(el("p", "ar-how", "Как: " + HOWS[e.how] + (e.by && e.how !== "url" ? " — " + e.by : "")));
       }
@@ -241,12 +241,6 @@
     if (tools.children.length) out.push(tools);
     return out;
   }
-
-  const SITES = { remanga: "Remanga", recomics: "ReComics", mangalib: "MangaLib", mangabuff: "MangaBuff",
-    readmanga: "ReadManga", desu: "Desu", comx: "com-x.life", onelove: "Manga One Love", mangadex: "MangaDex",
-    hentaichan: "Хентай-тян",
-    hentailib: "HentaiLib", allhentai: "AllHentai", nudemoon: "Nude-Moon" };
-  const siteLabel = (name) => SITES[name] || name;
 
   function candidateCard(e, c) {
     const card = el("button", "ar-cand");

@@ -61,13 +61,6 @@ def unique(items: Iterable[Any]) -> list:
     return out
 
 
-def query_value(url: str, key: str) -> str:
-    try:
-        return (parse_qs(urlparse(url).query).get(key) or [""])[0]
-    except ValueError:
-        return ""
-
-
 def post_id_from_url(url: str) -> str:
     """Extract a numeric post id from danbooru/gelbooru/moebooru/e621/rule34.us post URLs."""
     text = str(url or "")

@@ -26,16 +26,6 @@ from core.media_utils import MEDIA_EXTS
 _LOG = logging.getLogger("local_booru.library_diagnostics")
 
 
-AUTO_DELETE_REASONS = {
-    "duplicate_delete",
-    "subscription_visual_duplicate",
-    "subscription_session_cleanup",
-    "downloader_exact_duplicate",
-    "reimport_deleted_rejected",
-    "restore_exact_duplicate_cleanup",
-    "exact_md5_auto_normalized",
-}
-
 REASON_LABELS = {
     "gallery_context_delete": "удалено вручную из галереи",
     "post_context_delete": "удалено вручную из просмотра",
@@ -947,10 +937,3 @@ def repair_history() -> list[dict[str, Any]]:
             _LOG.warning("repair history not read: %s", exc)
             return []
     return [h for h in reversed(history) if isinstance(h, dict)]
-
-
-def save_audit_json(report: dict[str, Any], destination: str | Path) -> str:
-    path = Path(destination)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sanitize_object(report), ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(path)

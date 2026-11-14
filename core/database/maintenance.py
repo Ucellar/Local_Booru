@@ -1,6 +1,7 @@
 from __future__ import annotations
 from .connection import db, db_path
 from .storage import _safe_ident, _tag_written
+from core.quiet import passed as let_pass
 
 
 def _checkpoint_truncate(settings) -> str:
@@ -36,16 +37,16 @@ def optimize(settings):
     checkpoint = _checkpoint_truncate(settings)
     with db(settings, write=True) as con:
         try: con.execute("ANALYZE")
-        except Exception: pass
+        except Exception: let_pass("core.database.maintenance.optimize")
         try: con.execute("PRAGMA optimize")
-        except Exception: pass
+        except Exception: let_pass("core.database.maintenance.optimize#2")
         try:
             con.execute(
                 "INSERT INTO maintenance_history(operation,status,before_bytes,after_bytes,reclaimed_bytes,details,created_at) VALUES(?,?,?,?,?,?,?)",
                 ("optimize", "completed", int(before.get("size_bytes",0)), int(before.get("size_bytes",0)), 0, f"WAL checkpoint: {checkpoint}; ANALYZE; PRAGMA optimize", int(time.time())),
             )
         except Exception:
-            pass
+            let_pass("core.database.maintenance.optimize#3")
     if checkpoint == "ok":
         _checkpoint_truncate(settings)              # ANALYZE wrote to the log again
     return {"db": str(db_path(settings)), "before": before, "after": storage_report(settings), "wal_checkpoint": checkpoint}
@@ -201,7 +202,7 @@ def repair_e621_tag_metadata(settings):
             for _image_id in sorted(affected_images):
                 refresh_effective_tag_categories(con, int(_image_id))
         except Exception:
-            pass
+            let_pass("core.database.maintenance.repair_e621_tag_metadata")
         from .repository import cleanup_orphans
         cleanup_orphans(con)
     return {
@@ -280,7 +281,7 @@ def vacuum(settings, *, make_backup=True):
             )
             con.commit()
         except Exception:
-            pass
+            let_pass("core.database.maintenance.vacuum")
     finally:
         con.close()
     # In WAL mode the compacted pages are in the journal: the file itself shrinks when it is moved into

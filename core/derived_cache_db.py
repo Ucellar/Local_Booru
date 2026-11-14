@@ -25,6 +25,7 @@ import uuid
 from typing import Iterator
 
 from core.paths import CACHE_DIR
+from core.quiet import passed as let_pass
 
 CACHE_SCHEMA_VERSION = 1
 SUPPORTED_EXTERNAL_CACHES = {"vp_tree", "image_effective_tag_category"}
@@ -371,7 +372,7 @@ def publish_stage_generation(
                 finally:
                     os.close(fd)
         except Exception:
-            pass
+            let_pass("core.derived_cache_db.publish_stage_generation")
         # Validate by reopening the final immutable name before publication.
         with _VALIDATION_LOCK:
             _VALIDATED.pop(str(final_path.resolve()), None)
@@ -388,7 +389,7 @@ def publish_stage_generation(
         try:
             temp_path.unlink(missing_ok=True)
         except Exception:
-            pass
+            let_pass("core.derived_cache_db.publish_stage_generation#2")
 
 
 def _active_external_file_ids(settings: dict) -> set[str]:
@@ -457,44 +458,6 @@ def garbage_collect_external_generations(settings: dict, *, keep_per_cache: int 
             except Exception as exc:
                 errors.append(f"{path}: {exc}")
     return {"removed": removed, "kept": kept, "errors": errors}
-
-
-def clear_external_generations(settings: dict) -> dict:
-    """Delete only unpublished generations and always preserve active files.
-
-    The name is retained for compatibility, but this helper deliberately cannot
-    make a valid main.db pointer dangle.  Switching back to the main backend must
-    happen through a successful rebuild before its former generation is eligible
-    for removal.
-    """
-    root = external_cache_dir(settings)
-    removed = 0
-    kept_active = 0
-    errors: list[str] = []
-    try:
-        active_ids = _active_external_file_ids(settings)
-    except Exception as exc:
-        return {
-            "removed": 0,
-            "kept_active": 0,
-            "errors": [f"authority_unavailable: {type(exc).__name__}: {exc}"],
-        }
-    if root.exists():
-        for path in root.glob("derived_*.sqlite3"):
-            match = _FILE_RE.match(path.name)
-            if match and match.group(2) in active_ids:
-                kept_active += 1
-                continue
-            try:
-                path.unlink(missing_ok=True)
-                removed += 1
-            except Exception as exc:
-                errors.append(f"{path}: {exc}")
-    with _VALIDATION_LOCK:
-        # Clearing validation memoisation is harmless; active immutable files
-        # are reopened and revalidated on their next read.
-        _VALIDATED.clear()
-    return {"removed": removed, "kept_active": kept_active, "errors": errors}
 
 
 def selected_backend_from_connection(con: sqlite3.Connection, cache_name: str) -> str:
@@ -580,4 +543,4 @@ def attach_external_cache(
             try:
                 con.execute(f"DETACH DATABASE {alias}")
             except Exception:
-                pass
+                let_pass("core.derived_cache_db.attach_external_cache")

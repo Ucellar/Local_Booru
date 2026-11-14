@@ -42,9 +42,6 @@ class Section:
     danger: bool = False
     keys: tuple = field(default=())
 
-    def all_keys(self) -> tuple:
-        return tuple(f.key for f in self.fields)
-
 
 class FieldError(ValueError):
     def __init__(self, item: Field, message: str):

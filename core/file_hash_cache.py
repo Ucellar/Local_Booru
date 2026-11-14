@@ -16,6 +16,7 @@ from typing import Any
 from core.paths import CACHE_DIR
 from core.cache_db import connect as _cache_connect
 from core.media_utils import file_md5 as _byte_md5
+from core.quiet import passed as let_pass
 
 _MD5_RE = re.compile(r"^[0-9a-f]{32}$", re.I)
 _MIGRATED_PATHS: set[str] = set()
@@ -77,7 +78,7 @@ def _migrate_legacy_if_needed(con: sqlite3.Connection) -> None:
         try:
             con.rollback()
         except Exception:
-            pass
+            let_pass("core.file_hash_cache._migrate_legacy_if_needed")
 
 
 def _connect(settings: dict | None = None) -> sqlite3.Connection:
@@ -185,18 +186,6 @@ def get_or_compute_phash(settings: dict | None, path: str | Path, compute_func) 
     if phash:
         upsert(settings, path, hash_phash=phash)
     return phash, False
-
-
-def bind_image_row_md5(settings: dict | None, image_id: int, path: str | Path) -> str:
-    """Backward-compatible helper: compute/cache real MD5 only.
-
-    v258 deliberately stopped writing to the main ``images`` table from this
-    cache module.  Main DB mutation belongs to database/library lifecycle code,
-    not to a parser hash-cache helper; callers that need to update image rows
-    should do so explicitly after this function returns the MD5.
-    """
-    md5, _hit = get_or_compute_md5(settings, path)
-    return md5
 
 
 def count(settings: dict | None = None) -> int:

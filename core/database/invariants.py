@@ -11,6 +11,7 @@ from typing import Any
 from .connection import db
 from .repository import cleanup_orphans
 from . import journal
+from core.quiet import passed as let_pass
 
 
 def _now() -> int:
@@ -160,7 +161,7 @@ def repair(settings: dict, *, mark_missing_deleted: bool = True) -> dict[str, An
                 from .storage import refresh_effective_tag_categories
                 refresh_effective_tag_categories(con, None)
             except Exception:
-                pass
+                let_pass("core.database.invariants.repair")
             fixed["orphan_rows_removed"] = removed
             con.execute("UPDATE integrity_issues SET status='repaired', repaired_at=? WHERE status='open'", (now,))
         after = check(settings, persist=True, files=mark_missing_deleted)

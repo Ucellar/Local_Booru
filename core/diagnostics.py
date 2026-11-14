@@ -11,6 +11,7 @@ from pathlib import Path
 from core.paths import ERROR_LOG_FILE, LOGS_DIR, SETTINGS_FILE
 from core.database.connection import db_path
 from core.redaction import sanitize_object, sanitize_text
+from core.quiet import passed as let_pass
 
 _SECRET_WORDS = ("api_key", "key", "cookie", "password", "login", "token", "user_id")
 
@@ -28,8 +29,11 @@ def _redact(value, key=""):
 def create_diagnostic_zip(settings: dict, destination: str | Path) -> str:
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    from core import started_code, version
     report = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "version": version.VERSION,                             # (v5.44.165) which program made the report
+        "update_waiting": started_code.update_waiting(),        # …and whether another version waits for a restart
         "python": sys.version,
         "platform": platform.platform(),
         "settings": _redact(dict(settings or {})),
@@ -44,6 +48,11 @@ def create_diagnostic_zip(settings: dict, destination: str | Path) -> str:
         report["slow_operations"] = recent_slow_operations(100)
     except Exception as exc:
         report["slow_operations_error"] = str(exc)
+    # (v5.44.167) the errors the program's places let pass in this run (``core/quiet.py``): where, which, how often
+    from core import quiet
+    # (the name has no «pass» in it: ``sanitize_object`` takes a key called so for a password's)
+    report["quiet_errors"] = [{"where": where, "error": kind, "times": times}
+                              for where, kind, times in quiet.counts()[:300]]
     dbfile = db_path(settings)
     report["database_exists"] = dbfile.exists()
     report["database_size"] = dbfile.stat().st_size if dbfile.exists() else 0
@@ -60,10 +69,10 @@ def create_diagnostic_zip(settings: dict, destination: str | Path) -> str:
                     content = logfile.read_text(encoding="utf-8", errors="replace")
                     z.writestr(arcname, sanitize_text(content))
                 except Exception:
-                    pass
+                    let_pass("core.diagnostics.create_diagnostic_zip")
         if ERROR_LOG_FILE.exists() and ERROR_LOG_FILE.parent != Path(LOGS_DIR):
             try:
                 z.writestr("logs/errors.log", sanitize_text(ERROR_LOG_FILE.read_text(encoding="utf-8", errors="replace")))
             except Exception:
-                pass
+                let_pass("core.diagnostics.create_diagnostic_zip#2")
     return str(destination)

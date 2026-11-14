@@ -17,6 +17,7 @@ from core.media_utils import (
     iter_media_files,
 )
 from core.tag_utils import normalize_tag
+from core.quiet import passed as let_pass
 
 
 def read_tag_json(path: Path, settings):
@@ -25,7 +26,7 @@ def read_tag_json(path: Path, settings):
         if path.parent.name == "media" and path.parent.parent.name in ("found", "partial_match", "no_match"):
             candidates.append(path.parent.parent / "tags" / (path.stem + ".tags.json"))
     except Exception:
-        pass
+        let_pass("core.database.indexer.read_tag_json")
     for c in candidates:
         if c.exists():
             try:
@@ -39,7 +40,7 @@ def read_tag_json(path: Path, settings):
                     if out:
                         return out
             except Exception:
-                pass
+                let_pass("core.database.indexer.read_tag_json#2")
     return None
 
 
@@ -50,7 +51,7 @@ def read_tags_txt(path: Path, settings):
         if path.parent.name == "media" and path.parent.parent.name in ("found", "partial_match", "no_match"):
             candidates += [path.parent.parent / "tags" / (path.stem + ".tags.txt")]
     except Exception:
-        pass
+        let_pass("core.database.indexer.read_tags_txt")
     for c in candidates:
         if c.exists():
             try:
@@ -69,7 +70,7 @@ def read_sources(path: Path, settings):
         if path.parent.name == "media" and path.parent.parent.name in ("found", "partial_match", "no_match"):
             candidates.append(path.parent.parent / "source" / (path.stem + ".sources.txt"))
     except Exception:
-        pass
+        let_pass("core.database.indexer.read_sources")
     out = []
     for c in candidates:
         if not c.exists():
@@ -81,7 +82,7 @@ def read_sources(path: Path, settings):
                     u = urls[-1]
                     out.append({"host": host_from_url(u), "url": u})
         except Exception:
-            pass
+            let_pass("core.database.indexer.read_sources#2")
         if out:
             break
     return out
@@ -107,7 +108,7 @@ def upsert_tags(con, image_id, groups):
         from .storage import refresh_effective_tag_categories
         refresh_effective_tag_categories(con, int(image_id))
     except Exception:
-        pass
+        let_pass("core.database.indexer.upsert_tags")
 
 
 def upsert_sources(con, image_id, sources):
@@ -142,7 +143,7 @@ def _prepared(path: Path, settings, *, compute_md5: bool, phash: bool, sidecars:
             try:
                 md5 = file_md5(path)
             except Exception:
-                pass
+                let_pass("core.database.indexer._prepared")
     hash_phash = None
     if phash and path.suffix.lower() not in VIDEO_EXTS:
         try:
@@ -192,7 +193,7 @@ def _write_prepared(con, item: dict, now: int) -> bool:
             from core.vptree import VPTree
             VPTree(con).insert(int(image_id), item["phash"])
         except Exception:
-            pass
+            let_pass("core.database.indexer._write_prepared")
     if item["groups"] is not None:
         upsert_tags(con, image_id, item["groups"])
     if item["sources"]:
@@ -266,7 +267,7 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                         from core.vptree import VPTree
                         VPTree(con).insert(int(image_id), ph)
                     except Exception:
-                        pass
+                        let_pass("core.database.indexer.index_library.flush")
             for item in pending:
                 if _write_prepared(con, item, now):
                     indexed += 1
@@ -293,7 +294,7 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                         if ph:
                             phashes.append((int(old["id"]), str(path), ph))
                     except Exception:
-                        pass
+                        let_pass("core.database.indexer.index_library")
                 skipped += 1
                 if len(phashes) >= batch:
                     flush()
@@ -313,7 +314,7 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                     # Also prewarm the common gallery card size used by defaults.
                     safe_thumbnail_path(path, int(settings.get("thumb_cache_card_w", 240)), int(settings.get("thumb_cache_card_h", 220)))
                 except Exception:
-                    pass
+                    let_pass("core.database.indexer.index_library#2")
             pending.append(item)
             if len(pending) >= batch:
                 flush()
@@ -331,7 +332,7 @@ def index_library(settings, force=False, progress=None, stop_check=None, compute
                 from .storage import refresh_effective_tag_categories
                 refresh_effective_tag_categories(con, None)
             except Exception:
-                pass
+                let_pass("core.database.indexer.index_library#3")
     with db(settings, readonly=True) as con:
         db_file = str(con.execute("PRAGMA database_list").fetchone()[2])
     return {"scanned": scanned, "indexed": indexed, "skipped": skipped, "removed": removed, "db": db_file,

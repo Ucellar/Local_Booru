@@ -9,6 +9,7 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any
+from core.quiet import passed as let_pass
 
 _LAUNCH_LOCK = threading.Lock()
 _LAST_LAUNCH: dict[str, float] = {}
@@ -35,57 +36,9 @@ def custom_browser_executable(settings: dict[str, Any] | None) -> str:
         if path.is_file():
             return str(path)
     except Exception:
-        pass
+        let_pass("core.external_browser.custom_browser_executable")
     return ""
 
-
-def _family_from_hint(value: str) -> str:
-    raw = str(value or "").strip().strip('"').lower()
-    name = Path(raw).name.lower()
-    haystack = f"{raw} {name}"
-    if "firefox" in haystack:
-        return "firefox"
-    if "msedge" in haystack or "microsoftedge" in haystack or name.startswith("edge"):
-        return "edge"
-    if "brave" in haystack:
-        return "brave"
-    if "opera" in haystack or "opr" in haystack:
-        return "opera"
-    if "chrome" in haystack or "chromium" in haystack:
-        return "chrome"
-    return ""
-
-
-def system_default_browser_family() -> str:
-    """Best-effort Windows default HTTPS browser family.
-
-    Failure is intentionally harmless: the resolver then binds the task to the
-    unique URL fragment opened through ``webbrowser`` instead of guessing a
-    browser family.
-    """
-    if os.name != "nt":
-        return ""
-    try:
-        import winreg  # type: ignore
-
-        key_path = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            prog_id = str(winreg.QueryValueEx(key, "ProgId")[0] or "")
-        return _family_from_hint(prog_id)
-    except Exception:
-        return ""
-
-
-def preferred_browser_family(settings: dict[str, Any] | None) -> str:
-    """Family hint for the browser selected by the user.
-
-    Custom mode derives it from the selected executable.  Default mode asks
-    Windows which application owns HTTPS.  An empty result is not treated as
-    permission for a random browser: the bridge uses a one-time launch marker.
-    """
-    if browser_mode(settings) == "custom":
-        return _family_from_hint(str((settings or {}).get("external_browser_executable") or ""))
-    return system_default_browser_family()
 
 def browser_family_matches(preferred: str, actual: str) -> bool:
     wanted = str(preferred or "").strip().lower()
@@ -135,7 +88,7 @@ def open_external_browser_url(
             try:
                 log_fn(message)
             except Exception:
-                pass
+                let_pass("core.external_browser.open_external_browser_url._log")
 
     if browser_mode(settings) == "custom":
         exe = custom_browser_executable(settings)

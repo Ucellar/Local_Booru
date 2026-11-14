@@ -37,7 +37,7 @@ from __future__ import annotations
 import threading
 import time
 
-from core.parser.http import HttpFailure
+from core.parser.http import HttpFailure, UploadUnavailable
 from core.parser.models import Candidate, ReverseOutcome
 from core.parser.reverse.base import ReverseService
 from core.parser.util import json_body, looks_like_cloudflare, short
@@ -243,8 +243,8 @@ class E621Iqdb(ReverseService):
             return f"{path.suffix or 'без расширения'} — e621 IQDB ищет по JPEG и PNG, не спрашиваю"
         try:
             size = path.stat().st_size
-        except OSError:
-            return "картинки для поиска нет"
+        except OSError as exc:
+            raise UploadUnavailable(exc) from exc
         if size > UPLOAD_MAX:
             return f"картинка {size // (1024 * 1024)} МБ — для e621 IQDB больше {UPLOAD_MAX // (1024 * 1024)} МБ не шлю"
         return ""
