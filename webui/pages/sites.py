@@ -384,8 +384,9 @@ def save_cookies(req: Request) -> Response:
     text = str(body.get("text") or "")
     if not domain:
         return Response.json({"ok": False, "error": "Не указан домен сайта"}, 400)
-    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-    good = [ln for ln in lines if _COOKIE_LINE.match(ln) or _COOKIE_LINE.match("#HttpOnly_" + ln)]
+    lines = [ln for ln in text.splitlines() if ln.strip()
+             and (not ln.startswith("#") or ln.startswith("#HttpOnly_"))]
+    good = [ln for ln in lines if _COOKIE_LINE.match(ln)]
     if not good:
         return Response.json({"ok": False, "error": "Это не похоже на cookies.txt (формат Netscape: поля через табуляцию)"}, 400)
     if len(text) > 2_000_000:

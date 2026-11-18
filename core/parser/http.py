@@ -17,10 +17,12 @@ import threading
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 import requests
 
 from core import site_agent
+from core.http_identity import IdentitySession, sanitize_http_error
 from core.parser.util import host_of
 
 # Sites that are browsed (Cloudflare, cookies of a browser) get a browser's User-Agent; the hosts of e621 and Danbooru
@@ -30,6 +32,9 @@ BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
+
+
+_ApiSession = IdentitySession  # compatibility for callers of the former parser-only session
 
 
 class Cancelled(Exception):
@@ -53,10 +58,10 @@ class HttpFailure(Exception):
 
     def __init__(self, host: str, detail: str, *, status: int = 0, transient: bool = True):
         self.host = host
-        self.detail = detail
+        self.detail = sanitize_http_error(detail)
         self.status = int(status or 0)
         self.transient = transient
-        super().__init__(f"[{host}] {detail}")
+        super().__init__(f"[{host}] {self.detail}")
 
 
 _GATE_TRIES = 6             # a 429 of a gated host is asked again after the pause, this many times in all
@@ -154,14 +159,19 @@ class HttpClient:
 
     # ── sessions ────────────────────────────────────────────────────────────
     def session(self, host: str) -> requests.Session:
+        from core.tagger.cookies_io import cookie_dependency_hosts
+        host = str(host or "").strip().lower().lstrip(".")
         cache = getattr(self._local, "sessions", None)
         if cache is None:
             cache = {}
             self._local.sessions = cache
-        wanted = self._cookie_round.get(host, 0)
-        sess, loaded = cache.get(host, (None, 0))
+        # An API/www session may read its site's canonical handoff. Renewing that
+        # source must refresh existing workers too, not only the fresh retry thread.
+        with self._registry_lock:
+            wanted = tuple(self._cookie_round.get(source, 0) for source in cookie_dependency_hosts(host))
+        sess, loaded = cache.get(host, (None, ()))
         if sess is None:
-            sess = requests.Session()
+            sess = IdentitySession()
             sess.headers.update({
                 "User-Agent": BROWSER_UA,
                 "Accept": "application/json,text/html,*/*",
@@ -178,6 +188,7 @@ class HttpClient:
             self._load_cookies(sess, host)
             self._own_agent(sess, host)
             cache[host] = (sess, wanted)
+        self._own_agent(sess, host)              # settings may have changed during a manual retry
         return sess
 
     def _own_agent(self, sess: requests.Session, host: str) -> None:
@@ -188,27 +199,20 @@ class HttpClient:
 
     def renew_cookies(self, host: str) -> None:
         """The person renewed the cookies of ``host`` (in a browser, Companion wrote them): every thread's session of
-        that host loads them again before its next request (page «Парсер», «Проверить снова»)."""
+        that host and its dependent aliases loads them before its next request («Парсер», «Проверить снова»)."""
+        host = str(host or "").strip().lower().lstrip(".")
         with self._registry_lock:
             self._cookie_round[host] = self._cookie_round.get(host, 0) + 1
             self._cookie_logged.discard(host)
 
     def _load_cookies(self, sess: requests.Session, host: str) -> None:
-        from core.tagger.cookies_io import (
-            _normalize_cookie_records, load_cookie_bundle_for_host, load_txt_cookiejar_for_host,
-        )
-        added = 0
-        cookies, user_agent = load_cookie_bundle_for_host(host)
-        if cookies:
-            # Cloudflare clearance cookies are bound to the browser that got them.
-            if user_agent:
-                sess.headers["User-Agent"] = user_agent
-            for c in _normalize_cookie_records(cookies):
-                added += _set_cookie(sess, c.get("name"), c.get("value"), c.get("domain"), c.get("path") or "/")
-        jar, _info = load_txt_cookiejar_for_host(host)
-        for c in jar or []:
-            added += _set_cookie(sess, getattr(c, "name", None), getattr(c, "value", None),
-                                 getattr(c, "domain", None), getattr(c, "path", "/") or "/")
+        from core.tagger.cookies_io import load_session_cookies
+        cookies, user_agent = load_session_cookies(host, self.settings)
+        if user_agent:
+            sess.headers["User-Agent"] = user_agent
+        for cookie in cookies:
+            sess.cookies.set_cookie(cookie)
+        added = len(cookies)
         if added and host not in self._cookie_logged:
             self._cookie_logged.add(host)
             self.log(f"COOKIES [{host}]: загружено {added}")
@@ -262,7 +266,8 @@ class HttpClient:
                     wait_for(url, self._limiter_settings)
                 except RequestCancelled as exc:
                     raise Cancelled() from exc
-                response = self.session(session_host or host).request(
+                cookie_host = session_host or (urlsplit(url).hostname or host).lower()
+                response = self.session(cookie_host).request(
                     method, url, params=params, data=data, json=json, files=files,
                     headers=headers, auth=auth, timeout=timeout or self.timeout,
                     allow_redirects=allow_redirects, stream=stream,
@@ -349,21 +354,6 @@ class HttpClient:
             return b"".join(chunks)
         finally:
             response.close()
-
-
-def _set_cookie(sess: requests.Session, name, value, domain, path) -> int:
-    if not name or value is None:
-        return 0
-    try:
-        str(name).encode("latin-1")
-        str(value).encode("latin-1")
-    except UnicodeEncodeError:
-        return 0
-    kwargs = {"path": path or "/"}
-    if domain:
-        kwargs["domain"] = domain
-    sess.cookies.set(str(name), str(value), **kwargs)
-    return 1
 
 
 def _retry_after_seconds(response, default: float) -> float:

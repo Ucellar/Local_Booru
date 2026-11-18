@@ -26,6 +26,8 @@ import threading
 import time
 from pathlib import Path
 
+from core import download_scheduler
+from core.download_queue_order import reordered
 from core.manhwa_download import TASK
 
 _LOG = logging.getLogger("local_booru.manhwa_get")
@@ -72,25 +74,39 @@ def current_record() -> "dict | None":
         return dict(_CURRENT["record"]) if _CURRENT.get("record") else None
 
 
-def _job(record: dict | None, work):
+def _job(record: dict | None, work, *, scheduled: bool = False):
     """A download as the page task: kept as the one going while it goes; when it ends, the next of the queue starts.
     Ended by the program closing (its stop, not «Остановить») — kept, to be begun again at the next start."""
     def run(say, stop_check):
         _USER_STOP.clear()
         with _LOCK:
-            _CURRENT["record"] = dict(record) if record is not None else None
-        _persist()
+            _CURRENT.update(record=dict(record) if record is not None else None, scheduled=scheduled)
+        if not scheduled:
+            _persist()
         try:
             return work(say, stop_check)
         finally:
-            leaving = stop_check() and not _USER_STOP.is_set()
+            leaving = not scheduled and stop_check() and not _USER_STOP.is_set()
             with _LOCK:
                 if not leaving:
                     _CURRENT["record"] = None
-            _persist()
-            if not stop_check():                     # the next one in the queue, when this one has ended
-                next_soon()
+            if not scheduled:
+                _persist()
+                if not stop_check():                 # the next one in the queue, when this one has ended
+                    next_soon()
     return run
+
+
+def _scheduled(label: str, work, *, record: dict | None, about=None, title: str = "", count: int = 0,
+               chosen: list | None = None, restored: bool = False) -> dict | None:
+    kept = record or {}
+    url, where = str(kept.get("url") or ""), str(kept.get("where") or "")
+    return download_scheduler.submit(
+        "manhwa", label, None if restored else _job(record, work, scheduled=True), record=record, about=about,
+        dedupe=json.dumps([url, where]) if url else str(about or ""), dedupe_active=restored,
+        replace_waiting=not restored, presentation={"find": about, "title": title or label, "count": int(count),
+                                                   "chosen": list(chosen or []), "url": url, "where": where,
+                                                   "hentai": hentai_of(record)})
 
 
 def start(label: str, work, *, record: dict | None = None, about=None, title: str = "", count: int = 0,
@@ -98,6 +114,9 @@ def start(label: str, work, *, record: dict | None = None, about=None, title: st
     """The download begun — {"id": its task} — or, while another goes, put in the queue: {"queued": its place,
     "queue_id"} (the same list asked again keeps its place with its new choice)."""
     from core import page_jobs
+    admitted = _scheduled(label, work, record=record, about=about, title=title, count=count, chosen=chosen)
+    if admitted is not None:
+        return admitted
     run = _job(record, work)
     try:
         started = page_jobs.start(TASK, label, run, about=about)
@@ -145,10 +164,9 @@ def _next(wait: float = 10.0, after=None) -> None:
         if not _QUEUE:
             return
         entry = _QUEUE.pop(0)
-    try:
-        page_jobs.start(TASK, entry["label"], entry["run"], about=entry["find"])
-    except page_jobs.TaskBusy:                       # another started meanwhile
-        with _LOCK:
+        try:
+            page_jobs.start(TASK, entry["label"], entry["run"], about=entry["find"])
+        except page_jobs.TaskBusy:                   # another started meanwhile
             _QUEUE.insert(0, entry)
 
 
@@ -157,10 +175,11 @@ def public() -> list:
     place in the queue: «В очереди 2-м»)."""
     with _LOCK:
         queue = [dict(q) for q in _QUEUE]
-    return [{"id": q["id"], "find": q["find"], "title": q["title"], "count": q.get("count", 0),
+    legacy = [{"id": q["id"], "find": q["find"], "title": q["title"], "count": q.get("count", 0),
              "chosen": list(q.get("chosen") or []), "url": str((q.get("record") or {}).get("url") or ""),
              "where": str((q.get("record") or {}).get("where") or ""),
              "hentai": hentai_of(q.get("record"))} for q in queue]      # (v5.44.116) hidden in «SFW»
+    return legacy + [item for item, _record in download_scheduler.waiting("manhwa") if item["lane"] == "next"]
 
 
 def _same(entry: dict, record: "dict | None") -> bool:
@@ -179,17 +198,28 @@ def queued(url: str, where: str) -> dict | None:
             if kept.get("url") == url and kept.get("where") == where:
                 chosen = kept.get("chapters")
                 return {"id": q["id"], "place": place, "chapters": None if chosen is None else list(chosen)}
+    for place, (item, kept) in enumerate(download_scheduler.waiting("manhwa"), 1):
+        if kept.get("url") == url and kept.get("where") == where:
+            chosen = kept.get("chapters")
+            return {"id": item["id"], "place": place, "chapters": None if chosen is None else list(chosen),
+                    "postponed": item["lane"] == "later"}
     return None
 
 
 def waiting() -> bool:
     """Someone's downloads wait in the queue (the nightly round waits for them)."""
+    return legacy_busy() or any(item["lane"] == "next" for item, _ in download_scheduler.waiting("manhwa"))
+
+
+def legacy_busy() -> bool:
     with _LOCK:
         return bool(_QUEUE)
 
 
 def unqueue(wanted) -> bool:
     """«Убрать» a download from the queue (it has not begun): False — it is not there (begun already)."""
+    if download_scheduler.remove(wanted, waiting_kind="manhwa"):
+        return True
     with _LOCK:
         entry = next((q for q in _QUEUE if q["id"] == wanted), None)
         if entry is not None:
@@ -211,6 +241,19 @@ def move(wanted, step: int) -> bool:
     return True
 
 
+def reorder(expected: list[int], order: list[int]) -> bool:
+    """Change only the waiting titles, keeping the current download and saved choices by reference."""
+    with _LOCK:
+        changed = reordered(_QUEUE, expected, order)
+        if changed is None:
+            return False
+        if expected == order:
+            return True
+        _QUEUE[:] = changed
+    _persist()
+    return True
+
+
 def stop_all() -> list:
     """«Остановить»: the queue emptied, the download going not kept (the page stops it) — the titles dropped."""
     _USER_STOP.set()
@@ -222,9 +265,12 @@ def stop_all() -> list:
     return dropped
 
 
-def note_paused(paused: bool) -> None:
+def note_paused(paused: bool, task=None) -> None:
     """A pause stays a pause after a restart."""
+    download_scheduler.note_paused("manhwa", paused, task)
     with _LOCK:
+        if _CURRENT.get("scheduled"):
+            return
         if _CURRENT.get("record"):
             _CURRENT["record"] = dict(_CURRENT["record"], paused=bool(paused))
     _persist()
@@ -246,7 +292,7 @@ def _persist() -> None:
     from core.file_safety import write_json_kept
     with _KEEP_LOCK:
         with _LOCK:
-            records = ([_CURRENT["record"]] if _CURRENT.get("record") else []) + \
+            records = ([_CURRENT["record"]] if _CURRENT.get("record") and not _CURRENT.get("scheduled") else []) + \
                 [q["record"] for q in _QUEUE if q.get("record")]
             if not _RESTORED.is_set():               # (v5.44.116) the last run's, not begun again yet: kept with them
                 records += [r for r in _PENDING["records"] if not any(_same({"record": x}, r) for x in records)]
@@ -336,9 +382,14 @@ def restore(settings: dict) -> int:
     with _LOCK:                                      # (v5.44.116) begun or put in the queue meanwhile: not again
         here = ([{"record": _CURRENT["record"]}] if going and _CURRENT.get("record") else []) + list(_QUEUE)
         records = [r for r in records if not any(_same(q, r) for q in here)]
-        for n, record in enumerate(records):
-            title = str(record.get("title") or record["url"])
-            chosen = record.get("chapters")
+    for n, record in enumerate(records):
+        title = str(record.get("title") or record["url"])
+        chosen = record.get("chapters")
+        admitted = _scheduled(f"Скачать: {title}", None, record=record, about=f"saved{n}", title=title,
+                              count=len(chosen or []), restored=True)
+        if admitted is not None and admitted.get("ok", True):
+            continue
+        with _LOCK:
             _QUEUE.append({"id": next(_IDS), "find": f"saved{n}", "title": title, "count": len(chosen or []),
                            "chosen": [], "label": f"Скачать: {title}",
                            "run": _job(record, lambda say, stop_check, record=record: work(record, settings, say,

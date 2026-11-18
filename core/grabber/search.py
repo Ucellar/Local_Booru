@@ -16,16 +16,20 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ALL_COMPLETED, FIRST_COMPLETED, ThreadPoolExecutor, wait as wait_for_pages
+from contextlib import contextmanager
 
+from core import shutdown
 from core.grabber.cards import OWNED_FILE, OWNED_POST, entry, is_hidden, mark_owned, new_card, tags_of, card_key
-from core.parser.http import HttpClient
+from core.parser.http import Cancelled, HttpClient, HttpFailure
 
 KEEP_SEARCHES = 6
 SEARCH_TTL = 2 * 3600
 PER_SITE = 40                    # posts asked from each site for one page
 GIVE_UP_AFTER = 2                # pages in a row a site did not answer: it is left out of this search
-ATTEMPTS = 2                     # tries of one request (the parser makes 3; a page waits for the slowest site)
+ATTEMPTS = 2                     # tries of one request (the parser makes 3)
+PAGE_WAIT = 75.0                 # includes a minute's shared host budget before another request
+PREPARE_WAIT = 12.0               # optional profile/engine checks should not delay the tag query
 _LOCK = threading.Lock()
 _SEARCHES: "OrderedDict[str, GrabberSearch]" = OrderedDict()
 
@@ -50,16 +54,31 @@ def searchable_sites(settings: dict) -> list:
     return out
 
 
+def _chosen_sites(ctx, hosts: list | None) -> list:
+    """Build only selected searchable lanes; their preflight runs with their first batch."""
+    from core.parser.sites import _manual_order_hosts, canonical_host, engine_class, site_rows
+
+    wanted = {canonical_host(str(host)) for host in hosts or [] if host}
+    sites = []
+    for host, cfg in site_rows(ctx.settings).items():
+        if wanted and host not in wanted:
+            continue
+        cls = engine_class(cfg, host)
+        if cls is not None and cls.can_search_tags:
+            sites.append(cls(host, cfg, ctx))
+    rank = {host: n for n, host in enumerate(_manual_order_hosts(ctx.settings))}
+    return sorted(sites, key=lambda site: ("allthefallen" in site.host, rank.get(site.host, len(rank))))
+
+
 class GrabberSearch:
     """``link`` — (host, may the host be a server of the site) of «ссылка вместо тегов» (``core.grabber.link``):
     the one site of that address, enabled or not, asked once; its card is shown even when it carries a tag of
     the blocklist (marked — it is not downloaded), was hidden, or the library has it."""
 
     def __init__(self, settings: dict, query: str, hosts: list | None = None, *, hide_owned: bool = False,
-                 per_site: int | None = None, link: tuple | None = None):
+                 per_site: int | None = None, link: tuple | None = None, interactive: bool = False):
         from core.grabber_exclusions import active_identity_set
         from core.parser.context import ParserContext
-        from core.parser.sites import build_sites
         from core.subscriptions import normalize_blacklist_tags
         self.id = secrets.token_urlsafe(9)
         self.query = " ".join(str(query or "").split())
@@ -68,26 +87,33 @@ class GrabberSearch:
         self.per_site = max(1, int(per_site or PER_SITE))
         self.used = time.time()
         self.lock = threading.Lock()
+        self._closed = threading.Event()
         self.notes: deque = deque(maxlen=200)
-        self.http = _GrabberHttp(self.settings, log=self._note, cancel_check=lambda: False, pause_wait=lambda: None)
+        self.http = _GrabberHttp(self.settings, log=self._note, interactive=interactive, stopped=self._closed.is_set)
         self.ctx = ParserContext(self.settings, self.http, self._note, lambda *_a: None)
         self.single = link is not None
         if self.single:
-            from core.parser.sites import site_for_host
-            site = site_for_host(self.ctx, link[0], parent_domains=bool(link[1]))
-            if site is not None:
-                site.preflight()
+            with self.http.page_wait(preparing=True):
+                from core.parser.sites import site_for_host
+                site = site_for_host(self.ctx, link[0], parent_domains=bool(link[1]))
+                if site is not None:
+                    site.preflight()
             self.sites = [site] if site is not None else []
             self.hide_owned = False
             self.per_site = min(self.per_site, 5)
+        elif interactive:
+            self.sites = _chosen_sites(self.ctx, hosts)
         else:
-            wanted = {str(h).lower() for h in hosts or [] if h}
-            self.sites = [s for s in build_sites(self.ctx)
-                          if getattr(s, "can_search_tags", False) and (not wanted or s.host in wanted)]
+            from core.parser.sites import build_sites, canonical_host
+            wanted = {canonical_host(str(host)) for host in hosts or [] if host}
+            self.sites = [site for site in build_sites(self.ctx)
+                          if site.can_search_tags and (not wanted or site.host in wanted)]
         self.lanes = {s.host: {"label": s.label, "page": 0, "posts": 0, "done": bool(s.disabled_reason),
-                               "error": s.disabled_reason or "", "failures": 0} for s in self.sites}
+                               "error": s.disabled_reason or "", "failures": 0, "prepared": self.single or not interactive}
+                      for s in self.sites}
         # The same threads for every «Ещё»: the client keeps a session per thread and site.
         self._pool = ThreadPoolExecutor(max_workers=max(1, len(self.sites)), thread_name_prefix="grabber-site")
+        self._pending: dict = {}             # host -> (future, worker's private lane state)
         self.cards: list = []                # handed out to the page, in order
         self.by_key: dict = {}               # every card met (shown or not)
         self._shown: set = set()
@@ -105,63 +131,104 @@ class GrabberSearch:
     def has_more(self) -> bool:
         return any(not lane["done"] for lane in self.lanes.values())
 
-    def more(self) -> dict:
+    def more(self, *, wait: float | None = None) -> dict:
         """The next page of every site that still has posts: {"cards": new cards handed out,
         "updated": shown cards that got another site, "removed": shown cards that now carry a
-        blocked tag}."""
+        blocked tag}. A bounded wait publishes ready lanes while the other sites continue."""
         with self.lock:
             self.used = time.time()
-            lanes = [s for s in self.sites if not self.lanes[s.host]["done"]]
-            if not lanes:
-                return {"cards": [], "updated": [], "removed": []}
-            pages = list(self._pool.map(self._page, lanes))
-            touched: list = []
-            fresh: list = []
-            for i in range(max((len(p) for p in pages), default=0)):
-                for page in pages:              # one post of each site in turn
-                    if i >= len(page):
+            if not self._pending and not self._closed.is_set():
+                for site in self.sites:
+                    lane = dict(self.lanes[site.host])
+                    if lane["done"]:
                         continue
-                    item = page[i]
-                    key = card_key(item)
-                    card = self.by_key.get(key)
-                    if card is None:
-                        card = self.by_key[key] = new_card(item)
-                        fresh.append(card)
-                    elif not any(e["site"] == item["site"] and e["post_id"] == item["post_id"] for e in card["entries"]):
-                        card["entries"].append(item)
-                        touched.append(card)
-            if fresh or touched:              # a card a later page joined may be «есть» by its new post
-                mark_owned(self.settings, fresh + [c for c in touched if c not in fresh])
-            out = {"cards": [], "updated": [], "removed": []}
-            for card in fresh:
-                why = self._why_not_shown(card)
-                if why:
-                    self.skipped[why] += 1
-                    continue
-                self._shown.add(card["key"])
-                self.cards.append(card)
-                out["cards"].append(card)
-            for card in touched:
-                if card["key"] not in self._shown or card in out["cards"]:   # new now: sent whole anyway
-                    continue
-                why = self._why_not_shown(card)
-                if why:                       # a blocked tag or «есть» came with the other site
-                    self.skipped[why] += 1
-                    self._shown.discard(card["key"])
-                    self.cards = [c for c in self.cards if c["key"] != card["key"]]
-                    out["removed"].append(card["key"])
-                elif card not in out["updated"]:
-                    out["updated"].append(card)
-            return out
+                    future = self._pool.submit(self._page, site, lane)
+                    future.add_done_callback(self._clean_if_closed)
+                    self._pending[site.host] = (future, lane)
+            futures = tuple(future for future, _lane in self._pending.values())
+        return self._collect(futures, wait)
 
-    def _page(self, site) -> list:
-        from core.parser.http import Cancelled, HttpFailure
+    def progress(self, *, wait: float = 0.0) -> dict:
+        """Publish replies from the current batch; the next batch needs a separate request."""
+        with self.lock:
+            self.used = time.time()
+            futures = tuple(future for future, _lane in self._pending.values())
+        return self._collect(futures, wait)
+
+    def _collect(self, futures: tuple, wait: float | None) -> dict:
+        if wait is None:
+            pending = futures
+            while pending and not self._closed.is_set():
+                _done, pending = wait_for_pages(pending, timeout=0.25, return_when=ALL_COMPLETED)
+        elif futures and wait > 0:
+            wait_for_pages(futures, timeout=wait, return_when=FIRST_COMPLETED)
+        with self.lock:
+            pages = []
+            for host, (future, lane) in list(self._pending.items()):
+                if future not in futures or not future.done():
+                    continue
+                del self._pending[host]
+                try:
+                    pages.append(future.result())
+                except Exception as exc:
+                    self._note(f"{lane['label']}: ошибка поиска ({type(exc).__name__})")
+                    self._failed(lane, "не удалось обработать ответ сайта")
+                self.lanes[host].update(lane)
+            return self._merge(pages)
+
+    def _merge(self, pages: list) -> dict:
+        touched: list = []
+        fresh: list = []
+        for i in range(max((len(p) for p in pages), default=0)):
+            for page in pages:              # one post of each ready site in turn
+                if i >= len(page):
+                    continue
+                item = page[i]
+                key = card_key(item)
+                card = self.by_key.get(key)
+                if card is None:
+                    card = self.by_key[key] = new_card(item)
+                    fresh.append(card)
+                elif not any(e["site"] == item["site"] and e["post_id"] == item["post_id"] for e in card["entries"]):
+                    card["entries"].append(item)
+                    touched.append(card)
+        if fresh or touched:              # a card a later page joined may be «есть» by its new post
+            mark_owned(self.settings, fresh + [c for c in touched if c not in fresh])
+        out = {"cards": [], "updated": [], "removed": []}
+        for card in fresh:
+            why = self._why_not_shown(card)
+            if why:
+                self.skipped[why] += 1
+                continue
+            self._shown.add(card["key"])
+            self.cards.append(card)
+            out["cards"].append(card)
+        for card in touched:
+            if card["key"] not in self._shown or card in out["cards"]:   # new now: sent whole anyway
+                continue
+            why = self._why_not_shown(card)
+            if why:                       # a blocked tag or «есть» came with the other site
+                self.skipped[why] += 1
+                self._shown.discard(card["key"])
+                self.cards = [c for c in self.cards if c["key"] != card["key"]]
+                out["removed"].append(card["key"])
+            elif card not in out["updated"]:
+                out["updated"].append(card)
+        return out
+
+    def _page(self, site, lane: dict) -> list:
         from core.parser.sites import SiteUnavailable
         from core.redaction import sanitize_text
-        lane = self.lanes[site.host]
         try:
-            pairs = self._ask(site, lane["page"])
-        except Cancelled:                     # the one asking would wait no longer (``_GrabberHttp.hurry``)
+            if not lane["prepared"]:
+                with self.http.page_wait(preparing=True):
+                    site.preflight()
+                lane["prepared"] = True
+                if site.disabled_reason:
+                    raise SiteUnavailable(site.disabled_reason, transient=False)
+            with self.http.page_wait():
+                pairs = self._ask(site, lane["page"])
+        except Cancelled:
             self._failed(lane, "не ответил вовремя")
             return []
         except SiteUnavailable as exc:
@@ -277,18 +344,53 @@ class GrabberSearch:
             self._shown &= keep
 
     def state(self) -> dict:
-        return {"id": self.id, "query": self.query, "more": self.has_more, "shown": len(self.cards), "link": self.single,
-                "skipped": dict(self.skipped),
-                "sites": {host: {k: lane[k] for k in ("label", "posts", "done", "error")} for host, lane in self.lanes.items()}}
+        with self.lock:
+            return {"id": self.id, "query": self.query, "more": self.has_more and not self._pending,
+                    "shown": len(self.cards), "link": self.single,
+                    "skipped": dict(self.skipped), "pending": [self.lanes[host]["label"] for host in self._pending],
+                    "sites": {host: {**{k: lane[k] for k in ("label", "posts", "done", "error")},
+                                     "pending": host in self._pending} for host, lane in self.lanes.items()}}
 
     def close(self) -> None:
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        with self.lock:
+            self._closed.set()
+            self._pending.clear()
+            self._pool.shutdown(wait=False, cancel_futures=True)
         self.http.close_all()
+
+    def _clean_if_closed(self, _future) -> None:
+        if self._closed.is_set():
+            self.http.close_all()
 
 
 class _GrabberHttp(HttpClient):
-    """The parser's client with fewer tries: a page of results waits for its slowest site."""
+    """The parser's client with fewer tries and a deadline for each site's turn."""
     attempts = ATTEMPTS
+
+    def __init__(self, settings: dict, *, log, interactive: bool, stopped):
+        self._interactive = interactive
+        self._outside_cancel = None
+        self._stopped = stopped
+        super().__init__(settings, log=log, cancel_check=self._cancelled)
+
+    def _cancelled(self) -> bool:
+        deadline = getattr(self._local, "grab_page_deadline", None)
+        return self._stopped() or (deadline is not None and time.monotonic() >= deadline) or bool(
+            self._outside_cancel and self._outside_cancel())
+
+    @contextmanager
+    def page_wait(self, *, preparing: bool = False):
+        """Limit just this worker's result-page requests. Preview and card requests keep their own timeouts."""
+        if not self._interactive:
+            yield
+            return
+        self._local.grab_page_deadline = time.monotonic() + (PREPARE_WAIT if preparing else PAGE_WAIT)
+        self._local.grab_preparing = preparing
+        try:
+            yield
+        finally:
+            self._local.grab_page_deadline = None
+            self._local.grab_preparing = False
 
     def hurry(self, timeout: tuple, attempts: int, over) -> None:
         """A question a page shown already waits for (``core/set_remote.py``, v5.44.152): shorter waits for the site,
@@ -296,17 +398,29 @@ class _GrabberHttp(HttpClient):
         the site (the program's throttle, a pause the site asked for) gives up."""
         self.timeout = (float(timeout[0]), float(timeout[1]))
         self.attempts = max(1, int(attempts))
-        self.cancel_check = over
-        self._limiter_settings["_cancel_callback"] = over
+        self._outside_cancel = over
 
     def request(self, method, url, **kwargs):
         kwargs["attempts"] = min(int(kwargs.get("attempts", 3) or 3), self.attempts)
-        return super().request(method, url, **kwargs)
+        deadline = getattr(self._local, "grab_page_deadline", None)
+        if deadline is None:
+            return super().request(method, url, **kwargs)
+        remaining = max(0.1, deadline - time.monotonic())
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = tuple(min(value, remaining) for value in self.timeout)
+        try:
+            return super().request(method, url, **kwargs)
+        except Cancelled as exc:
+            if not self._local.grab_preparing:
+                raise
+            # The optional profile and engine probes handle a missing HTTP answer while building the site list.
+            from core.parser.util import host_of
+            raise HttpFailure(host_of(url), "не ответил вовремя") from exc
 
 
 # ── searches kept for the page ─────────────────────────────────────────────
 def open_search(settings: dict, query: str, hosts: list | None = None, **kwargs) -> GrabberSearch:
-    search = GrabberSearch(settings, query, hosts, **kwargs)
+    search = GrabberSearch(settings, query, hosts, interactive=True, **kwargs)
     with _LOCK:
         _SEARCHES[search.id] = search
         _drop_old()
@@ -317,7 +431,7 @@ def open_link(settings: dict, url: str) -> GrabberSearch:
     """A search of the one post at ``url`` (``core.grabber.link``); LinkError when the address cannot be one."""
     from core.grabber.link import LinkError, parse
     host, query, servers = parse(url)
-    search = GrabberSearch(settings, query, link=(host, servers))
+    search = GrabberSearch(settings, query, link=(host, servers), interactive=True)
     if not search.sites:
         search.close()
         raise LinkError(f"С сайта {host} «Галерея (booru)» брать не умеет: только с booru-сайтов (Danbooru, Gelbooru, "
@@ -349,3 +463,14 @@ def _drop_old() -> None:
     while len(_SEARCHES) > KEEP_SEARCHES:
         _sid, old = _SEARCHES.popitem(last=False)
         old.close()
+
+
+def _close_searches() -> None:
+    with _LOCK:
+        searches = list(_SEARCHES.values())
+        _SEARCHES.clear()
+    for search in searches:
+        search.close()
+
+
+shutdown.register("grabber searches", _close_searches)

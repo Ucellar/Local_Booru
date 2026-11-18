@@ -37,11 +37,14 @@ import re
 import shutil
 import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import parse_qsl, unquote, urljoin, urlparse, urlsplit
 
-from core import video_library, video_meta
+from core import download_telemetry, video_library, video_meta
 
 _LOG = logging.getLogger("local_booru.video")
 
@@ -72,6 +75,21 @@ PATH_MAX = 240                 # Windows: longer paths need «long paths» switc
 SPARE = 300 * 1024 * 1024      # bytes a download leaves free on the disk
 SIZE_LOOKUPS = 40              # files whose size is asked when the page is read
 METER_EVERY = 0.4              # seconds between updates of the progress bar
+
+
+def restorable_address(address: str) -> bool:
+    """Private and signed addresses belong to the live download, never to its saved queue or history."""
+    from core.redaction import is_secret_key
+    if not address.startswith(("http://", "https://")):
+        return False
+    try:
+        url = urlsplit(address)
+        return bool(url.hostname) and url.username is None and not any(
+            is_secret_key(key) or re.search(r"sig|session|expires|policy", key, re.I)
+            for key, _ in parse_qsl(url.query, keep_blank_values=True)
+        )
+    except ValueError:
+        return False
 
 
 class DownloadError(Exception):
@@ -772,10 +790,11 @@ def _fetch(session, remote: Remote, part: Path, referer: str, stop, progress, *,
                 raise DownloadError(f"на диске мало места: нужно {_mb(total - have)}, свободно {_mb(free)}")
             with open(part, mode) as out:
                 for chunk in answer.iter_content(CHUNK):
+                    download_telemetry.record(net=len(chunk))
                     if stop():
                         return "stopped", have, total
                     if chunk:
-                        out.write(chunk)
+                        download_telemetry.record(disk=out.write(chunk))
                         have += len(chunk)
                         progress(have, total)
     except requests.RequestException as exc:
@@ -1083,18 +1102,7 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
         if sound:
             say(f"Озвучки собираются в один файл: картинку серии даёт одна озвучка, остальные ({sound}) качаются "
                 "ради звука — у CVH только звук (без картинки), у Kodik в 360p: звук тот же, скачивать в разы меньше. "
-                "По сериям: сначала картинка серии, потом звук — и серия сразу собирается")
-        if roles:
-            # (v5.44.150) episode by episode — its picture, then the others' sound, and it is put together at once
-            # (it was every picture of the season first: the first episode to watch came after them all).  The
-            # picture first all the same: one that does not come is given by another voice-over of the episode,
-            # not downloaded yet (``Resolver.instead``)
-            first: dict = {}
-            for n, remote in enumerate(files):
-                first.setdefault(remote.name.rsplit(".", 1)[0], n)
-            pairs = sorted(zip(places, files), key=lambda pair: (first[pair[1].name.rsplit(".", 1)[0]],
-                                                                 roles.get(id(pair[1])) == "sound"))
-            places, files = [p for p, _f in pairs], [f for _p, f in pairs]
+                "По сериям: сначала картинка серии, потом звук. Пока серия собирается, качается следующая.")
     if planned is not None and len(places) != len([n for n in dict.fromkeys(chosen) if isinstance(n, int)
                                                     and 0 <= n < len(found.files)]):
         planned(list(places))
@@ -1102,23 +1110,29 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
         say("Картинку серий в папке заменить нечем: лучше, чем есть, у тайтла нет")
         return {"done": 0, "whole": 0, "failed_files": 0, "folder": str(found.folder),
                 "series": video_library._id_for(root, found.folder), "stopped": False, "states": {}}
-    # into one file: each episode as soon as its files have all come (not only at the end — owner, 05.11.2026: a season
-    # stopped half-way stayed half in «Озвучка JAM»), and first what an earlier download left in the sub-folders
     merger = found.after if merge and found.after is not None and callable(getattr(found.after, "waiting", None)) else None
     if merger is not None:
         from core import video_merge
         if not video_merge.available():
             merger = None
     pending: dict = {}                             # an episode -> its files of this download not ended yet
+    left = []
     if merger is not None:
+        # The picture comes first in each episode so another voice-over can replace a failed picture.
+        order = {stem: n for n, stem in enumerate(dict.fromkeys(merger.stem(remote) for remote in files))}
+        pairs = sorted(zip(places, files), key=lambda pair: (order[merger.stem(pair[1])],
+                                                            roles.get(id(pair[1])) == "sound"))
+        places, files = [place for place, _remote in pairs], [remote for _place, remote in pairs]
         for remote in files:
             if merger.takes(remote):
-                pending[merger.stem(remote)] = pending.get(merger.stem(remote), 0) + 1
+                stem = merger.stem(remote)
+                pending[stem] = pending.get(stem, 0) + 1
         left = sorted(merger.waiting() - set(pending), key=video_library.natural_key)
-        if left and not stop_check():
-            say(f"Сначала собираю серии, оставшиеся несобранными с прошлого раза: {len(left)}")
-            counts["merged"] += int((merger(say=say, stop=stop_check, stems=set(left)) or {}).get("episodes") or 0)
-            _set_meter(clear=True)
+    worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-merge") if merger is not None else None
+    merges = deque()
+    empty_folders: set[Path] = set()
+    leaving = threading.Event()
+    _set_meter(clear=True)
     _BUSY.append(1)
     if start_paused:                               # paused when the program closed: paused again
         _PAUSE.set()
@@ -1128,6 +1142,32 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
 
     def halt() -> bool:                            # what stops a file half-way: «Остановить» or «Пауза»
         return stop_check() or _PAUSE.is_set()
+
+    def stop_merge() -> bool:
+        return leaving.is_set() or stop_check()
+
+    def process_episode(stem: str) -> int:
+        # Pausing lets an active merge finish. A queued episode waits for resume.
+        while _PAUSE.is_set() and not stop_merge():
+            leaving.wait(0.25)
+        if stop_merge():
+            return 0
+        _set_meter(processing=stem)
+        try:
+            return int((merger(say=say, stop=stop_merge, stems={stem},
+                               empty_folders=empty_folders) or {}).get("episodes") or 0)
+        finally:
+            _set_meter(processing="")
+
+    def collect_episode() -> None:
+        counts["merged"] += merges.popleft().result()
+
+    def submit_episode(stem: str) -> None:
+        # One episode can wait behind the worker. Downloading more would grow the unmerged files on disk.
+        while merges and (merges[0].done() or len(merges) >= 2):
+            collect_episode()
+        if not stop_merge():
+            merges.append(worker.submit(copy_context().run, process_episode, stem))
 
     def wait_paused(place) -> bool:
         """While «Пауза»: the file's tile «пауза», the meter says it; True — «Продолжить», False — «Остановить»."""
@@ -1172,6 +1212,9 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
                     "она скачается в выбранном качестве")
         return state
     try:
+        if left:
+            say(f"Возобновляю сборку серий, оставшихся с прошлого раза: {len(left)}")
+            submit_episode(left[0])
         for n, (place, remote) in enumerate(zip(places, files), 1):
             if _PAUSE.is_set() and not stop_check():   # «Пауза» between two files
                 wait_paused(place)
@@ -1192,19 +1235,33 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
                 video_library.LIBRARY.invalidate()
             if state == "stopped":
                 break
+            if n == len(files):
+                _set_meter(download_complete=True, speed=0)
             stem = merger.stem(remote) if merger is not None and merger.takes(remote) else None
-            if stem in pending:                    # the episode's last file: its voice-overs into one file now
+            if stem in pending:
                 pending[stem] -= 1
                 if pending[stem] <= 0:
                     del pending[stem]
-                    if not stop_check():
-                        counts["merged"] += int((merger(say=say, stop=stop_check, stems={stem}) or {}).get("episodes") or 0)
-                        _set_meter(merging=False)
-        if merge and found.after is not None and not counts["stopped"] and not stop_check():
-            _set_meter(clear=True)                 # what is left (an episode not put together above)
+                    submit_episode(stem)
+        if merger is not None:
+            if counts["stopped"] or stop_check():
+                leaving.set()
+            else:
+                _set_meter(merging=bool(merges or left), speed=0)
+                for stem in left[1:]:
+                    submit_episode(stem)
+            while merges:
+                collect_episode()
+        elif merge and found.after is not None and not counts["stopped"] and not stop_check():
+            _set_meter(clear=True)
             merged = found.after(say=say, stop=stop_check) or {}
             counts["merged"] += int(merged.get("episodes") or 0)
     finally:
+        leaving.set()
+        if worker is not None:
+            worker.shutdown(wait=True, cancel_futures=True)
+            for folder in empty_folders:
+                video_merge.prune_empty_folder(folder)
         _BUSY.pop()
         _PAUSE.clear()
         _set_meter(clear=True)
@@ -1223,11 +1280,11 @@ def download(found: Found, chosen: list, root: Path, *, say, stop_check, quality
     say("Итог: " + ", ".join(summary))
     series_id = video_library._id_for(root, found.folder)
     result = {"done": counts["done"], "whole": counts["whole"], "failed_files": counts["failed"] + counts["dead"],
-              "folder": str(found.folder), "series": series_id, "stopped": bool(counts["stopped"]),
+              "folder": str(found.folder), "series": series_id, "stopped": bool(counts["stopped"] or stop_check()),
               "states": {str(n): state for n, state in states.items()}}
     if counts["merged"]:
         result["merged"] = counts["merged"]
-    if (counts["failed"] or counts["dead"]) and not counts["done"] and not counts["whole"] and not counts["stopped"]:
+    if (counts["failed"] or counts["dead"]) and not counts["done"] and not counts["whole"] and not result["stopped"]:
         result["failed"] = ("Сайт не отдаёт эти файлы: они пустые, и его плеер на странице их тоже не покажет — "
                             "поищите тайтл на другом сайте" if not counts["failed"] else
                             "Ни один файл не скачался — причины в журнале выше")

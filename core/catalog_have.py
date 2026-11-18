@@ -25,7 +25,9 @@ class Have:
     primary_keys: set = field(default_factory=set)    # downloaded identities, without merely discovered helpers
 
     def holds(self, ids, names) -> bool:
-        return bool(set(ids or ()) & self.keys) or bool(set(names or ()) & self.names)
+        from core.manhwa_sources import title_identity
+        identities = {title_identity(site, key) for site, key in ids or ()}
+        return bool(identities & self.keys) or bool(set(names or ()) & self.names)
 
 
 _HAVE: dict = {}                                  # (the kind's group, its folders) → (when, Have, their times)
@@ -80,26 +82,53 @@ def _have_books(settings: dict, roots: tuple) -> Have:
     from core import manga_library as M, manhwa_download as D, manhwa_library as H, manhwa_sources as S
     have = Have()
     for _folder, data in D.followed(settings):
-        identity = (str(data.get("site")), str(data.get("key")))
+        identity = S.title_identity(data.get("site"), data.get("key"))
         have.keys.add(identity)
-        have.primary_keys.add(identity)
+        have.primary_keys.add((str(data.get("site")), str(data.get("key"))))
         for other in data.get("helpers") or []:
             if isinstance(other, dict) and other.get("site") and other.get("key"):
-                have.keys.add((str(other["site"]), str(other["key"])))
+                have.keys.add(S.title_identity(other["site"], other["key"]))
         have.names |= S.names_of(str(data.get("title") or ""))
     manhwa, manga = roots
     if manhwa and _is_dir(manhwa):
         for title in H.LIBRARY.items(manhwa):
             have.names |= S.names_of(title.title, *title.alt_titles)
+            _book_sources(have, title.info.get("source_url"), title.chapters)
     if manga and _is_dir(manga):
         for item in M.LIBRARY.items(manga):
             have.names |= S.names_of(item.title, item.title_pretty, item.title_japanese)
-            gallery = re.search(r"nhentai\.net/g/(\d+)", str(item.source_url or ""))
-            if gallery:                               # (v5.44.97) a gallery of nhentai — by its number
-                identity = ("nhentai", str(int(gallery.group(1))))
-                have.keys.add(identity)
-                have.primary_keys.add(identity)
+            _book_sources(have, item.source_url, [item, *item.chapters], primary_nhentai=True)
     return have
+
+
+def _book_sources(have: Have, address, chapters, *, primary_nhentai: bool = False) -> None:
+    """Recognize saved title and downloaded-chapter URLs through every registered source."""
+    from core import manhwa_sources as S
+    addresses = [address]
+    for chapter in chapters:
+        info = chapter.info if isinstance(chapter.info, dict) else {}
+        source = info.get("source")
+        if isinstance(source, dict):
+            addresses.append(source.get("url"))
+    for position, url in enumerate(addresses):
+        try:
+            parsed = urlparse(str(url or ""))
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                continue
+            source, key = S.source_for(str(url))
+            identity = S.title_identity(source.name, key) if source is not None and key else None
+            if parsed.hostname.lower() in ("nhentai.net", "www.nhentai.net"):
+                gallery = re.fullmatch(r"/g/(\d+)(?:/\d+)?/?", parsed.path)
+                if gallery:
+                    identity = ("nhentai", str(int(gallery.group(1))))
+        except ValueError:
+            continue
+        if identity:
+            have.keys.add(identity)
+            # primary_keys is also used before removing a matched loose picture. Partial chapter
+            # sources may hide a feed card, but must never claim the whole title was downloaded.
+            if primary_nhentai and position == 0 and identity[0] == "nhentai":
+                have.primary_keys.add(identity)
 
 
 def _have_videos(root: str) -> Have:

@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 from urllib.parse import urljoin
 
-import requests
+from core.http_identity import IdentitySession
 
 from core.parser.context import ParserContext
 from core.parser.http import BROWSER_UA, Cancelled, HttpClient, HttpFailure
@@ -25,7 +25,7 @@ def get_session(settings=None, log_func=None, target_host=None):
     client = HttpClient(dict(settings or {}), log=log_func)
     if target_host:
         return client.session(clean_host(target_host))
-    sess = requests.Session()
+    sess = IdentitySession()
     sess.headers.update({"User-Agent": BROWSER_UA, "Accept": "application/json,text/html,*/*"})
     return sess
 

@@ -89,16 +89,17 @@ def _rows(settings) -> dict:
 def account(settings, fam: Family) -> tuple:
     """(login, user number) of the person on the site, from «Сайты и ключи» ("" — not written); the number — its
     «User ID», else the one the site told in this start of the program."""
-    rows = _rows(settings)
+    from core.parser.sites import table_config
     login = number = ""
     for key in fam.accounts:
-        for name in (key, "www." + key):
-            cfg = rows.get(name)
-            if not isinstance(cfg, dict):
-                continue
-            login = login or str(cfg.get("login") or "").strip()
-            uid = str(cfg.get("user_id") or "").strip()
-            number = number or (uid if uid.isdigit() else "")
+        cfg = table_config(settings or {}, key)
+        if cfg is None:
+            continue
+        login = str(cfg.get("login") or "").strip()
+        uid = str(cfg.get("user_id") or "").strip()
+        number = uid if uid.isdigit() else ""
+        if login or number:
+            break                     # one populated row: never combine another login's ID with this login
     if fam.numbered and not number and login:
         number = learned_user_id(fam.key, login)
     return login, number

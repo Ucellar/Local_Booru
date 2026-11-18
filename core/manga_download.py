@@ -28,7 +28,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core import download_telemetry
 from core import gates as G
+from core.download_queue_order import reordered
 
 _LOG = logging.getLogger("local_booru.manga")
 
@@ -436,6 +438,8 @@ def _ask(session, address: str, referer: str) -> tuple[int, bytes, str]:
             with session.get(address, timeout=TIMEOUT, stream=True, headers={"Referer": referer}) as answer:
                 body = bytearray()
                 for chunk in answer.iter_content(256 * 1024):
+                    if answer.status_code == 200:
+                        download_telemetry.record(net=len(chunk))
                     body += chunk
                     if len(body) > MAX_PICTURE:
                         return 413, b"", ""
@@ -531,7 +535,7 @@ def pages_there(folder: Path, pages: int) -> int:
 
 def _write(path: Path, data: bytes) -> None:
     part = path.with_name(path.name + ".part")
-    part.write_bytes(data)
+    download_telemetry.record(disk=part.write_bytes(data))
     part.replace(path)
 
 
@@ -585,6 +589,11 @@ def _item(number: int) -> dict:
             "why": "", "folder": ""}
 
 
+def _publish_items(items: list[dict], *, clear: bool = False) -> None:
+    """Publish a queue snapshot before releasing the run lock so an older state can't follow it."""
+    _set_meter(clear=clear, galleries=len(items), items=[dict(x) for x in items])
+
+
 def add(numbers: list) -> "list | None":
     """Galleries put into the download going, after the ones there — for each its place among the galleries waiting
     (0 — it is in the download already, begun or done).  None — no download takes more (none goes, or it is ending):
@@ -600,8 +609,7 @@ def add(numbers: list) -> "list | None":
                 there.add(number)
         waiting = [x["number"] for x in items if x["state"] == "wait"]
         places = [waiting.index(n) + 1 if n in waiting else 0 for n in numbers]
-        snapshot = [dict(x) for x in items]
-    _set_meter(galleries=len(snapshot), items=snapshot)
+        _publish_items(items)
     _persist()
     return places
 
@@ -614,8 +622,7 @@ def drop(number: int) -> bool:
         if k < 0:
             return False
         del items[k]
-        snapshot = [dict(x) for x in items]
-    _set_meter(galleries=len(snapshot), items=snapshot)
+        _publish_items(items)
     _persist()
     return True
 
@@ -628,6 +635,9 @@ def waiting() -> list:
 
 def going(number: int) -> bool:
     """(v5.44.170) The gallery waits in the download going, or is being downloaded in it now."""
+    from core import download_scheduler
+    if any(entry.get("number") == int(number) for entry, _ in download_scheduler.waiting("manga")):
+        return True
     with _RUN_LOCK:
         return bool(_RUN["open"]) and any(x["number"] == int(number) and x["state"] in ("wait", "reading", "pages")
                                           for x in _RUN["items"] or [])
@@ -646,8 +656,26 @@ def move(number: int, step: int) -> bool:
             return False
         a, b = waits[here], waits[other]
         items[a], items[b] = items[b], items[a]
-        snapshot = [dict(x) for x in items]
-    _set_meter(galleries=len(snapshot), items=snapshot)
+        _publish_items(items)
+    _persist()
+    return True
+
+
+def reorder(expected: list[int], order: list[int]) -> bool:
+    """Place waiting galleries in the requested order without moving the gallery already taken by the worker."""
+    with _RUN_LOCK:
+        if not _RUN["open"] or USER_STOP.is_set():
+            return False
+        items = _RUN["items"]
+        waits = [i for i, item in enumerate(items) if item["state"] == "wait"]
+        changed = reordered([items[i] for i in waits], expected, order, key="number")
+        if changed is None:
+            return False
+        if expected == order:
+            return True
+        for index, item in zip(waits, changed):
+            items[index] = item
+        _publish_items(items)
     _persist()
     return True
 
@@ -706,23 +734,24 @@ def _known_title(item: dict) -> str:
     return kept[1].title if kept is not None else ""
 
 
-def _persist(final: bool = False) -> None:
+def _persist() -> None:
     """``manga_queue.json``: the galleries of the download not finished and its folder (nothing after «Остановить»,
     nothing once it has ended); (v5.44.116) their titles known."""
     from core.file_safety import write_json_kept
-    with _RUN_LOCK:
-        items = [dict(x) for x in _RUN["items"] or []]
-        root = _RUN["root"]
-        waiting = [] if _RESTORED.is_set() else list(_PENDING["numbers"])     # (v5.44.116) the last run's, not
-        waiting_titles = dict(_PENDING["titles"]) if waiting else {}           # begun again yet: kept with these
-    left = [] if (final and USER_STOP.is_set()) else [x for x in items if x["state"] in UNFINISHED]
-    titles = {str(x["number"]): title for x in left for title in (_known_title(x),) if title}
-    numbers = [x["number"] for x in left]
-    more = [n for n in waiting if n not in numbers]
-    titles.update({str(n): waiting_titles[n] for n in more if waiting_titles.get(n)})
-    kept = {"root": root if left else "", "galleries": (numbers + more)[:MAX_IN_RUN], "titles": titles}
     try:
-        with _KEEP_LOCK:
+        with _KEEP_LOCK:                # take the snapshot in the same order as the writes
+            with _RUN_LOCK:
+                items = [dict(x) for x in _RUN["items"] or []] if not _RUN.get("scheduled") else []
+                root = _RUN["root"]
+                waiting = [] if _RESTORED.is_set() else list(_PENDING["numbers"])
+                waiting_titles = dict(_PENDING["titles"]) if waiting else {}
+                stopped_by_user = USER_STOP.is_set()
+            left = [] if stopped_by_user else [x for x in items if x["state"] in UNFINISHED]
+            titles = {str(x["number"]): title for x in left for title in (_known_title(x),) if title}
+            numbers = [x["number"] for x in left]
+            more = [n for n in waiting if n not in numbers]
+            titles.update({str(n): waiting_titles[n] for n in more if waiting_titles.get(n)})
+            kept = {"root": root if left else "", "galleries": (numbers + more)[:MAX_IN_RUN], "titles": titles}
             write_json_kept(_keep_file(), json.dumps(kept, ensure_ascii=False), dict)
     except OSError as exc:
         _LOG.warning("the queue of manga downloads not kept: %s", exc)
@@ -792,21 +821,21 @@ def forget_restore() -> bool:
     """(v5.44.116) «Не продолжать»: the galleries of the last run, waiting to be begun again, are not —
     ``manga_queue.json`` keeps only the download going now (if one began meanwhile).  False — none waits (they have
     begun already)."""
-    with _RUN_LOCK:
-        if _RESTORED.is_set() or not _PENDING["numbers"]:
-            return False
-        _RESTORED.set()
-        _PENDING.update(numbers=[], titles={})
-        going = bool(_RUN["open"])
+    from core.file_safety import write_json_kept
+    with _KEEP_LOCK:
+        with _RUN_LOCK:
+            if _RESTORED.is_set() or not _PENDING["numbers"]:
+                return False
+            _RESTORED.set()
+            _PENDING.update(numbers=[], titles={})
+            going = bool(_RUN["open"])
+        if not going:                                # the items of a download ended before are not to be kept
+            try:
+                write_json_kept(_keep_file(), json.dumps({"root": "", "galleries": [], "titles": {}}), dict)
+            except OSError as exc:
+                _LOG.warning("the queue of manga downloads not emptied: %s", exc)
     if going:
         _persist()                                   # the download begun meanwhile keeps its own galleries
-    else:                                            # (the items of a download ended before are not to be kept)
-        from core.file_safety import write_json_kept
-        try:
-            with _KEEP_LOCK:
-                write_json_kept(_keep_file(), json.dumps({"root": "", "galleries": [], "titles": {}}), dict)
-        except OSError as exc:
-            _LOG.warning("the queue of manga downloads not emptied: %s", exc)
     _LOG.info("manga downloads of the last run: not begun again («Не продолжать»)")
     return True
 
@@ -819,7 +848,8 @@ def _size(size: float) -> str:
 
 
 # ── the whole of it ──────────────────────────────────────────────────────────────────
-def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -> dict:
+def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None, scheduled: bool = False,
+             start_paused: bool = False) -> dict:
     """The galleries, one after another, into the manga folder ``root``.  The result: {"done": [numbers], "failed":
     [numbers], "folders": [paths], "stopped": bool, "items": each gallery's line (see ``meter``)}."""
     from core.redaction import sanitize_text
@@ -835,22 +865,23 @@ def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -
     items = [_item(number) for number in dict.fromkeys(numbers)]
     if items:                      # (v5.44.107) the first one is under way already: not «в очереди» for add()
         items[0]["state"] = "reading"
-    USER_STOP.clear()
-    _PAUSE.clear()                 # (v5.44.120) a pause or a skip of the download before is not this one's
+    _PAUSE.set() if start_paused else _PAUSE.clear()
     _SKIP.clear()
 
     def halt() -> bool:            # what stops a gallery half-way: «Остановить» or (v5.44.120) «Пропустить галерею»
         return stop_check() or _SKIP.is_set()
     with _RUN_LOCK:                                   # (v5.44.107) the galleries asked meanwhile join it: add()
-        _RUN.update(items=items, open=True, root=str(root))
+        USER_STOP.clear()
+        _RUN.update(items=items, open=True, root=str(root), scheduled=scheduled)
+        _publish_items(items, clear=True)
+        if start_paused:
+            _set_meter(paused=True)
 
     def mark(item: dict, **values) -> None:
         """A gallery's line of the page's list, then the list to the progress bar."""
         with _RUN_LOCK:
             item.update(values)
-            snapshot = [dict(x) for x in items]
-        _set_meter(items=snapshot, galleries=len(snapshot))
-    _set_meter(clear=True, galleries=len(items), items=[dict(x) for x in items])
+            _publish_items(items)
     _persist()
     def skipped(item: dict) -> None:
         """(v5.44.120) «Пропустить галерею»: this one did not come — «пропущена»; the next one goes."""
@@ -874,6 +905,7 @@ def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -
                 item["state"] = "reading"
                 number, total = item["number"], len(items)
             k += 1
+            download_telemetry.title(number)
             _set_meter(gallery=k, number=number, title="", page=0, pages=0, bytes=0)
             mark(item, state="reading")
             say(f"— Галерея {number} ({k} из {total})")
@@ -977,9 +1009,13 @@ def download(numbers: list, root: Path, *, say, stop_check, window_fetch=None) -
     finally:
         with _RUN_LOCK:
             _RUN["open"] = False
+            if USER_STOP.is_set():
+                # Forget the stopped run before any pending queue save can take its next snapshot.
+                _RUN.update(items=None, root="")
+                USER_STOP.clear()
         _PAUSE.clear()
         _SKIP.clear()
-        _persist(final=True)
+        _persist()
         _set_meter(clear=True)
     from core import manga_library
     manga_library.LIBRARY.invalidate()

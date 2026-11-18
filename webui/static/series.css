@@ -147,6 +147,7 @@
   font-size: 10px; line-height: 1; }
 .sv .sv-sw.disk { background: var(--panel-2, var(--panel)); border: 1px solid color-mix(in srgb, var(--text) 30%, transparent); }
 .sv .sv-sw.site { border: 1px solid color-mix(in srgb, var(--text) 30%, transparent); }
+.sv .sv-sw.external, .sv .sv-tile.external { border: 1px dashed var(--muted); }
 .sv .sv-sw.done { width: auto; height: auto; color: var(--muted); }
 .sv .sv-sw.new { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .sv .sv-list-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-left: auto; }

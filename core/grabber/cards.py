@@ -8,11 +8,13 @@ of its own.  :func:`mark_owned` says which cards the library already has.
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 VIDEO_EXTS = {"mp4", "webm", "mkv", "mov", "m4v", "avi", "zip"}      # zip: Danbooru ugoira
 OWNED_FILE, OWNED_POST, OWNED_TRASH = "file", "post", "trash"
 _PREVIEW_MARKS = ("/preview", "thumbnail", "/180x180/", "/360x360/", "/thumb/")
+_THUMBNAIL_TYPES = ("180x180", "360x360", "720x720")
+_SAMPLE_TYPES = ("sample", "full")
 
 
 def _ext_of(url: str) -> str:
@@ -36,24 +38,56 @@ def _size(raw: dict) -> tuple[int, int]:
     return width, height
 
 
+def _asset_copies(asset: dict, root: str) -> dict:
+    """Named reduced copies advertised by the post API, without guessing CDN paths."""
+    from core.network import is_permanently_disabled_url
+
+    copies = {}
+    variants = asset.get("variants")
+    for variant in variants if isinstance(variants, list) else ():
+        if not isinstance(variant, dict):
+            continue
+        kind, url = variant.get("type"), variant.get("url")
+        if kind not in (*_THUMBNAIL_TYPES, *_SAMPLE_TYPES) or not isinstance(url, str) or not url.strip():
+            continue
+        try:
+            url = urljoin(root.rstrip("/") + "/", url.strip())
+            parsed = urlparse(url)
+        except ValueError:
+            continue
+        if parsed.scheme in ("http", "https") and parsed.hostname and not (parsed.username or parsed.password) \
+                and not is_permanently_disabled_url(url):
+            copies.setdefault(kind, url)
+    return copies
+
+
 def entry(site, post, raw: dict) -> dict:
     """An entry from a post of a tag search (``site`` — the parser's site client)."""
     from core.downloader_utils import _absolute_url, _media_url_groups
     host = site.host
     originals, reduced, _pages = _media_url_groups(raw, host)
+    asset = raw.get("media_asset")
+    asset = asset if isinstance(asset, dict) else {}
+    copies = _asset_copies(asset, site.root)
+    thumbnails = [copies[kind] for kind in _THUMBNAIL_TYPES if kind in copies]
+    larger = [copies[kind] for kind in _SAMPLE_TYPES if kind in copies]
     original = originals[0] if originals else ""
-    preview = _absolute_url(post.preview_url, host) or (reduced[-1] if reduced else "")
+    preview = _absolute_url(post.preview_url, host)
+    if not preview:
+        preview = thumbnails[0] if thumbnails else next(reversed(reduced), "")
     # The larger copy for the post view: a sample when the site has one; when it has none (a small
     # picture: Danbooru's large_file_url is the file itself) the original — never the preview again.
     samples = [u for u in reduced if u != preview and not any(m in u.lower() for m in _PREVIEW_MARKS)]
-    sample = samples[0] if samples else (original or preview)
+    sample = next(iter(samples or larger), "") or original or (thumbnails[-1] if thumbnails else preview)
     file_info = raw.get("file") if isinstance(raw.get("file"), dict) else {}
-    ext = str(raw.get("file_ext") or file_info.get("ext") or _ext_of(original or sample)).lower().lstrip(".")
+    ext = str(raw.get("file_ext") or file_info.get("ext") or asset.get("file_ext") or
+              _ext_of(original or sample)).lower().lstrip(".")
     width, height = _size(raw)
     return {
         "site": host, "label": site.label, "post_id": str(post.post_id), "url": post.url, "md5": post.md5,
         "rating": post.rating, "tags": list(post.tags), "groups": post.groups, "sources": list(post.sources),
         "preview": preview, "sample": sample, "original": original, "width": width, "height": height,
+        "thumbnails": thumbnails, "larger_copies": larger,
         "ext": ext, "video": ext in VIDEO_EXTS, "raw": raw,
     }
 

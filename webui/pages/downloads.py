@@ -12,8 +12,8 @@ grabber and the subscriptions had their own pages.  Now:
   now («Том 5 · Глава 45: страница 18 из 32», «Серия 03 · 61% из 412 МБ», «Скачано картинок: 34 из 120»), the bar, the
   speed and the time left when known, its state and the buttons it has — a button is there only when it works:
   «Пропустить главу» (``manhwa_run.skip``), «Пропустить галерею» (``manga_download.skip``), «Пропустить подписку»
-  (``SubscriptionJob.skip``); the videos have no skip.  The queue — one list with places; «↑↓» within a kind's own
-  queue (the manga and manhwa — ``manhwa_queue.move``, nhentai — ``manga_download.move``; the videos' order is theirs).
+  (``SubscriptionJob.skip``); the videos have no skip. Drag and drop or «↑↓» change the waiting order within a
+  download kind. Each kind's downloader runs independently.
 * «SFW» — decided here for every kind alike: a download of hentai (the manga and manhwa as ``manhwa_get`` decides it,
   nhentai always, a video by ``core/content_marks`` of its series and its site), «Галерея (booru)» and the
   subscriptions (the gallery's world) — «Скрытая загрузка 18+»: no picture, no name, no site, no folder, no journal, no
@@ -22,7 +22,7 @@ grabber and the subscriptions had their own pages.  Now:
   disk, no site.
 * «Готово» — ``core/download_history`` (7 days); «Повторить не скачавшееся» puts exactly what did not come back in the
   queue (the manga and manhwa — ``manhwa_queue.start`` with those chapters; nhentai — those galleries; a video — its
-  card on «По ссылке», nothing of its code changed; «Галерея (booru)» stopped — its posts left).
+  missing files with their original quality and merge options; «Галерея (booru)» stopped — its posts left).
 * «Сама программа» — what the program does without the person (``core/background_duties``): the same switches as in
   «Настройки» (``settings_store.save``), «идёт сейчас» / «было в 03:12 — итог» / «выключено», «Проверить сейчас» where
   there is one already (the comics, the subscriptions).
@@ -39,6 +39,7 @@ import re
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlencode
 
 from webui.html import esc
 from webui.server import Request, Response
@@ -85,7 +86,10 @@ def register(router) -> None:
     router.add("GET", r"/api/downloads/duties", duties_api)
     router.add("GET", r"/api/downloads/log", log_api)
     router.add("GET", r"/api/downloads/video-cover", video_cover)
+    router.add("GET", r"/api/downloads/steam-cover", steam_cover)
     router.add("POST", r"/api/downloads/act", act_api)
+    router.add("POST", r"/api/downloads/steam-move", steam_move_api)
+    router.add("POST", r"/api/downloads/steam-remove", steam_remove_api)
     router.add("POST", r"/api/downloads/all", all_api)
     router.add("POST", r"/api/downloads/retry", retry_api)
     router.add("POST", r"/api/downloads/duty", duty_api)
@@ -170,7 +174,7 @@ def _video_marks(st: dict, settings: dict) -> None:
     """(«SFW») which of the videos going and waiting are hentai — ``content_marks`` of their series (by its folder or
     its page) and of their page's site; the other chat's download is only read."""
     from types import SimpleNamespace
-    from core import content_marks as CM, page_jobs, video_library as V
+    from core import content_marks as CM, download_scheduler, page_jobs, video_library as V
     from webui.pages import video_get
     root = V.video_root(settings)
     try:
@@ -194,15 +198,21 @@ def _video_marks(st: dict, settings: dict) -> None:
         return False
     title = _unquote(st.get("label"), r"^Скачать с сайта:\s*")
     if st.get("status") in RUNNING:
+        schedule = download_scheduler.snapshot()
+        active = schedule.get("worker") or schedule["active"]
+        scheduled = bool(active and active["kind"] == "video" and active.get("jobId") and
+                         st.get("id") == active["jobId"])
+        marked = scheduled and _scheduled_hidden(active, settings)
         task = page_jobs.current(video_get.FIND)
         result = task.result if task is not None and isinstance(task.result, dict) else {}
         found = result.get("found") if task is not None and str(task.id) == str(st.get("find")) else None
         if found is not None:
-            st["hentai"] = hentai(title, str(found.page.url or ""), str(found.folder), dict(found.facts or {}))
+            st["hentai"] = marked or hentai(title, str(found.page.url or ""), str(found.folder), dict(found.facts or {}))
         else:
-            st["hentai"] = hentai(title, address_of(title))
+            st["hentai"] = marked or hentai(title, str(active.get("url") or "") if scheduled else address_of(title))
     for q in st.get("queue") or []:
-        q["hentai"] = hentai(str(q.get("title") or ""), address_of(str(q.get("title") or "")))
+        q["hentai"] = bool(q.get("hentai")) or hentai(str(q.get("title") or ""),
+                                                      str(q.get("url") or "") or address_of(str(q.get("title") or "")))
     soon = st.get("restoring")
     if soon:
         soon["hentai"] = [hentai(t, address_of(t)) for t in soon.get("titles") or []]
@@ -272,6 +282,9 @@ def _row(key: str, kind: str, title: str, **values) -> dict:
 def _hide_row(row: dict) -> dict:
     from webui.pages.manhwa_get import HIDDEN, HIDDEN_KIND
     row.update(title=HIDDEN, kind=HIDDEN_KIND, hidden=True, dest="", cover="", log=False)
+    row.pop("current_title", None)
+    row.pop("processing_title", None)
+    row.pop("transfer", None)
     return row
 
 
@@ -347,12 +360,12 @@ def _manhwa_rows(st: dict, out: dict) -> None:
             row["text"] = "" if hidden else str(st.get("line") or "Начинаю…")
             if night:
                 row["sub"] = "ночная проверка новых глав"
-        if m.get("run") and not hidden and (now or done):
+        if m.get("run") and not hidden and (m.get("folder") or now or done):
             from core.title_covers import stamp       # (v5.44.123) a cover chosen meanwhile: another address
             row["cover"] = f"/api/manhwa/download-cover?run={int(m['run'])}" + (
                 f"&v={stamp(Path(str(m['folder'])))}" if m.get("folder") else "")
         out["jobs"].append(_hide_row(row) if hidden else row)
-    _queue(out, "manhwa", st.get("queue") or [], current, move=True,
+    _queue(out, "manhwa", st.get("queue") or [], current,
            what=lambda q: (plural(int(q.get("count") or 0), CHAPTERS) if q.get("count") else "все новые главы"),
            hidden=lambda q: q.get("title") == HIDDEN)
     soon = st.get("restoring")
@@ -367,7 +380,7 @@ def _manhwa_rows(st: dict, out: dict) -> None:
         out["jobs"].append(row)
 
 
-def _queue(out: dict, key: str, queue: list, current: str, *, move: bool, what, hidden) -> None:
+def _queue(out: dict, key: str, queue: list, current: str, *, what, hidden) -> None:
     from webui.pages.manhwa_get import HIDDEN, HIDDEN_KIND
     words = {"manhwa": "Манга и манхва", "video": "Видео", "manga": "Хентай"}
     folders = {"manga": "Манга", "manhwa": "Манхва"}  # the folder chosen on the card (none — by the title's type)
@@ -382,7 +395,7 @@ def _queue(out: dict, key: str, queue: list, current: str, *, move: bool, what, 
         word = folders.get(str(q.get("where") or ""), words[key]) if key == "manhwa" else words[key]
         out["queue"].append({"key": key, "id": q.get("id"), "kind": HIDDEN_KIND if secret else word,
                              "hidden": secret, "title": title, "what": " · ".join(x for x in (told, after) if x),
-                             "up": move and n > 0, "down": move and n < len(queue) - 1, "drop": True})
+                             "up": n > 0, "down": n < len(queue) - 1, "drop": True})
         before = title
 
 
@@ -405,13 +418,21 @@ def _video_rows(st: dict, out: dict) -> None:
             row.update(state="stopping", text="Останавливаю…")
         elif m.get("count"):
             count, index = int(m["count"]), int(m.get("index") or 1)
+            processing = m.get("processing")
+            if processing or m.get("merging"):
+                row["processing"] = True
+                if not hidden:
+                    row["processing_title"] = str(processing or m.get("name") or "")
             if m.get("merging"):
-                row["text"] = "Собираю озвучки в общие файлы серий" + ("" if hidden else f": {m.get('name') or ''}")
-                row["part"] = max(0, index - 1) / count
+                row["processing_only"] = True
+                row["text"] = "Собираю озвучки в общие файлы серий" + (
+                    f": {row['processing_title']}" if row.get("processing_title") else "")
+                row["part"] = 1.0 if m.get("download_complete") else max(0, index - 1) / count
             else:
                 share = min(1.0, float(m.get("done") or 0) / float(m["total"])) if m.get("total") else 0
                 row["part"] = min(1.0, (index - 1 + share) / count)
                 name = f"Файл {index}" if hidden else re.sub(r"\.[^.]+$", "", str(m.get("name") or "Файл"))
+                row["transfer"] = name
                 bits = [name]
                 if m.get("total"):
                     bits.append(f"{int(share * 100)}% из {_megabytes(m['total'])}")
@@ -425,7 +446,7 @@ def _video_rows(st: dict, out: dict) -> None:
         else:
             row["text"] = "" if hidden else str(st.get("line") or "Начинаю…")
         out["jobs"].append(_hide_row(row) if hidden else row)
-    _queue(out, "video", st.get("queue") or [], current, move=False,
+    _queue(out, "video", st.get("queue") or [], current,
            what=lambda q: plural(int(q.get("files") or 0), FILES) if q.get("files") else "",
            hidden=lambda q: bool(q.get("hentai")))
     soon = st.get("restoring")
@@ -463,6 +484,8 @@ def _manga_rows(st: dict, out: dict) -> None:
             row.update(state="stopping", text="Останавливаю…")
         elif now is not None:
             place = items.index(now) + 1
+            if len(items) > 1 and not hidden:
+                row["current_title"] = name(now)
             page = (f"страница {now.get('page') or 1} из {now.get('pages') or '?'}" if now.get("state") == "pages"
                     else "читаю описание…")
             said = (f"{place} из {len(items)} · {page}" if hidden else
@@ -476,15 +499,14 @@ def _manga_rows(st: dict, out: dict) -> None:
             row["skip"] = "Пропустить галерею"
             covered = (lambda x: x.get("cover") and (x.get("state") in ("done", "had") or (x.get("state") == "pages"
                                                                                             and (x.get("page") or 0) > 1)))
-            pic = now if covered(now) else next((x for x in items if covered(x)), None)
-            if pic is not None and not hidden:
-                row["cover"] = str(pic["cover"])
+            if not hidden and covered(now):
+                row["cover"] = str(now["cover"])
         else:
             row["text"] = "" if hidden else str(st.get("line") or "Начинаю…")
         out["jobs"].append(_hide_row(row) if hidden else row)
     queue = [{"id": q.get("id"), "title": q.get("title")} for q in st.get("queue") or []] \
         if st.get("status") in RUNNING else []
-    _queue(out, "manga", queue, current, move=True, what=lambda q: "", hidden=lambda q: hidden)
+    _queue(out, "manga", queue, current, what=lambda q: "", hidden=lambda q: hidden)
     soon = st.get("restoring")
     if soon:
         titles = list(soon.get("titles") or [])
@@ -566,7 +588,7 @@ def counts_words(going: int, paused: int, queued: int) -> str:
 def light_count() -> int:
     """The badge «Загрузки» of the header: the downloads going (a pause too) and waiting — from memory only (no disk,
     no site): the same count as :func:`summary`'s ``badge``."""
-    from core import manga_download, manhwa_download as D, manhwa_queue as Q, page_jobs, subscription_jobs as J
+    from core import download_scheduler, manga_download, manhwa_download as D, manhwa_queue as Q, page_jobs, subscription_jobs as J
     from webui.pages import manga_get, video_get
     n = 0
     for kind in (D.TASK, manga_get.GET, video_get.GET):
@@ -576,10 +598,15 @@ def light_count() -> int:
     job = J.current()
     if job is not None and not job.finished_at and job.status in ("starting", "running", "waiting", "stopping"):
         n += 1
-    n += len(Q.public()) + len(video_get.queue_public())
+    schedule = download_scheduler.snapshot()
+    queued = schedule["next"] + schedule["later"]
+    managed = {row["id"] for row in queued}
+    n += len(schedule["next"]) + sum(row.get("id") not in managed for row in Q.public() + video_get.queue_public())
+    if schedule["active"] and not schedule["active"].get("jobId"):
+        n += 1
     task = page_jobs.current(manga_get.GET)
     if task is not None and task.running:
-        n += len(manga_download.waiting())
+        n += sum(row.get("id") not in managed for row in manga_download.waiting())
     for soon in (Q.restoring_public(), manga_download.restoring_public(), video_get.restoring_public()):
         if soon:
             n += len(soon.get("titles") or []) or 1
@@ -590,6 +617,53 @@ def light_count() -> int:
 def _sfw() -> bool:
     from webui import content_mode
     return content_mode.mode() == "sfw"
+
+
+def _steam_board() -> str:
+    lanes = []
+    for lane, title, empty in (("next", "Далее", "В очереди нет загрузок"),
+                               ("later", "Не запланировано", "Нет отложенных загрузок")):
+        lanes.append(f"""<section class="dls-lane" data-dl-lane="{lane}" aria-labelledby="dls-{lane}">
+          <h2 id="dls-{lane}">{title} <small data-dl-lane-count></small></h2>
+          <ol class="dls-list"></ol><p class="dls-empty">{empty}</p>
+        </section>""")
+    return """<div class="dls" data-steam-downloads hidden>
+      <section class="dls-active" aria-label="Текущая загрузка" data-dl-lane="active" tabindex="-1">
+        <div class="dls-art" aria-hidden="true"></div>
+        <div class="dls-title">
+          <p class="dls-status"><i aria-hidden="true"></i><span>Нет активной загрузки</span></p>
+          <h2></h2>
+        </div>
+        <div class="dls-chart" data-dl-chart tabindex="0" role="group"
+             aria-label="Скорость сети и записи на диск. Выберите время клавишами со стрелками.">
+          <svg viewBox="0 0 600 100" preserveAspectRatio="none" aria-hidden="true"></svg>
+          <span class="dls-dot" hidden></span>
+          <div class="dls-tip" data-dl-tip id="dls-tip" role="tooltip" hidden>
+            <strong></strong><time></time><span>Сеть <b></b></span><span>Диск <b></b></span>
+          </div>
+        </div>
+        <div class="dls-read">
+          <dl class="dls-rates">
+            <div class="dls-net"><dt>Сеть</dt><dd>—</dd></div><div><dt>Пик сети</dt><dd>—</dd></div>
+            <div class="dls-disk"><dt>Диск</dt><dd>—</dd></div><div><dt>Пик диска</dt><dd>—</dd></div>
+          </dl>
+          <div class="dls-work" hidden>
+            <div class="dls-meter" hidden>
+              <span>Ход загрузки</span><strong></strong>
+              <div class="dls-track" role="progressbar" aria-label="Ход загрузки"><i></i></div>
+            </div>
+            <div class="dls-meter dls-processing" hidden>
+              <span>Обработка файлов</span><strong></strong>
+              <div class="dls-track" role="progressbar" aria-label="Обработка файлов"><i></i></div>
+            </div>
+            <p class="dls-work-detail"></p>
+          </div>
+          <div class="dls-actions dls-active-actions"></div>
+        </div>
+        <div class="dls-drop-hint" hidden>Отпустите, чтобы загрузить сейчас</div>
+      </section>
+      <p class="dls-warning" role="status" hidden></p>
+      <div class="dls-queues">""" + "".join(lanes) + "</div>\n    </div>"
 
 
 def _board(phone: bool) -> str:
@@ -607,6 +681,7 @@ def _board(phone: bool) -> str:
     </div>
   </div>
   {note}
+  {'' if phone else _steam_board()}
   <div class="dl-board">
     <div class="dl-main">
       <section class="dl-panel dl-going" aria-labelledby="dl-going-title">
@@ -616,8 +691,9 @@ def _board(phone: bool) -> str:
           поставит их сюда.</p>
       </section>
       <section class="dl-panel dl-queue-panel" aria-labelledby="dl-queue-title" hidden>
-        <h2 id="dl-queue-title">Очередь <span class="dl-n"></span><small>начнутся сами, по порядку; ↑↓ — поменять
-          порядок</small></h2>
+        <h2 id="dl-queue-title">Очередь <span class="dl-n"></span></h2>
+        <p class="dl-queue-help" hidden>{'Стрелки ↑↓ меняют порядок внутри очереди каждого типа.' if phone else
+          'Перетащите за ручку или используйте ↑↓. У каждого типа загрузок своя очередь.'}</p>
         <ol class="dl-queue"></ol>
       </section>
       <section class="dl-panel dl-done-panel" aria-labelledby="dl-done-title">
@@ -645,7 +721,7 @@ def page(req: Request) -> Response:
     """``/get/downloads`` — «Скачать → Загрузки» of the computer."""
     from webui.pages import get_hub
     return get_hub.frame(req, "Загрузки", _board(phone=False), part="downloads", kind="downloads",
-                         assets=("downloads",))
+                         assets=("downloads-steam", "downloads"))
 
 
 def phone_chips(current: str, count: int | None = None) -> str:
@@ -699,10 +775,101 @@ def phone_badge(count: int | None = None) -> str:
 
 
 # ── the API ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+def _scheduled_hidden(item: dict, settings: dict) -> bool:
+    try:
+        if item["kind"] == "manhwa":
+            from core.manhwa_queue import hentai_of
+            if hentai_of(item):
+                return True
+        return _entry_hidden(item, settings)
+    except Exception:  # noqa: BLE001 - a title with an unknown content mark stays hidden
+        return True
+
+
+def _scheduled_row(item: dict, settings: dict, sfw: bool, live: dict | None = None) -> dict:
+    kind = item["kind"]
+    title = str(item.get("title") or "")
+    if kind == "manhwa":
+        kind_name = "Манга" if item.get("where") == "manga" else "Манхва"
+        sub = plural(int(item["count"]), CHAPTERS) if item.get("count") else "Все новые главы"
+    elif kind == "video":
+        kind_name = "Видео"
+        sub = plural(int(item["count"]), FILES) if item.get("count") else ""
+    else:
+        kind_name = "Хентай"
+        sub = ""
+    row = dict(live) if live is not None else _row(kind, kind_name, title, state="starting", sub=sub,
+                                                  task=item.get("jobId"), stop=True, log=False)
+    row.update(id=item["id"], can_defer=item.get("durable", True))
+    if sfw and (row["hidden"] or _scheduled_hidden(item, settings)):
+        if not row["hidden"]:
+            row.update(text="", sub="", speed="", left="", skip="")
+        return _hide_row(row)
+    if kind == "video" and (item.get("url") or item.get("poster_key") or item.get("find")):
+        from core.title_covers import version
+        chosen = version()
+        row["cover"] = f"/api/downloads/steam-cover?id={item['id']}" + (f"&v={chosen}" if chosen else "")
+    elif not row["cover"] and kind == "manhwa" and item.get("find"):
+        row["cover"] = f"/api/downloads/steam-cover?id={item['id']}"
+    return row
+
+
+def _scheduled_summary(answer: dict, settings: dict, sfw: bool, *, include_steam: bool) -> None:
+    from core import download_scheduler, download_telemetry
+    schedule = download_scheduler.snapshot()
+    job = schedule["active"]
+    worker = schedule.get("worker")
+    queue = schedule["next"] + schedule["later"]
+    if not schedule["enabled"] and not job and not worker and not queue:
+        return
+    managed = {row["id"] for row in queue}
+    answer["queue"] = [row for row in answer["queue"] if row["id"] not in managed]
+    scheduled = {lane: [_scheduled_row(row, settings, sfw) for row in schedule[lane]] for lane in ("next", "later")}
+    for lane, rows in scheduled.items():
+        for index, row in enumerate(rows):
+            answer["queue"].append({**row, "scheduled": True, "lane": lane, "drop": True,
+                                    "what": row["sub"] if lane == "next" else "Отложено",
+                                    "up": schedule["enabled"] and index > 0,
+                                    "down": schedule["enabled"] and index < len(rows) - 1})
+    active = None
+    if worker and worker["id"] != (job or {}).get("id"):
+        for i, live in enumerate(answer["jobs"]):
+            if live["key"] == worker["kind"] and live["task"] == worker["jobId"]:
+                answer["jobs"][i] = _scheduled_row(worker, settings, sfw, live)
+    if job:
+        live = next((row for row in answer["jobs"] if row["key"] == job["kind"] and
+                     job.get("jobId") and row["task"] == job["jobId"]), None)
+        active = _scheduled_row(job, settings, sfw, live)
+        if live is not None:
+            answer["jobs"][answer["jobs"].index(live)] = active
+        else:
+            answer["jobs"].insert(0, {**active, "scheduled": True})
+            answer["counts"]["going"] += 1
+    counts = answer["counts"]
+    counts["queued"] = sum(row.get("lane") != "later" for row in answer["queue"]) + sum(
+        int(row.get("count") or 1) for row in answer["jobs"] if row["state"] == "restoring")
+    answer["said"] = counts_words(counts["going"], counts["paused"], counts["queued"])
+    answer["badge"] = sum(counts.values())
+    answer["queue_rev"] = schedule["revision"]
+    if include_steam and schedule["enabled"]:
+        traffic = download_telemetry.snapshot(job.get("jobId") if job else None)
+        # The graph needs timings and byte rates only. The task label is rendered from the mode-aware row.
+        traffic["samples"] = [{k: v for k, v in sample.items() if k in ("at", "net", "disk", "net_unknown")}
+                              for sample in traffic["samples"]]
+        answer["steam"] = {**scheduled, "active": active, "revision": schedule["revision"], "traffic": traffic,
+                           "error": schedule.get("error", ""),
+                           "handoverTask": worker["jobId"] if worker and schedule["switching"] else None,
+                           "switching": schedule["switching"], "nativeBusy": any(
+                               row["key"] in ("manhwa", "video", "manga") and
+                               row["state"] != "restoring" and row["task"] != (active or {}).get("task")
+                               for row in answer["jobs"])}
+
+
 def state_api(req: Request) -> Response:
     from core import download_history
     sfw = _sfw()
     answer = summary(raw_states(req.settings), sfw=sfw)
+    _scheduled_summary(answer, req.settings, sfw, include_steam=req.arg("steam") == "1")
     return Response.json({"ok": True, "sfw": sfw, "done_rev": download_history.revision(), **answer})
 
 
@@ -732,9 +899,13 @@ def _entry_hidden(entry: dict, settings: dict) -> bool:
             return True
     if kind == "video":
         from types import SimpleNamespace
-        from core import content_marks as CM, video_library as V
-        if CM.adult_site(str(entry.get("url") or "")):
+        from core import content_marks as CM, video_download_covers as P, video_library as V
+        retry = entry.get("retry") if isinstance(entry.get("retry"), dict) else {}
+        addresses = [str(value) for value in (entry.get("url"), retry.get("address"), retry.get("url")) if value]
+        if any(CM.adult_site(value) for value in addresses):
             return True
+        address = addresses[0] if addresses else ""
+        identity = P.address_key(address)
         folder, title = str(entry.get("folder") or ""), str(entry.get("title") or "")
         root = V.video_root(settings)
         try:                                         # its series by its folder, else by its name (as the rows do)
@@ -742,10 +913,11 @@ def _entry_hidden(entry: dict, settings: dict) -> bool:
         except OSError:
             return True
         series = next((x for x in library if folder and Path(x.path) == Path(folder)), None) or \
+            next((x for x in library if identity and P.address_key(str(x.info.get("source_url") or "")) == identity), None) or \
             next((x for x in library if title and x.title == title), None)
         if series is not None:
             return CM.series_verdict(series).hentai
-        return bool(CM.series_reason(SimpleNamespace(info={"source_url": entry.get("url") or ""})))
+        return bool(CM.series_reason(SimpleNamespace(info={"source_url": address})))
     return False
 
 
@@ -777,9 +949,11 @@ def _done_row(entry: dict, settings: dict, sfw: bool, now: float, earlier: list 
     fails = list(entry.get("fails") or [])
     retry = entry.get("retry") if isinstance(entry.get("retry"), dict) else None
     tool = None
-    if retry and entry.get("kind") == "video" and retry.get("url"):
-        from webui.pages.get_link import link_of
-        tool = {"label": "Повторить не скачавшееся", "href": link_of(str(retry["url"])), "count": len(fails)}
+    if entry.get("kind") == "video":
+        if not hidden and not entry.get("summary") and entry.get("sign") in ("part", "fail", "stop"):
+            count = _video_retry_count(retry)
+            label = f"Повторить не скачавшееся ({count})" if count else "Повторить"
+            tool = {"label": label, "id": entry["id"]}
     elif retry and entry.get("kind") in ("grab", "favorites"):
         tool = {"label": f"Докачать остальные ({int(retry.get('count') or 0)})", "id": entry["id"]}
     elif retry:
@@ -801,8 +975,6 @@ def _done_row(entry: dict, settings: dict, sfw: bool, now: float, earlier: list 
         numbers = re.sub(r":\s*$", ".", str(entry.get("said") or ""))
         numbers = re.sub(r"«[^»]*»", "", numbers).strip()
         row.update(title=HIDDEN, kind=HIDDEN_KIND, fails=[], open=False, what=numbers, note="")
-        if tool and tool.get("href"):
-            row["retry"] = None                       # a link would name the title's page
     return row
 
 
@@ -835,9 +1007,14 @@ def log_api(req: Request) -> Response:
     «SFW» hides — none (its lines name it)."""
     key = req.arg("key")
     after = req.int_arg("after", 0, lo=0)
-    rows = summary(raw_states(req.settings), sfw=_sfw())["jobs"]
-    if any(r["key"] == key and r["hidden"] for r in rows):
-        return Response.json({"ok": True, "hidden": True, "log": [], "last_seq": 0})
+    task = _task_of(key)
+    if _sfw():
+        state = summary(raw_states(req.settings), sfw=True)
+        _scheduled_summary(state, req.settings, True, include_steam=False)
+        live = next((r for r in state["jobs"] if r["key"] == key and r["state"] != "restoring" and
+                     (key == "subs" or (task and task.running and r["task"] == task.id))), None)
+        if live is None or live["hidden"]:
+            return Response.json({"ok": True, "hidden": True, "log": [], "last_seq": 0})
     if key == "subs":
         from core import subscription_jobs as J
         job = J.current()
@@ -845,7 +1022,6 @@ def log_api(req: Request) -> Response:
             return Response.json({"ok": True, "log": [], "last_seq": 0})
         snap = job.snapshot(after=after)
         return Response.json({"ok": True, "id": snap["id"], "log": snap["log"], "last_seq": snap["last_seq"]})
-    task = _task_of(key)
     if task is None:
         return Response.json({"ok": True, "log": [], "last_seq": 0})
     snap = task.snapshot(after=after)
@@ -861,7 +1037,7 @@ def video_cover(req: Request) -> Response:
     if task is None or not task.running or req.arg("task") != str(task.id):
         return Response.not_found("Обложки нет")
     if _sfw():
-        st = {"status": "running", "label": task.label, "find": task.about, "queue": []}
+        st = {"status": "running", "id": task.id, "label": task.label, "find": task.about, "queue": []}
         try:
             _video_marks(st, req.settings)
         except Exception:  # noqa: BLE001 - not known: no cover
@@ -891,6 +1067,68 @@ def video_cover(req: Request) -> Response:
             except OSError:
                 continue
     return Response.not_found("Обложки нет")
+
+
+def _scheduled_video_poster(item: dict, settings: dict) -> tuple | None:
+    from core import title_covers, video_download_covers, video_library
+    from webui.pages.covers import series_picture
+
+    address = str(item.get("url") or "")
+    chosen = series_picture(address, cache_only=True) if address else None
+    if chosen is not None:
+        return chosen
+    directory = video_library.video_root(settings)
+    root = Path(directory).resolve() if directory else None
+    identity = video_download_covers.address_key(address)
+    if identity and root is not None and root.is_dir():
+        for series in video_library.LIBRARY.items(root):
+            source = str(series.info.get("source_url") or "")
+            if not series.poster or video_download_covers.address_key(source) != identity:
+                continue
+            try:
+                path = Path(series.poster).resolve()
+                if not path.is_relative_to(root):
+                    continue
+                with path.open("rb") as file:
+                    data = file.read(title_covers.MAX_PICTURE + 1)
+            except OSError:
+                continue
+            ext = title_covers.picture_ext(data)
+            if ext and len(data) <= title_covers.MAX_PICTURE:
+                return data, title_covers.content_type(ext)
+    return video_download_covers.picture(address, key=str(item.get("poster_key") or ""))
+
+
+def steam_cover(req: Request) -> Response:
+    """The cached poster for one scheduled title, using the source page's own poster lookup."""
+    from dataclasses import replace
+    from core import download_scheduler
+    from webui.pages import manhwa_get, video_get
+    wanted = req.arg("id")
+    missing = Response.not_found("Обложки нет")
+    missing.headers["Cache-Control"] = "no-store"
+    if not re.fullmatch(r"[0-9a-f]{24}", wanted):
+        return missing
+    schedule = download_scheduler.snapshot()
+    item = next((row for row in (schedule["active"], *schedule["next"], *schedule["later"])
+                 if row and row["id"] == wanted), None)
+    if not item or (_sfw() and _scheduled_hidden(item, req.settings)):
+        return missing
+    if _sfw() and item.get("jobId"):
+        rows = summary(raw_states(req.settings), sfw=True)["jobs"]
+        if any(row["task"] == item["jobId"] and row["hidden"] for row in rows):
+            return missing
+    if item["kind"] == "video":
+        poster = _scheduled_video_poster(item, req.settings)
+        if poster:
+            return Response(200, bytes(poster[0]), poster[1], {"Cache-Control": "no-store"})
+    handler = {"manhwa": manhwa_get.find_cover, "video": video_get.find_poster}.get(item["kind"])
+    if handler and item.get("find"):
+        response = handler(replace(req, query={"find": [str(item["find"])]}))
+        response.headers["Cache-Control"] = "no-store"
+        if response.status == 200:
+            return response
+    return missing
 
 
 # ── what the buttons do ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -976,6 +1214,21 @@ def act(settings: dict, key: str, what: str, number=None, step: int = 0) -> tupl
 def act_api(req: Request) -> Response:
     body = req.json()
     key, what = str(body.get("key") or ""), str(body.get("act") or "")
+    if body.get("task") is not None:
+        task = _task_of(key)
+        if task is None or not task.running or body["task"] != task.id:
+            return Response.json({"ok": False, "error": "Эта загрузка уже сменилась"}, 409)
+    if what == "reorder":
+        from core import manga_download, manhwa_queue
+        from webui.pages import video_get
+        reorder = {"manhwa": manhwa_queue.reorder, "manga": manga_download.reorder,
+                   "video": video_get.reorder_queue}.get(key)
+        if reorder is None:
+            return Response.json({"ok": False, "error": "Нет такой очереди"}, 400)
+        ok = reorder(body.get("expected"), body.get("order"))
+        if not ok:
+            return Response.json({"ok": False, "error": "Очередь изменилась. Попробуйте ещё раз."}, 409)
+        return Response.json({"ok": True, "message": "Порядок загрузок сохранён"})
     try:
         step = int(body.get("step") or 0)
     except (TypeError, ValueError):
@@ -984,13 +1237,43 @@ def act_api(req: Request) -> Response:
     return Response.json({"ok": ok, "message": words, **({} if ok else {"error": words})}, 200 if ok else 409)
 
 
+def steam_move_api(req: Request) -> Response:
+    from core import download_scheduler
+    body = req.json()
+    wanted, lane, before, revision = (body.get(k) for k in ("id", "lane", "before", "revision"))
+    if not isinstance(wanted, str) or lane not in ("active", "next", "later") or type(revision) is not int or \
+            (before is not None and not isinstance(before, str)):
+        return Response.json({"ok": False, "error": "Некорректное место в очереди"}, 400)
+    if not download_scheduler.move(wanted, lane, before, revision):
+        error = download_scheduler.snapshot().get("error") or "Очередь изменилась. Попробуйте ещё раз."
+        return Response.json({"ok": False, "error": error}, 409)
+    return Response.json({"ok": True, "message": {"active": "Загрузка запланирована первой", "next": "Порядок очереди сохранён",
+                                                   "later": "Загрузка отложена"}[lane]})
+
+
+def steam_remove_api(req: Request) -> Response:
+    from core import download_scheduler
+    if not download_scheduler.remove(req.json().get("id")):
+        error = download_scheduler.snapshot().get("error") or "Этой загрузки уже нет"
+        return Response.json({"ok": False, "error": error}, 409)
+    return Response.json({"ok": True, "message": "Загрузка убрана"})
+
+
 def all_api(req: Request) -> Response:
     """«Пауза всего» / «Продолжить всё» / «Остановить всё» (the queues too)."""
     what = str(req.json().get("act") or "")
     if what not in ("pause", "resume", "stop"):
         return Response.json({"ok": False, "error": "Непонятно, что сделать"}, 400)
-    raw = raw_states(req.settings)
     done = []
+    if what == "stop":
+        from core import download_scheduler
+        if download_scheduler.stop_all():
+            done.append("steam")
+        else:
+            schedule = download_scheduler.snapshot()
+            if schedule.get("error") and (schedule["active"] or schedule["next"]):
+                return Response.json({"ok": False, "error": schedule["error"]}, 409)
+    raw = raw_states(req.settings)
     for row in summary(raw, sfw=_sfw())["jobs"]:
         if row["state"] == "restoring":
             continue
@@ -1014,12 +1297,31 @@ def all_api(req: Request) -> Response:
 def retry_api(req: Request) -> Response:
     """«Повторить не скачавшееся» of a line of «Готово»: exactly what did not come, into the queue."""
     from core import download_history
-    entry = download_history.get(str(req.json().get("id") or ""))
+    body = req.json()
+    entry = download_history.get(str(body.get("id") or ""))
     retry = entry.get("retry") if entry else None
-    if not entry or not isinstance(retry, dict):
+    if not entry or (entry.get("kind") != "video" and not isinstance(retry, dict)):
         return Response.json({"ok": False, "error": "Повторять нечего — этой строки уже нет"}, 409)
     try:
-        words = _retry(req.settings, entry, retry)
+        if entry.get("kind") == "video":
+            from webui.pages import video_get
+            if entry.get("summary") or entry.get("sign") not in ("part", "fail", "stop"):
+                raise _Refused("В этой загрузке нечего повторять")
+            if _sfw() and _entry_hidden(entry, req.settings):
+                raise _Refused("Загрузка скрыта в режиме SFW")
+            count = _video_retry_count(retry)
+            if count:
+                result = video_get.retry_download(req.settings, retry)
+            elif isinstance(retry, dict) and retry.get("choose") is True:
+                result = retry
+            else:
+                result = video_get.retry_from_library(req.settings, entry)
+            if result.get("choose"):
+                href = _video_choice(req.settings, entry, result.get("address"), body.get("phone") is True)
+                return Response.json({"ok": True, "href": href})
+            words = _video_retry_message(result, count)
+        else:
+            words = _retry(req.settings, entry, retry)
     except _Refused as exc:
         return Response.json({"ok": False, "error": str(exc)}, 409)
     return Response.json({"ok": True, "message": words})
@@ -1027,6 +1329,55 @@ def retry_api(req: Request) -> Response:
 
 class _Refused(Exception):
     pass
+
+
+def _video_retry_count(retry) -> int:
+    from core.video_download import restorable_address
+    if isinstance(retry, dict) and restorable_address(str(retry.get("address") or "")):
+        return len(retry["files"]) if isinstance(retry.get("files"), list) else 0
+    return 0
+
+
+def _video_retry_message(result: dict, count: int) -> str:
+    if not result.get("ok"):
+        raise _Refused(str(result.get("error") or "Не удалось начать загрузку"))
+    if result.get("postponed"):
+        return "Повтор в разделе «Не запланировано»"
+    if result.get("already") and result.get("id"):
+        return "Эта загрузка уже идёт"
+    verb = "В очереди" if result.get("queued") else "Скачиваю снова"
+    return f"{verb}: {plural(count, FILES)}" if count else verb
+
+
+def _video_choice(settings: dict, entry: dict, address, phone: bool) -> str:
+    """Open voice-over selection when the series can be identified, else the video's title search."""
+    from core import catalog, content_marks, manhwa_sources
+    from core.video_download import restorable_address
+    from webui import content_mode
+    from webui.pages.get_link import link_of
+
+    prefix = "/m" if phone else ""
+    mode = content_mode.mode()
+    retry = entry.get("retry") if isinstance(entry.get("retry"), dict) else {}
+    for source in (address, entry.get("url"), retry.get("url"), retry.get("address")):
+        if isinstance(source, str) and restorable_address(source):
+            if mode == "sfw" and content_marks.adult_site(source):
+                raise _Refused("Загрузка скрыта в режиме SFW")
+            return prefix + link_of(source)
+
+    title = str(entry.get("title") or "").strip()
+    if not title or "://" in title:
+        return prefix + "/get"
+    # The visible feed hides already-owned titles. Include them in this lookup, which only opens a selector.
+    query = catalog.Query("video", text=title, mode=mode)
+    found = catalog.page(query, wait=catalog.WAIT, settings=settings)
+    if found and not (found.more or found.errors or found.late):
+        key = manhwa_sources.name_key(title)
+        matches = [tile for tile in found.tiles if key and key in {
+            manhwa_sources.name_key(tile.get("title")), manhwa_sources.name_key(tile.get("alt"))}]
+        if len(matches) == 1 and restorable_address(str(matches[0].get("url") or "")):
+            return prefix + link_of(matches[0]["url"])
+    return prefix + "/videos/feed?" + urlencode({"q": title})
 
 
 def _retry(settings: dict, entry: dict, retry: dict) -> str:
@@ -1053,21 +1404,14 @@ def _retry(settings: dict, entry: dict, retry: dict) -> str:
             return f"В очереди {started['queued']}-м: {plural(len(chapters), CHAPTERS)}"
         return f"Скачиваю снова: {plural(len(chapters), CHAPTERS)}"
     if kind == "manga" and retry.get("numbers"):
-        from core import manga_download as MD, page_jobs
-        from core import manga_library as M
+        from core import manga_download as MD
         from webui.pages import manga_get
         numbers = [int(n) for n in retry["numbers"] if str(n).isdigit()][:MD.MAX_AT_ONCE]
-        root = M.manga_root(settings)
-        if not root or not Path(root).is_dir():
-            raise _Refused("Папки манги нет на месте")
-        places = MD.add(numbers)
-        if places is not None:
-            return f"В очереди: {plural(len(numbers), GALLERIES)}"
-        try:
-            page_jobs.start(manga_get.GET, manga_get._label(numbers), manga_get._run_of(numbers, Path(root)))
-        except page_jobs.TaskBusy as exc:
-            raise _Refused(f"{exc}. Дождитесь конца.") from exc
-        return f"Скачиваю снова: {plural(len(numbers), GALLERIES)}"
+        result = manga_get.begin(settings, numbers)
+        if not result.get("ok"):
+            raise _Refused(str(result.get("error") or "Не удалось начать загрузку"))
+        verb = "В очереди" if result.get("queued") else "Скачиваю снова"
+        return f"{verb}: {plural(len(numbers), GALLERIES)}"
     if kind in ("grab", "favorites") and isinstance(retry.get("sub"), dict):
         from core import subscription_jobs as J
         # the posts found before wait in the seed cache: no scan («given_posts» empty), only their download

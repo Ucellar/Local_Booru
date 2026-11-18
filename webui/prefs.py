@@ -18,6 +18,7 @@ from pathlib import Path
 
 _LOG = logging.getLogger("local_booru.webui")
 _LOCK = threading.Lock()
+_DOWNLOAD_LOOK_LOCK = threading.Lock()
 _CACHE: dict = {"stamp": None, "data": {}}
 # (v5.44.165) what a page is told when the file stays held by another program and :func:`save` gave up (``OSError``)
 HELD_WORDS = "Не сохранилось: файл настроек страниц занят другой программой. Попробуйте ещё раз."
@@ -95,6 +96,14 @@ def motion(stored: dict | None = None) -> str:
     stored = load() if stored is None else stored
     value = str(stored.get("motion") or "vivid")
     return value if value in MOTION else "vivid"
+
+
+def sync_download_scheduler(settings_provider=None) -> None:
+    """Apply the latest saved look to the foreground queue at startup or after a look change."""
+    from webui.pages import download_schedule
+
+    with _DOWNLOAD_LOOK_LOCK:
+        download_schedule.configure(look("get")["skin"] == "steam", settings_provider=settings_provider)
 
 
 def choices(stored: dict | None = None) -> dict:

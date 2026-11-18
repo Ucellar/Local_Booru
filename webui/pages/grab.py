@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 
-from webui.html import CATEGORY_ORDER, CATEGORY_TITLES, esc
+from webui.html import CATEGORY_ORDER, CATEGORY_TITLES, THUMB_SIZES, esc
 from webui.server import Request, Response
 
 MAX_KEYS = 2000                  # cards one request may download or hide
@@ -18,6 +18,7 @@ def register(router) -> None:
     router.add("GET", r"/api/grab/card", grab_card)
     router.add("POST", r"/api/grab/search", grab_search)
     router.add("POST", r"/api/grab/more", grab_more)
+    router.add("POST", r"/api/grab/progress", grab_progress)
     router.add("POST", r"/api/grab/download", grab_download)
     router.add("POST", r"/api/grab/hide", grab_hide)
     router.add("POST", r"/api/grab/owned", grab_owned)
@@ -43,6 +44,7 @@ _GRAB_TIPS = """<div class="empty grab-tips">
   </div>"""
 def grab_page(req: Request) -> Response:
     from core.grabber.search import searchable_sites
+    from webui.pages import gallery
     s = req.settings
     sites = searchable_sites(s)
     query = " ".join(req.arg("q").split())
@@ -53,13 +55,18 @@ def grab_page(req: Request) -> Response:
     hide = " checked" if s.get("grabber_preview_hide_existing", True) else ""
     no_sites = ('<span class="tool-warn">нет включённых сайтов с поиском по тегам — включите их: '
                 '<a href="/sites">Настройки → Парсер и сайты</a></span>')
-    data = {"categories": [[c, CATEGORY_TITLES[c]] for c in CATEGORY_ORDER]}
+    prefs = _prefs()
+    sizes = "".join(
+        f'<button type="button" class="link{" active" if size == prefs["thumbs"] else ""}" data-action="thumb-size" '
+        f'data-size="{size}" aria-pressed="{"true" if size == prefs["thumbs"] else "false"}">{label}</button>'
+        for size, label in THUMB_SIZES)
+    data = {"categories": [[c, CATEGORY_TITLES[c]] for c in CATEGORY_ORDER], "pageSize": gallery._per_page(req)}
     data_json = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     body = f"""
 <section class="tool grab" id="grab" data-query="{esc(query)}">
   <div class="panel grab-panel">
     <form class="grab-search" data-form="grab-search" role="search">
-      <input type="search" name="q" value="{esc(query)}" placeholder="теги, как на сайте: artist_name rating:explicit — или ссылка на пост"
+      <input type="search" name="q" value="{esc(query)}" placeholder="Теги или ссылка на пост"
         aria-label="Теги для поиска или ссылка на пост" spellcheck="false" autocomplete="off">
       <button type="submit" class="primary">Найти</button>
     </form>
@@ -69,7 +76,10 @@ def grab_page(req: Request) -> Response:
     </div>
   </div>
   {"" if query else _GRAB_TIPS}
-  <p class="grab-status" role="status" aria-live="polite"></p>
+  <div class="result-bar grab-result-bar">
+    <p class="result-count grab-status" role="status" aria-live="polite"></p>
+    <div class="thumb-sizes" role="group" aria-label="Размер превью" hidden>{sizes}</div>
+  </div>
   <div class="select-bar" hidden>
     <button type="button" data-action="select-mode" aria-pressed="false">Выбрать</button>
     <span class="select-tools" hidden>
@@ -84,9 +94,9 @@ def grab_page(req: Request) -> Response:
   </div>
   <div class="grab-job" hidden><b class="grab-job-title"></b> <span class="grab-job-status"></span>
     <a href="/subs">журнал</a></div>
-  <div class="thumbs grab-results"></div>
-  <div class="grab-more tool-actions" hidden><button type="button" data-action="grab-more">Ещё</button>
-    <span class="action-status" role="status"></span></div>
+  <div class="thumbs grab-results" id="grab-results"></div>
+  <nav class="paginator grab-pages" aria-label="Страницы результатов" hidden></nav>
+  <p class="grab-page-note" role="status" hidden></p>
   <dialog class="grab-viewer" aria-labelledby="gv-title">
     <div class="gv-media"><img alt=""><p class="gv-note" hidden></p></div>
     <div class="gv-side">
@@ -110,7 +120,7 @@ def grab_page(req: Request) -> Response:
                '<p class="hint">Здесь появятся теги найденных постов.</p></div></section>')
     from webui.pages import get_hub
     return get_hub.frame(req, "Скачать в галерею", body, part="gallery", kind="grab", assets=("grab",),
-                         sidebar=sidebar, body_data={"tool": "grab"}, **_prefs())
+                         sidebar=sidebar, body_data={"tool": "grab"}, **prefs)
 
 
 # ── cards for the page ─────────────────────────────────────────────────────
@@ -143,8 +153,15 @@ def _card_json(card: dict, search=None) -> dict:
 
 
 def _batch(search, result: dict) -> dict:
-    return {"ok": True, "search": search.state(), "cards": [_card_json(c, search) for c in result["cards"]],
-            "updated": [_card_json(c, search) for c in result["updated"]], "removed": list(result["removed"])}
+    state = search.state()
+    batch = {"ok": True, "search": state, "cards": [_card_json(c, search) for c in result["cards"]],
+             "updated": [_card_json(c, search) for c in result["updated"]], "removed": list(result["removed"])}
+    if search.single and not state["pending"] and not state["shown"]:
+        lane = next(iter(state["sites"].values()), {})
+        why = lane.get("error") or ("на сайте нет такого поста (или его видно только после входа: «Настройки → "
+                                    "Парсер и сайты»)")
+        batch["error_note"] = f"Пост не получен: {why}"
+    return batch
 
 
 def _search_or_error(body_or_req) -> tuple:
@@ -164,31 +181,34 @@ def grab_search(req: Request) -> Response:
     query = " ".join(str(body.get("q") or "").split())
     if not query:
         return Response.json({"ok": False, "error": "Введите теги для поиска или ссылку на пост"}, 400)
+    wait = .2 if body.get("partial") is True else None
     if looks_like_link(query):
         try:
             search = open_link(dict(req.settings), query)
         except LinkError as exc:
             return Response.json({"ok": False, "error": str(exc)}, 400)
-        batch = _batch(search, search.more())
-        if not batch["cards"]:
-            lane = next(iter(search.state()["sites"].values()), {})
-            why = lane.get("error") or ("на сайте нет такого поста (или его видно только после входа: «Настройки → "
-                                        "Парсер и сайты»)")
-            batch["error_note"] = f"Пост не получен: {why}"
-        return Response.json(batch)
+        return Response.json(_batch(search, search.more(wait=wait)))
     known = {host for host, _label in searchable_sites(req.settings)}
     hosts = [str(h) for h in body.get("sites") or [] if str(h) in known]
     if not hosts:
         return Response.json({"ok": False, "error": "Выберите хотя бы один сайт"}, 400)
     search = open_search(dict(req.settings), query, hosts, hide_owned=bool(body.get("hide_owned")))
-    return Response.json(_batch(search, search.more()))
+    return Response.json(_batch(search, search.more(wait=wait)))
 
 
 def grab_more(req: Request) -> Response:
+    body = req.json()
+    search, error = _search_or_error(body)
+    if error:
+        return error
+    return Response.json(_batch(search, search.more(wait=.2 if body.get("partial") is True else None)))
+
+
+def grab_progress(req: Request) -> Response:
     search, error = _search_or_error(req.json())
     if error:
         return error
-    return Response.json(_batch(search, search.more()))
+    return Response.json(_batch(search, search.progress()))
 
 
 def grab_media(req: Request) -> Response:

@@ -27,14 +27,19 @@ The ``.lb`` folder of a series (skipped by the library) keeps the prints of a pi
 """
 from __future__ import annotations
 
+import io
 import itertools
 import json
 import logging
+import math
 import os
 import struct
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
+from threading import Lock
+
+from core import download_telemetry
 
 _LOG = logging.getLogger("local_booru.video")
 
@@ -48,7 +53,8 @@ MIN_RUN = 4                 # anchors a run needs to be believed (after the lone
 NEIGHBOURS = 3              # anchors on each side an anchor's shift is checked against
 MIN_COVER = 0.6             # of the picture's length the voice-over must match, else it is another video
 SILENCE_MIN = 0.03          # seconds of a gap filled with silence (smaller ones are the packets' own steps)
-CHUNK = 1024                # voice-over prints matched at once (memory: CHUNK × picture prints)
+MATCH_ROWS = 16             # packed fingerprints compared at once; no BLAS pool or episode-sized distance matrix
+MATCH_COLUMNS = 4096        # at 18 bytes per print: under 3 MiB of matching temporaries, independent of duration
 
 
 class MergeError(Exception):
@@ -140,6 +146,8 @@ def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = 
                 # a seek lands on a key frame — in MPEG-TS sometimes after the place asked: from further back then
                 margin = 1.0
                 while True:
+                    if stop is not None and stop():
+                        raise MergeError("остановлено")
                     box.seek(int(max(0.0, start - margin) / stream.time_base), stream=stream)
                     frames = box.decode(stream)
                     first = next(frames, None)
@@ -147,8 +155,8 @@ def prints_of(path: Path, *, stop=None, cache: Path | None = None, keys: bool = 
                         break
                     margin *= 4
                 frames = itertools.chain([first] if first is not None else [], frames)
-            for n, frame in enumerate(frames):
-                if stop is not None and n % 100 == 0 and stop():      # (v5.44.151; was 500 — seconds with one thread)
+            for frame in frames:
+                if stop is not None and stop():
                     raise MergeError("остановлено")
                 if frame.time is None or (start is not None and frame.time < start):
                     continue
@@ -302,30 +310,82 @@ def _unpacked(prints: Prints):
     return np.unpackbits(prints.bits, axis=1).astype(np.float32)
 
 
-def _anchors(picture: Prints, voice: Prints):
+def _anchor_indices(times, *, stop=None):
+    """The first frame at each STEP tick, once, without allocating ticks across gaps in a file's clock."""
+    import numpy as np
+    if len(times) < 2:
+        return []
+    origin, end = float(times[0]), float(times[-1])
+    if not math.isfinite(origin) or not math.isfinite(end):
+        raise MergeError("у видео некорректные времена кадров")
+    out, tick, target = [], 0, origin
+    while target < end:
+        if stop is not None and len(out) % 128 == 0 and stop():
+            raise MergeError("остановлено")
+        index = int(np.searchsorted(times, target))
+        if index >= len(times):
+            break
+        out.append(index)
+        at = float(times[index])
+        offset = (at - origin) / STEP
+        if not math.isfinite(offset):
+            raise MergeError("у видео некорректные времена кадров")
+        tick = max(tick + 1, math.floor(offset) + 1)
+        target = origin + tick * STEP
+        if target <= at:                 # a clock too large to represent a STEP: still visit each frame at most once
+            target = math.nextafter(at, math.inf)
+    return out
+
+
+def _print_distances(left, right, pop):
+    """Hamming distances of one small tile of packed prints; ordinary ufuncs do not start a BLAS worker pool."""
+    import numpy as np
+    return pop[np.bitwise_xor(left[:, None, :], right[None, :, :])].sum(axis=2, dtype=np.uint16)
+
+
+def _anchors(picture: Prints, voice: Prints, *, stop=None):
     """(voice time, picture time) of the voice-over's prints every ``STEP`` that are clearly one place of the
     picture."""
     import numpy as np
-    pick = np.searchsorted(voice.times, np.arange(voice.times[0], voice.times[-1], STEP))
-    pick = np.unique(np.clip(pick, 0, len(voice.times) - 1))
-    vt, vb = voice.times[pick], _unpacked(Prints(voice.times[pick], voice.bits[pick]))
-    pb = _unpacked(picture)
-    ps = pb.sum(1)
+    if stop is not None and stop():
+        raise MergeError("остановлено")
+    if not len(picture.times) or not len(voice.times):
+        return []
+    pick = _anchor_indices(voice.times, stop=stop)
+    if not pick:
+        return []
+    vt, vb = voice.times[pick], voice.bits[pick]
+    pb = picture.bits
+    pop = np.array([n.bit_count() for n in range(256)], dtype=np.uint8)
     out = []
-    for at in range(0, len(vt), CHUNK):
-        chunk = vb[at:at + CHUNK]
-        dist = chunk.sum(1)[:, None] + ps[None, :] - 2 * (chunk @ pb.T)
-        best = dist.argmin(1)
-        for k, i in enumerate(best):
-            row = dist[k]
-            d1 = row[i]
-            if d1 > MAX_DIST:
-                continue
-            lo, hi = max(0, i - GUARD * 6), i + GUARD * 6 + 1       # frames: the same scene, ±2 s at 24 fps
-            others = np.concatenate([row[:lo], row[hi:]])
-            if others.size and others.min() - d1 < MARGIN:
-                continue
-            out.append((float(vt[at + k]), float(picture.times[i])))
+    for at in range(0, len(vt), MATCH_ROWS):
+        chunk = vb[at:at + MATCH_ROWS]
+        rows = np.arange(len(chunk))
+        best = np.full(len(chunk), 65535, dtype=np.uint16)
+        where = np.zeros(len(chunk), dtype=np.int64)
+        # First find the closest frame, then the closest outside its guard.  Two bounded passes keep the same
+        # ambiguity rule without retaining a matrix of every frame against every sampled frame of an episode.
+        for start in range(0, len(pb), MATCH_COLUMNS):
+            if stop is not None and stop():
+                raise MergeError("остановлено")
+            dist = _print_distances(chunk, pb[start:start + MATCH_COLUMNS], pop)
+            nearest = dist.argmin(1)
+            values = dist[rows, nearest]
+            better = values < best                 # an equal distance keeps the first frame, just like argmin
+            best[better], where[better] = values[better], start + nearest[better]
+        if not (best <= MAX_DIST).any():
+            continue
+        second = np.full(len(chunk), 65535, dtype=np.uint16)
+        for start in range(0, len(pb), MATCH_COLUMNS):
+            if stop is not None and stop():
+                raise MergeError("остановлено")
+            dist = _print_distances(chunk, pb[start:start + MATCH_COLUMNS], pop)
+            columns = np.arange(start, start + dist.shape[1])
+            guard = np.abs(columns[None, :] - where[:, None]) <= GUARD * 6
+            dist[guard] = 65535
+            np.minimum(second, dist.min(1), out=second)
+        accepted = (best <= MAX_DIST) & (second.astype(np.int32) - best >= MARGIN)
+        out.extend((float(vt[at + k]), float(picture.times[where[k]])) for k in np.nonzero(accepted)[0])
     return out
 
 
@@ -424,10 +484,10 @@ def _cut(picture: Prints, pb, voice: Prints, vb, a: dict, b: dict) -> tuple[floa
 def align(picture: Prints, voice: Prints, detail: Detail | None = None) -> Fit:
     """How the voice-over's file goes onto the picture; :class:`MergeError` when it is another video.  ``voice`` —
     the prints of all its frames, or of its key frames with ``detail`` to read every frame where it is needed."""
-    pb = _unpacked(picture)
-    runs = _runs(_anchors(picture, voice))
+    runs = _runs(_anchors(picture, voice, stop=detail.stop if detail is not None else None))
     if not runs:
         raise MergeError("картинка не совпадает ни в одном месте — это другое видео")
+    pb = _unpacked(picture)
     for run in runs:
         near = voice
         if detail is not None:                    # windows across the run, every frame
@@ -502,7 +562,7 @@ class Track:
     index: int = 0                  # the sound stream of the file (its number among the file's sound streams)
 
 
-def _sound(path: Path, index: int = 0):
+def _sound(path: Path, index: int = 0, *, stop=None):
     """(rate, layout name, AudioSpecificConfig, [(time on the file's clock, duration, raw AAC frame)])."""
     import av
     packets, config = [], b""
@@ -518,6 +578,8 @@ def _sound(path: Path, index: int = 0):
         rate, layout = _described(config) if config else (0, "")
         rate, layout = rate or cc.sample_rate, layout or (cc.layout.name if cc.layout else "")
         for packet in box.demux(stream):
+            if stop is not None and stop():
+                raise MergeError("остановлено")
             if packet.pts is None or packet.size == 0:
                 continue
             data = bytes(packet)
@@ -577,10 +639,10 @@ def _silence(rate: int, layout: str) -> bytes:
     return _QUIET[key]
 
 
-def placed(track: Track, origin: float, length: float):
+def placed(track: Track, origin: float, length: float, *, stop=None):
     """The track's sound on the picture's timeline (seconds from its first frame): (rate, layout, config,
     [(time, raw frame)]) — what the picture has not filled with silence."""
-    rate, layout, config, packets = _sound(track.path, track.index)
+    rate, layout, config, packets = _sound(track.path, track.index, stop=stop)
     step = 1024 / rate
     out = []
     pieces = track.fit.pieces if track.fit is not None else None
@@ -592,10 +654,11 @@ def placed(track: Track, origin: float, length: float):
             if piece is None:
                 continue
             when = at + piece.shift - origin
-        if -step / 2 <= when < length and (not out or when >= out[-1][0] + step * 0.5):
+        if when >= -step / 2 and (not length or when < length) and (not out or when >= out[-1][0] + step * 0.5):
             out.append((max(0.0, when), frame))
     filled, cursor = [], 0.0
-    for when, frame in out + [(length, None)]:
+    tail = [(length, None)] if length else ()
+    for when, frame in itertools.chain(out, tail):
         gap = when - cursor
         if gap >= max(SILENCE_MIN, step * 1.5):  # a gap: silence frames that fit before the next sound
             quiet = _silence(rate, layout)
@@ -607,6 +670,13 @@ def placed(track: Track, origin: float, length: float):
 
 
 # ── the file ───────────────────────────────────────────────────────────────────────────
+class _MeasuredFile(io.BufferedWriter):
+    def write(self, data) -> int:
+        count = super().write(data)
+        download_telemetry.record(disk=count)
+        return count
+
+
 def merge(picture: Path, tracks: list[Track], target: Path, *, stop=None) -> float:
     """``target`` (.mkv): the picture of ``picture`` with ``tracks`` as its sound tracks, in this order.
     Written as ``<target>.part``, checked, then put in place (an old ``target`` replaced).  The picture's first
@@ -624,8 +694,9 @@ def merge(picture: Path, tracks: list[Track], target: Path, *, stop=None) -> flo
         for track in tracks:
             if stop is not None and stop():
                 raise MergeError("остановлено")
-            sounds.append(placed(track, origin, length or 1e9))
-        with av.open(str(picture)) as box, av.open(str(part), "w", format="matroska") as out:
+            sounds.append(placed(track, origin, length, stop=stop))
+        with av.open(str(picture)) as box, _MeasuredFile(part.open("wb", buffering=0)) as file, \
+                av.open(file, "w", format="matroska") as out:
             video = box.streams.video[0]
             vout = out.add_stream_from_template(video)
             aouts = []
@@ -657,9 +728,13 @@ def merge(picture: Path, tracks: list[Track], target: Path, *, stop=None) -> flo
                 packet.stream = vout
                 out.mux(packet)
             while q < len(queue):
+                if stop is not None and stop():
+                    raise MergeError("остановлено")
                 _mux_sound(out, aouts[queue[q][1]], queue[q])
                 q += 1
         check(part, len(tracks), length)
+        if stop is not None and stop():
+            raise MergeError("остановлено")
         os.replace(part, target)
         return origin
     except av.FFmpegError as exc:
@@ -713,11 +788,13 @@ def _first(items, count: int):
         yield item
 
 
-def tracks_in(path: Path) -> list[str]:
+def tracks_in(path: Path, *, require_picture: bool = False) -> list[str]:
     """The titles of the sound tracks of a file made here (or any file): [] when it is not read."""
     import av
     try:
         with av.open(str(path)) as box:
+            if require_picture and not box.streams.video:
+                return []
             return [str(s.metadata.get("title") or s.metadata.get("TITLE") or "") for s in box.streams.audio]
     except (av.FFmpegError, OSError):
         return []
@@ -736,6 +813,7 @@ def read_note(folder: Path) -> dict:
 
 # ── (v5.44.150) an episode's picture lent by a release whose voice-over was not asked for ───────────
 PICTURES = "picture.json"
+_PICTURES_LOCK = Lock()         # downloader and merge worker update notes for different episodes of the same title
 
 
 def read_pictures(folder: Path) -> dict:
@@ -755,21 +833,22 @@ def read_pictures(folder: Path) -> dict:
 
 def put_picture(folder: Path, stem: str, group: str = "", state: str = "") -> None:
     """Notes (``state`` "wanted" / "refused") or forgets (no state) the release an episode's picture is lent by."""
-    from core.file_safety import write_json_kept
-    kept = read_pictures(folder)
-    before = dict(kept)
-    if state:
-        kept[stem] = {"group": group, "state": state}
-    else:
-        kept.pop(stem, None)
-    if kept == before:
-        return
+    from core.file_safety import read_json_kept, write_json_kept
     place = Path(folder) / ".lb" / PICTURES
-    try:
-        place.parent.mkdir(parents=True, exist_ok=True)
-        write_json_kept(place, json.dumps(kept, ensure_ascii=False, indent=1), dict)
-    except OSError as exc:
-        _LOG.info("the picture's note of %s not kept: %s", stem, exc)
+    with _PICTURES_LOCK:
+        try:
+            kept = read_json_kept(place, dict, what="pictures") or {}
+            if state:
+                note = {"group": group, "state": state}
+                if kept.get(stem) == note:
+                    return
+                kept[stem] = note
+            elif kept.pop(stem, None) is None:
+                return
+            place.parent.mkdir(parents=True, exist_ok=True)
+            write_json_kept(place, json.dumps(kept, ensure_ascii=False, indent=1), dict)
+        except OSError as exc:
+            _LOG.info("the picture's note of %s not kept: %s", stem, exc)
 
 
 # ── an episode of a series: its voice-overs' files → one file ────────────────────────────
@@ -834,8 +913,20 @@ def _prints_place(folder: Path, path: Path) -> Path:
     return folder / ".lb" / "prints" / f"{name.hexdigest()[:16]}.npz"
 
 
+def prune_empty_folder(path: Path, *, deferred: set | None = None) -> None:
+    """An empty release folder can be reused by another episode still downloading."""
+    if deferred is not None:
+        deferred.add(path)
+        return
+    try:
+        if path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except OSError as exc:
+        _LOG.info("%s not removed: %s", path, exc)
+
+
 def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Path | str | None = None,
-                  lent: bool = False) -> dict:
+                  lent: bool = False, empty_folders: set | None = None) -> dict:
     """«<stem>.mkv» in the series folder: the voice-overs' files of one episode (``files``: [(track name, path)]) put
     into it — beside the ones it has.  The picture: ``prefer`` (one of ``files``: the original's cut chosen by
     ``video_dubs.Resolver.roles`` — it replaces the file's picture, its sound the track of the same name), otherwise
@@ -918,22 +1009,16 @@ def merge_episode(folder: Path, stem: str, files: list, *, say, stop, prefer: Pa
                 gone.unlink(missing_ok=True)
             except OSError as exc:
                 say(f"{stem}: {gone.name} не удалён — {exc}")
-        try:
-            if lone.parent != folder and not any(lone.parent.iterdir()):
-                lone.parent.rmdir()
-        except OSError as exc:
-            _LOG.info("%s not removed: %s", lone.parent, exc)
+        if lone.parent != folder:
+            prune_empty_folder(lone.parent, deferred=empty_folders)
     for track in added:                                  # the voice-overs' own files: in the new file now
         for gone in (track.path, _prints_place(folder, track.path)):
             try:
                 gone.unlink(missing_ok=True)
             except OSError as exc:
                 say(f"{stem}: {gone.name} не удалён — {exc}")
-        try:
-            if track.path.parent != folder and not any(track.path.parent.iterdir()):
-                track.path.parent.rmdir()
-        except OSError as exc:
-            _LOG.info("%s not removed: %s", track.path.parent, exc)
+        if track.path.parent != folder:
+            prune_empty_folder(track.path.parent, deferred=empty_folders)
     # the new file's picture is the picture's: its prints, on the new file's clock — the next voice-over is matched to
     # them without reading the file again
     if base is not None:
@@ -985,18 +1070,17 @@ class Merger:
         return any(dub_key(name) == key for name in self.tracks(self.folder / f"{self.stem(remote)}.mkv"))
 
     def waiting(self) -> set:
-        """The episodes whose voice-overs lie in their sub-folders, not in the episode's file: left by a download that
-        did not end (the program closed, «Остановить», an error) — put together before the next one begins."""
+        """The episodes whose separate input files are still to be merged."""
         out = set()
         for remote in self.files:
-            if self.takes(remote) and remote.group:
-                place = self.folder / remote.group
+            if self.takes(remote):
+                place = self.folder / remote.group if remote.group else self.folder
                 stem = self.stem(remote)
                 if any((place / f"{stem}{ext}").is_file() for ext in (".mp4", ".ts", ".aac")):
                     out.add(stem)
         return out
 
-    def _lent_over(self, stem: str, lender: dict, lent, result: dict, say) -> None:
+    def _lent_over(self, stem: str, lender: dict, lent, result: dict, say, empty_folders) -> None:
         """After an episode was put together: its lent picture is in the file — the note goes; it did not fit — said,
         noted «refused» (not asked of that release again), and its file goes when the episode has a file of its own
         (with none it stays: a whole episode, a voice-over as any other); the release's file never came — the note
@@ -1025,13 +1109,10 @@ class Merger:
                         say(f"{stem}: {gone.name} не удалён — {exc}")
         elif result["merged"] or result.get("repictured"):
             put_picture(self.folder, stem)
-        try:
-            if place.is_dir() and not any(place.iterdir()):
-                place.rmdir()
-        except OSError as exc:
-            _LOG.info("%s not removed: %s", place, exc)
+        if place != self.folder:
+            prune_empty_folder(place, deferred=empty_folders)
 
-    def __call__(self, *, say, stop, stems=None) -> dict:
+    def __call__(self, *, say, stop, stems=None, empty_folders: set | None = None) -> dict:
         """The voice-overs' files of the episodes into their «Серия NN.mkv» — every episode of the folder, or those of
         ``stems`` (one whose files have all come: put together at once, not at the end of the whole download — owner,
         05.11.2026: a season stopped half-way stayed half in «Озвучка JAM»)."""
@@ -1059,8 +1140,6 @@ class Merger:
                 break
             names = ", ".join(name for name, _path in files)
             say(f"Сборка {n}/{len(episodes)}: {stem} — {names}" if len(episodes) > 1 else f"Сборка: {stem} — {names}")
-            from core.video_download import _set_meter
-            _set_meter(merging=True, index=n, count=len(episodes), name=stem, file=-1, done=0, total=0, speed=0)
             prefer = None                        # the voice-over chosen for the episode's picture (its file)
             chosen = getattr(self, "pictures", {}).get(stem)
             if chosen is not None:
@@ -1083,7 +1162,7 @@ class Merger:
             before = video_skips.stamp_of(self.folder / f"{stem}.mkv")
             try:
                 result = merge_episode(self.folder, stem, files, say=say, stop=stop, prefer=prefer,
-                                       lent=lent is not None)
+                                       lent=lent is not None, empty_folders=empty_folders)
             except MergeError as exc:
                 say(f"{stem}: не собрана — {exc}; файлы озвучек остались как были")
                 continue
@@ -1091,7 +1170,7 @@ class Merger:
                 say(f"{stem}: не собрана — {exc} (если серия открыта в плеере, закройте её); файлы озвучек остались")
                 continue
             if lender is not None:
-                self._lent_over(stem, lender, lent, result, say)
+                self._lent_over(stem, lender, lent, result, say, empty_folders)
             if result["merged"] or result.get("repictured"):
                 done += 1
                 count = len(self.tracks(Path(result["file"])))

@@ -83,30 +83,76 @@ def _bands():
             for k in range(BANDS)]
 
 
-def prints_from(samples):
-    """32-bit prints of 8 kHz mono samples (numpy float32): one every ``HOP`` samples."""
-    import numpy as np
-    samples = np.ascontiguousarray(samples, dtype=np.float32)
-    count = (len(samples) - WINDOW) // HOP + 1
-    if count < 3:
-        return np.zeros(0, dtype=np.uint32)
-    frames = np.lib.stride_tricks.as_strided(samples, shape=(count, WINDOW),
-                                             strides=(samples.strides[0] * HOP, samples.strides[0]))
-    window, bands = np.hanning(WINDOW).astype(np.float32), _bands()
-    energy = np.empty((count, BANDS), dtype=np.float64)
-    for k in range(0, count, CHUNK):                             # a few MB at a time, not the episode at once
-        spectrum = np.abs(np.fft.rfft(frames[k:k + CHUNK] * window, axis=1)) ** 2
-        energy[k:k + CHUNK] = np.stack([spectrum[:, a:b].sum(1) for a, b in bands], axis=1)
-    across = energy[:, :-1] - energy[:, 1:]                      # (count, 32)
-    bits = (across[1:] - across[:-1]) > 0                        # (count-1, 32)
-    weights = (1 << np.arange(31, -1, -1, dtype=np.uint64)).astype(np.uint64)
-    return (bits.astype(np.uint64) @ weights).astype(np.uint32)
+def _check(stop) -> None:
+    if stop is not None and stop():
+        raise InterruptedError
+
+
+class _SoundPrints:
+    """A bounded piece of decoded sound, with the overlap and last energy kept between pieces."""
+    def __init__(self, stop=None):
+        import numpy as np
+        self.stop = stop
+        self.pieces, self.prints = [], []
+        self.samples = self.count = 0
+        self.previous = None
+        self.window, self.bands = np.hanning(WINDOW).astype(np.float32), _bands()
+        self.weights = (1 << np.arange(31, -1, -1, dtype=np.uint64)).astype(np.uint64)
+
+    def add(self, samples) -> None:
+        import numpy as np
+        _check(self.stop)
+        samples = np.ascontiguousarray(samples, dtype=np.float32)
+        for at in range(0, len(samples), CHUNK * HOP):
+            piece = samples[at:at + CHUNK * HOP]
+            self.pieces.append(piece)
+            self.samples += len(piece)
+            if self.samples >= CHUNK * HOP + WINDOW - HOP:
+                self._take()
+
+    def _take(self) -> None:
+        import numpy as np
+        _check(self.stop)
+        if self.samples < WINDOW:
+            return
+        samples = np.concatenate(self.pieces)
+        count = (len(samples) - WINDOW) // HOP + 1
+        frames = np.lib.stride_tricks.as_strided(samples, shape=(count, WINDOW),
+                                                strides=(samples.strides[0] * HOP, samples.strides[0]))
+        for at in range(0, count, CHUNK):
+            _check(self.stop)
+            spectrum = np.abs(np.fft.rfft(frames[at:at + CHUNK] * self.window, axis=1)) ** 2
+            # The old full-track buffer was float64, even when FFT returns complex64 (NumPy 2).
+            energy = np.stack([spectrum[:, a:b].sum(1) for a, b in self.bands], axis=1).astype(np.float64)
+            across = energy[:, :-1] - energy[:, 1:]
+            if self.previous is not None:
+                across = np.concatenate([self.previous[None, :], across])
+            bits = (across[1:] - across[:-1]) > 0
+            self.prints.append((bits.astype(np.uint64) @ self.weights).astype(np.uint32))
+            self.previous = across[-1].copy()
+        self.count += count
+        tail = samples[count * HOP:].copy()
+        self.pieces, self.samples = [tail], len(tail)
+
+    def finish(self):
+        import numpy as np
+        self._take()
+        _check(self.stop)
+        return np.concatenate(self.prints) if self.count >= 3 else np.zeros(0, dtype=np.uint32)
+
+
+def prints_from(samples, *, stop=None):
+    """32-bit prints of 8 kHz mono samples: same windows across bounded pieces, one per ``HOP``."""
+    maker = _SoundPrints(stop)
+    maker.add(samples)
+    return maker.finish()
 
 
 def sound_prints(path: Path, *, stop=None, cache: Path | None = None):
     """(the time of the first print on the file's clock, the prints) of a file's first sound track."""
     import av
     import numpy as np
+    _check(stop)
     path = Path(path)
     stat = path.stat()
     key = f"{stat.st_size}-{int(stat.st_mtime)}-{VERSION}"
@@ -117,24 +163,24 @@ def sound_prints(path: Path, *, stop=None, cache: Path | None = None):
                     return float(kept["start"]), kept["prints"]
         except Exception as exc:   # noqa: BLE001 - a cut-short or foreign file (BadZipFile, EOFError …): made anew
             _LOG.info("sound prints of %s not read: %s: %s", path.name, type(exc).__name__, exc)
-    pieces, start = [], None
+    maker, start = _SoundPrints(stop), None
     with av.open(str(path)) as box:
         if not box.streams.audio:
             return 0.0, np.zeros(0, dtype=np.uint32)
         stream = box.streams.audio[0]
+        stream.thread_count = THREADS
         resampler = av.AudioResampler(format="flt", layout="mono", rate=RATE)
-        for n, frame in enumerate(box.decode(stream)):
-            if stop is not None and n % 500 == 0 and stop():      # ten seconds of sound: asked several times a second
-                raise InterruptedError
+        for frame in box.decode(stream):
+            _check(stop)
             if start is None and frame.time is not None:
                 start = float(frame.time)
             for out in resampler.resample(frame):
-                pieces.append(out.to_ndarray().reshape(-1))
-    samples = np.ascontiguousarray(np.concatenate(pieces)) if pieces else np.zeros(0, dtype=np.float32)
-    prints = prints_from(samples.astype(np.float32))
+                maker.add(out.to_ndarray().reshape(-1))
+    prints = maker.finish()
     start = (start or 0.0) + WINDOW / 2 / RATE
     if cache is not None:
         from core.video_merge import save_kept
+        _check(stop)
         save_kept(cache, key=key, start=start, prints=prints)
     return start, prints
 
@@ -152,10 +198,11 @@ def _popcount(values):
     return _POP[values & 0xFFFF] + _POP[values >> 16]
 
 
-def common(a, b) -> list[tuple[float, float, float]]:
+def common(a, b, *, stop=None) -> list[tuple[float, float, float]]:
     """Stretches the two rows of prints have in common: (start in a, end in a, shift — b's place minus a's), in
     seconds of print steps (``HOP / RATE``)."""
     import numpy as np
+    _check(stop)
     if len(a) < SMOOTH * 2 or len(b) < SMOOTH * 2:
         return []
     step = HOP / RATE
@@ -167,7 +214,9 @@ def common(a, b) -> list[tuple[float, float, float]]:
     found = np.clip(found, 0, len(values) - 1)
     hit = (values[found] == a)
     votes: dict = {}
-    for i in np.nonzero(hit)[0]:
+    for n, i in enumerate(np.nonzero(hit)[0]):
+        if n % 256 == 0:
+            _check(stop)
         k = found[i]
         if counts[k] > COMMON_VALUE:
             continue
@@ -180,6 +229,7 @@ def common(a, b) -> list[tuple[float, float, float]]:
     out, seen = [], []
     kernel = np.ones(SMOOTH, dtype=np.float32) / SMOOTH
     for _v, shift in tops:
+        _check(stop)
         if any(abs(shift - s) <= 4 for s in seen):
             continue
         seen.append(shift)
@@ -203,13 +253,20 @@ EDGE = 20.0                  # seconds before a run's first anchor (after its la
 EDGE_MISS = 0.6              # seconds of frames not alike that end a stretch
 
 
-def picture_common(a, b) -> list[tuple[float, float, float]]:
+def picture_common(a, b, *, stop=None) -> list[tuple[float, float, float]]:
     """Stretches the key frames of two episodes (``video_merge.Prints``) have in common: (start in a, end in a,
     shift — b's time minus a's), from the first anchor to the last of a run (``_edges`` makes them exact)."""
     from core import video_merge as G
-    anchors = sorted(G._anchors(b, a))
+    _check(stop)
+    try:
+        anchors = sorted(G._anchors(b, a, stop=stop))
+    except G.MergeError as exc:
+        if str(exc) == "остановлено":
+            raise InterruptedError from exc
+        raise
     out, run = [], []
     for u, t in anchors + [(float("inf"), float("inf"))]:
+        _check(stop)
         if run and abs((t - u) - (run[-1][1] - run[-1][0])) <= RUN_TOL and u - run[-1][0] <= RUN_GAP:
             run.append((u, t))
             continue
@@ -237,6 +294,7 @@ class Frames:
         episode's MKV whose voice-overs were put together here has every frame's prints kept already: not read."""
         import numpy as np
         from core import video_merge as G
+        _check(self.stop)
         lo = max(0.0, lo)
         if hi < lo:
             return None
@@ -249,6 +307,7 @@ class Frames:
             return (whole.times[kept], whole.bits[kept]) if kept.any() else None
         times, bits = [], []
         for k in range(int(lo // self.PIECE), int(hi // self.PIECE) + 1):
+            _check(self.stop)
             key = (str(path), k)
             if key not in self.pieces:
                 try:
@@ -278,6 +337,7 @@ def _edges(path_a: Path, path_b: Path, start: float, end: float, shift: float, s
     frames = frames if frames is not None else Frames(stop)
 
     def alike_times(lo: float, hi: float):
+        _check(stop)
         pa = frames.get(path_a, lo, hi)
         pb = frames.get(path_b, lo + shift - 1, hi + shift + 1)
         if pa is None or pb is None:
@@ -293,6 +353,7 @@ def _edges(path_a: Path, path_b: Path, start: float, end: float, shift: float, s
     # back from the first anchor, a window of EDGE seconds at a time while the frames are still alike at its
     # beginning (the first key frames of a song may be far from its start); forward the same
     for _ in range(int(MAX_LEN // EDGE) + 1):
+        _check(stop)
         times, alike = alike_times(start - EDGE, start + 1)
         if times is None or not len(times):
             break
@@ -309,6 +370,7 @@ def _edges(path_a: Path, path_b: Path, start: float, end: float, shift: float, s
         if ended or not moved:
             break
     for _ in range(int(MAX_LEN // EDGE) + 1):
+        _check(stop)
         times, alike = alike_times(end - 1, end + EDGE)
         if times is None or not len(times):
             break
@@ -495,9 +557,12 @@ def waiting(series) -> list:
 
 def find_series(series, *, stop=None, deadline: float | None = None, first: str = "") -> int:
     """Look at the episodes of a series that wait (``waiting``): their openings and endings by their sound, kept.
-    The number looked at — less when ``deadline`` (``time.monotonic()``) came or ``stop()``.  ``first`` — the number
+    The round's ``deadline`` is soft, between completed episodes; ``stop()`` interrupts inside calculations too.
+    A slow episode must be allowed to finish while idle, rather than repeat its beginning forever. ``first`` — the number
     of the episode the person stopped at: the ones from it on are looked at before the ones watched already."""
     import numpy as np
+    if (stop is not None and stop()) or (deadline is not None and time.monotonic() >= deadline):
+        return 0
     folder = Path(series.path)
     episodes = list(series.episodes)
     todo = {id(e) for e in waiting(series)}
@@ -509,12 +574,14 @@ def find_series(series, *, stop=None, deadline: float | None = None, first: str 
     frames = Frames(stop, folder)            # the pieces of frames read for the edges, shared by all the comparisons
 
     def of(k: int):
+        _check(stop)
         if k not in prints:
             path = Path(episodes[k].path)
             prints[k] = sound_prints(path, stop=stop, cache=_sound_cache(folder, path))
         return prints[k]
 
     def picture_of(k: int):
+        _check(stop)
         from core import video_merge as G
         if k not in pictures:
             path = Path(episodes[k].path)
@@ -539,6 +606,7 @@ def find_series(series, *, stop=None, deadline: float | None = None, first: str 
             stretches, peers, compared, ends = [], _peers_of(episodes, n), 0, {}
             for k in peers:
                 try:
+                    _check(stop)
                     their_start, theirs = of(k)
                     their_origin = _origin(Path(episodes[k].path))
                     their_end = their_start + len(theirs) * HOP / RATE          # its clock
@@ -548,10 +616,11 @@ def find_series(series, *, stop=None, deadline: float | None = None, first: str 
                         return (at - their_origin) / their_length
                     # on the files' clocks: the shift of a print step plus where each one's sound begins
                     stretches += [(start + a - origin, start + b - origin, k, shift + their_start - start,
-                                   where(their_start + a + shift)) for a, b, shift in common(mine, theirs)]
+                                   where(their_start + a + shift)) for a, b, shift in common(mine, theirs, stop=stop)]
                     pa, pb = picture_of(n), picture_of(k)
                     if pa is not None and pb is not None and len(pa.times) and len(pb.times):
-                        for a, b, shift in picture_common(pa, pb):
+                        for a, b, shift in picture_common(pa, pb, stop=stop):
+                            _check(stop)
                             a, b = _edges(Path(episode.path), Path(episodes[k].path), a, b, shift, stop, frames)
                             if MIN_LEN <= b - a <= MAX_LEN:
                                 stretches.append((a - origin, b - origin, k, shift, where(a + shift)))
@@ -581,8 +650,12 @@ def find_series(series, *, stop=None, deadline: float | None = None, first: str 
                     found["ending"] = [ending[0], round(length, 2)]
             except InterruptedError:
                 break
+        if stop is not None and stop():  # never remember an unfinished comparison as «no opening»
+            break
         try:
             with _LOCK:
+                if stop is not None and stop():
+                    break
                 data = read_note(folder)
                 _prune(folder, data)
                 item = data["episodes"].setdefault(_key(folder, Path(episode.path)), {})
@@ -608,6 +681,7 @@ def _tail_alike(path_a: Path, since: float, end_a: float, path_b: Path, end_b: f
     ones, the two put end to end (``end_b`` — the other's end)."""
     import numpy as np
     from core import video_merge as G
+    _check(frames.stop)
     if end_a - since < 1.0:
         return 1.0                             # it ends with the ending
     pa = frames.get(path_a, since, end_a)

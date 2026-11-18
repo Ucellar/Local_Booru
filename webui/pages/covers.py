@@ -351,9 +351,10 @@ class _Series:
         return {"said": said, "cover": f"/api/catalog/cover?c={quote(shown, safe='')}" if shown else ""}
 
 
-def series_picture(address: str) -> "tuple | None":
+def series_picture(address: str, *, cache_only: bool = False) -> "tuple | None":
     """(bytes, type) of the poster the owner chose for the series of a site's page (``address``) — «Загрузки» show it
-    for the series going: its folder's when the program put it there, else the one kept for it; None — none chosen."""
+    for the series going: its folder's when the program put it there, else the one kept for it; None — none chosen.
+    With ``cache_only``, a poster may come from local bytes or memory."""
     from core import title_covers as TC, video_watch as W
     key = W.key_of(str(address or ""))
     choice = TC.chosen([key]) if key else None
@@ -362,10 +363,19 @@ def series_picture(address: str) -> "tuple | None":
     if choice.get("folder"):
         path = TC.current(Path(str(choice["folder"])), "poster")
         try:
-            data = path.read_bytes() if path is not None else b""
+            if path is not None and cache_only:
+                with path.open("rb") as file:
+                    data = file.read(TC.MAX_PICTURE + 1)
+                if len(data) > TC.MAX_PICTURE or not TC.picture_ext(data):
+                    return None
+            else:
+                data = path.read_bytes() if path is not None else b""
         except OSError:
             data = b""
         return (data, TC.content_type(TC.picture_ext(data))) if data else None
+    if cache_only and choice["how"] == "site":
+        from core import manhwa_search
+        return manhwa_search.fetch_cover(str(choice.get("url") or ""), cache_only=True)
     return TC.picture_of(choice)
 
 

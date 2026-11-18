@@ -419,10 +419,11 @@ def _smaller(got: tuple, width: int) -> tuple:
         return got
 
 
-def fetch_cover(address: str, page: str = "", *, net=None, shrink: int = 0) -> "tuple[bytes, str] | None":
+def fetch_cover(address: str, page: str = "", *, net=None, shrink: int = 0,
+                cache_only: bool = False) -> "tuple[bytes, str] | None":
     """A cover by its address — from the sites' own hosts only (:data:`COVER_HOSTS`), with its site as the Referer,
     kept in memory a while; None — none, or not a picture.  (v5.44.90) ``shrink`` — a picture wider than this is
-    kept and given smaller (:func:`_smaller`)."""
+    kept and given smaller (:func:`_smaller`). With ``cache_only``, check only the memory cache."""
     if not _cover_ok(address):
         return None
     # (v5.44.123) a smaller one is kept apart: the menu of covers shows a cover whole (its size is the site's), «Лента»
@@ -435,6 +436,8 @@ def fetch_cover(address: str, page: str = "", *, net=None, shrink: int = 0) -> "
         if key in _COVERS:
             _COVERS.move_to_end(key)
             return _COVERS[key]
+        if cache_only:
+            return None
         failed = _COVERS_FAILED.get(failure)
         if failed is not None and time.monotonic() - failed < COVER_FAILED_FOR:
             return None

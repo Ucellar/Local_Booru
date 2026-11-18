@@ -11,7 +11,7 @@ from core.parser.sites.rule34us import Rule34UsSite
 from core.parser.util import clean_host
 
 __all__ = ["Site", "SiteUnavailable", "build_sites", "engine_class", "post_page_url", "site_for_host", "site_for_url",
-           "site_rows"]
+           "site_rows", "canonical_host", "table_config"]
 
 _BY_TYPE = {
     "danbooru": DanbooruSite, "danbooru2": DanbooruSite, "danbooru_html": DanbooruSite,
@@ -103,19 +103,20 @@ def detect_engine(ctx: ParserContext, host: str):
 
 def site_rows(settings: dict) -> dict[str, dict]:
     """{host: its settings} of the enabled sites (the built-in table, then the person's own sites over it)."""
-    rows: dict[str, dict] = {}
+    hosts: dict[str, None] = {}
     for domain, cfg in (settings.get("sites") or {}).items():
-        if isinstance(cfg, dict) and cfg.get("enabled", False):
-            rows[clean_host(domain)] = dict(cfg)
+        if isinstance(cfg, dict) and (host := canonical_host(domain)):
+            hosts[host] = None
     for cfg in settings.get("custom_sites") or []:
-        if not isinstance(cfg, dict) or not cfg.get("enabled", False):
+        if not isinstance(cfg, dict):
             continue
-        host = clean_host(cfg.get("domain") or cfg.get("base_url") or cfg.get("login_url") or "")
+        host = canonical_host(cfg.get("domain") or cfg.get("base_url") or cfg.get("login_url") or "")
         if host:
-            merged = dict(rows.get(host, {}))
-            merged.update({k: v for k, v in cfg.items() if v not in (None, "", [], {})})
-            rows[host] = merged
-    return rows
+            hosts[host] = None
+    # Resolve first so a disabled custom override cannot leave the builtin account
+    # active in parser runs while direct lookups use a different account.
+    return {host: row for host in hosts if (row := table_config(settings, host)) is not None
+            and row.get("enabled", False)}
 
 
 def build_sites(ctx: ParserContext) -> list:
@@ -178,19 +179,33 @@ HOST_ALIASES = {"api.rule34.xxx": "rule34.xxx", "donmai.us": "danbooru.donmai.us
                 "safebooru.donmai.us": "danbooru.donmai.us"}
 
 
+def canonical_host(host: str) -> str:
+    """One site-table name for explicit aliases; media servers never inherit credentials."""
+    host = clean_host(host)
+    return HOST_ALIASES.get(host, host)
+
+
+def _merge_config(previous: dict | None, row: dict) -> dict:
+    merged = dict(previous or {})
+    # Empty fields saved by the person revoke an old credential instead of reviving the builtin value.
+    auth_fields = {"login", "api_key", "user_id", "user_agent", "api_user_agent"}
+    merged.update({k: v for k, v in row.items() if k in auth_fields or v not in (None, "", [], {})})
+    return merged
+
+
 def table_config(settings: dict, host: str) -> dict | None:
     """The row of ``host`` in the site table (built-in and the person's own sites, ticked or not)."""
+    host = canonical_host(host)
     found = None
     for domain, row in (settings.get("sites") or {}).items():
-        if isinstance(row, dict) and HOST_ALIASES.get(clean_host(domain), clean_host(domain)) == host:
+        if isinstance(row, dict) and canonical_host(domain) == host:
             found = dict(row)
     for row in settings.get("custom_sites") or []:
         if not isinstance(row, dict):
             continue
-        domain = clean_host(row.get("domain") or row.get("base_url") or row.get("login_url") or "")
-        if domain and HOST_ALIASES.get(domain, domain) == host:
-            found = dict(found or {})
-            found.update({k: v for k, v in row.items() if v not in (None, "", [], {})})
+        domain = canonical_host(row.get("domain") or row.get("base_url") or row.get("login_url") or "")
+        if domain and domain == host:
+            found = _merge_config(found, row)
     return found
 
 

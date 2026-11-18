@@ -25,6 +25,9 @@ program never goes around it), and hands the posts' numbers here (``/extension/f
    While the parser is busy the files wait (:data:`STORE` «parse»); a run the person stopped — its files wait until
    the parser has done something else (``held``, :func:`_parse_over`); a run cut short by the program's closing goes
    again after its start.
+
+Manual Grabber downloads use the same durable intake for library originals. Their parser run checks exact MD5
+matches on the enabled sites and leaves the already imported card with all its original sources.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ _LOG = logging.getLogger("local_booru.favorites")
 STORE = SETTINGS_DIR / "favorites.json"
 SITES = ("rule34.xxx", "gelbooru.com", "danbooru.donmai.us", "booru.allthefallen.moe", "e621.net", "e926.net")
 KIND = "favorites"                   # the subscription job's kind and the parser run's
+GRAB_KIND = "grab"
 MAX_IDS = 200_000                    # numbers of one account kept / taken at once
 SHOWN_IDS = 50_000                   # numbers the extension gets back (it stops at the posts known)
 PARSE_DIR = "favorites_parse"        # <settings>/cache/<this>: the parser's staged files
@@ -71,6 +75,9 @@ def _load() -> dict:
     data["parse"] = [str(p) for p in data.get("parse") or [] if p]
     data["held"] = [str(p) for p in data.get("held") or [] if p]
     data["parsing"] = data.get("parsing") if isinstance(data.get("parsing"), dict) else {}
+    pending = set(data["parse"] + data["held"])
+    pending.update(str(p) for p in data["parsing"].get("files") or [] if p)
+    data["grab_parse"] = [str(p) for p in data.get("grab_parse") or [] if isinstance(p, str) and p in pending]
     return data
 
 
@@ -153,11 +160,13 @@ def state(settings: dict, site: str, account: str) -> dict:
         data = _load()
     rec = data["accounts"].get(key) or {}
     ids = _numbers(rec.get("ids"))
+    grab = set(data["grab_parse"])
+    parsing = data["parse"] + data["held"] + list(data["parsing"].get("files") or [])
     out = {"ok": True, "site": host, "account": who, "name": str(rec.get("name") or ""), "known": len(ids),
            "ids": ids[:SHOWN_IDS], "last_at": int(rec.get("last_at") or 0), "got": int(rec.get("got") or 0),
            "have": len(library_posts(settings, host, ids)[0]) if ids else 0,
            "pending": any(p.get("key") == key for p in data["pending"]),
-           "parse": len(data["parse"]) + len(data["held"]) + len((data["parsing"] or {}).get("files") or []),
+           "parse": sum(path not in grab for path in parsing),
            "going": None}
     job = _job()
     if job is not None and _job_key(job) == key:
@@ -353,17 +362,18 @@ def posts_of(settings: dict, site: str, ids, *, log=None, stop=None, key: str = 
 
 
 def _ended(job) -> None:
-    """(``subscription_jobs.ENDED``) A download of favorites is over: its count kept, the files it brought — to the
-    parser (and the files a stopped run of the parser held back — with them)."""
-    if getattr(job, "kind", "") != KIND:
+    """Send imported favorites or Grabber originals to the parser after the download ends."""
+    kind = getattr(job, "kind", "")
+    if kind not in (KIND, GRAB_KIND):
+        return
+    files = [str(p) for p in getattr(job, "files", None) or [] if p]
+    if kind == GRAB_KIND and not files:
         return
     from core.settings import load_settings
     settings = load_settings()
-    key = _job_key(job)
-    files = [str(p) for p in getattr(job, "files", None) or [] if p]
     with _LOCK:
         data = _load()
-        rec = data["accounts"].get(key)
+        rec = data["accounts"].get(_job_key(job)) if kind == KIND else None
         if isinstance(rec, dict):
             rec["got"] = int(rec.get("got") or 0) + int(getattr(job, "downloaded", 0) or 0)
         if data["parsing"]:
@@ -371,12 +381,14 @@ def _ended(job) -> None:
         if files or data["held"]:
             data["parse"] = list(dict.fromkeys(data["held"] + data["parse"] + files))
             data["held"] = []
+        if kind == GRAB_KIND:
+            data["grab_parse"] = list(dict.fromkeys(data["grab_parse"] + files))
         _save(data)
     if data["parse"]:
         try:
             _start_parse(settings)
         except Exception as exc:  # noqa: BLE001 - the files wait: the next round starts the parser
-            _LOG.warning("favorites: the parser not started: %s: %s", type(exc).__name__, exc)
+            _LOG.warning("%s: the parser not started: %s: %s", kind, type(exc).__name__, exc)
 
 
 # ── the parser ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -417,22 +429,24 @@ def _stage(settings: dict, files: list) -> Path:
     return root
 
 
-def run_settings(settings: dict, root: Path) -> dict:
-    """The settings of the parser's run over the downloaded favorites: every site asked by MD5 (not only for files
-    without tags), a file no site has stays the card it is (``parser_library_cards``: no Брак, no reverse search)."""
+def run_settings(settings: dict, root: Path, *, kind: str = KIND) -> dict:
+    """Ask the enabled sites even for tagged originals. A file already imported stays in the library."""
     out = dict(settings)
     out.update(root=str(root), skip_existing=False, tag_only_untagged=False, retry_nomatch=False,
                parser_skip_manga=False, limit_files=0, parser_recheck_new_sites=False, skip_copy_suffix_files=False,
                parser_library_cards=True)
     out.pop("_parser_explicit_paths", None)
+    if kind == GRAB_KIND:
+        out["_parser_exact_md5_only"] = True
     return out
 
 
 def _start_parse(settings: dict) -> bool:
-    """The parser over the files the downloads of favorites brought, when it is free (True — started)."""
+    """Start the next batch of imported originals when the parser is free."""
     global _PARSE_JOB
     from core.parser import jobs as P
-    if P.is_running():
+    from core.shutdown import is_shutting_down
+    if is_shutting_down() or P.is_running():
         return False
     with _LOCK:
         data = _load()
@@ -446,10 +460,14 @@ def _start_parse(settings: dict) -> bool:
                 data["parse"] = []
                 _save(data)
             return False
+        grab = set(data["grab_parse"])
+        kind = GRAB_KIND if files[0] in grab else KIND
+        files = [p for p in files if (p in grab) == (kind == GRAB_KIND)]
+        title = "Галерея (booru)" if kind == GRAB_KIND else "Избранное"
         root = _stage(settings, files)
         try:
-            job = P.start(run_settings(settings, root), label=f"Избранное: теги со всех сайтов ({len(files)})",
-                          kind=KIND)
+            job = P.start(run_settings(settings, root, kind=kind), label=f"{title}: теги со всех сайтов ({len(files)})",
+                          kind=kind)
         except P.ParserBusy:
             return False
         _PARSE_JOB = job
@@ -457,7 +475,7 @@ def _start_parse(settings: dict) -> bool:
         taken = set(files)
         data["parse"] = [f for f in data["parse"] if f not in taken]
         _save(data)
-    _LOG.info("Избранное: парсер по всем сайтам — %d файлов", len(files))
+    _LOG.info("%s: парсер по всем сайтам — %d файлов", title, len(files))
     return True
 
 
@@ -477,6 +495,8 @@ def _parse_over(settings: dict, data: dict) -> bool:
         data["held"] = list(dict.fromkeys(data["held"] + files))
     else:
         shutil.rmtree(_stage_root(settings), ignore_errors=True)
+        finished = set(files) - set(data["parse"]) - set(data["held"])
+        data["grab_parse"] = [p for p in data["grab_parse"] if p not in finished]
     data["parsing"] = {}
     return True
 
@@ -517,5 +537,6 @@ def background_round(settings: dict) -> dict:
 def register() -> None:
     """The hook of the subscriptions' jobs (once)."""
     from core import subscription_jobs as J
-    if _ended not in J.ENDED:
-        J.ENDED.append(_ended)
+    with _LOCK:
+        if _ended not in J.ENDED:
+            J.ENDED.append(_ended)

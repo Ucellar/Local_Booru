@@ -65,6 +65,10 @@ def _restore_later() -> None:
             if not root or not Path(root).is_dir():
                 _LOG.warning("the galleries of the last run not begun again: no manga folder")
                 return
+            admitted = _schedule(numbers, Path(root), titles=manga_download.kept_titles())
+            if admitted is not None and admitted.get("ok"):
+                manga_download._persist()
+                return
             if manga_download.add(numbers) is not None:        # a download began meanwhile: they join it
                 return
             page_jobs.start(GET, _label(numbers, "С прошлого запуска — "), _run_of(numbers, Path(root)))
@@ -87,6 +91,9 @@ def begin(settings: dict, numbers: list, before: str = "") -> dict:
     root = M.manga_root(settings)
     if not root or not Path(root).is_dir():
         return {"ok": False, "error": "папки манги нет на месте"}
+    scheduled = _schedule(numbers, Path(root), before=before)
+    if scheduled is not None:
+        return scheduled
     for _try in range(25):                              # (a download ending this moment is waited for a little)
         places = manga_download.add(numbers)
         if places is not None:
@@ -105,14 +112,30 @@ def _label(numbers: list, before: str = "") -> str:
                      f"Скачать с nhentai: {plural(len(numbers), ('галерея', 'галереи', 'галерей'))}")
 
 
-def _run_of(numbers: list, root: Path):
+def _schedule(numbers: list, root: Path, *, before: str = "", titles: dict | None = None) -> dict | None:
+    from core import download_scheduler, manga_download
+    entries = []
+    for number in numbers:
+        title = (titles or {}).get(number) or manga_download._known_title({"number": number}) or f"Галерея {number}"
+        entries.append((number, title, _label([number], before), _run_of([number], root, scheduled=True)))
+    reply = download_scheduler.submit_galleries(entries)
+    return {"ok": True, "count": len(numbers), "queued": 0, **reply} if reply is not None else None
+
+
+def restore_scheduled(record: dict, settings: dict):
+    root = M.manga_root(settings)
+    if not root or not Path(root).is_dir():
+        return lambda say, stop_check: {"failed": "Папка манги недоступна"}
+    return _run_of([int(record["number"])], Path(root), scheduled=True, start_paused=bool(record.get("paused")))
+
+
+def _run_of(numbers: list, root: Path, *, scheduled: bool = False, start_paused: bool = False):
     """The page task's work: the galleries (and the ones that join them) into ``root``."""
     from core import manga_download
     from webui.pages.videos import _window_fetch
-    window = _window_fetch()
-
     def run(say, stop_check):
-        result = manga_download.download(numbers, root, say=say, stop_check=stop_check, window_fetch=window)
+        result = manga_download.download(numbers, root, say=say, stop_check=stop_check, window_fetch=_window_fetch(),
+                                         scheduled=scheduled, start_paused=start_paused)
         # a gallery not downloaded is a line of the list, not a failed task ("failed" of a task's result is its refusal)
         result["failed_galleries"] = result.pop("failed", [])
         result["open"] = _open_link(root, result.get("folders") or [])
@@ -209,6 +232,9 @@ def download(req: Request) -> Response:
     root, why = _root(req)
     if root is None:
         return Response.json({"ok": False, "error": why}, 409)
+    scheduled = _schedule(numbers, root)
+    if scheduled is not None:
+        return Response.json(scheduled, 200 if scheduled.get("ok") else 409)
     # (v5.44.107; the owner: «почему нет очереди на скачивании манги») a download going: they join it, after its own
     places = manga_download.add(numbers)
     if places is not None:
@@ -240,9 +266,14 @@ def _queued(places: list, numbers: list) -> Response:
 
 def download_unqueue(req: Request) -> Response:
     """(v5.44.107) «Убрать» a gallery waiting in the download going."""
-    from core import manga_download
+    from core import download_scheduler, manga_download
+    wanted = req.json().get("id")
+    for entry, _record in download_scheduler.waiting("manga"):
+        if wanted == entry["id"] or str(wanted) == str(entry["number"]):
+            if download_scheduler.remove(entry["id"], waiting_kind="manga"):
+                return Response.json({"ok": True})
     try:
-        number = int(req.json().get("id"))
+        number = int(wanted)
     except (TypeError, ValueError):
         return Response.json({"ok": False, "error": "Нет номера галереи"}, 400)
     if not manga_download.drop(number):
@@ -295,7 +326,7 @@ def _hidden() -> bool:
 
 
 def download_state(req: Request) -> Response:
-    from core import manga_download, page_jobs
+    from core import download_scheduler, manga_download, page_jobs
     from webui.pages.manhwa_get import HIDDEN, HIDDEN_KIND
     task = page_jobs.current(GET)
     hidden = _hidden()
@@ -306,6 +337,9 @@ def download_state(req: Request) -> Response:
                         "count": 0}
                        for q in manga_download.waiting()] if task is not None and task.running else [],
              **({"restoring": soon} if soon else {}), **({"hidden": True, "what": HIDDEN_KIND} if hidden else {})}
+    extra["queue"].extend({"id": entry["id"], "number": None if hidden else entry["number"],
+                           "title": HIDDEN if hidden else entry["title"], "count": 0, "lane": entry["lane"]}
+                          for entry, _ in download_scheduler.waiting("manga") if entry["lane"] == "next")
     if task is None:
         return Response.json({"ok": True, "status": "idle", **extra})
     state = {"ok": True, **task.snapshot(after=req.int_arg("after", 0, lo=0)), **extra}
@@ -362,8 +396,12 @@ def download_cover(req: Request) -> Response:
 
 def download_stop(req: Request) -> Response:
     """«Остановить»: the download going and the galleries waiting in it (nothing of it kept for the next run)."""
-    from core import manga_download, page_jobs
+    from core import download_scheduler, manga_download, page_jobs
     task = page_jobs.current(GET)
+    stopped = download_scheduler.stop_kind("manga", task)
+    if stopped is not None:
+        return Response.json({"ok": True}) if stopped else Response.json(
+            {"ok": False, "error": "Состояние загрузки изменилось или очередь недоступна"}, 409)
     if task is None or not task.running:
         return Response.json({"ok": False, "error": "Скачивание не идёт"}, 409)
     manga_download.USER_STOP.set()

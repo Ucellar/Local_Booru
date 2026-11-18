@@ -31,6 +31,8 @@ import traceback
 from collections import deque
 from typing import Callable
 
+from core import download_telemetry
+
 LOG_KEEP = 2000
 _ENDED: dict = {}                 # (v5.44.120) kind -> [fn(task)] told when a task of the kind has ended
 _LOCK = threading.Lock()
@@ -97,7 +99,8 @@ class PageTask:
 
     def _run(self) -> None:
         try:
-            self.result = self.fn(self._say, self._stop.is_set)
+            with download_telemetry.track(self.id):
+                self.result = self.fn(self._say, self._stop.is_set)
             stopped = self._stop.is_set()
             if isinstance(self.result, dict) and "stopped" in self.result:
                 stopped = bool(self.result["stopped"])    # the work says whether it really stopped half-way

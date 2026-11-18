@@ -1229,12 +1229,11 @@
         return;
       }
       meterBox.hidden = false;
-      if (m.merging) {                 // after the downloads: each episode's voice-overs into its file
+      if (m.merging) {                 // all downloads have finished transferring files
         runActive = { file: -1, part: 0 };
-        meterBox.querySelector("progress").value = Math.round(((Number(m.index) || 1) - 1) / m.count * 1000);
+        meterBox.querySelector("progress").value = 1000;
         meterBox.querySelector(".vmeter-pct").textContent = "";
-        meterBox.querySelector(".vmeter-text").textContent = "Собираю в общие файлы серий: " + (m.name || "")
-          + ". Всего: " + m.index + " из " + m.count;
+        meterBox.querySelector(".vmeter-text").textContent = "Собираю озвучки" + (m.processing ? " · " + m.processing : "");
         return;
       }
       const part = m.total ? Math.min(1, m.done / m.total) : 0;
@@ -1250,7 +1249,8 @@
       else if (m.done) bits.push(megabytes(m.done));
       if (m.speed) bits.push(megabytes(m.speed) + "/с");
       meterBox.querySelector(".vmeter-text").textContent = (m.paused ? "Пауза — " : "") + name
-        + (bits.length ? ": " + bits.join(", ") : "") + ". Всего: " + m.index + " из " + m.count;
+        + (bits.length ? ": " + bits.join(", ") : "") + ". Всего: " + m.index + " из " + m.count
+        + (m.processing ? " · Сборка: " + m.processing : "");
     }
 
     function showResult(st, busy) {

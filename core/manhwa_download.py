@@ -97,10 +97,12 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from core import chapter_numbering as N, manhwa_run as R, manhwa_sources as S
+from core import download_telemetry
 from core.manhwa_sites.ehentai import is_photo as ehentai_photo
 
 _LOG = logging.getLogger("local_booru.manhwa_get")
@@ -764,6 +766,7 @@ class Found:
     # ``cover`` came from: {"how": "folder"} — the folder's own, {"how": "site", "site", "url"}, {"how": "own", "file"}
     covers: list = field(default_factory=list)
     cover_from: dict = field(default_factory=dict)
+    unanswered_helpers: list[str] = field(default_factory=list)
 
     def by_number(self) -> bool:
         """The title is counted through the tomes: a number is one chapter (:func:`counted_through` of what its tomes
@@ -1060,6 +1063,7 @@ class _Others:
             found.asking = [] if final else [a.site.label for a in self.asking if not a.done]
             if final:
                 found.late = [a.site.label for a in self.asking if a.late]
+                found.unanswered_helpers = [a.site.label for a in self.asking if a.chapters and a.failed]
                 self.ended = True
             about = found.about_site
         if final and about:
@@ -1297,15 +1301,20 @@ def _chapter(net: S.Net, take: Take, folder: Path, k: int, halt, night: bool = F
             raise S.SourceError(f"{source.label} прислал не картинку вместо страницы {n}")
         path = partial / f"{n:03d}{ext}"
         tmp = path.with_suffix(path.suffix + ".part")
-        tmp.write_bytes(data)
+        download_telemetry.record(disk=tmp.write_bytes(data))
         os.replace(tmp, path)
         R.add_bytes(len(data))
         came(n)
         return n, path
 
+    # Page workers read and write concurrently, so each inherits the download's task context.
+    def in_context(context, n, pic):
+        return context.run(one, n, pic)
+
     files: dict = {}
     with ThreadPoolExecutor(max_workers=PAGE_WORKERS, thread_name_prefix="manhwa-page") as pool:
-        for n, path in pool.map(lambda pair: one(*pair), enumerate(pictures, 1)):
+        contexts = (copy_context() for _ in pictures)
+        for n, path in pool.map(in_context, contexts, range(1, len(pictures) + 1), pictures):
             files[n] = path
     if halt() or any(path is None for path in files.values()):
         return ""
@@ -1409,19 +1418,25 @@ def _first_cover(found: Found, folder: Path, *, stop_check=None) -> None:
 ENDED: list = []      # (v5.44.120) fn(found, result) at the end of every download (``core/download_history``: «Готово»)
 
 
-def _looked(found: Found, home: S.Source, use: bool, silent: list) -> str:
-    """(v5.44.146) Where a title's chapters were looked for besides its own site — for the end of a download some of
-    whose chapters did not come: the sites that have the title (how many of their chapters are free), the ones that
-    did not answer (``silent`` — their labels), the ones that have not the title.  "" — nothing to say (a title not
-    in Russian: the other sites are not asked of it)."""
+def _looked(found: Found, home: S.Source, use: bool, missed: dict[int, Take], refused: dict[int, set[str]]) -> str:
+    """Report catalogue matches and observed access refusals for the chapters that did not finish."""
     if not use:
         return "Другие сайты не спрашивались — галочка «брать с других сайтов» снята"
     if (found.title.language or "ru") != "ru":
         return ""
+    matches: dict[str, int] = {}
+    denials: dict[str, int] = {}
+    for index, take in missed.items():
+        for site in {option.source.name for option in R.options_of(take) if option.source is not None}:
+            matches[site] = matches.get(site, 0) + 1
+        for site in refused.get(index, ()):
+            denials[site] = denials.get(site, 0) + 1
     parts = []
-    for helper in found.helpers:
-        free = sum(1 for c in helper.chapters if c.free)
-        parts.append(f"{helper.source.label} — бесплатных глав {free} из {len(helper.chapters)}")
+    if found.helpers:
+        by_site = ", ".join(f"{helper.source.label} {matches.get(helper.source.name, 0)}/{len(missed)}"
+                            for helper in found.helpers)
+        parts.append(f"совпадения в списках глав — {by_site}")
+    silent = found.unanswered_helpers
     if silent:
         parts.append(f"{', '.join(silent)} — не ответил" + ("" if len(silent) == 1 else "и"))
     have = {h.source.name for h in found.helpers}
@@ -1429,8 +1444,12 @@ def _looked(found: Found, home: S.Source, use: bool, silent: list) -> str:
     absent = [site.label for site in S.readable() if site.name != home.name and site.name in searched
               and site.name not in have and site.label not in silent]
     if absent:
-        parts.append(f"на {', '.join(absent)} этого тайтла нет")
-    return "Другие сайты: " + "; ".join(parts) if parts else ""
+        parts.append(f"на {', '.join(absent)} не подтверждён подходящий список глав")
+    notes = ["Другие сайты: " + "; ".join(parts)] if parts else []
+    sources = [home, *(helper.source for helper in found.helpers)]
+    if blocked := ", ".join(f"{site.label} ({denials[site.name]})" for site in sources if site.name in denials):
+        notes.append("Отказы при загрузке глав — " + blocked)
+    return ". ".join(notes)
 
 
 def download(found: Found, *, chapters: list | None = None, follow: bool = True, helpers: "bool | None" = None,
@@ -1469,8 +1488,13 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
     R.begin(found.title.title, found.title.site, str(folder), wanted, kind=found.kind)
     _write_title(net, source, found, folder)
     stored = read_source(folder)
+    chapter_source = (found.title.site, found.title.key, found.branch.id if found.branch else "")
+    deferred = stored.pop("deferred_chapters", None)
+    priority = []
+    if tuple(stored.get(key, "") for key in ("site", "key", "branch")) == chapter_source and isinstance(deferred, list):
+        priority = list(dict.fromkeys(cid for cid in deferred if isinstance(cid, str)))
     record = {**stored, "site": found.title.site, "key": found.title.key, "url": found.title.url,
-              "branch": found.branch.id if found.branch else "", "branch_name": found.branch.name if found.branch else "",
+              "branch": chapter_source[2], "branch_name": found.branch.name if found.branch else "",
               "follow": bool(follow), "kind": found.kind, "title": found.title.title,
               "added_at": stored.get("added_at") or int(_now()),
               "waiting": [{"id": c.id, "label": c.label, "free_at": c.free_at} for c in paid],
@@ -1480,6 +1504,8 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
         record["skipped"] = sorted(str(x) for x in stored.get("skipped") or [] if str(x) not in (chosen or set()))
     if not record["skipped"]:
         record.pop("skipped")
+    if priority:
+        record["deferred_chapters"] = priority
     write_source(folder, record)
     if paid and not any(c.free_at for c in paid):
         say(f"Платных глав, которых пока нет бесплатно ни на одном из сайтов: {len(paid)} — программа их не покупает; "
@@ -1500,7 +1526,7 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
     if start_paused:                               # paused when the program closed: paused again
         R.pause()
         say("ПАУЗА с прошлого запуска — «Продолжить», чтобы качать дальше")
-    asked_more: dict = {"done": False, "silent": list(found.late)}
+    asked_more = False
     team = found.branch.name if found.branch and not getattr(source, "languages", False) else ""
 
     def rescue(k, left, why=""):
@@ -1511,11 +1537,12 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
         not answer when the title was found, and the ones not asked at all (:func:`_helper_plan` by what the title
         keeps) — at once, :data:`RESCUE_DEADLINE` seconds at most.  -> ({place: the take with more sites}, [takes to
         add]) or None."""
-        if asked_more["done"] or not use or stop_check():
+        nonlocal asked_more
+        if asked_more or not use or stop_check():
             return None
         if k is None and (chosen is not None or not found.waiting(True)):
             return None                            # nothing waits for a site (or the page ticked its chapters itself)
-        asked_more["done"] = True
+        asked_more = True
         kept = dict(found.helper_record)
         if k is not None and _now() - float(kept.get("helpers_at") or 0) > TRUST_SEARCH:
             # a chapter no site known gave: every other site is asked, the ones searched before too — «тайтла там
@@ -1548,13 +1575,15 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
         found.helpers, found.helper_record = _helpers_of(sites, asking)
         found.asked_helpers = True
         found.late = [a.site.label for a in fresh if a.late]
+        retried = {a.site.label for a in fresh}
+        found.unanswered_helpers = [label for label in found.unanswered_helpers if label not in retried]
+        found.unanswered_helpers.extend(a.site.label for a in fresh if a.failed)
         record.update(found.helper_record)
         try:                                       # «Читать» keeps the title's chapters by their places in the list
             from core import manga_online
             manga_online.ONLINE.forget_title(found)
         except Exception as exc:  # noqa: BLE001 - the reader's own memory: the download goes on all the same
             _LOG.warning("the reader's kept chapters of %s not let go: %s", found.title.title, exc)
-        asked_more["silent"] = [a.site.label for a in fresh if a.failed]
         now = found.takes(True)
         by_id = {t.id: t for t in now}
         by_place = {(t.ch.tome, t.ch.number): t for t in now if t.ch.number}
@@ -1585,19 +1614,32 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
         return swaps, added
     try:                                           # «Пауза»: the strips on their way come, the next ones wait
         run = R.go(wanted, lambda take, k, halt: _chapter(net, take, folder, k, halt, night=night), say=say,
-                   stop_check=stop_check, rescue=rescue, hold=hold)
+                   stop_check=stop_check, rescue=rescue, hold=hold, priority=priority)
     finally:
         R.resume()
     got = [name for _k, name, _take in run["got"]]
     others = sum(1 for _k, _name, take in run["got"] if take.helped)
-    if asked_more["done"]:                         # (v5.44.146) the sites asked meanwhile: what waits for a site now
+    if asked_more:                                 # (v5.44.146) the sites asked meanwhile: what waits for a site now
         paid = found.waiting(use)
         record["waiting"] = [{"id": c.id, "label": c.label, "free_at": c.free_at} for c in paid]
     looked = ""
-    if not run["stopped"] and any(x.get("why") != R.SKIPPED for x in run["failed"]):
-        looked = _looked(found, source, use, asked_more["silent"])
+    if not run["stopped"] and run["failed"]:
+        completed = {k for k, _name, _take in run["got"]}
+        skipped_ids = {x["id"] for x in run["failed"] if x["why"] == R.SKIPPED}
+        missed = {k: take for k, take in enumerate(wanted) if k not in completed and take.id not in skipped_ids}
+        if missed:
+            looked = _looked(found, source, use, missed, run["refused"])
     if looked:
         say(looked)
+    if not run["stopped"]:
+        # A manually selected subset may leave some previously deferred chapters outside this plan.
+        in_run = {take.id for take in wanted}
+        still_missing = {take.id for take in new}
+        next_run = run["deferred"] + [cid for cid in priority if cid in still_missing and cid not in in_run]
+        if next_run:
+            record["deferred_chapters"] = next_run
+        else:
+            record.pop("deferred_chapters", None)
     record["checked_at"] = int(_now())
     if night:                                      # (v5.44.119) the round's look at this title and what it brought
         record["night_at"] = record["checked_at"]
@@ -1615,7 +1657,8 @@ def download(found: Found, *, chapters: list | None = None, follow: bool = True,
     result = {"title": found.title.title, "folder": str(folder), "kind": found.kind, "got": len(got),
               "chapters": got, "failed_chapters": failed, "paid": len(paid), "stopped": run["stopped"],
               "helped": others, "looked": looked,
-              "gave_up": run["gave_up"], "skipped": len(record.get("skipped") or [])}
+              "gave_up": run["gave_up"], "deferred_chapters": run["deferred"],
+              "skipped": len(record.get("skipped") or [])}
     if hold is not None and run["stopped"] and R.gave_way():     # (v5.44.163) the round gave way to the person's
         result["gave_way"] = True                                # download: «Готово» says so, not «Остановлено»
     R.values(finished=True, gave_up=run["gave_up"])

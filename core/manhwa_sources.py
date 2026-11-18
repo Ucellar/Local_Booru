@@ -97,6 +97,7 @@ from dataclasses import dataclass, field
 from urllib.parse import unquote, urlparse
 
 # the program's gates: what a site says of a title is handed to them (``core/gates.py``)
+from core import download_telemetry
 from core import gates as G
 
 _LOG = logging.getLogger("local_booru.manhwa_get")
@@ -793,9 +794,11 @@ class Net:
         from core import site_browser
         share_signin(url)                                # (v5.44.132) the owner's sign-in there — the browser's too
         try:
-            page = site_browser.open_page(url, still_check)
+            page = site_browser.open_page(url, still_check, stop_check=self.stop_check)
+        except site_browser.BrowserCancelled as exc:
+            raise SourceError(str(exc)) from exc
         except site_browser.BrowserError as exc:
-            raise Closed(f"{closed} — браузер окна программы её не прошёл: {exc}") from exc
+            raise Closed(f"{closed} — браузер программы её не прошёл: {exc}") from exc
         if still_check(page.html, page.url):
             raise Closed(f"{closed} — браузер окна программы её не прошёл: она ждёт человека (капча), а такое "
                          "программа не решает")
@@ -871,7 +874,8 @@ class Net:
             if self.stop_check():
                 raise SourceError("остановлено")
             try:
-                status, data, ctype = site_browser.fetch_bytes(url, referer, limit)
+                with download_telemetry.browser_read(picture=limit == PICTURE_LIMIT):
+                    status, data, ctype = site_browser.fetch_bytes(url, referer, limit)
             except site_browser.BrowserError as exc:
                 _LOG.info("%s: the browser's own request did not work: %s", what, exc)
                 with self._lock:
@@ -1003,7 +1007,7 @@ class Net:
                         raise SourceError(f"{what} ответил {status}")
                     if status == 200 and "html" in ctype:
                         return bytes(body), ctype
-                    return self._read(answer, limit, what), ctype
+                    return self._read(answer, limit, what, picture=limit == PICTURE_LIMIT), ctype
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last = f"{what} не ответил: {library_words(exc)}"
                 silent = True
@@ -1037,10 +1041,12 @@ class Net:
             raise Silent(silent_words(what, SILENT_FOR, nameless=nameless))     # words for a person, not the library's
         raise SourceError(last or f"{what} не ответил")
 
-    def _read(self, answer, limit: int, what: str, cut: bool = False) -> bytes:
+    def _read(self, answer, limit: int, what: str, cut: bool = False, *, picture: bool = False) -> bytes:
         """The body of an answer up to ``limit`` bytes: more — :class:`SourceError` (``cut`` — only that much)."""
         body = bytearray()
         for chunk in answer.iter_content(128 * 1024):
+            if picture:
+                download_telemetry.record(net=len(chunk))
             body += chunk
             if len(body) > limit:
                 if cut:
@@ -1065,6 +1071,16 @@ class Net:
 # (v5.44.132) the owner's sign-in given to the window's browser (``share_signin``): its origin → the cookies given
 _SHARED: dict = {}
 _SHARED_LOCK = threading.Lock()
+
+
+def browser_session_changed(hosts) -> None:
+    """A manual check switched profiles; send the app's own sign-in to the selected browser again."""
+    from core import site_browser
+    sites = {site_browser.site_of(host) for host in hosts}
+    with _SHARED_LOCK:
+        for origin in list(_SHARED):
+            if site_browser.site_of(urlparse(origin).hostname or "") in sites:
+                _SHARED.pop(origin, None)
 
 
 def _signin_key(c: dict) -> tuple:
@@ -1406,6 +1422,10 @@ class Source:
     def key_of(self, url: str) -> str:
         raise NotImplementedError
 
+    def identity_key(self, key: str) -> str:
+        """Stable title identity for downloaded-card matching; the download key stays unchanged."""
+        return str(key or "")
+
     @staticmethod
     def words(key: str) -> list:
         """(v5.44.72) The words of the title's name in its address: «9504-latna-saga-survival…» → latna, saga,
@@ -1564,6 +1584,12 @@ def source_for(url: str) -> tuple:
 
 def by_name(name: str) -> "Source | None":
     return next((s for s in SOURCES if s.name == name), None)
+
+
+def title_identity(site: str, key: str) -> tuple:
+    """A site's stable title key, shared by the catalog and browser companion."""
+    source = by_name(str(site or ""))
+    return str(site or ""), source.identity_key(key) if source is not None else str(key or "")
 
 
 # ── (v5.44.169) the lists the rest of the program keeps of the sites — made of what the sites say of themselves ─────

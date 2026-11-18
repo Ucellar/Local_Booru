@@ -12,8 +12,8 @@ Every download is noted at its end (:func:`install` — once a run of the progra
   their ids (``manhwa_run``) — «Повторить не скачавшееся» puts exactly them in the queue; a download that failed
   before its chapters (its site did not answer) — by its page task's end;
 * nhentai — by its page task's end (``manga_get.GET``): the galleries that did not come;
-* the videos — the other chat's: by the end of its page task (``page_jobs.on_end``), its result and its series' folder
-  only read, not a line of its code changed;
+* the videos — by the end of the page task (``page_jobs.on_end``), with the unfilled part of the chosen episodes
+  and voice-overs when available;
 * «Галерея (booru)» and the subscriptions — by the end of their check (``subscription_jobs.ENDED``).
 
 Kept in ``download_history.json`` in the settings folder — written whole (``.tmp`` → ``os.replace``, the last good copy
@@ -39,7 +39,7 @@ KEEP_SECONDS = KEEP_DAYS * 24 * 3600
 NAME = "download_history.json"
 MAX_ENTRIES = 600                 # lines kept at most (the newest)
 MAX_FAILS = 300                   # what did not come, kept per line
-VIDEO_TASK = "video_download"     # ``webui/pages/video_get.GET`` — the other chat's page task (only its end is read)
+VIDEO_TASK = "video_download"     # ``webui/pages/video_get.GET``
 MANGA_TASK = "manga_download"     # ``webui/pages/manga_get.GET`` — nhentai
 CHAPTERS = ("глава", "главы", "глав")
 GALLERIES = ("галерея", "галереи", "галерей")
@@ -170,12 +170,142 @@ def last_round() -> dict:
         return dict(_ROUND)
 
 
+def _departed_video(current: dict, previous: dict) -> dict | None:
+    """The scheduler's commit that removed its active item, with both waiting lanes intact."""
+    from core.download_scheduler import Scheduler
+    if not isinstance(current, dict) or not isinstance(previous, dict) or \
+            set(current) != {"active", "next", "later"} or set(previous) != set(current):
+        return None
+    active = Scheduler._read_entry(previous["active"])
+    if current["active"] is not None or not active or active.kind != "video" or active.paused:
+        return None
+    title = active.record.get("title")
+    if not isinstance(title, str) or not title or active.label != f"Скачать с сайта: «{title}»":
+        return None
+    seen = {active.id}
+    for lane in ("next", "later"):
+        waiting = current[lane]
+        if not isinstance(waiting, list) or waiting != previous[lane]:
+            return None
+        for item in waiting:
+            entry = Scheduler._read_entry(item)
+            if not entry or entry.id in seen:
+                return None
+            if entry.kind == "video" and (entry.record.get("title") == title or
+                                           entry.record.get("address") == active.record.get("address")):
+                return None
+            seen.add(entry.id)
+    shown = active.presentation
+    if (shown.get("title") and shown["title"] != title) or \
+            (shown.get("url") and shown["url"] != active.record.get("address")):
+        return None
+    return {"title": title, "retry": active.record, "hentai": shown.get("hentai") is True}
+
+
+def _legacy_retry(line: dict, candidate: dict) -> dict | None:
+    """Copy only the original public page and explicit file identities from an early, whole-task failure."""
+    from core import redaction, video_download, video_dubs
+    if line.get("kind") != "video" or line.get("sign") != "fail" or line.get("fails") or \
+            line.get("title") != candidate.get("title"):
+        return None
+    saved = candidate.get("retry")
+    if not isinstance(saved, dict) or (saved.get("title") and saved["title"] != line.get("title")):
+        return None
+    address, files, quality, merge = (saved.get(k) for k in ("address", "files", "quality", "merge"))
+    if not isinstance(address, str) or "#" in address or not video_download.restorable_address(address) or \
+            redaction.sanitize_text(address) != address:
+        return None
+    previous = line.get("retry") or {}
+    if not isinstance(previous, dict) or set(previous) - {"url"} or \
+            any(url and url != address for url in (line.get("url"), previous.get("url"))):
+        return None
+    if not isinstance(files, list) or not files or quality not in ("", *getattr(video_dubs, "QUALITIES", ())) or \
+            type(merge) is not bool:
+        return None
+    for pair in files:
+        if not isinstance(pair, list) or len(pair) != 2 or not all(isinstance(s, str) for s in pair) or \
+                not pair[1].strip() or any("://" in s or redaction.sanitize_text(s) != s for s in pair):
+            return None
+    title = line["title"]
+    if not isinstance(title, str) or not title.strip() or redaction.sanitize_text(title) != title or \
+            len({tuple(pair) for pair in files}) != len(files):
+        return None
+    return {"address": address, "title": title, "files": files, "quality": quality, "merge": merge,
+            "history_retry": True, "match_aliases": True}
+
+
+def _recover_legacy_video(path: Path) -> None:
+    """Before scheduler startup, repair one v191 failure whose original selection is still identifiable."""
+    from core.file_safety import write_json_kept
+    schedule = path.with_name("download_schedule.json")
+    backup = schedule.with_suffix(".json.bak")
+    preserved = path.with_name("video_retry_recovered.json")
+    try:
+        # Read verbatim. The normal recovery reader may repair a damaged input file during a read.
+        if preserved.is_file():
+            candidate = json.loads(preserved.read_text(encoding="utf-8-sig"))
+            if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str) or not candidate["id"]:
+                return
+            times = ()
+        else:
+            times = (schedule.stat().st_mtime, backup.stat().st_mtime)
+            if max(times) - min(times) > 1 or time.time() - min(times) > KEEP_SECONDS:
+                return
+            candidate = _departed_video(json.loads(schedule.read_text(encoding="utf-8")),
+                                        json.loads(backup.read_text(encoding="utf-8")))
+            if candidate is None:
+                return
+        history_stamp = path.stat().st_mtime_ns
+        history = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(history, dict) or not isinstance(history.get("entries"), list):
+            return
+        title = candidate.get("title")
+        if not isinstance(title, str) or not title:
+            return
+        lines = [row for row in history["entries"] if isinstance(row, dict) and row.get("kind") == "video"
+                 and str(row.get("title") or "").casefold().strip() == title.casefold().strip()]
+        if not lines:
+            return
+        latest = max(lines, key=_order)
+        at = latest.get("at")
+        row_id = latest.get("id")
+        if not isinstance(row_id, str) or not row_id or not isinstance(at, (int, float)) or \
+                not 0 <= time.time() - at <= KEEP_SECONDS:
+            return
+        if sum(isinstance(row, dict) and row.get("id") == row_id for row in history["entries"]) != 1:
+            return
+        if times:
+            # The .bak and primary are freshly written in the same terminal commit. Allow one second for I/O.
+            matches = [row for row in lines if all(abs(float(row.get("at") or 0) - t) <= 1 for t in times)]
+            if len(matches) != 1 or matches[0] is not latest:
+                return
+        elif row_id != candidate["id"] or at != candidate.get("at"):
+            return
+        retry = _legacy_retry(latest, candidate)
+        if retry is None:
+            return
+        if times and times != (schedule.stat().st_mtime, backup.stat().st_mtime):
+            return
+        if path.stat().st_mtime_ns != history_stamp:
+            return
+        latest.update(url=retry["address"], retry=retry)
+        if candidate.get("hentai") is True:
+            latest["hentai"] = True
+        write_json_kept(path, json.dumps(history, ensure_ascii=False), dict)
+        if not times:
+            preserved.unlink(missing_ok=True)
+    except (OSError, TypeError, ValueError, OverflowError, RecursionError):
+        return
+
+
 # ── what ended ─────────────────────────────────────────────────────────────────────────────────────────────────────
 def install() -> None:
     """The ends of downloads noted from now on (once a run of the program)."""
     if _INSTALLED.is_set():
         return
     _INSTALLED.set()
+    with _LOCK:
+        _recover_legacy_video(_file())
     from core import manhwa_download, page_jobs, subscription_jobs
     if _manhwa_ended not in manhwa_download.ENDED:
         manhwa_download.ENDED.append(_manhwa_ended)
@@ -201,19 +331,25 @@ def _short(name: str) -> str:
 def _manhwa_ended(found, result: dict) -> None:
     """A title of the sites downloaded (or a stop): what came, what did not (every chapter not «done» of the run —
     the ones that failed with why, the ones a stop left), the chapters to ask again."""
-    from core import manhwa_download as D, manhwa_run as R, manhwa_sources as S
+    from core import manhwa_download as D, manhwa_run as R, manhwa_sources as S, page_jobs
+    task = page_jobs.current(D.TASK)
+    if result.get("stopped") and getattr(task, "download_handover", False):
+        return
     _meter, items = R.meter(since=0, run=-1)
     came = int(result.get("got") or 0)
     why = {str(x.get("id")): x for x in result.get("failed_chapters") or [] if isinstance(x, dict)}
-    # (v5.44.146) «скачается в следующий раз» was a promise the program could not keep (chapters no site has)
-    left = "отложена: главы перед ней подряд не пришли — попробую в следующий раз" if result.get("gave_up") else LEFT
+    deferred = set(result.get("deferred_chapters") or [])
     fails, ids = [], []
     for item in items:
         if item.get("state") == "done":
             continue
         cid = str(item.get("id") or "")
         told = why.get(cid) or {}
-        fails.append({"label": str(item.get("label") or ""), "why": _clean(told.get("why") or item.get("why") or left)})
+        reason = told.get("why") or item.get("why")
+        if cid in deferred:
+            detail = f". Последняя попытка: {reason}" if reason else ""
+            reason = "отложена: несколько глав подряд не пришли — попробую в следующий раз" + detail
+        fails.append({"label": str(item.get("label") or ""), "why": _clean(reason or LEFT)})
         if cid:
             ids.append(cid)
     for cid, told in why.items():                     # (locked ones — never begun: not among the run's items)
@@ -264,6 +400,8 @@ def _manhwa_ended(found, result: dict) -> None:
 def _task_ended(task) -> None:
     from core import background_duties, manhwa_download
     result = task.result if isinstance(task.result, dict) else {}
+    if getattr(task, "download_handover", False) and (task.status == "stopped" or result.get("stopped")):
+        return
     if task.kind == manhwa_download.TASK:
         if task.label == background_duties.ROUND_LABEL:
             _round_ended(task, result)
@@ -327,7 +465,8 @@ def _galleries_ended(task, result: dict) -> None:
 
 
 def _video_ended(task, result: dict) -> None:
-    """(the other chat's download: its result and its series' folder are only read)"""
+    from core.video_download import restorable_address
+
     title = re.sub(r"^Скачать с сайта:\s*", "", str(task.label or "")).strip()
     title = title[1:-1] if title.startswith("«") and title.endswith("»") else title
     folder = str(result.get("folder") or "")
@@ -338,10 +477,25 @@ def _video_ended(task, result: dict) -> None:
             url = str(info.get("source_url") or "") if isinstance(info, dict) else ""
         except (OSError, ValueError):
             url = ""
+    selection = result.get("retry")
+    if isinstance(selection, dict) and selection.get("files") and restorable_address(str(selection.get("address") or "")):
+        retry = selection
+        if not restorable_address(url):
+            url = str(selection["address"])
+    else:
+        manual = result.get("manual_video_choice") is True
+        chosen_url = selection.get("url") if manual and isinstance(selection, dict) else None
+        if isinstance(chosen_url, str) and restorable_address(chosen_url):
+            url = chosen_url
+        url = url if restorable_address(url) else ""
+        retry = {"url": url} if url else None
+        if manual and retry:
+            retry["choose"] = True
     if task.status == "failed" and not result.get("done"):
+        detail = result.get("history_error") or task.error or result.get("failed") or "причина в журнале"
         add({"kind": "video", "what": "Видео", "title": title, "sign": "fail",
-             "said": "Не скачалось: " + _clean(task.error or result.get("failed") or "причина в журнале"),
-             "fails": [], "retry": {"url": url} if url.startswith(("http://", "https://")) else None,
+             "said": "Не скачалось: " + _clean(detail),
+             "fails": [], "retry": retry,
              "folder": folder, "series": str(result.get("series") or ""), "url": url})
         return
     done, whole = int(result.get("done") or 0), int(result.get("whole") or 0)
@@ -358,7 +512,8 @@ def _video_ended(task, result: dict) -> None:
         "".join(", " + b for b in bits[1:]) + "."
     sign = "stop" if stopped else "part" if failed and done else "fail" if failed else "ok"
     fails = [{"label": f"Не скачались файлы: {failed}", "why": "причины — в журнале скачивания"}] if failed else []
-    retry = {"url": url} if (failed or stopped) and url.startswith(("http://", "https://")) else None
+    if not (failed or stopped):
+        retry = None
     add({"kind": "video", "what": "Видео", "title": title, "sign": sign, "said": said, "fails": fails, "retry": retry,
          "folder": folder, "series": str(result.get("series") or ""), "url": url})
 
@@ -382,7 +537,7 @@ def _subs_ended(job) -> None:
             said = f"{agree(got, GOT)} {plural(got, PICTURES)}" + (
                 f" из {cards}{chosen} — остальные уже были в библиотеке или пропущены." if cards and got < cards
                 else ".")
-            if job.kind == "favorites" and got:
+            if got:
                 said += " Потом — парсер по всем сайтам."
             sign = "ok"
         retry = None

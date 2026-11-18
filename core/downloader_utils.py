@@ -153,19 +153,27 @@ def _correct_extension(data: bytes) -> str | None:
 
 # Session cache: host → session, reused within a subscription run
 _session_cache: dict[str, object] = {}
+_session_revisions: dict[str, str] = {}
 
 
 def clear_session_cache():
     """Call at the start of each subscription run to get fresh sessions."""
     _session_cache.clear()
+    _session_revisions.clear()
 
 
 def _get_or_create_session(host: str, settings: dict, log=None):
     """Return cached session for host, creating and warming it if needed."""
-    if host in _session_cache:
-        return _session_cache[host]
-    s = _session(host, settings=settings, log=log)
-    clean_host = str(host or "").lower().replace("www.", "")
+    from core.tagger.cookies_io import load_session_cookie_snapshot
+    clean_host = _host(host)
+    _cookies, _agent, revision = load_session_cookie_snapshot(clean_host, settings)
+    s = _session_cache.get(clean_host)
+    if s is None or _session_revisions.get(clean_host) != revision:
+        # A new browser handoff replaces the saved snapshot, including deletions/revocation.
+        # Unchanged snapshots leave the session's newer server-issued cookies intact.
+        s = _session(clean_host, settings=settings, log=log)
+        _session_cache[clean_host] = s
+        _session_revisions[clean_host] = revision
     if clean_host in {"e621.net", "e926.net", "danbooru.donmai.us", "donmai.us"}:
         s.headers.update({
             "User-Agent": site_agent.user_agent(clean_host, settings),
@@ -183,30 +191,8 @@ def _get_or_create_session(host: str, settings: dict, log=None):
             "Accept": "application/json",
             "Accept-Encoding": "gzip, deflate",
         })
-    # Explicit browser handoff is domain-scoped and DPAPI-protected.  It is
-    # applied after the normal site defaults so the real browser User-Agent and
-    # session cookies win only for the selected domain.
-    try:
-        from core.domain_credentials import load_domain_credentials
-        creds = load_domain_credentials(settings, clean_host)
-        if not creds and clean_host.startswith("www."):
-            creds = load_domain_credentials(settings, clean_host[4:])
-        if creds:
-            # e621 and Danbooru ban a program with a browser's User-Agent (their API rules): their cookies go, the
-            # browser's words do not
-            if creds.get("user_agent") and not site_agent.is_own(clean_host):
-                s.headers["User-Agent"] = str(creds["user_agent"])
-            for cookie in creds.get("cookies") or []:
-                if not isinstance(cookie, dict) or not cookie.get("name"):
-                    continue
-                kwargs = {"path": str(cookie.get("path") or "/")}
-                if cookie.get("domain"):
-                    kwargs["domain"] = str(cookie.get("domain"))
-                s.cookies.set(str(cookie.get("name")), str(cookie.get("value") or ""), **kwargs)
-    except Exception as exc:
-        if log:
-            log(f"Browser credential handoff warning [{clean_host}]: {type(exc).__name__}")
-    _session_cache[host] = s
+    if _agent and not site_agent.is_own(clean_host):
+        s.headers["User-Agent"] = _agent
     return s
 
 
@@ -385,16 +371,24 @@ def _session(host: str, settings: dict | None = None, log=None):
             log(f"  SESSION WARN: get_session failed ({e}), using plain session")
 
     # Hard fallback
+    from core.http_identity import IdentitySession
     h = host.lower().replace("www.", "")
     if _CURL and any(h.endswith(cf) for cf in _CF_HOSTS):
         try:
             s = requests.Session(impersonate="chrome120")
         except Exception:
-            s = __import__("requests").Session()
+            s = IdentitySession()
     else:
-        s = __import__("requests").Session()
+        s = IdentitySession()
     s.headers["User-Agent"] = site_agent.user_agent(h, settings) if site_agent.is_own(h) else _UA
     s.headers["Accept"] = "application/json, */*"
+    from core.tagger.cookies_io import load_session_cookies
+    cookies, user_agent = load_session_cookies(h, settings)
+    jar = getattr(s.cookies, "jar", s.cookies)
+    for cookie in cookies:
+        jar.set_cookie(cookie)
+    if user_agent and not site_agent.is_own(h):
+        s.headers["User-Agent"] = user_agent
     try:
         from core.network import install_safe_session
         install_safe_session(s, settings=settings or {}, log_func=log)
@@ -407,61 +401,13 @@ def _auth_params(host: str, settings: dict | None = None) -> dict:
     """Return login/api_key/user_id params saved in Parser/Sites.
 
     Subscriptions must not keep separate credentials.  This resolver accepts the
-    same settings structure used by the parser/site table, including aliases like
-    api.rule34.xxx -> rule34.xxx and custom-site rows.
+    same resolver as the parser/site table, including explicit aliases and
+    custom-site overrides. A media subdomain never inherits an API key.
     """
     if not settings:
         return {}
-    h = (host or "").lower().replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
-    aliases = [h]
-    if h == "api.rule34.xxx":
-        aliases.append("rule34.xxx")
-    if h == "rule34.xxx":
-        aliases.append("api.rule34.xxx")
-    if h == "danbooru.donmai.us":
-        aliases.append("donmai.us")
-
-    def _same_site(key: str, cfg: dict) -> bool:
-        key = str(key or "").lower().replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
-        if key in aliases:
-            return True
-        for field in ("domain", "host", "base_url", "url", "login_url"):
-            val = str(cfg.get(field) or "").lower().replace("www.", "")
-            if val and any(a in val for a in aliases):
-                return True
-        return False
-
-    cfg = {}
-    sites = settings.get("sites", {})
-    if isinstance(sites, dict):
-        # Normal flat form: {"rule34.xxx": {login/api_key/user_id...}}
-        for a in aliases:
-            v = sites.get(a)
-            if isinstance(v, dict):
-                cfg = v
-                break
-        # Defensive fallback for grouped forms copied from settings.py/UI.
-        if not cfg:
-            for key, v in sites.items():
-                if isinstance(v, dict) and _same_site(key, v):
-                    cfg = v
-                    break
-                if isinstance(v, dict):
-                    for sub_key, sub_v in v.items():
-                        if isinstance(sub_v, dict) and _same_site(sub_key, sub_v):
-                            cfg = sub_v
-                            break
-                    if cfg:
-                        break
-
-    if not cfg:
-        for item in settings.get("custom_sites", []) or []:
-            if not isinstance(item, dict):
-                continue
-            if _same_site(item.get("domain") or item.get("base_url") or item.get("url") or "", item):
-                cfg = item
-                break
-
+    from core.parser.sites import table_config
+    cfg = table_config(settings, host) or {}
     params = {}
     for key in ("login", "api_key", "user_id"):
         val = str(cfg.get(key, "") or "").strip() if isinstance(cfg, dict) else ""
@@ -475,11 +421,18 @@ def _auth_status(params: dict) -> str:
     return " ".join(f"{k}={'yes' if params.get(k) else 'no'}" for k in ("login", "api_key", "user_id"))
 
 
+def _uses_basic_auth(host: str, settings: dict | None = None) -> bool:
+    from core.parser.sites import canonical_host, engine_class, table_config
+    host = canonical_host(host)
+    engine = engine_class(table_config(settings or {}, host) or {}, host)
+    return engine is not None and engine.engine in {"danbooru", "e621"}
+
+
 def _basic_auth_for_host(host: str, settings: dict | None = None):
     params = _auth_params(host, settings)
     login = str(params.get("login") or "").strip()
     api_key = str(params.get("api_key") or "").strip()
-    if login and api_key and (_host(host) in {"e621.net", "e926.net", "danbooru.donmai.us", "donmai.us"} or "allthefallen" in _host(host)):
+    if login and api_key and _uses_basic_auth(host, settings):
         return (login, api_key)
     return None
 
@@ -499,13 +452,14 @@ def _api_headers_for_host(host: str, settings: dict | None = None):
 def _query_auth_params_for_host(host: str, settings: dict | None = None):
     clean = _host(host)
     params = _auth_params(clean, settings)
-    if _basic_auth_for_host(clean, settings) is not None:
+    if _uses_basic_auth(clean, settings):
         return {k: v for k, v in params.items() if k not in {"login", "api_key"}}
     return params
 
 
 def _host(site: str) -> str:
-    return (site or "").lower().replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0]
+    from core.media_utils import normalize_host
+    return normalize_host(site)
 
 
 def _posts_api_url(site: str, query: str, page: int, limit: int = 100) -> tuple[str, dict]:
@@ -513,7 +467,8 @@ def _posts_api_url(site: str, query: str, page: int, limit: int = 100) -> tuple[
 
     page is zero-based inside subscriptions. Site-specific APIs are normalized here.
     """
-    host = _host(site)
+    from core.parser.sites import canonical_host
+    host = canonical_host(site)
 
     # rule34.xxx currently behaves better through api.rule34.xxx for JSON DAPI.
     if host == "rule34.xxx" or host == "api.rule34.xxx":
@@ -574,7 +529,8 @@ def _query_with_id_bound(query: str, mode: str, cursor_id: int) -> str:
 
 
 def _posts_api_url_bound(site: str, query: str, page: int, limit: int = 100, cursor_id: int = 0, run_mode: str = "all") -> tuple[str, dict]:
-    host = _host(site)
+    from core.parser.sites import canonical_host
+    host = canonical_host(site)
 
     # Gelbooru/Rule34 DAPI pagination is page-number based.  Do not mix
     # `id:<...` tag bounds with `pid`, because rule34.xxx can silently return
@@ -949,8 +905,9 @@ def fetch_posts_for_query(
             baseline mode: return no posts and only save newest id.
       old — posts older than since_post_id; if since_post_id is 0, behaves like all.
     """
+    from core.parser.sites import canonical_host
     log = log or (lambda m: None)
-    host = _host(site)
+    host = canonical_host(site)
     s = _get_or_create_session(host, settings, log=log)
     auth = _query_auth_params_for_host(host, settings)
     api_host_for_auth = "api.rule34.xxx" if host == "rule34.xxx" else host

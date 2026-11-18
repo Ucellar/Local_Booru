@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Local Booru Companion",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Local Booru Companion: paired import, automatic quality upgrades, Pixiv families, arbitrary-site provenance, notes and browser-session handoff.",
   "permissions": [
     "storage",
@@ -41,12 +41,14 @@
     "*://*.h-chan.me/*",
     "*://*.henchan.pro/*",
     "*://*.hentaichan.live/*",
+    "*://*.hentaichan.ru/*",
     "*://*.hentailib.me/*",
     "*://*.hentailib.org/*",
     "*://*.mangabuff.ru/*",
     "*://*.mangadex.org/*",
     "*://*.mangalib.me/*",
     "*://*.mangalib.org/*",
+    "*://*.mangaonelove.space/*",
     "*://*.nude-moon.fun/*",
     "*://*.nude-moon.net/*",
     "*://*.nude-moon.org/*",
@@ -57,7 +59,9 @@
     "*://*.readmanga.ru/*",
     "*://*.recomics.org/*",
     "*://*.remanga.org/*",
-    "*://*.zazaza.me/*"
+    "*://*.zazaza.me/*",
+    "*://*.e-hentai.org/*",
+    "*://*.exhentai.org/*"
   ],
   "background": {
     "service_worker": "service_worker.js"
@@ -90,7 +94,39 @@
     },
     {
       "matches": [
-        "*://nhentai.net/*"
+        "*://nhentai.net/*",
+        "*://*.allhen.online/*",
+        "*://*.allhentai.online/*",
+        "*://*.allhentai.ru/*",
+        "*://*.com-x.life/*",
+        "*://*.desu.city/*",
+        "*://*.desu.me/*",
+        "*://*.desu.uno/*",
+        "*://*.desu.win/*",
+        "*://*.h-chan.me/*",
+        "*://*.henchan.pro/*",
+        "*://*.hentaichan.live/*",
+        "*://*.hentaichan.ru/*",
+        "*://*.hentailib.me/*",
+        "*://*.hentailib.org/*",
+        "*://*.mangabuff.ru/*",
+        "*://*.mangadex.org/*",
+        "*://*.mangalib.me/*",
+        "*://*.mangalib.org/*",
+        "*://*.mangaonelove.space/*",
+        "*://*.nude-moon.fun/*",
+        "*://*.nude-moon.net/*",
+        "*://*.nude-moon.org/*",
+        "*://*.readmanga.io/*",
+        "*://*.readmanga.live/*",
+        "*://*.readmanga.me/*",
+        "*://*.readmanga.org/*",
+        "*://*.readmanga.ru/*",
+        "*://*.recomics.org/*",
+        "*://*.remanga.org/*",
+        "*://*.zazaza.me/*",
+        "*://*.e-hentai.org/*",
+        "*://*.exhentai.org/*"
       ],
       "js": [
         "manga_script.js"

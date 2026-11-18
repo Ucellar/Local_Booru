@@ -91,6 +91,10 @@ class NudeMoon(S.Source):
     def entry_url(self, key: str) -> str:
         return f"{self.site()}/{key}.html"
 
+    def identity_key(self, key: str) -> str:
+        number = str(key or "").partition("--")[0]
+        return str(int(number)) if number.isdigit() else str(key or "")
+
     def reader_url(self, key: str) -> str:
         number, _sep, slug = str(key).partition("--")
         return f"{self.site()}/{number}-online--{slug}.html"

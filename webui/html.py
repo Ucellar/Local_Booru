@@ -198,6 +198,7 @@ PAGE_CSS = {"manga": '\n<link rel="stylesheet" href="/static/manga.css">',
             "title": '\n<link rel="stylesheet" href="/static/title.css">',        # (v5.44.102) a title of «Лента»
             "covers": '\n<link rel="stylesheet" href="/static/covers.css">',     # (v5.44.123) the menu of covers
             "downloads": '\n<link rel="stylesheet" href="/static/downloads.css">',  # (v5.44.120) «Скачать → Загрузки»
+            "downloads-steam": '\n<link rel="stylesheet" href="/static/downloads-steam.css">',
             "help": '\n<link rel="stylesheet" href="/static/help.css">'}           # (v5.44.153) «Справка»
 PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            "manga": '\n<script src="/static/manga.js" defer></script>',
@@ -217,6 +218,7 @@ PAGE_JS = {"subs": '\n<script src="/static/subs.js" defer></script>',
            "reader": '\n<script src="/static/reader.js" defer></script>',     # (v5.44.117) the one reader
            "dupes": '\n<script src="/static/dupes.js" defer></script>',
            "downloads": '\n<script src="/static/downloads.js" defer></script>',   # (v5.44.120) «Загрузки»
+           "downloads-steam": '\n<script src="/static/downloads-steam.js" defer></script>',
            "diag": '\n<script src="/static/diag.js" defer></script>',
            "help": '\n<script src="/static/help.js" defer></script>',            # (v5.44.153) «Справка»
            "settings": '\n<script src="/static/settings.js" defer></script>'

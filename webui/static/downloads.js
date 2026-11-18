@@ -1,6 +1,6 @@
 // Local Booru «Скачать → Загрузки» (v5.44.120, webui/pages/downloads.py): everything that downloads in one place —
 // the manga and manhwa of the sites, nhentai, the videos, «Галерея (booru)» and the subscriptions; one queue with its
-// places and ↑↓; «Готово» for 7 days with «Повторить не скачавшееся»; «Сама программа» with its switches.  The
+// places, drag and drop and ↑↓; «Готово» for 7 days with «Повторить не скачавшееся»; «Сама программа» with its switches. The
 // computer (/get/downloads) and the phone (/m/get/downloads) have the same board, this script and one API:
 // /api/downloads/state (asked every 1.5 s while the page is seen, never while it is hidden), /done (when it changed),
 // /duties (every 15 s), /log (a journal opened), /act, /all, /retry, /duty, /duty-act.  «SFW» is the server's: a row it
@@ -22,11 +22,15 @@
   const goingEmpty = going.querySelector(".dl-empty");
   const queuePanel = box.querySelector(".dl-queue-panel");
   const queueList = queuePanel.querySelector(".dl-queue");
+  const queueHelp = queuePanel.querySelector(".dl-queue-help");
   const donePanel = box.querySelector(".dl-done-panel");
   const doneList = donePanel.querySelector(".dl-done");
   const doneEmpty = donePanel.querySelector(".dl-done-empty");
   const doneAll = donePanel.querySelector("[data-done-all]");
   const dutiesList = box.querySelector(".dl-duties");
+  const steamBoard = box.querySelector("[data-steam-downloads]");
+  const steam = steamBoard && LB.createSteamDownloads?.(steamBoard, send);
+  const steamSelected = () => steam && document.documentElement.dataset.skin === "steam";
   const STATES = { running: "идёт", paused: "пауза", stopping: "останавливается", waiting: "ждёт ответа",
     restoring: "с прошлого запуска" };
   const ICON = {
@@ -35,6 +39,7 @@
     warn: ["M12 4l9 16H3z", "M12 10v4.5", "M12 17.5h.01"], up: ["M12 19V5", "M6 11l6-6 6 6"],
     down: ["M12 5v14", "M6 13l6 6 6-6"], list: ["M9 6h11", "M9 12h11", "M9 18h11", "M4.5 6h.01", "M4.5 12h.01",
       "M4.5 18h.01"], close: ["M6 6l12 12", "M18 6L6 18"],
+    grip: ["M9 5h.01", "M15 5h.01", "M9 12h.01", "M15 12h.01", "M9 19h.01", "M15 19h.01"],
   };
 
   // ── little things ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -142,13 +147,15 @@
   let doneRev = null;
   let dutiesAt = 0;
   let showAll = false;
+  let queueRev = null;
+  let lastSfw = box.dataset.sfw === "1";
 
   async function tick() {
     clearTimeout(timer);
     if (document.hidden || asking) return;
     asking = true;
     try {
-      const st = await getJson("/api/downloads/state");
+      const st = await getJson("/api/downloads/state" + (steamSelected() ? "?steam=1" : ""));
       paint(st);
       if (st.done_rev !== doneRev) {
         doneRev = st.done_rev;
@@ -166,13 +173,37 @@
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) clearTimeout(timer); else tick();
+    if (document.hidden) {
+      endDrag();
+      steam?.endDrag();
+      clearTimeout(timer);
+    } else tick();
   });
+  if (steam) new MutationObserver(() => {
+    steam.endDrag();
+    if (!steamSelected()) steam.paint(null);
+    poke();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-skin"] });
 
   function paint(st) {
+    queueRev = st.queue_rev;
+    if (lastSfw !== Boolean(st.sfw)) {
+      steam?.endDrag(false);
+      lastSfw = Boolean(st.sfw);
+    }
+    const managed = steamSelected() && st.steam;
+    steam?.paint(managed || null);
+    const visibleJobs = (st.jobs || []).filter((row) => {
+      if (managed?.handoverTask && row.task === managed.handoverTask) return false;
+      return !managed?.active || (row.id !== managed.active.id &&
+        !(row.key === managed.active.key && row.task && row.task === managed.active.task));
+    });
+    const visibleQueue = (st.queue || []).filter((row) => !managed || !row.scheduled);
+    going.hidden = Boolean(managed && !visibleJobs.length);
+    going.querySelector("h2").firstChild.textContent = managed ? "Другие задачи " : "Идёт сейчас ";
     countLine.textContent = st.said || "";
-    going.querySelector(".dl-n").textContent = String((st.jobs || []).filter((r) => r.state !== "restoring").length || "");
-    const any = (st.jobs || []).some((r) => r.state !== "restoring") || (st.queue || []).length;
+    going.querySelector(".dl-n").textContent = String(visibleJobs.filter((r) => r.state !== "restoring").length || "");
+    const any = (st.jobs || []).some((r) => r.state !== "restoring") || (st.queue || []).some((r) => r.lane !== "later");
     headTools.hidden = !any;
     const pausable = (st.jobs || []).filter((r) => r.pause);
     const resumable = (st.jobs || []).filter((r) => r.resume);
@@ -181,8 +212,8 @@
     pauseAll.textContent = "";
     pauseAll.append(svg(pausable.length ? ICON.pause : ICON.play, 15),
       el("span", "dl-words", pausable.length ? "Пауза всего" : "Продолжить всё"));
-    paintJobs(st.jobs || []);
-    paintQueue(st.queue || []);
+    paintJobs(visibleJobs);
+    paintQueue(visibleQueue);
     document.querySelectorAll("[data-dl-n]").forEach((n) => {     // the badge of the header, the phone's chip
       n.textContent = st.badge ? String(st.badge) : "";
       n.hidden = !st.badge;
@@ -203,17 +234,24 @@
     const pic = el("span", "dl-pic");
     const letter = el("span", "dl-letter");
     letter.setAttribute("aria-hidden", "true");
-    pic.append(letter);
+    pic.append(letter, svg(ICON.list, 22));
     const body = el("div", "dl-body");
     const top = el("div", "dl-top");
     const kind = el("span", "dl-kind");
+    const status = el("span", "dl-status");
     const title = el("b", "dl-title");
     const dest = el("span", "dl-dest");
-    top.append(kind, title, dest);
+    top.append(kind, status, title, dest);
     const text = el("p", "dl-text");
     const bar = el("span", "dl-bar");
     const fill = el("i");
     bar.append(fill);
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", "Ход загрузки");
+    const percent = el("span", "dl-percent");
+    percent.setAttribute("aria-hidden", "true");
+    const progress = el("div", "dl-job-progress");
+    progress.append(bar, percent);
     const sub = el("p", "dl-sub");
     const logBox = el("div", "dl-log-box");
     logBox.hidden = true;
@@ -226,7 +264,7 @@
     copied.setAttribute("role", "status");
     logTools.append(copyButton, copied);
     logBox.append(pre, logTools);
-    body.append(top, text, bar, sub, logBox);
+    body.append(top, text, progress, sub, logBox);
     const tools = el("div", "dl-tools");
     const pause = button("dl-btn", "Пауза", "pause");
     const skip = button("dl-btn", "Пропустить", "skip");
@@ -238,13 +276,14 @@
     more.append(details, stop);
     tools.append(pause, skip, forget, more);
     li.append(pic, body, tools);
-    const parts = { li, pic, letter, kind, title, dest, text, bar, fill, sub, logBox, pre, pause, skip, forget, details,
+    const parts = { li, pic, letter, kind, status, title, dest, text, progress, bar, fill, percent, sub, logBox, pre, pause, skip, forget, details,
       stop, row: r, log: null, picture: "" };
     pause.addEventListener("click", () => send("/api/downloads/act", { key: parts.row.key,
       act: parts.row.resume ? "resume" : "pause" }, pause));
     skip.addEventListener("click", () => send("/api/downloads/act", { key: parts.row.key, act: "skip" }, skip));
     forget.addEventListener("click", () => send("/api/downloads/act", { key: parts.row.key, act: "forget" }, forget));
-    stop.addEventListener("click", () => send("/api/downloads/act", { key: parts.row.key, act: "stop" }, stop));
+    stop.addEventListener("click", () => parts.row.scheduled ? send("/api/downloads/steam-remove", { id: parts.row.id }, stop) :
+      send("/api/downloads/act", { key: parts.row.key, act: "stop" }, stop));
     details.addEventListener("click", () => toggleLog(parts));
     copyButton.addEventListener("click", async () => {
       const textAll = (pre.textContent || "").replace(/\s+$/, "");
@@ -266,7 +305,9 @@
     const img = el("img");
     img.alt = "";
     img.decoding = "async";
-    img.onload = () => parts.pic.classList.add("has-picture");
+    img.onload = () => {
+      if (parts.picture === address && img.isConnected) parts.pic.classList.add("has-picture");
+    };
     img.onerror = () => {
       img.remove();
       parts.failed = { address, at: Date.now() };
@@ -278,6 +319,8 @@
 
   function paintJobs(list) {
     const before = places(jobsList);
+    const primary = list.find((r) => r.state === "running") || list.find((r) => r.state !== "restoring");
+    if (primary && primary !== list[0]) list = [primary, ...list.filter((r) => r !== primary)];
     const wanted = new Set(list.map(rowId));
     Object.keys(rows).forEach((id) => {
       if (!wanted.has(id)) {
@@ -291,17 +334,23 @@
       p.row = r;
       p.li.dataset.state = r.state;
       p.li.classList.toggle("hid", !!r.hidden);
+      p.li.classList.toggle("dl-feature", r === primary);
       p.kind.textContent = r.kind || "";
-      p.title.textContent = r.title || "";
-      p.title.title = r.title || "";
+      p.status.textContent = STATES[r.state] || "";
+      p.status.hidden = !p.status.textContent;
+      p.title.textContent = r.current_title || r.title || "";
+      p.title.title = p.title.textContent;
       p.dest.textContent = r.dest || "";
       p.dest.hidden = !r.dest;
       p.text.textContent = r.text || "";
       p.text.hidden = !r.text;
       p.sub.textContent = r.sub || "";
       p.sub.hidden = !r.sub;
-      p.bar.hidden = r.part === null || r.part === undefined;
-      p.fill.style.width = Math.max(2, Math.min(100, (Number(r.part) || 0) * 100)).toFixed(1) + "%";
+      p.progress.hidden = r.part === null || r.part === undefined;
+      const pct = Math.max(0, Math.min(100, (Number(r.part) || 0) * 100));
+      p.fill.style.width = pct.toFixed(1) + "%";
+      p.bar.setAttribute("aria-valuenow", String(Math.round(pct)));
+      p.percent.textContent = Math.floor(pct) + "%";
       p.pause.hidden = !r.pause && !r.resume;
       p.pause.textContent = "";
       p.pause.append(svg(r.resume ? ICON.play : ICON.pause, phone ? 16 : 14),
@@ -313,7 +362,7 @@
       p.stop.hidden = !r.stop || r.state === "stopping";
       p.details.hidden = !r.log;
       if (!r.log && p.log) toggleLog(p, false);
-      picture(p, r.hidden ? "" : r.cover, r.hidden ? "" : r.title || r.kind);
+      picture(p, r.hidden ? "" : r.cover, r.hidden ? "" : p.title.textContent || r.kind);
       p.pic.classList.toggle("dl-pic-hidden", !!r.hidden);
     });
     const now = [...jobsList.children];
@@ -358,20 +407,110 @@
 
   // ── «Очередь» ───────────────────────────────────────────────────────────────────────────────────────────────────
   let queueSaid = "";             // (v5.44.158) the queue as it was drawn last
+  let queueRows = [];
+  let dragging = null;
+  let settlingOrder = false;
+
+  function inQueue(key) {
+    return queueRows.filter((q) => q.key === key && !q.scheduled).map((q) => q.id);
+  }
+
+  async function sendOrder(key, from, to, expected) {
+    if (from === to || settlingOrder || from < 0 || to < 0 || to >= expected.length) return;
+    const order = expected.slice();
+    const [moved] = order.splice(from, 1);
+    order.splice(to, 0, moved);
+    settlingOrder = true;
+    try {
+      await send("/api/downloads/act", { key, act: "reorder", expected, order });
+    } finally {
+      settlingOrder = false;
+    }
+  }
+
+  function endDrag() {
+    if (!dragging) return;
+    dragging.row.classList.remove("dl-dragging");
+    if (dragging.over) delete dragging.over.dataset.insert;
+    dragging = null;
+    poke();
+  }
+
+  queueList.addEventListener("dragstart", (event) => {
+    const handle = event.target.closest(".dl-grip");
+    if (!handle || settlingOrder || !event.dataTransfer) return;
+    const row = handle.closest(".dl-q");
+    const expected = inQueue(row.dataset.key);
+    if (expected.length < 2) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.setData("text/plain", "download");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setDragImage(row, 24, row.offsetHeight / 2);
+    dragging = { row, expected, from: expected.indexOf(Number(row.dataset.id)), over: null };
+    row.classList.add("dl-dragging");
+  });
+
+  function dropPosition(event) {
+    const row = event.target.closest(".dl-q");
+    if (!dragging || !row || row.dataset.key !== dragging.row.dataset.key || row === dragging.row) return null;
+    const bounds = row.getBoundingClientRect();
+    const after = event.clientY > bounds.top + bounds.height / 2;
+    const index = dragging.expected.indexOf(Number(row.dataset.id));
+    if (index < 0) return null;
+    const slot = index + Number(after);
+    return { row, after, to: slot - Number(dragging.from < slot) };
+  }
+
+  queueList.addEventListener("dragover", (event) => {
+    if (!dragging) return;
+    const target = dropPosition(event);
+    if (dragging.over) delete dragging.over.dataset.insert;
+    dragging.over = target ? target.row : null;
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    target.row.dataset.insert = target.after ? "after" : "before";
+  });
+  queueList.addEventListener("dragleave", (event) => {
+    if (dragging && dragging.over && (!(event.relatedTarget instanceof Node) || !queueList.contains(event.relatedTarget))) {
+      delete dragging.over.dataset.insert;
+      dragging.over = null;
+    }
+  });
+  queueList.addEventListener("drop", (event) => {
+    const target = dropPosition(event);
+    if (!target) return;
+    event.preventDefault();
+    const { row, from, expected } = dragging;
+    endDrag();
+    sendOrder(row.dataset.key, from, target.to, expected);
+  });
+  box.addEventListener("dragend", endDrag);
+
   function paintQueue(list) {
+    // A poll may arrive during a drag. Keep its source and targets until drop, then check the snapshot on the server.
+    if (dragging || settlingOrder) return;
+    queueRows = list;
     queuePanel.hidden = !list.length;
     queuePanel.querySelector(".dl-n").textContent = list.length ? String(list.length) : "";
+    queueHelp.hidden = !list.some((q) => q.up || q.down);
     // nothing new: the rows stay as they are (the button under the pointer, the one in focus) — drawn anew every
     // 1.5 s they lost both
     const said = JSON.stringify(list);
     if (said === queueSaid && queueList.children.length === list.length) return;
     queueSaid = said;
     const before = places(queueList);
+    const focused = document.activeElement;
+    const focusedRow = queueList.contains(focused) ? focused.closest(".dl-q") : null;
     queueList.textContent = "";
     list.forEach((q, n) => {
       const li = el("li", "dl-q" + (q.hidden ? " hid" : ""));
       li.dataset.key = q.key;
+      li.dataset.id = String(q.id);
       li.dataset.row = q.key + "|" + q.id;
+      if (n > 0 && list[n - 1].key !== q.key) li.dataset.kindStart = "1";
       li.append(el("span", "dl-qn", String(n + 1)), el("span", "dl-kind", q.kind || ""));
       const main = el("span", "dl-q-main");
       const name = el("span", "dl-q-name");      // the kind beside the name — where its own column is not (narrow)
@@ -379,6 +518,15 @@
       main.append(name);
       if (q.what) main.append(el("span", "dl-q-what", (phone ? "" : " — ") + q.what));
       li.append(main);
+      if (!phone) {
+        const handle = el("span", "dl-grip");
+        handle.append(svg(ICON.grip, 16));
+        handle.classList.toggle("dl-off", q.scheduled || !q.up && !q.down);
+        handle.draggable = !q.scheduled && !!(q.up || q.down);
+        handle.title = "Перетащить в очереди";
+        handle.setAttribute("aria-hidden", "true");
+        li.prepend(handle);
+      }
       const move = el("span", "dl-move");
       [["up", -1, "Выше — начнётся раньше"], ["down", 1, "Ниже — начнётся позже"]].forEach(([icon, step, label]) => {
         const b = el("button", "dl-icon-btn");
@@ -390,7 +538,19 @@
         const off = !(step < 0 ? q.up : q.down);
         b.classList.toggle("dl-off", off);         // its place kept: ↑ and ↓, «убрать» of every line one under another
         b.disabled = off;
-        b.addEventListener("click", () => send("/api/downloads/act", { key: q.key, act: "move", id: q.id, step }, b));
+        b.addEventListener("click", () => {
+          if (settlingOrder) return;
+          if (q.scheduled) {
+            const entries = queueRows.filter((row) => row.scheduled && row.lane === q.lane);
+            const at = entries.findIndex((row) => row.id === q.id);
+            send("/api/downloads/steam-move", { id: q.id, lane: q.lane, revision: queueRev,
+              before: entries[at + (step < 0 ? -1 : 2)]?.id || null }, b);
+          } else if (q.key === "video") {
+            const expected = inQueue(q.key);
+            const from = expected.indexOf(q.id);
+            sendOrder(q.key, from, from + step, expected);
+          } else send("/api/downloads/act", { key: q.key, act: "move", id: q.id, step }, b);
+        });
         move.append(b);
       });
       move.classList.toggle("dl-off", !q.up && !q.down);
@@ -398,10 +558,17 @@
       if (q.drop) {
         const drop = button("dl-link", "убрать");
         drop.dataset.drop = "1";
-        drop.addEventListener("click", () => send("/api/downloads/act", { key: q.key, act: "drop", id: q.id }, drop));
+        drop.addEventListener("click", () => q.scheduled ? send("/api/downloads/steam-remove", { id: q.id }, drop) :
+          send("/api/downloads/act", { key: q.key, act: "drop", id: q.id }, drop));
         li.append(drop);
       }
       queueList.append(li);
+      if (focusedRow && li.dataset.row === focusedRow.dataset.row) {
+        const matching = [...li.querySelectorAll("button")].find((b) => b.dataset.move === focused.dataset.move
+          && b.dataset.drop === focused.dataset.drop && !b.disabled);
+        const next = matching || li.querySelector("button:not(:disabled)");
+        if (next) next.focus({ preventScroll: true });
+      }
     });
     settle(queueList, before);
   }
@@ -454,15 +621,13 @@
       body.append(fold);
     }
     const tools = el("div", "dl-res-tools");
-    if (r.retry && r.retry.href) {
-      const a = el("a", "dl-btn");
-      a.href = r.retry.href;
-      a.append(svg(ICON.retry, 14), el("span", "dl-words", r.retry.label));
-      tools.append(a);
-    } else if (r.retry) {
+    if (r.retry) {
       const b = button("dl-btn", r.retry.label, "retry");
       b.dataset.retry = r.id;
-      b.addEventListener("click", () => send("/api/downloads/retry", { id: r.id }, b));
+      b.addEventListener("click", async () => {
+        const reply = await send("/api/downloads/retry", { id: r.id, phone }, b);
+        if (reply && reply.href) window.location.assign(reply.href);
+      });
       tools.append(b);
     }
     if (r.open) {

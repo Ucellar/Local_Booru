@@ -1,14 +1,16 @@
 'use strict';
+(() => {
+if (window.__lbOwnedTitles) return;
+window.__lbOwnedTitles = true;
+const IS_NHENTAI = /(^|\.)nhentai\.net$/i.test(location.hostname);
 
-// Local Booru on nhentai (0.9.0).  The galleries the program's manga folder has — this very one («Уже есть») or
-// another version of its work («Есть: English»: another language, another upload) — are blurred (the label shows one
-// and blurs it again), hidden, or only labelled, as the popup says («Манга на nhentai»).  The program tells which
-// (/extension/manga): by the gallery's number, else by its title and the people who made it.  The page of a gallery
-// says it over its title.  Nothing is asked of the site and nothing is sent anywhere but to the program.
+// Downloaded source cards on supported and explicitly permitted sites. The program matches saved URLs and
+// stable site/title keys; only nhentai also recognizes versions by its title and credited people. Cards are blurred,
+// hidden or labelled according to the popup. No content is requested from the website; only the local program.
 
 const MANGA = {
   options: { enabled: true, mangaMode: 'blur', mangaVersions: true },
-  known: new Map(),          // gallery number -> the program's answer (asked once a page)
+  known: new Map(),          // source URL -> the program's answer
   timer: null, busy: false, again: false, toldOffline: false,
 };
 const MANGA_OWN = '.lb-manga-label,.lb-manga-note,.lb-companion-toast';
@@ -16,45 +18,59 @@ const LANGUAGE_NAMES = { english: 'English', japanese: 'японский', chine
   russian: 'русский', spanish: 'испанский', french: 'французский', german: 'немецкий', portuguese: 'португальский' };
 
 function galleryNumber(href) {
+  if (!IS_NHENTAI) return 0;
   const m = String(href || '').match(/\/g\/(\d{1,8})\/?(?:[?#].*)?$/);
   return m ? Number(m[1]) : 0;
 }
-function shownGallery() {
-  const m = location.pathname.match(/^\/g\/(\d{1,8})\/?$/);
-  return m ? Number(m[1]) : 0;
-}
+function shownGallery() { return galleryNumber(location.pathname); }
 function textOf(el) { return el ? String(el.textContent || '').replace(/\s+/g, ' ').trim() : ''; }
-
-// A card: the element round one gallery's cover link (nhentai's «.gallery»: the covers of a list, «More Like This»),
-// its title the caption.  The gallery the page shows is not a card.
+function titleUrl(href) {
+  try {
+    const u = new URL(href, location.href);
+    if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) return '';
+    u.hash = '';
+    if (u.pathname === '/' && !u.search) return '';
+    return u.href;
+  } catch (_) { return ''; }
+}
+function cardContainer(a) {
+  const box = a.closest('.gallery,article,tr,.shortstory,.short-item,.manga-item,.content_row,.card,.tile,.item');
+  if (!box) return a;
+  const targets = new Set([...box.querySelectorAll('a[href]')].filter(x => x.querySelector('img,picture'))
+    .map(x => titleUrl(x.href)).filter(Boolean));
+  return targets.size === 1 ? box : a;
+}
 function mangaCards() {
-  const out = new Map();
-  const here = shownGallery();
-  for (const a of document.querySelectorAll('a[href*="/g/"]')) {
-    const id = galleryNumber(a.getAttribute('href'));
-    if (!id || id === here || out.has(id) || !a.querySelector('img') || a.closest(MANGA_OWN)) continue;
-    const card = a.closest('.gallery') || a;
-    const caption = card.querySelector('.caption') || a.querySelector('.caption');
+  const out = [];
+  const here = titleUrl(location.href);
+  const seenCards = new Set();
+  for (const a of document.querySelectorAll('a[href]')) {
+    const key = titleUrl(a.href);
+    if (!key || key === here || !a.querySelector('img,picture') || a.closest(MANGA_OWN)) continue;
+    const id = galleryNumber(a.href);
+    if (IS_NHENTAI && !id) continue;
+    const card = cardContainer(a);
+    if (seenCards.has(card)) continue;
+    seenCards.add(card);
+    const caption = card.querySelector('.caption,h2,h3,.title');
     const img = a.querySelector('img');
-    const title = textOf(caption) || String(a.getAttribute('title') || (img && img.getAttribute('alt')) || '').trim();
-    out.set(id, { id, title, card });
+    const title = textOf(caption) || String(a.title || (img && img.alt) || '').trim();
+    out.push({ id, key, url: key, title, card });
   }
   return out;
 }
-
-// The gallery the page shows: its titles and the people of its tags (their links say their kind: /artist/…, /group/…).
 function pageGallery() {
+  const key = titleUrl(location.href);
   const id = shownGallery();
-  if (!id) return null;
-  const info = document.querySelector('#info') || document.body;
-  const h1 = info.querySelector('h1.title') || info.querySelector('h1');
-  const h2 = info.querySelector('h2.title');
-  const people = kind => [...document.querySelectorAll(`a[href*="/${kind}/"]`)].map((a) => {
+  const h1 = document.querySelector('#info h1,h1');
+  if (!key || !h1 || IS_NHENTAI && !id) return null;
+  const info = IS_NHENTAI ? document.querySelector('#info') : h1.parentElement;
+  const people = kind => [...document.querySelectorAll(`a[href*="/${kind}/"]`)].map(a => {
     const m = String(a.getAttribute('href') || '').match(new RegExp(`/${kind}/([^/?#]+)/?$`));
     try { return m ? decodeURIComponent(m[1]).replace(/-/g, ' ') : ''; } catch (_) { return ''; }
   }).filter(Boolean);
-  const title = textOf(h1) || document.title.replace(/\s*[»|–-]\s*nhentai.*$/i, '').trim();
-  return { id, title, japanese: textOf(h2), artists: people('artist'), groups: people('group'), info };
+  return { id, key, url: key, title: textOf(h1), japanese: IS_NHENTAI ? textOf(info.querySelector('h2.title')) : '',
+    artists: IS_NHENTAI ? people('artist') : [], groups: IS_NHENTAI ? people('group') : [], info };
 }
 
 function languagesText(result) {
@@ -71,6 +87,7 @@ function counts(result) {
 
 function markCard(entry, result) {
   const { card } = entry;
+  if (entry.key) card.dataset.lbOwnedKey = entry.key;
   const mode = MANGA.options.mangaMode || 'blur';
   let label = card.querySelector(':scope > .lb-manga-label');
   if (!counts(result) || mode === 'off' || !MANGA.options.enabled) {
@@ -92,7 +109,7 @@ function markCard(entry, result) {
   label.dataset.status = result.status;
   const shown = card.classList.contains('lb-manga-shown');
   const hint = mode === 'blur' ? (shown ? 'Щёлкните, чтобы размыть снова' : 'Щёлкните, чтобы показать') : '';
-  const title = (result.title ? `В папке манги: ${result.title}` : '') + (hint ? (result.title ? '\n' : '') + hint : '');
+  const title = (result.title ? `В библиотеке: ${result.title}` : '') + (hint ? (result.title ? '\n' : '') + hint : '');
   if (label.title !== title) label.title = title;
 }
 
@@ -110,7 +127,7 @@ function markPage(gallery, result) {
   }
   const langs = languagesText(result);
   const text = result.status === 'same'
-    ? 'Local Booru: эта манга уже есть в папке манги'
+    ? 'Local Booru: этот материал уже есть в библиотеке'
     : `Local Booru: в папке манги есть другая версия этой манги${langs ? ` (${langs})` : ''}: ${result.title || ''}`;
   if (note.textContent !== text) note.textContent = text;
   note.dataset.status = result.status;
@@ -133,23 +150,25 @@ async function checkManga() {
     if (o && o.options) MANGA.options = { ...MANGA.options, ...o.options };
     const cards = mangaCards();
     const gallery = pageGallery();
-    const ask = [];
-    for (const entry of cards.values()) if (!MANGA.known.has(entry.id)) ask.push({ id: entry.id, title: entry.title });
-    if (gallery && !MANGA.known.has(gallery.id)) {
-      ask.push({ id: gallery.id, title: gallery.title, japanese: gallery.japanese, artists: gallery.artists,
-                 groups: gallery.groups });
-    }
+    const pending = new Map();
+    for (const entry of cards.values()) if (!MANGA.known.has(entry.key)) pending.set(entry.key,
+      { id: entry.id, key: entry.key, url: entry.url, title: entry.title });
+    if (gallery && !MANGA.known.has(gallery.key)) pending.set(gallery.key,
+      { id: gallery.id, key: gallery.key, url: gallery.url, title: gallery.title, japanese: gallery.japanese,
+        artists: gallery.artists, groups: gallery.groups });
+    const ask = [...pending.values()].slice(0, 300);
     if (ask.length && MANGA.options.enabled && (MANGA.options.mangaMode || 'blur') !== 'off') {
       const r = await chrome.runtime.sendMessage({ type: 'LB_MANGA_CHECK', items: ask });
       if (r && r.offline) {
-        if (!MANGA.toldOffline) { MANGA.toldOffline = true; mangaToast('Local Booru закрыта — метки манги появятся, когда она запущена'); }
+        if (!MANGA.toldOffline) { MANGA.toldOffline = true; mangaToast('Local Booru закрыта — метки скачанного появятся, когда она запущена'); }
       } else {
-        for (const one of (r && r.items) || []) MANGA.known.set(Number(one.id), one);
-        for (const one of ask) if (!MANGA.known.has(one.id)) MANGA.known.set(one.id, { id: one.id, status: '' });
+        for (const one of (r && r.items) || []) MANGA.known.set(one.key, one);
+        for (const one of ask) if (!MANGA.known.has(one.key)) MANGA.known.set(one.key, { key: one.key, status: '' });
       }
     }
-    for (const entry of cards.values()) markCard(entry, MANGA.known.get(entry.id));
-    if (gallery) markPage(gallery, MANGA.known.get(gallery.id));
+    for (const entry of cards.values()) markCard(entry, MANGA.known.get(entry.key));
+    if (gallery) markPage(gallery, MANGA.known.get(gallery.key));
+    if (pending.size > ask.length && ask.every(x => MANGA.known.has(x.key))) MANGA.again = true;
   } catch (_) {
     /* the program does not answer: no marks; the popup says why */
   } finally {
@@ -169,13 +188,14 @@ function mangaLabelClick(ev) {
   const card = label.parentElement;
   if (!card.classList.contains('lb-manga-blur')) return;
   card.classList.toggle('lb-manga-shown');
-  const result = MANGA.known.get(galleryNumber((card.matches('a') ? card : card.querySelector('a[href*="/g/"]'))?.getAttribute('href')));
+  const result = MANGA.known.get(card.dataset.lbOwnedKey);
   if (result) markCard({ card }, result);
 }
 for (const type of ['click', 'mousedown', 'mouseup', 'auxclick']) document.addEventListener(type, mangaLabelClick, true);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
+  if (changes.offlineIndex || changes.mangaSitesRev) { MANGA.known.clear(); scheduleManga(); }
   if (changes.mangaMode || changes.mangaVersions || changes.enabled) scheduleManga();
 });
 // new covers (the next page loaded in place, «More Like This») and the site's own moves between pages
@@ -186,3 +206,7 @@ new MutationObserver((ms) => {
   if (ms.some(m => !own(m.target) && [...(m.addedNodes || [])].some(n => !own(n)))) scheduleManga();
 }).observe(document.documentElement, { childList: true, subtree: true });
 scheduleManga();
+
+// New downloads are reflected without reloading the site's page. No request while the tab is hidden.
+setInterval(() => { if (!document.hidden) { MANGA.known.clear(); scheduleManga(); } }, 30000);
+})();

@@ -28,7 +28,7 @@ class ReadManga(S.Source):
     ``rm_h.readerInit(chapterInfo, [[server, '', path, width, height, ''], …])``; a chapter taken down (a licence) —
     404 and ``/static/deleted…`` pictures: :class:`Paid` (another site's copy is the only way).  Its search —
     ``/search/suggestion?query=`` (JSON; only this site's titles: a link of its own, ``type`` MANGA).  One translation
-    to a chapter; all free."""
+    to a chapter; the list does not confirm that the reader still has its pages."""
     name = "readmanga"
     feed_order = 40
     label = "ReadManga"
@@ -36,6 +36,7 @@ class ReadManga(S.Source):
     address_value = "READMANGA_SITE"
     cover_hosts = ("one-way.work", "zazaza.me", "readmanga.live", "readmanga.io")
     shown = "readmanga (a.zazaza.me)"
+    chapter_access_unknown = True
     RESERVED = {"list", "search", "internal", "user", "users", "static", "news", "forum", "login", "register", "auth",
                 "rss", "api", "help", "about", "top", "catalog", "random", "private", "ajax", "app", "uploads"}
 
@@ -130,7 +131,7 @@ class ReadManga(S.Source):
         return out
 
     _ITEM = re.compile(r"\[\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*\"([^\"]*)\"\s*,\s*(\d+)\s*,\s*(\d+)")
-    GONE = "глава убрана с ReadManga (обычно — по лицензии): там её больше нет"
+    GONE = "глава убрана с ReadManga"
 
     def pictures(self, net: S.Net, title: S.TitleRef, chapter: S.ChapterRef) -> list:
         def fetch(address: str) -> str:

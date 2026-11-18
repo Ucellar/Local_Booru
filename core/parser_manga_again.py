@@ -120,7 +120,7 @@ def recheck(settings: dict, key: str) -> dict:
         count = _loose_mark(str(key))
         if count is None:
             return {"ok": False, "error": "Такой строки в списке нет — откройте страницу заново"}
-        return {"ok": True, "count": count, "words": _started_words(settings)}
+        return {"ok": True, "count": count, "words": _started_words(settings, key=str(key))}
     item = PM.STORE.items().get(str(key))
     cand = PM._cand(item or {})
     if cand is None:
@@ -157,7 +157,7 @@ def recheck(settings: dict, key: str) -> dict:
     count = int(PM.STORE.change(put) or 0)
     if not count:
         return {"ok": False, "error": "Такой папки в списке нет — откройте страницу заново"}
-    return {"ok": True, "count": count, "words": _started_words(settings)}
+    return {"ok": True, "count": count, "words": _started_words(settings, key=str(key))}
 
 
 def recheck_all(settings: dict) -> dict:
@@ -296,13 +296,16 @@ def say_link(settings: dict, key: str, url: str, work: str = "") -> dict:
         return True
     if not PM.STORE.change(put):
         return {"ok": False, "error": "Такой папки в списке нет — откройте страницу заново"}
-    return {"ok": True, "words": _started_words(settings).replace("Перепроверяю", "Открываю ссылку")
+    return {"ok": True, "words": _started_words(settings, key=str(key)).replace("Перепроверяю", "Открываю ссылку")
             .replace("перепроверю", "открою ссылку")}
 
 
-def _started_words(settings: dict) -> str:
+def _started_words(settings: dict, *, key: str = "") -> str:
+    from core import parser_manga as PM
     from core.parser import jobs as parser_jobs
     if parser_jobs.is_running():
+        if PM.run_handles(settings, key):
+            return "В очереди манги — проверю во время парсинга"
         return "Идёт парсер — перепроверю, как он закончит"
     start(settings)
     return "Перепроверяю — результат появится в строке"

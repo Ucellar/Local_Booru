@@ -35,18 +35,23 @@
   border-radius: var(--radius); background: var(--panel-2); color: var(--muted); }
 .dl .dl-pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .dl .dl-pic.has-picture .dl-letter { visibility: hidden; }
+.dl .dl-pic > .dl-svg { display: none; }
+.dl .dl-pic:not(.has-picture, .dl-pic-hidden) > .dl-letter:empty + .dl-svg { display: block; }
 .dl .dl-letter { font-size: 20px; font-weight: 700; }
 .dl .dl-job.hid .dl-pic { width: 34px; height: 48px; }
 .dl .dl-job.hid .dl-pic::after { content: "18+"; color: var(--muted); font-size: 10px; font-weight: 700; }
 .dl .dl-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .dl .dl-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
 .dl .dl-kind { flex: none; color: var(--accent-text); font-size: 12px; font-weight: 700; }
+.dl .dl-status { color: var(--muted); font-size: 12px; }
 .dl .dl-title { min-width: 0; color: var(--strong); overflow-wrap: anywhere; }
 .dl .dl-dest { display: none; }
 .dl .dl-text { margin: 0; color: var(--text); font-size: 13.5px; overflow-wrap: anywhere; }
 .dl .dl-sub { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .dl .dl-bar { display: block; height: 4px; overflow: hidden; border-radius: 2px; background: var(--panel-2); }
 .dl .dl-bar i { display: block; height: 100%; width: 2%; background: var(--accent); transition: width 0.4s; }
+.dl .dl-job-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.dl .dl-percent { min-width: 4ch; color: var(--muted); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
 .dl .dl-job[data-state="paused"] .dl-bar i { background: var(--dl-warn); }
 .dl .dl-job[data-state="paused"] .dl-text { color: var(--muted); }
 .dl .dl-tools { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -57,9 +62,16 @@
   color: var(--text); font: 11.5px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dl .dl-log-tools { display: flex; gap: 12px; align-items: baseline; }
 .dl .dl-said { color: var(--muted); font-size: 12px; }
+.dl .dl-job.dl-feature { grid-template-columns: 78px minmax(0, 1fr); align-items: start;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--panel));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 9%, var(--panel)), var(--panel) 70%); }
+.dl .dl-feature .dl-pic { width: 100%; height: auto; aspect-ratio: 2 / 3; }
+.dl .dl-feature .dl-title { flex-basis: 100%; font-size: 17px; line-height: 1.25; }
+.dl .dl-feature .dl-bar { height: 6px; }
 
 /* the queue, «Готово», «Сама программа»: lines */
 .dl :is(.dl-queue, .dl-done, .dl-duties) { margin: 0 14px; border-top: 1px solid var(--panel); }
+.dl .dl-queue-help { margin: 0 14px 6px; color: var(--muted); font-size: 12px; }
 .dl .dl-q { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 4px 8px;
   min-height: 52px; padding: 6px 0; border-bottom: 1px solid var(--panel); font-size: 14px; }
 .dl .dl-qn, .dl .dl-q > .dl-kind { display: none; }

@@ -75,6 +75,7 @@ class Availability:
         """Permanent for this run (bad key, Cloudflare, API rejects us)."""
         with self._availability_lock:
             if self.disabled_reason:
+                self.disabled_reason = reason or self.disabled_reason  # a retry may find a different refusal
                 return
             self.disabled_reason = reason
             self.ever_disabled = self.ever_disabled or reason

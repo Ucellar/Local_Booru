@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
+from core import download_telemetry
+
 _LOG = logging.getLogger("local_booru.video")
 
 MAX_PLAYLIST = 4 * 1024 * 1024          # bytes of a playlist at most
@@ -405,6 +407,7 @@ def _fetch_piece(session, piece: Segment, referer: str, stop) -> bytes | None:
                     raise StreamError("вместо части видео сайт прислал страницу (проверка на роботов или ошибка)")
                 body = bytearray()
                 for chunk in answer.iter_content(CHUNK):
+                    download_telemetry.record(net=len(chunk))
                     if stop():
                         return None
                     body += chunk
@@ -432,7 +435,7 @@ def download(session, found: Plan, part: Path, referer: str, *, stop, progress) 
             head = _fetch_piece(session, media.init, referer, stop)
             if head is None:
                 return "stopped"
-            part.write_bytes(head)
+            download_telemetry.record(disk=part.write_bytes(head))
         else:
             part.write_bytes(b"")
         _write_state(part, media, 0)
@@ -442,7 +445,7 @@ def download(session, found: Plan, part: Path, referer: str, *, stop, progress) 
             data = _fetch_piece(session, media.segments[n], referer, stop)
             if data is None:
                 return "stopped"
-            out.write(data)
+            download_telemetry.record(disk=out.write(data))
             out.flush()
             _write_state(part, media, n + 1)
             progress(n + 1, total, out.tell())

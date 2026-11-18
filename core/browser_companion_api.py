@@ -1153,10 +1153,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(200, check_items(self.settings, data.get("items") or []))
             return
         if path == "/extension/manga":
-            # (v5.44, extension 0.9.0) the galleries of a manga site's page: the manga folder has this one, or
-            # another version of its work (another language, another upload)
-            from core.manga_works import check as manga_check
-            self._send_json(200, manga_check(self.settings, data.get("items") or []))
+            # Saved source cards on permitted sites; nhentai also retains its alternate-version matching.
+            from core.browser_owned_titles import check as manga_check
+            from core.settings import load_settings
+            self._send_json(200, manga_check(load_settings(), data.get("items") or []))
             return
         if path == "/extension/index":
             # The extension's copy of «what the library has», for marking cards while the program is closed.

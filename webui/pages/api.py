@@ -62,11 +62,14 @@ def autocomplete(req: Request) -> Response:
 
 def save_prefs(req: Request) -> Response:
     from webui import prefs
+    update = req.json()
     try:
-        stored = prefs.save(req.json())
+        stored = prefs.save(update)
     except OSError as exc:                       # (v5.44.165) the file stays held (Windows): said, not a broken page
         _LOG.warning("web gallery preferences not saved: %s", exc)
         return Response.json({"ok": False, "error": prefs.HELD_WORDS}, 503)
+    if {"skin", "grab_skin", "looks_all"}.intersection(update):
+        prefs.sync_download_scheduler()
     return Response.json({"ok": True, "prefs": stored})
 
 

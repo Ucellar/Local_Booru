@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 from core import site_agent
 from core.parser.models import Post
 from core.parser.sites.base import Site, SiteUnavailable, TextBody
-from core.parser.util import norm_md5, post_dicts, short
+from core.parser.util import json_body, norm_md5, post_dicts, short
 from core.site_posts import fields as post_fields
 
 _SPLIT_FIELDS = {
@@ -83,6 +83,26 @@ class DanbooruSite(Site):
 
     def _auth(self):
         return (self.login, self.api_key) if self.login and self.api_key else None
+
+    def authorization_error(self, response) -> str:
+        family = site_agent.family(self.host)
+        if family is None or family.key != "danbooru":
+            return super().authorization_error(response)
+        # Only translate known server messages. Never echo a body that might reflect credentials.
+        data = json_body(response)
+        message = str(data.get("message") or data.get("reason") or "").strip().rstrip(".").casefold() \
+            if isinstance(data, dict) else ""
+        known = {
+            "requests can't include both an api key and a login cookie":
+                "сайт отклонил одновременную отправку API-ключа и cookie входа из браузера",
+            "invalid api key": "сайт отклонил пару логин / API-ключ",
+            "missing `login` or `api_key`": "сайту нужны логин и API-ключ",
+            "api keys can only be used in json, xml, or atom requests":
+                "API-ключ отправлен на обычную страницу вместо API сайта",
+        }
+        fallback = "сайт не принял авторизацию" if response.status_code == 401 else \
+            "сайт запретил запрос — проверь права API-ключа и ограничения по IP"
+        return f"HTTP {response.status_code}: {known.get(message, fallback)}"
 
     def _api(self, url: str, params=None, soft: bool = False):
         if self.is_atf:

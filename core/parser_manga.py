@@ -293,11 +293,12 @@ class Asker:
     manga (their searches, their titles' pages) and SauceNAO — the run's own e621 in a run, made for the background else
     (:func:`background_asker`)."""
 
-    def __init__(self, settings: dict, *, http, e621=None, stop_check=None):
+    def __init__(self, settings: dict, *, http, e621=None, stop_check=None, defer_cards: bool = False):
         self.settings = dict(settings or {})
         self.http = http
         self.e621 = e621
         self.stop_check = stop_check or (lambda: False)
+        self.defer_cards = defer_cards
         self._pools: dict = {}
         self._posts: dict = {}
         self._titles: dict = {}             # (a title's link, a chapter) -> its pages' pHashes, its name (a round)
@@ -400,7 +401,8 @@ def _e621_of(sites: list):
 
 def run_asker(settings: dict, engine, http, stop_check) -> Asker:
     """The run's own e621 (its pace is the run's)."""
-    return Asker(settings, http=http, e621=_e621_of(getattr(engine, "sites", [])), stop_check=stop_check)
+    return Asker(settings, http=http, e621=_e621_of(getattr(engine, "sites", [])), stop_check=stop_check,
+                 defer_cards=True)
 
 
 _BG: dict = {"key": None, "asker": None}
@@ -1512,25 +1514,38 @@ def place(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.Work", r
     values = {"copy": got["key"], "folder": got["name"], "copied": True, "copy_error": "", "copy_retry_at": 0,
               "pages": got["pages"]}
     rec["fresh_copy"] = bool(got.get("new"))
-    if rec.get("cards_to_trash"):                       # confirmed after its pages were parsed: their cards go
-        with STORE._lock:
-            if stop_check():
-                return {"state": "", "more": True}
-            trashed = trash_cards(settings, work, got["name"])
-            guard.put({"cards_to_trash": False, "cards_trashed": trashed})
-        values["cards_trashed"] = trashed
-        rec["cards_to_trash"] = False
-        if rec.get("how") == "saucenao":
-            say(line("МАНГА", f"«{work.name}» — SauceNAO подтвердил позже → в «Мангу»" + (
-                f"; {plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)" if trashed else "")))
-        elif trashed:                                   # (v5.44.169) confirmed another way (a second look by its
-            say(line("МАНГА", f"«{work.name}» — её страницы парсер уже разобрал: "      # name, the owner's link)
-                              f"{plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)"))
+    if rec.get("cards_to_trash") and not asker.defer_cards:
+        _clean_gallery_cards(settings, work, rec, got["name"], guard, say)
     values.update(linked_values(settings, work, Path(got["folder"]), rec, say=say, stop_check=stop_check))
     if not guard.put(values):
         return {"state": "", "more": True}
     rec.update(values)
     return rec
+
+
+def _clean_gallery_cards(settings: dict, work: "MD.Work", rec: dict, name: str, guard: _WorkGuard, say) -> None:
+    """Clean up cards only when the parser cannot still write other pages of this folder."""
+    from core.parser import jobs
+    owner = f"уборка карточек манги ({threading.get_ident()})"
+    if not jobs.claim(owner):
+        return
+    try:
+        with STORE._lock:
+            if guard.stopped():
+                return
+            trashed = trash_cards(settings, work, name)
+            values = {"cards_to_trash": False, "cards_trashed": trashed}
+            if not guard.put(values):
+                return
+            rec.update(values)
+    finally:
+        jobs.release(owner)
+    if rec.get("how") == "saucenao":
+        say(line("МАНГА", f"«{work.name}» — SauceNAO подтвердил позже → в «Мангу»" + (
+            f"; {plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)" if trashed else "")))
+    elif trashed:
+        say(line("МАНГА", f"«{work.name}» — её страницы парсер уже разобрал: "
+                          f"{plural(trashed, PICTURES)} из галереи — в корзину (можно вернуть)"))
 
 
 def linked_values(settings: dict, work: "MD.Work", folder: Path, rec: dict, *, say, stop_check=None) -> dict:
@@ -1668,6 +1683,7 @@ class RunWatch:
         self.root = Path(root)
         self.log = log
         self.kept: list = []
+        self.candidate_keys: set[str] = set()
         self.todo: list = []                # [(cand, work)] to check
         self.places: list = []              # [(cand, work)] confirmed, their copy not made yet
         self.held: dict = {}                # work key -> [files]
@@ -1703,10 +1719,11 @@ class RunWatch:
         return self._stop.is_set() or bool(self._runner_stopped())
 
     def start(self, engine, http, runner_stopped=None) -> None:
-        if not self.todo and not self.places:
+        if not self.candidate_keys:
             return
         self._runner_stopped = runner_stopped or (lambda: False)
-        self._deciding.set()
+        if self.todo or self.places:
+            self._deciding.set()
         self._thread = threading.Thread(target=self._work, args=(engine, http), name="parser-manga", daemon=True)
         self._thread.start()
 
@@ -1741,7 +1758,8 @@ class RunWatch:
         """A manga's verdict kept and done: «not a manga» — its pages join the run (marked «handed»)."""
         extra = {"handed": int(time.time())} if verdict.state == NOT else None
         rec = apply(self.settings, asker, cand, work, verdict, say=self.log, stop_check=self.stopped, extra=extra,
-                    said=lambda r, cand=cand, work=work: self._said(cand, work, r))
+                    said=lambda r, cand=cand, work=work: self._said(cand, work, r),
+                    expected=self.before.get(work.key))
         if rec.get("state") == NOT:
             self._release(work, cand)
         with self._lock:
@@ -1786,13 +1804,34 @@ class RunWatch:
                                        "остановить: доделает фон"))
 
     def _work(self, engine, http) -> None:
-        asker = run_asker(self.settings, engine, http, self.stopped)
+        if self._deciding.is_set():
+            while not self.stopped():
+                if _ROUND.acquire(timeout=0.2):
+                    try:
+                        self._first_checks(engine, http)
+                    finally:
+                        _ROUND.release()
+                    break
+            self._deciding.clear()
+        # Once the initial checks finish, pending retries can progress while the booru lanes drain.
+        while not self.stopped():
+            try:
+                asker = run_asker(self.settings, engine, http, self.stopped)
+                background_round(self.settings, stop_check=self.stopped, say=self.log, active_asker=asker,
+                                 candidate_keys=self.candidate_keys)
+            except Exception as exc:  # noqa: BLE001 - retry later, keep the parser and its queues alive
+                _LOG.warning("parser manga: deferred folders not checked: %s: %s", type(exc).__name__, exc)
+            self._stop.wait(20.0)
+
+    def _first_checks(self, engine, http) -> None:
         try:
+            asker = run_asker(self.settings, engine, http, self.stopped)
             for cand, work in self.places:
                 if self.stopped():
                     return
-                item = STORE.items().get(cand.key) or {}
-                place(self.settings, asker, cand, work, state_of(item, work), say=self.log, stop_check=self.stopped)
+                rec = state_of(STORE.items().get(cand.key) or {}, work)
+                if _can_place(rec):
+                    place(self.settings, asker, cand, work, rec, say=self.log, stop_check=self.stopped)
             told: set = set()
             with self._lock:
                 self._open = {work.key: (cand, work) for cand, work in self.todo}
@@ -1847,8 +1886,6 @@ class RunWatch:
         except Exception as exc:  # noqa: BLE001 - the run goes on without its manga: they wait for the background
             _LOG.warning("parser manga: the run's checks broke: %s: %s", type(exc).__name__, exc)
             self.log(line("МАНГА", f"проверка манги прервалась ({type(exc).__name__}) — доделает фон"))
-        finally:
-            self._deciding.clear()
 
     def _said(self, cand: "MD.Candidate", work: "MD.Work", rec: dict) -> None:
         state = rec.get("state")
@@ -1932,6 +1969,18 @@ def notes_of(cand: "MD.Candidate") -> list:
     return out
 
 
+def run_handles(settings: dict, key: str = "") -> bool:
+    """Whether the current parser has a live folder queue for this root (and, optionally, this row)."""
+    from core.parser import jobs
+    job = jobs.current()
+    if job is None or job.status not in {"running", "paused"}:
+        return False
+    watch = getattr(job._runner, "_manga", None)
+    return bool(watch and watch._thread and watch._thread.is_alive() and not watch.stopped()
+                and MD._norm(watch.root) == MD._norm(settings.get("root") or "")
+                and (not key or key in watch.candidate_keys))
+
+
 def for_run(settings: dict, root: Path, files: list, libraries: tuple = (), *, log=None) -> RunWatch:
     """The run's files sorted out (:class:`RunWatch` ``kept`` — what the parser parses now): the program's own folders
     of manga, manhwa and videos — never; a manga — held back (copied by the watch, if not yet); a folder waiting for
@@ -1941,6 +1990,7 @@ def for_run(settings: dict, root: Path, files: list, libraries: tuple = (), *, l
     lib_keys = {MD._norm(x) for x in libraries if x}
     files = [p for p in files if not MD._under(Path(p).parent, lib_keys)] if lib_keys else list(files)
     cands = [c for c in detect(root, files) if not any(MD._under(Path(r), lib_keys) for r in c.roots())]
+    watch.candidate_keys = {cand.key for cand in cands}
     items = STORE.register(str(root), cands) if cands else STORE.items(str(root))
     routes = _route(files, cands)
     now = time.time()
@@ -1956,8 +2006,8 @@ def for_run(settings: dict, root: Path, files: list, libraries: tuple = (), *, l
                 watch.parsed[work.key] = (cand, work)
                 continue
             watch.held[work.key] = []
-            if (rec.get(PA.AGAIN) or {}).get("link"):   # (v5.44.169) the owner gave its link: the background takes
-                decided["wait"] += 1                    # it (after the run) — a check here would drop his word
+            if rec.get(PA.AGAIN):
+                decided["wait"] += 1                    # the follow-up queue honors the marked steps and links
             elif state == MANGA:
                 decided["manga"] += 1
                 if not rec.get("copied") and copy_due(rec, now):
@@ -2016,6 +2066,11 @@ def copy_due(rec: dict, now: float) -> bool:
     return bool(retry) and retry <= now
 
 
+def _can_place(rec: dict) -> bool:
+    return (rec.get("state") == MANGA and not rec.get("copied") and not rec.get(PA.AGAIN)
+            and copy_due(rec, time.time()))
+
+
 def _due(items: dict, now: float) -> tuple:
     """(to check, to place, «not a manga» for now whose SauceNAO may be asked, (v5.44.166) to look at again — the
     owner's «Перепроверить»: ``parser_manga_again``, (v5.44.169) to look at again by the program itself — the folders
@@ -2029,8 +2084,7 @@ def _due(items: dict, now: float) -> tuple:
             rec = state_of(item, work)
             state = rec.get("state")
             mark = rec.get(PA.AGAIN)
-            if mark and (state in (MANGA, NOT, WAIT) or mark.get("link")):
-                # (one not looked at yet is checked as any new one — but for the owner's link of it: v5.44.169)
+            if mark:
                 if float(mark.get("later_at") or 0) <= now and not (item.get("hand") == NOT or
                                                                   rec.get("hand") == NOT):
                     # (v5.44.169) what the owner asked for goes first: his link, then his «Перепроверить»; the
@@ -2157,12 +2211,13 @@ def _fill_galleries(settings: dict, items: dict, tell, *, stop_check=None) -> in
     return began
 
 
-def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_SECONDS, say=None) -> dict:
+def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_SECONDS, say=None,
+                     active_asker: "Asker | None" = None, candidate_keys: "set[str] | None" = None) -> dict:
     """(``comic_manga``'s duty, «Проверить сейчас») The manga of the parser's folder that wait for something: new
     folders and those whose wait is over checked (the ways that cost nothing first for all), confirmed ones copied and
     linked; then the «not a manga» for now whose SauceNAO may be asked again (its step «pictures» alone: a manga —
     copied, its cards of the gallery to the trash; nothing — «not a manga» for good) — for ``seconds`` at most; never
-    while the parser runs (its own thread does it).  ``say`` — a line of a journal (also the program's log).
+    while the parser runs, except from its own RunWatch after the initial folder checks.
     {"checked", "copied", "manga", "more", "busy", "no_room", "wait"}."""
     from core.parser import jobs as parser_jobs
     out = {"checked": 0, "copied": [], "manga": [], "more": False, "busy": False, "no_room": "", "wait": 0.0}
@@ -2176,7 +2231,7 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
     root = str(settings.get("root") or "").strip()
     if not enabled(settings) or not root or not Path(root).is_dir():
         return out
-    if parser_jobs.is_running():
+    if active_asker is None and parser_jobs.is_running():
         out["busy"] = True
         return out
     if not _ROUND.acquire(blocking=False):
@@ -2185,25 +2240,38 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
     try:
         stop_check = stop_check or (lambda: False)
         deadline = time.monotonic() + max(1.0, float(seconds))
-        cands = MD.STORE.candidates(root)
-        if cands:
-            STORE.register(root, [c for c in cands if not _in_libraries(settings, c)], whole=True)
         try:                                            # (v5.44.166) a folder of a kind is a сборка no more
-            PA.unset_copies(settings, root)
+            if active_asker is None:
+                cands = MD.STORE.candidates(root)
+                if cands:
+                    STORE.register(root, [c for c in cands if not _in_libraries(settings, c)], whole=True)
+                PA.unset_copies(settings, root)
             PA.mark_old(root)                           # (v5.44.169) «не манга» of the rules of before: again
         except Exception as exc:  # noqa: BLE001 - its trouble does not stop the round: asked again next time
             _LOG.warning("parser manga: the сборки of before not taken off: %s: %s", type(exc).__name__, exc)
         items = STORE.items(root)
-        try:                                            # (v5.44.170) the pages a gallery's copy misses
-            if _fill_galleries(settings, items, tell,
-                               stop_check=lambda: stop_check() or time.monotonic() > deadline):
-                items = STORE.items(root)
-        except Exception as exc:  # noqa: BLE001 - its trouble does not stop the round: asked again next time
-            _LOG.warning("parser manga: the pages of the galleries not asked for: %s: %s", type(exc).__name__, exc)
+        if active_asker is None:
+            try:
+                if _fill_galleries(settings, items, tell,
+                                   stop_check=lambda: stop_check() or time.monotonic() > deadline):
+                    items = STORE.items(root)
+            except Exception as exc:  # noqa: BLE001 - its trouble does not stop the round: asked again next time
+                _LOG.warning("parser manga: the pages of the galleries not asked for: %s: %s", type(exc).__name__, exc)
+        else:
+            keys = candidate_keys or set()
+            items = {key: item for key, item in items.items() if key in keys}
         check, places, later, again, auto = _due(items, time.time())
-        if not (check or places or later or again or auto):
+        cleanup = []
+        if active_asker is None:
+            for item in items.values():
+                cand = _cand(item)
+                for work in cand.works if cand is not None else ():
+                    rec = state_of(item, work)
+                    if rec.get("state") == MANGA and rec.get("copied") and rec.get("cards_to_trash"):
+                        cleanup.append((cand, work, rec))
+        if not (check or places or later or again or auto or cleanup):
             return out
-        asker = background_asker(settings, stop_check)
+        asker = active_asker or background_asker(settings, stop_check)
 
         def look(pairs: list, keeps: int = 0) -> bool:
             """Each of ``pairs`` looked at again (``parser_manga_again.look_again``); ``keeps`` — not while the hour
@@ -2233,46 +2301,54 @@ def background_round(settings: dict, *, stop_check=None, seconds: float = ROUND_
             return True
         if not look(again):                             # (v5.44.166) «Перепроверить»: the owner waits for these
             return out
+        for cand, work, rec in cleanup:
+            if stop_check() or time.monotonic() > deadline:
+                out["more"] = True
+                return out
+            guard = _WorkGuard(cand, work, rec, stop_check)
+            if PA._copy_folder(rec) is not None:
+                _clean_gallery_cards(settings, work, rec, str(rec.get("folder") or work.name), guard, tell)
+            else:
+                guard.put({"cards_to_trash": False})
         for cand, work in places:
             if stop_check() or time.monotonic() > deadline:
                 out["more"] = True
                 return out
-            item = STORE.items(root).get(cand.key) or {}
-            rec = place(settings, asker, cand, work, state_of(item, work), say=tell, stop_check=stop_check,
-                        deadline=deadline)
+            rec = state_of(STORE.items(root).get(cand.key) or {}, work)
+            if not _can_place(rec):
+                continue
+            rec = place(settings, asker, cand, work, rec, say=tell, stop_check=stop_check, deadline=deadline)
             if rec.get("copied") and rec.get("fresh_copy"):
                 out["copied"].append(rec.get("folder") or work.name)
             if rec.get("no_room"):
                 out["no_room"] = rec["no_room"]          # the disk of the manga folder: no more copies this round
                 return out
-        memo: dict = {}
-        for step in STEPS:                              # the ways that cost nothing first for all
-            left = []
-            for cand, work in check:
-                if stop_check() or time.monotonic() > deadline:
-                    out["more"] = True
-                    return out
-                try:
-                    verdict = check_work(asker, cand, work, steps=(step,), memo=memo.setdefault(work.key, {}),
-                                         later_not=True, kept=state_of(items.get(cand.key) or {}, work))
-                except Pace as pace:
-                    verdict = paced(pace.wait)
-                    out["wait"] = round(pace.wait, 1)
-                if verdict is None:
-                    left.append((cand, work))
-                    continue
-                if not verdict.state:
-                    out["more"] = True
-                    return out
-                rec = apply(settings, asker, cand, work, verdict, say=tell, stop_check=stop_check, deadline=deadline)
+        # Finish one folder before starting another so the round's time limit cannot discard every partial check.
+        for cand, work in check:
+            if stop_check() or time.monotonic() > deadline:
+                out["more"] = True
+                return out
+            before = state_of(items.get(cand.key) or {}, work)
+            try:
+                verdict = check_work(asker, cand, work, later_not=True, kept=before)
+            except Pace as pace:
+                verdict = paced(pace.wait)
+                out["wait"] = round(pace.wait, 1)
+            if verdict is None:
+                continue
+            if not verdict.state:
+                out["more"] = True
+                return out
+            rec = apply(settings, asker, cand, work, verdict, say=tell, stop_check=stop_check, deadline=deadline,
+                        expected=before)
+            if rec.get("state") in (MANGA, NOT, WAIT):
                 out["checked"] += 1
-                if rec.get("state") == MANGA:
-                    out["manga"].append(work.name)
-                    if rec.get("copied") and rec.get("fresh_copy"):
-                        out["copied"].append(rec.get("folder") or work.name)
-                if rec.get("no_room"):
-                    out["no_room"] = rec["no_room"]
-            check = left
+            if rec.get("state") == MANGA:
+                out["manga"].append(work.name)
+                if rec.get("copied") and rec.get("fresh_copy"):
+                    out["copied"].append(rec.get("folder") or work.name)
+            if rec.get("no_room"):
+                out["no_room"] = rec["no_room"]
         for cand, work in later:                        # «not a manga» for now: SauceNAO, now that it may be asked
             if stop_check() or time.monotonic() > deadline:
                 out["more"] = True
@@ -2307,11 +2383,14 @@ def _sauce_again(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.W
     SauceNAO switched off) — «not a manga» for good, its mark gone; SauceNAO not to be asked yet, the sites not
     answering, the hour's searches spent — asked again later (it stays «not a manga» for now: its pages are parsed).
     The record; None — stopped half-way."""
+    before = state_of(STORE.items().get(cand.key) or {}, work)
+    if before.get(PA.AGAIN) or before.get("state") != NOT or before.get("how") != "later":
+        return {"state": ""}
+    guard = _WorkGuard(cand, work, before, stop_check)
     try:
-        before = state_of(STORE.items().get(cand.key) or {}, work)
         verdict = check_work(asker, cand, work, steps=("pictures",), memo={}, later_not=True, kept=before)
     except Pace as pace:
-        STORE.put_work(cand.key, work.key, {"sauce_at": int(time.time() + max(60.0, pace.wait))})
+        guard.put({"sauce_at": int(time.time() + max(60.0, pace.wait))})
         return {"state": "", "wait": round(pace.wait, 1)}
     if not verdict.state:
         return None
@@ -2320,13 +2399,13 @@ def _sauce_again(settings: dict, asker: Asker, cand: "MD.Candidate", work: "MD.W
                      extra={"cards_to_trash": not verdict.eh_photo}, expected=before)
     if verdict.state == WAIT and (verdict.late or {}).get("eh_hits"):
         # The files already went through booru parsing. Keep that decision while the gallery is still being checked.
-        guard = _WorkGuard(cand, work, before, stop_check)
         guard.put({"sauce_at": verdict.later_at, "late": verdict.late})
         return {"state": ""}
     if verdict.state == NOT and verdict.how != "later":
-        return apply(settings, asker, cand, work, verdict, say=say, stop_check=stop_check, deadline=deadline)
+        return apply(settings, asker, cand, work, verdict, say=say, stop_check=stop_check, deadline=deadline,
+                     expected=before)
     again = int(verdict.sauce_at or verdict.later_at or 0) or int(time.time()) + LATER
-    STORE.put_work(cand.key, work.key, {"sauce_at": again})
+    guard.put({"sauce_at": again})
     return {"state": ""}
 
 

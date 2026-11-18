@@ -76,8 +76,8 @@ def store_domain_credentials(settings: dict | None, *, domain: str, cookies: lis
         cdom = str(cookie.get("domain") or domain).lower().lstrip(".")
         if not (cdom == domain or domain.endswith("." + cdom) or cdom.endswith("." + domain)):
             continue
-        clean.append({k: cookie.get(k) for k in ("name", "value", "domain", "path", "secure", "httpOnly", "sameSite", "expirationDate") if k in cookie})
-    blob = protect_payload({"domain": domain, "cookies": clean})
+        clean.append({k: cookie.get(k) for k in ("name", "value", "domain", "hostOnly", "path", "secure", "httpOnly", "sameSite", "expirationDate") if k in cookie})
+    blob = protect_payload({"domain": domain, "cookies": clean, "revision": time.time_ns()})
     now = int(time.time())
     with db(settings, write=True) as con:
         con.execute(
@@ -91,10 +91,27 @@ def store_domain_credentials(settings: dict | None, *, domain: str, cookies: lis
 
 
 def load_domain_credentials(settings: dict | None, domain: str) -> dict[str, Any]:
+    return load_domain_cookie_record(settings, domain) or {}
+
+
+def load_domain_cookie_record(settings: dict | None, domain: str) -> dict[str, Any] | None:
+    """Exact-domain handoff: None when never stored, {} when explicitly revoked.
+
+    An empty/revoked handoff must not resurrect an older file's login. Reading cookies
+    before the first database is created (or before this table's migration) is harmless.
+    Other database/decryption errors propagate instead of silently reusing stale secrets.
+    """
+    from core.database.connection import db_path
+    if not db_path(settings).is_file():
+        return None
     domain = str(domain or "").strip().lower().lstrip(".")
     with db(settings, readonly=True) as con:
-        row = con.execute("SELECT * FROM domain_session_credentials WHERE domain=? AND revoked_at=0", (domain,)).fetchone()
+        if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='domain_session_credentials'").fetchone():
+            return None
+        row = con.execute("SELECT * FROM domain_session_credentials WHERE domain=?", (domain,)).fetchone()
     if not row:
+        return None
+    if row["revoked_at"]:
         return {}
     payload = unprotect_payload(str(row["protected_blob"] or ""))
     payload.update({"user_agent": str(row["user_agent"] or ""), "received_at": int(row["received_at"] or 0)})

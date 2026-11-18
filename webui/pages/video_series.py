@@ -298,7 +298,7 @@ def build(req: Request, ref: Ref, *, wait: float = 0.0) -> Built:
                 item = V.PROGRESS.view(ref.keys)
     public = W.public(title, item) if site_shown else None
     if site_shown:                        # what the shelf «Продолжить просмотр» shows of it (not «watched lately»)
-        V.PROGRESS.note(ref.key, count=len(_labels_of(title)), address=title.address, site=title.site,
+        V.PROGRESS.note(ref.key, count=_episode_count(title), address=title.address, site=title.site,
                         hentai=bool(title.hentai), cover=None if item.get("cover") else cover_of(title))
     dubs = []
     if site_shown:
@@ -352,8 +352,9 @@ def _entries(series, item: dict, dubs: list, public: dict | None, *, tracks: boo
             out.append(entry)
             if not unit.group:
                 own[unit.label] = entry
-    if dubs:
-        labels: dict = {}
+    listed = set((public or {}).get("listed") or ())
+    if public:
+        labels = {label: [] for label in listed}
         for n, d in enumerate(dubs):
             for label in d["eps"]:
                 labels.setdefault(label, []).append(n)
@@ -384,7 +385,8 @@ def _entries(series, item: dict, dubs: list, public: dict | None, *, tracks: boo
         entry["here"] = key == last and not done and entry["place"] is not None
         entry["new"] = not done and entry["place"] is None and (
             (entry["disk"] and entry["fresh"]) or (ongoing and site_only and entry is site_only[-1]))
-        entry["where"] = "disk" if entry["disk"] else "site"
+        entry["where"] = ("disk" if entry["disk"] else "site" if entry["site"] else
+                          "external" if not entry["group"] and entry["label"] in listed else "off")
         entry.pop("fresh", None)
     return out
 
@@ -444,6 +446,7 @@ def resume_target(entries: list, item: dict, single: bool = False) -> dict:
     """Where «Продолжить» goes: the last episode at its place; the one after it once it was watched; else the first
     not watched — and the words of the button (``videos.resume_words``)."""
     from webui.pages.videos import resume_words
+    entries = [e for e in entries if e["disk"] or e["site"]]
     if not entries:
         return {}
     keys = [e["key"] for e in entries]
@@ -490,6 +493,10 @@ def _model(req, ref, series, item, online, title, public, dubs, entries, voice, 
             slot.setdefault("dub", d["name"])
             slot["site"].append(entry["label"])
     total = len(entries)
+    declared = (public or {}).get("declared") or 0
+    listed = (public or {}).get("listed") or []
+    player_numbers = bool(listed and (not declared or len(listed) != declared or
+                                       any(not n.isdigit() or not 1 <= int(n) <= declared for n in listed)))
     rating = ""
     for pair in info.get("ratings") or []:
         if isinstance(pair, (list, tuple)) and len(pair) == 2 and str(pair[1]).strip():
@@ -504,6 +511,7 @@ def _model(req, ref, series, item, online, title, public, dubs, entries, voice, 
         "site": {"name": site_name, "address": (public or {}).get("address") or ref.url, "can": bool(ref.url),
                  "online": online, "pending": online and title is None and not error, "said": said, "error": error,
                  "hidden": hidden, "count": len(site_only), "missing": ranges(site_only),
+                 "declared": declared, "player_numbers": player_numbers,
                  "rating": (public or {}).get("ratings", [{}])[0].get("value", 0) if public and public.get("ratings") else 0},
         "folder": {"name": series.folder_title if series is not None else "", "range": ranges(disk_labels),
                    "count": len(disk_labels), "variants": variants, "varied": ranges(varied)},
@@ -839,7 +847,7 @@ def progress_json(req: Request) -> Response:
     from core import video_watch as W
     title = W.kept(ref.url) if ref.url else None
     if title is not None:                 # what the shelf «Продолжить просмотр» shows of a title of a site
-        extra = {"address": title.address, "site": title.site, "count": len(_labels_of(title)),
+        extra = {"address": title.address, "site": title.site, "count": _episode_count(title),
                  "hentai": bool(title.hentai)}
         if not V.PROGRESS.of(ref.key).get("cover"):
             extra["cover"] = cover_of(title)
@@ -851,8 +859,8 @@ def progress_json(req: Request) -> Response:
                           "progress": {k: item.get(k) for k in ("last", "at", "length", "done", "watched", "places")}})
 
 
-def _labels_of(title) -> set:
-    return {e.label for d in title.dubs for e in d.episodes}
+def _episode_count(title) -> int:
+    return title.declared or len({e.label for d in title.dubs for e in d.episodes})
 
 
 def cover_of(title) -> str:
@@ -891,6 +899,8 @@ def play_json(req: Request) -> Response:
     entry = next((e for e in built.model["episodes"] if e["key"] == label), None)
     if entry is None:
         return Response.json({"ok": False, "error": f"Серии {label} у сериала нет"}, 404)
+    if entry["where"] == "external":
+        return Response.json({"ok": False, "error": "Эта серия доступна в плеере на странице тайтла"}, 409)
     asked = body.get("variant") if isinstance(body.get("variant"), dict) else None
     variant = chosen_variant(built.model, entry, asked)
     if not variant:
@@ -1291,7 +1301,8 @@ def tile_words(e: dict) -> str:
         words.append("досмотрена")
     if e["new"]:
         words.append("новая")
-    words.append("в папке" if e["disk"] else "на сайте, онлайн" if e["site"] else "нет ни в папке, ни на сайте")
+    words.append("в папке" if e["disk"] else "на сайте, онлайн" if e["site"] else
+                 "открыть страницу тайтла на сайте" if e["where"] == "external" else "нет ни в папке, ни на сайте")
     return ", ".join(words)
 
 
@@ -1300,7 +1311,7 @@ def _tile(ref: Ref, e: dict, current: str, *, phone: bool) -> str:
     number; ✓ watched / ● new in the corner; under it «▶ 12:34» where it stopped, «досмотрена», «новая», «в папке»;
     the episode in the player framed.  The classes ``.vepisodes`` / ``.vep`` of the row of numbers of before stay on
     the tiles: «Скачать с сайта» leads here and its checks find them."""
-    where = "disk" if e["disk"] else "site" if e["site"] else "off"
+    where = e["where"]
     marks = (("done", e["done"]), ("here", e["here"]), ("new", e["new"]), ("now", e["key"] == current))
     cls = " ".join(["sv-tile", "vep", where] + [name for name, on in marks if on])
     corner = "✓" if e["done"] else "●" if e["new"] else ""
@@ -1311,13 +1322,14 @@ def _tile(ref: Ref, e: dict, current: str, *, phone: bool) -> str:
     elif e["new"]:
         sub = "новая"
     else:
-        sub = "в папке" if e["disk"] else ""
+        sub = "в папке" if e["disk"] else "На сайте ↗" if where == "external" else ""
     bar = ""
     if e["place"] and e["place"][1] and not e["done"]:
         part = max(0, min(100, round(100 * e["place"][0] / e["place"][1])))
         bar = f'<span class="sv-tile-bar" style="width: {part}%" aria-hidden="true"></span>'
     link = address(ref, ep=e["key"], play=True, phone=phone) + ("" if phone else "#player")
-    href = f' href="{esc(link)}"' if where != "off" else ' aria-disabled="true"'
+    href = (f' href="{esc(ref.url)}" target="_blank" rel="noopener noreferrer"' if where == "external" and ref.url
+            else f' href="{esc(link)}"' if where in ("disk", "site") else ' aria-disabled="true"')
     now = ' aria-current="true"' if e["key"] == current else ""
     words = esc(tile_words(e))
     return (f'<a class="{cls}"{href}{now} data-ep="{esc(e["key"])}" title="{words}" aria-label="{words}">'
@@ -1333,13 +1345,14 @@ def _card(ref: Ref, model: dict, current: str, *, phone: bool) -> str:
     if model["single"]:
         return '<section class="sv-list" data-sv-list aria-label="Серии" hidden></section>'
     count = model["counts"]["total"]
+    heading = "Номера в плеерах" if model["site"].get("player_numbers") else "Серии"
     shown = model["episodes"]
     if len(shown) > PAGE + PAGE // 5:          # a long series: the hundred of the episode in the player (series.js parts)
         at = next((n for n, e in enumerate(shown) if e["key"] == current), 0)
         shown = shown[at // PAGE * PAGE:at // PAGE * PAGE + PAGE]
     tiles = "".join(_tile(ref, e, current, phone=phone) for e in shown)
     return (f'<section class="sv-list" data-sv-list aria-labelledby="sv-eps-h"><div class="sv-eps" data-sv-eps>'
-            f'<div class="sv-list-head"><h2 id="sv-eps-h">Серии'
+            f'<div class="sv-list-head"><h2 id="sv-eps-h">{heading}'
             + (f' <span class="sv-count">{count}</span>' if count else "") + '</h2></div>'
             f'<div class="sv-tiles vepisodes">{tiles}</div></div></section>')
 

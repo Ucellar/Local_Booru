@@ -714,15 +714,29 @@ class ParserRunner:
         return ""
 
     def _site_again(self, engine: ParserEngine, site) -> None:
-        from core.parser.sites import site_rows
+        from core.parser.sites import canonical_host, table_config
         from core.settings import load_settings
         try:
-            fresh = site_rows(load_settings()).get(site.host)
+            fresh = table_config(load_settings(), site.host) or {}
         except Exception as exc:  # the settings file: the site is asked with what the run started with
             self.log(f"  {site.label}: настройки сайта не перечитаны ({type(exc).__name__}: {exc})")
             fresh = None
-        if fresh:
-            site.cfg = dict(fresh)                # a key written on «Сайты и ключи» meanwhile
+        if fresh is not None:
+            # Publish one complete snapshot. Concurrent retries update their own row without
+            # changing the run's options or retaining an old alias/custom account in its User-Agent.
+            with self._again_lock:
+                host = canonical_host(site.host)
+                settings = dict(self.settings)
+                settings["sites"] = {domain: row for domain, row in (settings.get("sites") or {}).items()
+                                     if canonical_host(domain) != host}
+                settings["sites"][host] = dict(fresh)
+                settings["custom_sites"] = [row for row in settings.get("custom_sites") or []
+                                            if not isinstance(row, dict) or canonical_host(
+                                                row.get("domain") or row.get("base_url") or row.get("login_url") or "") != host]
+                site.cfg = dict(fresh)
+                self.settings = site.ctx.settings = settings
+                if self._http is not None:
+                    self._http.settings = settings
         if self._http is not None:
             self._http.renew_cookies(site.host)   # the cookies Companion wrote after the browser's check
         self.log(f"  {site.label}: проверяю снова — cookies и настройки перечитаны")

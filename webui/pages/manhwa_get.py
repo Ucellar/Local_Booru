@@ -555,7 +555,7 @@ def download(req: Request) -> Response:
     record = Q.record_of(found, chapters=chapters, where=where, follow=follow_new, helpers=helpers)
     started = Q.start(f"Скачать: {found.title.title}", work, record=record, about=task.id, title=found.title.title,
                       count=len(wanted), chosen=[t.id for t in wanted])
-    return Response.json({"ok": True, **started, "count": len(wanted)})
+    return Response.json({"ok": True, **started, "count": len(wanted)}, 200 if started.get("ok", True) else 409)
 
 
 def download_state(req: Request) -> Response:
@@ -680,8 +680,12 @@ def download_cover(req: Request) -> Response:
 
 def download_stop(req: Request) -> Response:
     """«Остановить»: the download going, and the queue after it (a stop that the next one would undo is no stop)."""
-    from core import manhwa_queue as Q, manhwa_run as R, page_jobs
+    from core import download_scheduler, manhwa_queue as Q, manhwa_run as R, page_jobs
     task = page_jobs.current(GET)
+    stopped = download_scheduler.stop_kind("manhwa", task)
+    if stopped is not None:
+        return Response.json({"ok": True, "dropped": 0}) if stopped else Response.json(
+            {"ok": False, "error": "Состояние загрузки изменилось или очередь недоступна"}, 409)
     dropped = Q.stop_all()
     if task is None or not task.running:
         if dropped:
@@ -713,7 +717,7 @@ def download_pause(req: Request) -> Response:
         if R.held():
             R.go_on()
             task._say("ПРОДОЛЖАЮ: вы сказали не ждать — новые главы проверяются сейчас")
-    Q.note_paused(R.paused())
+    Q.note_paused(R.paused(), task)
     return Response.json({"ok": True, "paused": R.paused()})
 
 

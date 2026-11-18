@@ -59,6 +59,7 @@ MEDIA_PATHS = ("/thumb/", "/media/", "/poster/", "/manga/cover/", "/manga/thumb/
                "/api/manhwa/download-cover",             # (v5.44.87) «Загрузки» of «Скачать → По ссылке»
                "/api/catalog/cover",                     # (v5.44.90) a tile of «Лента» of the tabs
                "/api/downloads/video-cover",             # (v5.44.120) «Загрузки»: the poster of the video going
+               "/api/downloads/steam-cover",
                "/api/covers/pic",                        # (v5.44.123) the menu of covers: a site's cover, whole
                "/watch/s/")                              # (v5.44.106) an episode of «Смотреть»: its picture and sound
 SLOW_PAGE = 1.0           # (v5.44.151) seconds: a page or an answer slower than this is noted (``note_slow``)
@@ -506,6 +507,8 @@ class WebUI:
             webui = server
 
         httpd = _PooledHTTPServer((self.host, self.port), _Handler)
+        from webui import prefs
+        prefs.sync_download_scheduler(self.settings)
         self.port = int(httpd.server_address[1])
         self._httpd = httpd
         self._thread = threading.Thread(target=httpd.serve_forever, name="webui-http", daemon=True)

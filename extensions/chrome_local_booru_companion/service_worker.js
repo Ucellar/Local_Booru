@@ -1490,7 +1490,7 @@ async function requestProfilePermissions(extraUrl = '') {
     await STORAGE.set({ arbitraryOrigins: arbitrary });
     const builtins = new Set(['rule34.xxx','gelbooru.com','danbooru.donmai.us','e621.net','e926.net','booru.allthefallen.moe','pixiv.net','tineye.com','ascii2d.net','generic']);
     const scripts = profiles.filter(p => !builtins.has(String(p.site_id || '').toLowerCase())).map(p => ({ id: 'lb-' + p.site_id.replace(/[^a-z0-9_-]/gi, '-'), matches: p.origins, js: ['content_script.js'], css: ['content_styles.css'], runAt: 'document_idle', persistAcrossSessions: true }));
-    arbitrary.forEach((origin, index) => scripts.push({ id: 'lb-generic-' + index, matches: [origin], js: ['content_script.js'], css: ['content_styles.css'], runAt: 'document_idle', persistAcrossSessions: true }));
+    arbitrary.forEach((origin, index) => scripts.push({ id: 'lb-generic-' + index, matches: [origin], js: ['content_script.js', 'manga_script.js'], css: ['content_styles.css', 'manga_styles.css'], runAt: 'document_idle', persistAcrossSessions: true }));
     try { const current = await chrome.scripting.getRegisteredContentScripts(); const ids = current.filter(x => String(x.id || '').startsWith('lb-')).map(x => x.id); if (ids.length) await chrome.scripting.unregisterContentScripts({ ids }); } catch (_) {}
     try { if (scripts.length) await chrome.scripting.registerContentScripts(scripts); } catch (err) { await setFailure('profile_registration:' + err.message); throw err; }
   }
@@ -1621,4 +1621,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: false, error: String(err && err.message || err) });
   });
   return true;
+});
+
+// (0.12.0) Exact saved source cards also work on domains granted through the popup.
+async function installOwnedTitles(tabId, address) {
+  try {
+    const u = new URL(address || '');
+    if (!['http:', 'https:'].includes(u.protocol) || ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) return;
+    const booru = /(^|\.)(rule34\.xxx|gelbooru\.com|danbooru\.donmai\.us|e621\.net|e926\.net|pixiv\.net|allthefallen\.moe|tineye\.com|ascii2d\.net)$/;
+    if (booru.test(u.hostname)) return; // their ordinary Companion script already handles exact posts
+    if (!await chrome.permissions.contains({ origins: [u.origin + '/*'] })) return;
+    await chrome.scripting.insertCSS({ target: { tabId }, files: ['manga_styles.css'] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['manga_script.js'] });
+  } catch (_) { /* tab closed, restricted page, or permission revoked */ }
+}
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+  if (change.status === 'complete') installOwnedTitles(tabId, tab.url || '');
 });

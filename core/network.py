@@ -165,9 +165,10 @@ def _retry_after_seconds(response) -> float:
 
 
 def _safe_log(log_func, message: str) -> None:
+    from core.redaction import sanitize_text
     if callable(log_func):
         try:
-            log_func(message)
+            log_func(sanitize_text(message))
         except Exception:
             let_pass("core.network._safe_log")
 

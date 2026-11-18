@@ -380,7 +380,7 @@
     holder.textContent = "";
     const c = M.counts || {};
     if (M.rating) holder.append(el("span", "sv-rate", "★ " + M.rating));
-    if (!M.single) holder.append(el("span", "", plural(c.total || 0, EPISODES)));
+    if (!M.single) holder.append(el("span", "", plural(M.site.declared || c.total || 0, EPISODES)));
     if (M.site && M.site.online && M.site.name && (M.dubs || []).length) holder.append(el("span", "", "с " + M.site.name));
     if (M.series && !M.single) holder.append(el("span", "sv-have", "в папке: " + (c.disk || 0)));
     if (c.done) holder.append(el("span", "", "досмотрено: " + c.done));
@@ -625,7 +625,8 @@
     if (e.here && e.place) words.push("вы остановились на " + clock(e.place[0]));
     else if (e.done) words.push("досмотрена");
     if (e.new) words.push("новая");
-    words.push(e.disk.length ? "в папке" : e.site.length ? "на сайте, онлайн" : "нет ни в папке, ни на сайте");
+    words.push(e.disk.length ? "в папке" : e.site.length ? "на сайте, онлайн"
+      : e.where === "external" ? "открыть страницу тайтла на сайте" : "нет ни в папке, ни на сайте");
     const dl = dlOf(e);
     if (dl) words.push(dl.words);
     return words.join(", ");
@@ -641,6 +642,7 @@
     bar.setAttribute("aria-hidden", "true");
     a.append(top, el("span", "sv-tile-sub"), bar);
     a.addEventListener("click", (event) => {
+      if (e.where === "external" && M.site.address) return;
       if (!playable(e)) { event.preventDefault(); return; }
       if (navigates() || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
@@ -652,7 +654,7 @@
   }
   function paintTile(a, e) {
     const dl = dlOf(e);
-    const cls = ["sv-tile", "vep", e.disk.length ? "disk" : e.site.length ? "site" : "off"];
+    const cls = ["sv-tile", "vep", e.where];
     if (e.done) cls.push("done");
     if (e.here) cls.push("here");
     if (e.new) cls.push("new");
@@ -678,13 +680,18 @@
     else if (e.done) sub = "досмотрена";
     else if (e.new) sub = "новая";
     else if (e.disk.length) sub = "в папке";
+    else if (e.where === "external") sub = "На сайте ↗";
     a.querySelector(".sv-tile-sub").textContent = sub;
     const bar = a.querySelector(".sv-tile-bar");
     const watched = e.place && e.place[1] && !e.done && !dl ? Math.min(100, Math.round(100 * e.place[0] / e.place[1])) : 0;
     bar.style.width = watched + "%";
     bar.hidden = !watched;
     if (playable(e)) { a.href = address(e.key, true); a.removeAttribute("aria-disabled"); }
-    else { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); }
+    else if (e.where === "external" && M.site.address) {
+      a.href = M.site.address;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    } else { a.removeAttribute("href"); a.setAttribute("aria-disabled", "true"); }
     if (current && e.key === current) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
     const words = tileWords(e);
     a.title = words;
@@ -712,7 +719,7 @@
   function listHead() {
     const c = M.counts || {};
     const head = el("div", "sv-list-head");
-    const h = el("h2", "", "Серии ");
+    const h = el("h2", "", M.site.player_numbers ? "Номера в плеерах " : "Серии ");
     h.id = "sv-eps-h";
     h.append(el("span", "sv-count", String(c.total || 0)));
     head.append(h);
@@ -760,7 +767,9 @@
       ul.append(li);
     };
     if (M.series) item("disk", "в папке — " + (c.disk || 0));
-    if (c.site) item("site", (M.series ? "только на сайте — " : "на сайте — ") + c.site);
+    const external = episodes().filter((e) => e.where === "external").length;
+    if (c.site) item("site", (external ? "онлайн в LB — " : M.series ? "только на сайте — " : "на сайте — ") + c.site);
+    if (external) item("external", "в плеере сайта — " + external);
     item("done", "досмотрено — " + (c.done || 0));
     if (c.new) item("new", (c.new === 1 ? "новая — " : "новые — ") + c.new);
     return ul;
@@ -841,8 +850,10 @@
     } else if (phone) {
       eps.append(legend());
     } else {
-      eps.append(el("p", "sv-hint", "Нажмите серию — она откроется в плеере ниже. Озвучка выбрана для всего сериала; " +
-        "у одной серии другую можно выбрать в плеере."));
+      eps.append(el("p", "sv-hint", all.some((e) => e.where === "external")
+        ? "«На сайте ↗» открывает страницу тайтла. Выберите там плеер и нужный номер."
+        : "Нажмите серию — она откроется в плеере ниже. Озвучка выбрана для всего сериала; " +
+          "у одной серии другую можно выбрать в плеере."));
     }
     eps.append(src);
     paintGoing();
@@ -1937,7 +1948,7 @@
     if (mine && mine.where === "site" && (mine.player_name || mine.quality)) {   // whose stream, how good
       holder.append(el("span", "sv-stream", [mine.player_name, mine.quality].filter(Boolean).join(" · ")));
     }
-    if (!phone && !M.single) holder.append(el("span", "sv-series", M.title + " · " + plural((M.counts || {}).total || 0, EPISODES)));
+    if (!phone && !M.single) holder.append(el("span", "sv-series", M.title + " · " + plural(M.site.declared || (M.counts || {}).total || 0, EPISODES)));
     const picks = el("div", "sv-picks");
     const variants = e.disk.length + e.site.length;
     const voice = el("button", "sv-pick sv-pick-voice");

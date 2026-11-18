@@ -198,6 +198,11 @@ class Title:
         return is_page(self.key)
 
     @property
+    def declared(self) -> int:
+        count = _dict(self.anime.get("episodes")).get("count")
+        return count if type(count) is int and count > 0 else 0
+
+    @property
     def name(self) -> str:
         return str(self.anime.get("title") or getattr(self.found, "title", "") or self.meta.get("title")
                    or self.alias or self.site)
@@ -355,13 +360,14 @@ def _yummy_title(key: str, address: str, settings: dict, root: Path, say) -> Tit
     if anime is None:
         raise WatchError(f"У {SITE_NAME} нет тайтла «{alias}» — проверьте ссылку")
     page = address_of(alias)
-    found = Y._found(api, anime, Y.title_page(anime, page), root, say=say, stop=lambda: False, settings=settings)
+    found = Y._found(api, anime, Y.title_page(anime, page), root, say=say, stop=lambda: False, settings=settings,
+                     allow_external_only=True)
     title = Title(key=key, alias=alias, address=page, anime=anime, found=found, root=root)
     why = G.title(**_said(title))
     if why:
         raise WatchError(why)
     title.dubs = _dubs_of(found, root)
-    if not title.dubs:
+    if not title.dubs and not any(s.get("listed") for s in found.sources):
         raise WatchError(f"У {SITE_NAME} нет серий этого тайтла в плеерах, которые программа понимает")
     return title
 
@@ -580,6 +586,8 @@ def public(title: Title, progress: dict | None = None) -> dict:
         "about": [p.strip() for p in re.split(r"\r?\n", str(anime.get("description") or "")) if p.strip()],
         "order": order if len(order) > 1 else [],
         "ongoing": bool(source.get("ongoing")),
+        "declared": title.declared,
+        "listed": [label_of(number) for number in source.get("listed") or []],
         "dubs": dubs,
         "rest": [{"name": v.get("name") or "", "players": list(v.get("players") or [])}
                  for v in getattr(title.found, "voices", None) or [] if isinstance(v, dict)],

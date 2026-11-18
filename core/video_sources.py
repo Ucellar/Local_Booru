@@ -67,6 +67,10 @@ KINDS = {"TV": "ТВ", "ONA": "ONA", "OVA": "OVA", "MOVIE": "фильм", "SPECI
 class SourceError(Exception):
     """Said to the person as it is."""
 
+    def __init__(self, message: str, *, summary: str = ""):
+        super().__init__(message)
+        self.summary = summary
+
 
 @dataclass
 class Title:
@@ -473,8 +477,9 @@ def find(page, root: Path, *, settings: dict, say, stop_check=None) -> video_dow
         raise SourceError("Поиск остановлен")
     if found is None:
         tried = ", ".join(f"«{q}»" for q in queries(title)[:3]) or "—"
-        raise SourceError(f"На {NAME} этого тайтла нет: поиск по названиям {tried} его не нашёл"
-                          + (f" (с похожим названием — другие тайтлы: {', '.join(others[:2])})" if others else ""))
+        nearby = f" (с похожим названием — другие тайтлы: {', '.join(others[:2])})" if others else ""
+        raise SourceError(f"На {NAME} этого тайтла нет: поиск по названиям {tried} его не нашёл" + nearby,
+                          summary=f"Поиск не нашёл этот тайтл на {NAME}")
     release = api.release(found.get("id")) or {}
     if not release:
         raise SourceError(f"{NAME} не отдал описание релиза {describe(found)}")

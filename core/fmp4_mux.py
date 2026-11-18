@@ -13,6 +13,8 @@ import os
 import struct
 from pathlib import Path
 
+from core import download_telemetry
+
 CHUNK = 1 << 20
 MAX_HEADER = 32 * 1024 * 1024           # a moov or a moof bigger than this is not a stream's
 _LOCKED = (b"encv", b"enca", b"sinf", b"pssh", b"senc", b"tenc")
@@ -232,7 +234,7 @@ def mux(video: Path, audio: Path, out: Path, *, stop=None) -> str:
     sequence = 0
     with open(out, "wb") as dest, open(picture.path, "rb") as fv, open(sound.path, "rb") as fa:
         sources = (fv, fa)
-        dest.write(head)
+        download_telemetry.record(disk=dest.write(head))
         while any(n is not None for n in nexts):
             if stop():
                 return "stopped"
@@ -241,7 +243,8 @@ def mux(video: Path, audio: Path, out: Path, *, stop=None) -> str:
             _time, start, moof, end = nexts[which]
             sequence += 1
             where = dest.tell()
-            dest.write(_moof_for(moof, sequence=sequence, track_id=streams[which][1], shift=where - start))
+            fragment = _moof_for(moof, sequence=sequence, track_id=streams[which][1], shift=where - start)
+            download_telemetry.record(disk=dest.write(fragment))
             source = sources[which]
             source.seek(start + len(moof))
             left = end - (start + len(moof))         # what follows the moof up to the end of its mdat, as it was
@@ -249,7 +252,7 @@ def mux(video: Path, audio: Path, out: Path, *, stop=None) -> str:
                 chunk = source.read(min(CHUNK, left))
                 if not chunk:
                     raise MuxError(f"{streams[which][0].what}: часть оборвана")
-                dest.write(chunk)
+                download_telemetry.record(disk=dest.write(chunk))
                 left -= len(chunk)
             nexts[which] = next(streams[which][2], None)
         dest.flush()

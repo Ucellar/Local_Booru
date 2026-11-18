@@ -14,7 +14,7 @@ The owner, 5.11.2026: «В манхве можно было бы сделать 
   wait is over (before the chapters after it); another site's copy of it (``Take.alt``) is asked at once each time;
   a paid chapter (``manhwa_sources.Paid``) and a site the window's browser does not get through (``Closed``) are not
   asked again; ``GIVE_UP_AFTER`` chapters in a row that did not come, each asked again too, — the site gives none now:
-  the rest wait for the next time (the night, or «Скачать» again);
+  the rest wait for the next time (the night, or «Скачать» again), unless only one chapter remains;
 * the meter (:func:`meter`): each chapter's state for its tile («wait», «going», «paused», «retry», «done»,
   «failed»), the strips of the one going, the bytes, the speed, the time left; ``run`` — the download (another one —
   the page forgets the tiles it had), ``rev`` — the newest change: the page asks only for what changed after it (a
@@ -384,7 +384,7 @@ def _attempt(k: int, take, chapter, halt, say, shut: set, cold: dict, whys: dict
     return "failed", _why(whys), again
 
 
-def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict:
+def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None, priority=()) -> dict:
     """Every chapter of ``takes`` by ``chapter(take, k, halt)`` (-> the chapter's folder name; "" when ``halt()``
     stopped it half-way) — in their order, with «Пауза» and the chapters that failed asked again.
     (v5.44.146) ``rescue(k, left, why)`` — the other sites asked once more (``manhwa_download.download``): called
@@ -394,8 +394,13 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
     (v5.44.163) ``hold()`` — the person is at the computer (the round of new chapters alone gives it): the next
     chapter waits for him to leave (:func:`wait_away`).  ``GIVE_UP_AFTER`` chapters in a row that did not come put off
     the chapters left that have no other site than theirs; the ones that have go on.
-    -> {"got": [(k, name, the take that gave it)], "failed": [{label, why, id}], "stopped", "gave_up": words}."""
+    ``priority`` is the ordered list of chapter IDs left by that limit on an earlier run. Return them as ``deferred``
+    in the order they would have run, separately from the attempted chapters and any left by an explicit stop."""
     takes = list(takes)                             # (v5.44.146) the rescue swaps takes and adds some: this run's own
+    positions = {cid: index for index, cid in enumerate(priority)}
+
+    def order(k: int) -> int:
+        return positions.get(takes[k].id, len(positions) + k)
 
     def halt() -> bool:
         return stop_check() or _PAUSE.is_set() or _SKIP.is_set()
@@ -434,7 +439,7 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
     cold: dict = {}
     got, failed, stopped, gave_up, in_a_row, for_good, end_asked = [], [], False, "", 0, 0, False
     streak: dict = {}                               # (v5.44.163) the sites of the chapters that did not come in a row
-    put_off = 0                                     # …and the chapters put off with them so far (no other site)
+    deferred: list[int] = []                        # …and the chapters put off with them so far (no other site)
     while True:
         if not pending:
             if end_asked or rescue is None or stop_check():
@@ -467,7 +472,7 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
         if not ready:
             _sleep_until(min(pending.values()), halt)
             continue
-        k = min(ready)                              # the earliest chapter: a retry whose wait is over comes first
+        k = min(ready, key=order)                   # a retry whose wait is over keeps its place in this order
         del pending[k]
         take = takes[k]
         outcome, value, extra = _attempt(k, take, chapter, halt, say, shut.setdefault(k, set()), cold,
@@ -516,7 +521,8 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
         in_a_row += 1
         for_good += 0 if extra else 1
         streak.update(_site_names(take))
-        if in_a_row >= GIVE_UP_AFTER and pending:
+        # The last chapter must get its turn. A six-chapter backlog otherwise hits the same five refusals every night.
+        if in_a_row >= GIVE_UP_AFTER and len(pending) > 1:
             # (v5.44.163) the chapters left that have a site none of those in a row was asked of go on: until now
             # five chapters one site alone had ended the download of eleven more that five sites had
             hopeless = [p for p in sorted(pending) if {name for name, _label in _site_names(takes[p])} <= set(streak)]
@@ -529,7 +535,8 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
                     for place in hopeless:
                         del pending[place]
                     _settle(hopeless)
-                    put_off += len(hopeless)
+                    deferred.extend(hopeless)
+                    put_off = len(deferred)
                     gave_up = (f"{told}. Только там есть ещё {put_off} {_forms(put_off, 'глава', 'главы', 'глав')} "
                                f"— отложено до следующего раза (ночью или по «Скачать»)")
                     say(f"{gave_up}; остальные ({going}) есть на других сайтах — качаю их")
@@ -538,10 +545,11 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
                 in_a_row = for_good = 0
                 streak.clear()
                 continue
-            left = len(pending) + put_off
-            if for_good:                            # (v5.44.146) no site has them — not «the site gives none now»
-                gave_up = (f"{in_a_row} {_forms(in_a_row, 'главу', 'главы', 'глав')} подряд не дал ни один сайт — "
-                           f"похоже, и остальных сейчас нигде нет. Остальные ({left}) попробую в следующий "
+            deferred.extend(pending)
+            left = len(deferred)
+            if for_good:
+                gave_up = (f"{in_a_row} {_forms(in_a_row, 'главу', 'главы', 'глав')} подряд не дал ни один сайт "
+                           f"из тех, где нашлись эти главы. Остальные ({left}) попробую в следующий "
                            f"раз — ночью или по «Скачать»")
             else:
                 gave_up = (f"{in_a_row} {_forms(in_a_row, 'глава', 'главы', 'глав')} подряд не скачались, каждая — и "
@@ -554,4 +562,5 @@ def go(takes: list, chapter, *, say, stop_check, rescue=None, hold=None) -> dict
         _settle(list(pending))
     got.sort(key=lambda x: x[0])                    # in the order of reading, whichever came first
     return {"got": got, "failed": [x for _k, x in sorted(failed, key=lambda x: x[0])], "stopped": stopped,
-            "gave_up": gave_up}
+            "gave_up": gave_up, "deferred": [takes[k].id for k in sorted(deferred, key=order)],
+            "refused": {k: set(sites) for k, sites in shut.items() if sites}}

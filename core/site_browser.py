@@ -64,6 +64,11 @@ _PAGE_LOCK = threading.RLock()       # all tasks share one full page; nested Net
 _MANUAL_CHECK = threading.Lock()
 MANUAL_CHECK_SECONDS = 120
 _MANUAL_CHECK_SITES = ("nudemoon", "mangadex", "mangabuff", "comx")
+_QT_SITES: set = set()       # an explicit manual check keeps using the window's authenticated profile
+
+
+def _camoufox_for(url: str) -> bool:
+    return site_of(urlparse(url).hostname or "") not in _QT_SITES
 
 
 @contextmanager
@@ -99,22 +104,39 @@ def available() -> bool:
     """The window's browser is there (the program window is open, or the checks gave their own)."""
     if OPENER is not None:
         return True
+    from core import site_camoufox
+    if site_camoufox.available():
+        return True
     from webui import service
     return service.bridge() is not None
 
 
-def open_page(url: str, still_check=None) -> Page:
+def open_page(url: str, still_check=None, *, stop_check=None) -> Page:
     """The page as the window's browser opens it — out of sight, with the site's check run as any browser runs it
     (``still_check(html, url)`` — the page is still the check: the browser waits for the next one).  What the site
     gave is kept for the run.  :class:`BrowserError` with words."""
-    with page_turn():
-        return _open_page(url, still_check)
+    with page_turn(stop_check):
+        return _open_page(url, still_check, stop_check)
 
 
-def _open_page(url: str, still_check) -> Page:
+def _open_page(url: str, still_check, stop_check=None) -> Page:
     if OPENER is not None:
         page = OPENER(url, still_check)
     else:
+        from core import site_camoufox
+        if _camoufox_for(url):
+            try:
+                result = site_camoufox.open_page(url, still_check, stop_check)
+            except site_camoufox.Unavailable:
+                result = None  # Optional runtime absent or failed to start: use the existing browser.
+            except site_camoufox.Cancelled as exc:
+                raise BrowserCancelled(str(exc)) from exc
+            except site_camoufox.Failed as exc:
+                raise BrowserError(str(exc)) from exc
+            if result is not None:
+                page = Page(html=result["html"], url=result["url"], cookies=result["cookies"], agent=result["agent"])
+                remember(url, page.cookies, page.agent)
+                return page
         from webui import service
         if service.bridge() is None:
             raise BrowserError("окна программы нет — её браузер не открыть")
@@ -210,7 +232,13 @@ def verify_site(site: str) -> bool:
             raise BrowserError(f"Окно программы не завершило проверку {source.label}")
         if box.get("error"):
             raise BrowserError(str(box["error"]))
-        return not waiting(str(box.get("html") or ""), str(box.get("url") or ""))
+        ready = not waiting(str(box.get("html") or ""), str(box.get("url") or ""))
+        if ready:
+            _QT_SITES.update(site_of(host) for host in hosts)
+            # The user's manual check belongs to Qt's profile, not to the headless worker.
+            remember(url, list(box.get("cookies") or []), str(box.get("agent") or ""))
+            S.browser_session_changed(hosts)
+        return ready
     finally:
         _MANUAL_CHECK.release()
 
@@ -223,6 +251,14 @@ def fetch_bytes(url: str, referer: str = "", limit: int = 0) -> tuple:
     its pictures (and pages) are asked by the browser.  :class:`BrowserError` with words."""
     if BYTES is not None:
         return BYTES(url, referer)
+    from core import site_camoufox
+    if _camoufox_for(referer or url):
+        try:
+            return site_camoufox.fetch_bytes(url, referer, limit)
+        except site_camoufox.Unavailable:
+            pass
+        except site_camoufox.Failed as exc:
+            raise BrowserError(str(exc)) from exc
     from webui import service
     if service.bridge() is None:
         raise BrowserError("окна программы нет — её браузер не открыть")
@@ -243,6 +279,14 @@ def share_cookies(origin: str, cookies: list, *, forget: bool = False) -> int:
     with words."""
     if COOKIES is not None:
         return COOKIES(origin, list(cookies or []), forget)
+    from core import site_camoufox
+    if _camoufox_for(origin):
+        try:
+            return site_camoufox.share_cookies(origin, list(cookies or []), forget=forget)
+        except site_camoufox.Unavailable:
+            pass
+        except site_camoufox.Failed as exc:
+            raise BrowserError(str(exc)) from exc
     from webui import service
     if service.bridge() is None:
         raise BrowserError("окна программы нет — её браузеру вход не передать")

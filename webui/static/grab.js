@@ -14,7 +14,10 @@
   const queryInput = form.elements.namedItem("q");
   const results = section.querySelector(".grab-results");
   const statusLine = section.querySelector(".grab-status");
-  const moreBox = section.querySelector(".grab-more");
+  const pager = section.querySelector(".grab-pages");
+  const pageNote = section.querySelector(".grab-page-note");
+  const sizes = section.querySelector(".thumb-sizes");
+  const pageSize = Number(data.pageSize) || 42;
   const bar = section.querySelector(".select-bar");
   const jobBox = section.querySelector(".grab-job");
   const viewer = section.querySelector(".grab-viewer");
@@ -24,14 +27,17 @@
     post: ["есть похожая", "Пост уже записан источником картинки из галереи (найден обратным поиском — файл может отличаться)"],
     trash: ["в корзине", "Файл в корзине — вернуть его можно там"],
   };
-  let search = null;              // {id, query, more, sites, skipped, shown}
-  let cards = [];                 // shown, in order
+  let search = null;              // {id, query, more, pending, sites, skipped, shown}
+  let cards = [];                 // all loaded results, in order
+  let pages = [];                 // stable groups of cards, split at the end of each server batch
+  let page = 1;
   const byKey = new Map();
   let current = -1;               // the card in the post view
   let busy = false;
   let jobTimer = 0;
 
   const media = (key, v) => `/grab/media?s=${encodeURIComponent(search.id)}&k=${encodeURIComponent(key)}&v=${v}`;
+  const hasNextBatch = () => Boolean(search?.more && !search.pending?.length);
   const sitesChosen = () => Array.from(section.querySelectorAll('.site-picks input[name="site"]:checked')).map((b) => b.value);
   const hideOwned = () => { const b = section.querySelector('input[name="hide_owned"]'); return !!(b && b.checked); };
 
@@ -68,7 +74,7 @@
 
   function cardEl(c) {
     const art = document.createElement("article");
-    art.className = "thumb" + (c.video ? " is-video" : "");
+    art.className = "thumb" + (c.video ? " is-video" : "") + (c.tags.length ? "" : " untagged");
     art.dataset.id = c.key;
     art.dataset.owned = c.owned || "";
     const ratio = c.w && c.h ? Math.max(0.3, Math.min(3.5, c.w / c.h)) : 1;
@@ -81,13 +87,34 @@
     img.alt = "";
     img.loading = "lazy";
     img.decoding = "async";
+    const missing = document.createElement("span");
+    missing.className = "grab-no-preview";
+    missing.hidden = true;
+    missing.textContent = "Нет превью";
+    img.addEventListener("error", () => { img.hidden = true; missing.hidden = false; }, { once: true });
     img.src = media(c.key, "preview");
-    link.appendChild(img);
+    const caption = document.createElement("span");
+    caption.className = "thumb-caption";
+    const lead = ["artist", "character", "copyright"].flatMap((cat) => c.tags.filter((t) => t[1] === cat));
+    caption.textContent = (lead.length ? lead.slice(0, 3).map(([tag]) => tag).join(" · ") : c.tags[0]?.[0] || "без тегов")
+      .replaceAll("_", " ");
     const badges = document.createElement("span");
     badges.className = "badges";
     fillBadges(badges, c);
-    link.appendChild(badges);
-    art.appendChild(link);
+    link.append(img, missing, caption, badges);
+    const info = document.createElement("div");
+    info.className = "thumb-info";
+    if (c.w && c.h) {
+      const size = document.createElement("span");
+      size.className = "ti-size";
+      size.textContent = `${c.w}×${c.h}`;
+      info.appendChild(size);
+    }
+    const kind = document.createElement("span");
+    kind.className = "ti-kind";
+    kind.textContent = c.ext.toUpperCase() || (c.video ? "Видео" : "");
+    info.appendChild(kind);
+    art.append(link, info);
     return art;
   }
 
@@ -95,49 +122,126 @@
     return results.querySelector(`.thumb[data-id="${CSS.escape(key)}"]`);
   }
 
-  function addCards(list) {
-    const frag = document.createDocumentFragment();
-    list.forEach((c) => {
-      if (byKey.has(c.key)) return;
+  function addCards(list, round) {
+    let tail = pages.includes(round.tail) ? round.tail : null;
+    for (const c of list) {
+      if (byKey.has(c.key)) continue;
       byKey.set(c.key, c);
+      if (!tail || tail.length >= pageSize) {
+        tail = [];
+        pages.push(tail);
+        if (!pages.includes(round.first)) round.first = tail;
+      }
+      tail.push(c);
       cards.push(c);
-      const card = cardEl(c);
-      // (v5.44.158) the cards added come one after another from the first of them (booru.css: --m-i)
-      card.style.setProperty("--m-i", String(Math.min(frag.childElementCount, 16)));
-      frag.appendChild(card);
-    });
-    results.appendChild(frag);
+    }
+    round.tail = tail;
   }
 
   function updateCards(list) {
     list.forEach((c) => {
       if (!byKey.has(c.key)) return;
-      Object.assign(byKey.get(c.key), c);
+      const saved = byKey.get(c.key);
+      const changedSources = c.sites && c.sites.length > saved.sites.length;
+      Object.assign(saved, c);
       const node = cardNode(c.key);
       if (node) {
-        node.dataset.owned = byKey.get(c.key).owned || "";
-        fillBadges(node.querySelector(".badges"), byKey.get(c.key));
+        if (changedSources && !node.querySelector(".grab-no-preview").hidden) {
+          node.replaceWith(cardEl(saved));
+          LB.refreshSelection?.();
+        } else {
+          node.dataset.owned = saved.owned || "";
+          fillBadges(node.querySelector(".badges"), saved);
+        }
       }
     });
   }
 
   function removeCards(keys) {
+    if (!keys.length) return;
     keys.forEach((key) => {
       byKey.delete(key);
-      const node = cardNode(key);
-      if (node) node.remove();
       if (LB.selected) LB.selected.delete(key);
     });
-    cards = cards.filter((c) => byKey.has(c.key));
-    if (LB.refreshSelection) LB.refreshSelection();
+    const visible = pages[page - 1]?.find((card) => byKey.has(card.key));
+    for (const group of pages) {
+      for (let i = group.length - 1; i >= 0; i--) {
+        if (!byKey.has(group[i].key)) group.splice(i, 1);
+      }
+    }
+    pages = pages.filter((group) => group.length);
+    cards = pages.flat();
+    if (visible) page = pages.findIndex((group) => group.includes(visible)) + 1;
+  }
+
+  function loadedPages() {
+    return Math.max(1, pages.length);
+  }
+
+  function pageLink(number, text, title = "") {
+    const link = document.createElement("a");
+    link.href = "#grab-results";
+    link.dataset.action = "grab-page";
+    link.dataset.page = String(number);
+    if (title) link.setAttribute("aria-label", title);
+    link.textContent = text;
+    return link;
+  }
+
+  function paintPager() {
+    const last = loadedPages();
+    pager.hidden = !search || (last === 1 && !hasNextBatch());
+    if (pager.hidden) return;
+    const links = [];
+    if (page > 1) links.push(pageLink(page - 1, "‹", "Предыдущая страница"));
+    let previous = 0;
+    const start = Math.max(1, page - 2);
+    const width = Math.min(last, page + 2) - start + 1;
+    for (const n of new Set([1, ...Array.from({ length: width }, (_, index) => start + index), last])) {
+      if (previous && n > previous + 1) {
+        const gap = document.createElement("span");
+        gap.className = "gap";
+        gap.textContent = "…";
+        links.push(gap);
+      }
+      if (n === page) {
+        const currentPage = document.createElement("b");
+        currentPage.setAttribute("aria-current", "page");
+        currentPage.textContent = String(n);
+        links.push(currentPage);
+      } else links.push(pageLink(n, String(n)));
+      previous = n;
+    }
+    if (page < last || hasNextBatch()) links.push(pageLink(page + 1, "›", "Следующая страница"));
+    pager.replaceChildren(...links);
+  }
+
+  function paintPage() {
+    page = Math.min(page, loadedPages());
+    const wanted = (pages[page - 1] || []).map((c) => cardNode(c.key) || cardEl(c));
+    wanted.forEach((node, index) => {
+      if (results.children[index] !== node) results.insertBefore(node, results.children[index] || null);
+    });
+    while (results.children.length > wanted.length) results.lastElementChild.remove();
+    LB.refreshSelection?.();
+    paintPager();
+    renderTags();
+  }
+
+  function pageMessage(text, error = false) {
+    pageNote.hidden = !text;
+    pageNote.textContent = text;
+    pageNote.classList.toggle("tool-error", error);
   }
 
   // ── what was found: the status line and the tags ───────────────────────
   function renderStatus() {
     if (!search) { statusLine.textContent = ""; return; }
+    const pending = new Set(search.pending || []);
     const parts = [`Найдено: ${cards.length}`];
     Object.values(search.sites || {}).forEach((s) => {
-      if (s.error) parts.push(`${s.label}: ${s.error}`);
+      if (pending.has(s.label)) parts.push(`${s.label} — жду ответа`);
+      else if (s.error) parts.push(`${s.label}: ${s.error}`);
       else parts.push(`${s.label} ${s.posts}${s.done ? "" : "+"}`);
     });
     const sk = search.skipped || {};
@@ -146,15 +250,15 @@
     if (sk.blocked) hidden.push(`блоклист — ${sk.blocked}`);
     if (sk.hidden) hidden.push(`скрытые — ${sk.hidden}`);
     if (hidden.length) parts.push("не показаны: " + hidden.join(", "));
-    statusLine.textContent = parts.join(" · ");
-    moreBox.hidden = !search.more;
-    bar.hidden = !cards.length;
+    const next = parts.join(" · ");
+    if (statusLine.textContent !== next) statusLine.textContent = next;
+    bar.hidden = sizes.hidden = !cards.length;
   }
 
   function renderTags() {
     if (!tagBox) return;
     const counts = new Map();
-    cards.forEach((c) => c.tags.forEach(([name, cat]) => {
+    (pages[page - 1] || []).forEach((c) => c.tags.forEach(([name, cat]) => {
       const low = name.toLowerCase();
       const row = counts.get(low) || { name, cat, n: 0 };
       row.n += 1;
@@ -226,30 +330,87 @@
   });
 
   // ── searching ──────────────────────────────────────────────────────────
+  function applyBatch(result, round) {
+    const viewed = viewer.open ? cards[current]?.key : null;
+    const changed = result.cards.length || result.updated.length || result.removed.length;
+    search = result.search;
+    if (changed) {
+      updateCards(result.updated);
+      removeCards(result.removed);
+      addCards(result.cards, round);
+      paintPage();
+    } else paintPager();
+    renderStatus();
+    if (viewed) {
+      current = cards.findIndex((card) => card.key === viewed);
+      if (current < 0) viewer.close();
+      else {
+        viewer.querySelector(".gv-prev").disabled = current === 0;
+        viewer.querySelector(".gv-next").disabled = current === cards.length - 1 && !hasNextBatch();
+      }
+    }
+  }
+
+  function watchSearch(round, onUpdate) {
+    if (!search.pending?.length) return;
+    const id = search.id;
+    const sameSearch = () => search?.id === id;
+    const poll = async () => {
+      if (!sameSearch()) return;
+      try {
+        const result = await postJson("/api/grab/progress", { s: id });
+        if (!sameSearch()) return;
+        applyBatch(result, round);
+        onUpdate?.(result);
+        if (search.pending?.length) setTimeout(poll, 800);
+      } catch (err) {
+        if (sameSearch()) {
+          search.pending = [];
+          search.more = false;
+          renderStatus();
+          paintPager();
+          pageMessage(err.message, true);
+        }
+      }
+    };
+    setTimeout(poll, 800);
+  }
+
   async function runSearch() {
     const query = queryInput.value.trim();
     const submit = form.querySelector('button[type="submit"]');
-    if (!query) { say(submit, "Введите теги или ссылку на пост", true); return; }
+    if (!query) { statusLine.textContent = "Введите теги или ссылку на пост"; return; }
     if (busy) return;
     busy = true;
     submit.disabled = true;
     statusLine.textContent = "Ищу…";
+    pageMessage("");
     try {
-      const r = await postJson("/api/grab/search", { q: query, sites: sitesChosen(), hide_owned: hideOwned() });
-      search = r.search;
+      const r = await postJson("/api/grab/search", { q: query, sites: sitesChosen(), hide_owned: hideOwned(), partial: true });
+      page = 1;
       cards = [];
+      pages = [];
       byKey.clear();
-      results.textContent = "";
-      if (LB.selected) LB.selected.clear();
-      if (LB.refreshSelection) LB.refreshSelection();
-      addCards(r.cards);
-      renderStatus();
+      results.replaceChildren();
       renderTags();
-      if (r.error_note) statusLine.textContent = r.error_note;
-      else if (!cards.length) statusLine.textContent += search.more ? " — нажмите «Ещё»" : " — ничего не нашлось";
+      if (LB.selected) LB.selected.clear();
+      bar.querySelector(".action-status").textContent = "";
+      const round = {};
+      applyBatch(r, round);
+      let opened = false;
+      const summarize = (result) => {
+        if (result.error_note) statusLine.textContent = result.error_note;
+        else if (!cards.length && !search.pending?.length) {
+          statusLine.textContent += hasNextBatch() ? " — попробуйте следующую страницу" : " — ничего не нашлось";
+        } else if (!opened && search.link && cards.length === 1) {
+          opened = true;
+          openView(0);                                      // a link: its post at once
+        }
+      };
+      summarize(r);
+      watchSearch(round, summarize);
       const params = new URLSearchParams({ q: query, sites: sitesChosen().join(",") });
       history.replaceState(null, "", "/grab?" + params.toString());
-      if (search.link && cards.length === 1) openView(0);       // a link: its post at once
     } catch (err) {
       statusLine.textContent = err.message;
     } finally {
@@ -258,24 +419,48 @@
     }
   }
 
-  async function loadMore(el) {
-    if (!search || busy) return;
+  async function loadMore(advance = false) {
+    if (!hasNextBatch() || busy) return false;
     busy = true;
-    el.disabled = true;
+    pageMessage("Ищу следующую страницу…");
+    pager.setAttribute("aria-busy", "true");
     try {
-      const r = await postJson("/api/grab/more", { s: search.id });
-      search = r.search;
-      addCards(r.cards);
-      updateCards(r.updated);
-      removeCards(r.removed);
-      renderStatus();
-      renderTags();
-      if (!r.cards.length && search.more) say(el, "На этой странице ничего нового — ещё раз?");
+      const r = await postJson("/api/grab/more", { s: search.id, partial: true });
+      const round = {};
+      applyBatch(r, round);
+      const fromPage = page;
+      const first = pages.indexOf(round.first) + 1;
+      let awaitingPage = advance && !first;
+      const note = () => {
+        if (round.first || search.pending?.length) pageMessage("");
+        else pageMessage(search.more ? "На сайтах ничего нового. Можно продолжить поиск." : "Больше результатов нет.");
+      };
+      note();
+      watchSearch(round, () => {
+        note();
+        if (awaitingPage && round.first) {
+          awaitingPage = false;
+          if (page === fromPage && !viewer.open) goToPage(pages.indexOf(round.first) + 1);
+        }
+      });
+      return first;
     } catch (err) {
-      say(el, err.message, true);
+      pageMessage(err.message, true);
+      return false;
     } finally {
       busy = false;
-      el.disabled = false;
+      pager.removeAttribute("aria-busy");
+    }
+  }
+
+  async function goToPage(number) {
+    if (busy || !search || number < 1) return;
+    if (number > loadedPages()) number = await loadMore(true);
+    if (number && number !== page) {
+      pageMessage("");
+      page = number;
+      paintPage();
+      statusLine.scrollIntoView({ block: "start" });
     }
   }
 
@@ -307,16 +492,27 @@
     if (index < 0 || index >= cards.length) return;
     current = index;
     const c = cards[index];
+    const cardPage = pages.findIndex((group) => group.includes(c)) + 1;
+    if (page !== cardPage) {
+      page = cardPage;
+      paintPage();
+    }
     const token = ++viewToken;              // a late answer for a card no longer shown is dropped
     const img = viewer.querySelector(".gv-media img");
     const note = viewer.querySelector(".gv-note");
-    img.removeAttribute("src");
+    img.hidden = false;
+    img.onerror = () => {
+      if (token !== viewToken) return;
+      img.hidden = true;
+      note.hidden = false;
+      note.textContent = "Превью недоступно. Пост можно открыть на сайте.";
+    };
     img.src = media(c.key, c.video ? "preview" : "sample");
     note.hidden = !c.video;
     note.textContent = c.video ? "Видео: здесь только кадр — посмотреть можно на сайте или после скачивания." : "";
     viewer.querySelector("#gv-title").textContent = c.sites.join(", ") + (c.w && c.h ? ` · ${c.w}×${c.h}` : "");
     viewer.querySelector(".gv-prev").disabled = index === 0;
-    viewer.querySelector(".gv-next").disabled = index === cards.length - 1 && !(search && search.more);
+    viewer.querySelector(".gv-next").disabled = index === cards.length - 1 && !hasNextBatch();
     viewer.querySelector('[data-action="grab-download-one"]').disabled = !c.original || !!(c.blocked && c.blocked.length);
     const status = viewer.querySelector(".action-status");
     if (status) status.textContent = "";
@@ -437,8 +633,11 @@
   }
 
   async function refreshMarks() {
+    const id = search?.id;
+    if (!id) return;
     try {
-      const marks = await postJson("/api/grab/owned", { s: search.id });
+      const marks = await postJson("/api/grab/owned", { s: id });
+      if (id !== search?.id) return;
       Object.entries(marks.marks || {}).forEach(([key, m]) => updateCards([{ key, owned: m.owned, image_id: m.image_id }]));
       if (viewer.open && current >= 0 && cards[current]) renderOwned(cards[current]);
     } catch (err) { /* the search is gone (a new one, or two hours): the marks stay as they were */ }
@@ -446,11 +645,13 @@
 
   async function hide(el, keys) {
     if (!keys.length) return;
+    const id = search.id;
     try {
-      const r = await postJson("/api/grab/hide", { s: search.id, keys });
+      const r = await postJson("/api/grab/hide", { s: id, keys });
+      if (id !== search?.id) return;
       removeCards(keys);
       renderStatus();
-      renderTags();
+      paintPage();
       say(el, `Скрыто: ${r.hidden}`);
     } catch (err) {
       say(el, err.message, true);
@@ -458,7 +659,7 @@
   }
 
   Object.assign(actions, {
-    "grab-more": (el) => loadMore(el),
+    "grab-page": (el) => goToPage(Number(el.dataset.page)),
     "grab-tag-add"(el) {
       searchFor(queryInput.value.trim() + " " + el.dataset.tag);
     },
@@ -468,12 +669,10 @@
     "grab-viewer-close": () => viewer.close(),
     async "grab-next"() {
       if (current < cards.length - 1) { openView(current + 1); return; }
-      const more = section.querySelector('[data-action="grab-more"]');
-      if (search && search.more && more) {
-        const before = cards.length;
-        await loadMore(more);
-        if (cards.length > before) openView(before);
-      }
+      const key = cards[current]?.key;
+      if (!key || !await loadMore() || !viewer.open) return;
+      const still = cards.findIndex((c) => c.key === key);
+      if (still >= 0 && still < cards.length - 1) openView(still + 1);
     },
     "grab-prev"() {
       if (current > 0) openView(current - 1);

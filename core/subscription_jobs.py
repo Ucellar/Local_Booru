@@ -149,6 +149,9 @@ class SubscriptionJob:
             raise ValueError("нечего проверять")
         if is_shutting_down():
             raise SubscriptionsBusy("закрытие программы", "Программа закрывается — подписки сейчас не проверяются")
+        if self.kind == "grab":
+            from core import favorites
+            favorites.register()
         if not claim(self.owner):
             raise SubscriptionsBusy(owner())
         with _LOCK:

@@ -31,7 +31,7 @@ def say_link(settings: dict, row_key: str, url: str) -> dict:
 
     if not L.STORE.change(put):
         return {"ok": False, "error": "Такой строки в списке нет — откройте страницу заново"}
-    return {"ok": True, "words": A._started_words(settings).replace("Перепроверяю", "Открываю ссылку")
+    return {"ok": True, "words": A._started_words(settings, key=str(row_key)).replace("Перепроверяю", "Открываю ссылку")
             .replace("перепроверю", "открою ссылку")}
 
 

@@ -692,6 +692,8 @@ class ParserEngine:
 
     def _after_md5(self, job: FileJob, state: "_State", matches: list):
         """Stages 3–6 after the sites' exact-MD5 answers ``matches``: the file's answer, or a ReverseTicket."""
+        if self.ctx.flag("_parser_exact_md5_only", False):
+            return self._finish_found(job, state, matches) if matches else self._finish_miss(job, state)
         for site_md5 in self.authoritative_md5s:
             if not matches and site_md5 != state.md5:
                 self._say(state, f"MD5 из поста-источника: {site_md5}")

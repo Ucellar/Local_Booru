@@ -9,7 +9,7 @@ than the one running (``core/started_code.update_waiting`` — «Установ�
 Every version changes this line together with the heading of its entry in ``CHANGELOG.md``; the static check
 (``check_contracts.py``, check 7) fails when the two differ.
 """
-VERSION = "5.44.179"
+VERSION = "5.44.194"
 
 
 def short() -> str:

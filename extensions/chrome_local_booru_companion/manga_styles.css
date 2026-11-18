@@ -1,4 +1,4 @@
-/* Local Booru on nhentai (0.9.0): the galleries the manga folder has — blurred, hidden or labelled (manga_script.js) */
+/* Local Booru saved source cards (0.12.0): the galleries the manga folder has — blurred, hidden or labelled (manga_script.js) */
 .lb-manga-marked { position: relative !important; }
 .lb-manga-hidden { display: none !important; }
 .lb-manga-blur img { filter: blur(14px) saturate(0.6) !important; transition: filter 0.15s ease !important; }

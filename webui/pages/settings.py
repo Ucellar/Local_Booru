@@ -943,6 +943,7 @@ def _save_looks(body: dict) -> Response:
     except OSError as exc:                       # (v5.44.165) the file stays held (Windows): said beside «Сохранить»
         _LOG.warning("web gallery preferences not saved: %s", exc)
         return Response.json({"ok": False, "error": prefs.HELD_WORDS}, 503)
+    prefs.sync_download_scheduler()
     new = prefs.look("settings")
     reload = (new["skin"], new["variant"]) != (was["skin"], was["variant"]) or changes.get("motion") != now["motion"]
     return Response.json({"ok": True, "message": "Сохранено", "reload": reload})

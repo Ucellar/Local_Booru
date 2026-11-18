@@ -173,7 +173,7 @@ def _again_said(row: dict) -> str:
     return "".join(lines[:3])
 
 
-def _kind(row: dict, live: bool) -> tuple:
+def _kind(row: dict, live: bool, *, during_run: bool = False) -> tuple:
     """(the class of the row's mark, its words)."""
     state = row["state"]
     works = row["works"]
@@ -181,7 +181,7 @@ def _kind(row: dict, live: bool) -> tuple:
         linked = any(w.get("again_link") for w in works)
         if _again_later(row):
             return "wait", "Открою ссылку позже" if linked else "Перепроверю позже"
-        if live and not row.get("again_auto"):
+        if live and not during_run:
             return "wait", "Ждёт окончания парсера"
         # The saved request proves that a check is pending, not that this particular row is running.
         return "wait", "Ссылка в очереди на проверку" if linked else "В очереди на перепроверку"
@@ -205,7 +205,7 @@ def _kind(row: dict, live: bool) -> tuple:
                         "Ждёт: сайты манги не ответили" if "down" in hows else
                         "Ждёт SauceNAO (лимит)" if "лимит" in said or "хватит" in said else
                         "Ждёт SauceNAO" if "saucenao" in hows else "Ждёт: проверка не удалась")
-    return ("going", "Проверяю…") if live else ("check", "Ещё не проверена")
+    return ("wait", "В очереди на проверку") if during_run else ("check", "Ещё не проверена")
 
 
 def _wait_words(hows: list) -> str:
@@ -525,7 +525,8 @@ def _row(settings: dict, row: dict, live: bool, counted: bool, items: dict) -> s
     from core import parser_manga as PM
     if row.get("loose"):                                # (v5.44.164) a manga of the loose pictures
         return _loose_row(row, live)
-    cls, words = _kind(row, live)
+    during_run = live and PM.run_handles(settings, row["key"])
+    cls, words = _kind(row, live, during_run=during_run)
     works = row["works"]
     check, went = [], []                 # the lines of the second and the third point
     went_cls, went_title = "todo", "—"
@@ -615,7 +616,7 @@ def _row(settings: dict, row: dict, live: bool, counted: bool, items: dict) -> s
         went_title = "Пока никуда"
         went.append("<span>ни в «Мангу», ни на booru-сайты: без подтверждения ничего не делается</span>")
     else:
-        check_cls, check_title = ("now", "Проверяю…") if live else ("todo", "Ещё не проверена")
+        check_cls, check_title = "todo", words
         check.append("<span>" + ("ComicInfo.xml и ссылка в файлах, потом тайтл на сайтах манги по имени (и по "
                                  "названию пула e621), потом SauceNAO" if live else
                                  "проверю в следующем запуске парсера или в фоне") + "</span>")
@@ -627,8 +628,8 @@ def _row(settings: dict, row: dict, live: bool, counted: bool, items: dict) -> s
         previous = check if row["state"] in ("not", "wait", "manga", "part") else []
         check = []
         check_cls, check_title = "todo", words
+        waiting = ("в очереди манги" if during_run else "после завершения основного парсера" if live else "по очереди")
         if any(w.get("again_link") for w in works):     # (v5.44.169) «Указать ссылку»
-            waiting = "после завершения основного парсера" if live else "по очереди"
             check.append((f'<span>открою ссылку {esc(_when(later))}' + (f": {esc(why)}" if why else "") + "</span>")
                          if later else f"<span>ссылка поставлена в очередь: {waiting} открою страницу по вашей "
                                        "ссылке и сверю её страницы с папкой</span>")
@@ -636,7 +637,6 @@ def _row(settings: dict, row: dict, live: bool, counted: bool, items: dict) -> s
             check.append("<span>обновлены правила распознавания — перепроверю сама: по названию, потом "
                          "SauceNAO</span>")
         else:
-            waiting = "после завершения основного парсера" if live else "по очереди"
             check.append((f'<span>перепроверю {esc(_when(later))}' + (f": {esc(why)}" if why else "") + "</span>")
                          if later else f"<span>перепроверка запрошена: {waiting} заново сверю с сайтами манги "
                                        "файлы папки, её название, SauceNAO</span>")
@@ -838,13 +838,17 @@ def body(settings: dict, *, wanted: str = "all", every: bool = False) -> str:
     # (v5.44.166) «Перепроверить все „не манга"»: the rows the program (not the owner, not a gate) called so
     again_can = sum(1 for r in groups["not"] if r.get("hand") != "not" and not r.get("again") and any(
         w["state"] == "not" and w.get("how") not in ("forbidden", "later", "hand") for w in r["works"]))
-    again_pending = sum(1 for r in rows if r.get("again") and not r.get("again_auto"))
+    manual = [r for r in rows if r.get("again") and not r.get("again_auto")]
+    again_pending = len(manual)
     again_queued = sum(1 for r in rows if r.get("again_auto"))      # (v5.44.169) …by the program itself
     again = ""
     if again_pending:
-        waiting = "После завершения парсера" if live else "Запрошена перепроверка"
+        running = sum(1 for r in manual if live and not r.get("loose") and PM.run_handles(settings, r["key"]))
+        waiting = "В очереди манги" if running == again_pending else (
+            "После завершения парсера" if live and not running else "Запрошена перепроверка")
+        after = (f" ({again_pending - running} после завершения парсера)" if 0 < running < again_pending else "")
         again = (f'<p class="pm-again">{waiting}: '
-                 f'{_plural(again_pending, ("папка", "папки", "папок"))} — сайты манги спрашиваю не чаще '
+                 f'{_plural(again_pending, ("папка", "папки", "папок"))}{after} — сайты манги спрашиваю не чаще '
                  f'{PM.SEARCHES_PER_HOUR} раз в час, остальное доделаю сама, страницу можно закрыть</p>')
     elif again_queued and skip:
         again = (f'<p class="pm-again">После обновления программа спрашивает и nhentai — папки «не манга» '

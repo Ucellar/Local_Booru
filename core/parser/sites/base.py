@@ -149,6 +149,10 @@ class Site(Availability):
         return self.fetch_post(post_id) if post_id else None
 
     # ── helpers for engines ─────────────────────────────────────────────────
+    def authorization_error(self, response) -> str:
+        reason = "сайт не принял авторизацию" if response.status_code == 401 else "сайт запретил доступ к запросу"
+        return f"HTTP {response.status_code}: {reason}"
+
     def get_json(self, url: str, *, params=None, headers=None, auth=None,
                  soft: bool = False, accept_text: bool = False):
         """GET an API URL and return parsed JSON (dict or list); None for HTTP 404.
@@ -170,9 +174,10 @@ class Site(Availability):
                          "и обнови cookies через расширение Companion")
             raise SiteUnavailable(f"Cloudflare (HTTP {status})", transient=False)
         if status in (401, 403):
+            reason = self.authorization_error(response)
             if not soft:
-                self.disable(f"HTTP {status}: доступ запрещён — проверь логин и API-ключ сайта")
-            raise SiteUnavailable(f"HTTP {status}", transient=False)
+                self.disable(reason)
+            raise SiteUnavailable(reason, transient=False)
         if status == 404:
             return None
         if status == 429 or status >= 500:
